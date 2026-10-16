@@ -1,0 +1,35 @@
+; Unbatched bus observer used only by the native differential checks.
+Procedure M5PpuTicksReference(cycles.i)
+  Protected left.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
+  If M5Timer>0 And M5TimerRun<>0
+    M5Timer=M5Timer-cycles
+    If M5Timer<=0 : M5Timer=0 : M5TimerRun=0 : M5TimerFlag=1 : M5IrqUpdate() : EndIf
+  EndIf
+  left=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While left>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    edge=width
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      ; Actual four bus fetches per tile and the two repeated end-of-line NT
+      ; fetches; the PPU's current pixel renderer remains independent.
+      If dot<339
+        If dot=0 : edge=1 : Else : edge=((dot-1)/2+1)*2+1 : EndIf
+      EndIf
+    EndIf
+    step=edge-dot : If step>left : step=left : EndIf
+    dot=dot+step : left=left-step : M5Dots=M5Dots+step
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot>=337 : addr=$2000
+        ElseIf dot<257 Or dot>=321
+          If (dot&7)=1 : addr=$2000 : ElseIf (dot&7)=3 : addr=$23C0 : EndIf
+        EndIf
+        M5PpuRead(addr,M5Dots)
+      EndIf
+    EndIf
+  Wend
+  If M5Dots-M5LastRead>=9 : M5InFrame=0 : M5Matches=0 : M5LastAddr=-1 : EndIf
+EndProcedure

@@ -243,6 +243,7 @@ Procedure GuestReset()
   FramePending=0 : FrameConsumed=0 : PublishTop=0 : PublishBottom=0
   RenderTop=0 : MenuRequested=0 : InputSeen=0 : EmulateUs=0 : EmulateCalls=0
   VideoFrames=0 : VideoUs=0
+  MapManaged=0
   MapIrq=0 : MapDots=0 : MapIrqClocks=0 : MapIrqAssertions=0
   AudioReadCursor=0
 EndProcedure

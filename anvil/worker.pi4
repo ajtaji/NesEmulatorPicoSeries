@@ -68,7 +68,9 @@ Procedure.i LocalPpuCommand(command.i, addr.i, value.i, stamp.i)
     i=PpuRegRead(addr&7) : MapperRegNotice(addr&7) : ProcedureReturn i
   ElseIf command=2
     PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)
+    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf
   ElseIf command=3
+    If CartMapper=5 : M5ScanReset() : EndIf
     OamCacheDirty=1
     For i=0 To 255
       Oam((PpuOamAddr+i)&255)=NesDmaRead(value*256+i)
@@ -112,10 +114,12 @@ Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)
   ElseIf command=2
     If addr<$4000
       PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)
+    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf
     Else
       ApuWrite(addr,value)
     EndIf
   ElseIf command=3
+    If CartMapper=5 : M5ScanReset() : EndIf
     OamCacheDirty=1
     For i=0 To 255
       Oam((PpuOamAddr+i)&255)=WorkerRead(value*256+i)

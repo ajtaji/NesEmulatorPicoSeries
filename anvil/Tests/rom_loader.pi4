@@ -51,7 +51,7 @@ Procedure.i RomLoaderTests()
   RomTestHeader() : RomCheck(RomValidateHeader(24592),1)
   RomHeader(0)=0 : RomCheck(RomValidateHeader(24592),0)
   RomTestHeader() : RomCheck(RomValidateHeader(15),0) : RomCheck(RomValidateHeader(24591),0)
-  RomHeader(6)=80 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(6)=96 : RomCheck(RomValidateHeader(24592),0)
   RomHeader(6)=4 : RomCheck(RomValidateHeader(25104),0)
   RomHeader(6)=8 : RomCheck(RomValidateHeader(24592),0)
   RomTestHeader() : RomHeader(9)=1 : RomCheck(RomValidateHeader(24592),0)
@@ -75,6 +75,17 @@ Procedure.i RomLoaderTests()
   RomHeader(5)=32 : RomCheck(RomValidateHeader(278544),0)
   RomHeader(6)=64 : RomHeader(5)=32 : RomCheck(RomValidateHeader(278544),1)
   RomHeader(8)=2 : RomCheck(RomValidateHeader(278544),0)
+  RomTestHeader() : RomHeader(6)=48 : RomCheck(RomValidateHeader(24592),1)
+  RomHeader(4)=4 : RomCheck(RomValidateHeader(100000),0)
+  RomTestHeader() : RomHeader(6)=112 : RomHeader(5)=0 : RomHeader(4)=16
+  RomCheck(RomValidateHeader(262160),1)
+  RomHeader(5)=1 : RomCheck(RomValidateHeader(270352),0)
+  RomTestHeader() : RomHeader(6)=176 : RomHeader(4)=8 : RomHeader(5)=16
+  RomCheck(RomValidateHeader(262160),1)
+  RomHeader(5)=32 : RomCheck(RomValidateHeader(524288),0)
+  RomTestHeader() : RomHeader(6)=80 : RomHeader(4)=64 : RomHeader(5)=128
+  RomCheck(RomValidateHeader(2097168),1)
+  RomHeader(8)=3 : RomCheck(RomValidateHeader(2097168),0)
   RomCheck(RomServices(),1)
   saved=rom_read : *rom_read=@RomTestShort
   RomCheck(RomReadExact(0,@RomHeader(0),16),0) : *rom_read=saved

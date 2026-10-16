@@ -1,7 +1,7 @@
 Procedure.i PpuNtAddr(addr.i)
   Protected table.i
   table=(addr>>10)&3
-  If CartMapper=1 Or CartMapper=4
+  If MapManaged
     ProcedureReturn MapNtSlots(table)*1024+(addr&1023)
   EndIf
   If PpuMirroring=1
@@ -20,11 +20,15 @@ Procedure.i PpuPalAddr(addr.i)
 EndProcedure
 Procedure.i PpuRead(addr.i)
   addr=addr&$3FFF
+  If CartMapper=5
+    If addr<$3F00 : M5PpuRead(addr,M5Dots) : EndIf
+    If addr>=$2000 And addr<$3F00 : ProcedureReturn M5NtRead(addr) : EndIf
+  EndIf
   If CartMapper=4 And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
   If addr<$2000
     ProcedureReturn PeekA(Chr+addr)
   ElseIf addr<$3F00
-    If CartMapper=1 Or CartMapper=4 : ProcedureReturn MapCiram(PpuNtAddr(addr)) : EndIf
+    If MapManaged : ProcedureReturn MapCiram(PpuNtAddr(addr)) : EndIf
     ProcedureReturn Nt(PpuNtAddr(addr))
   EndIf
   ProcedureReturn Pal(PpuPalAddr(addr))

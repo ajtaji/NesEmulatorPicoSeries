@@ -20,3 +20,55 @@ Global MapMirrorMode.i=-1
 Declare PpuDecode(row.i)
 Declare MapperMirror(mode.i)
 
+
+Global MapManaged.i,MapRamBytes.i=8192
+Declare M5Init()
+Declare M5Write(addr.i,value.i)
+Declare.i M5Read(addr.i)
+Declare.i M5PrgRead(addr.i)
+Declare M5PrgWrite(addr.i,value.i)
+Declare M5NtRefresh()
+Declare.i M5NtRead(addr.i)
+Declare M5NtWrite(addr.i,value.i)
+Declare M5PpuTicks(cycles.i)
+Declare M5PpuRead(addr.i,dot.i)
+Declare M5ScanReset()
+Declare M5PpuNotice(addr.i,value.i)
+Declare M5PcmRead(value.i)
+Declare M5AudioAdvance(dt.i)
+Declare M5AudioMix()
+Declare M5FetchTile()
+Declare M5ChrUpdate()
+Declare.i M5ChrBank(slot.i,set.i)
+Global M5PrgMode.i=3,M5ChrMode.i,M5Protect1.i=1,M5Protect2.i=2
+Global M5ExMode.i=3,M5NtConfig.i,M5FillTile.i,M5FillAttr.i,M5ChrHigh.i,M5LastSet.i
+Global M5Split.i,M5SplitScroll.i,M5SplitBank.i,M5MulA.i,M5MulB.i
+Global M5Scanline.i,M5InFrame.i,M5Pending.i,M5IrqEnable.i,M5IrqTarget.i
+Global M5LastAddr.i=-1,M5Matches.i,M5LastRead.i=-100,M5Dots.i,M5PpuControl.i,M5PpuMask.i
+Global M5PcmMode.i,M5PcmEnable.i,M5PcmPending.i,M5PcmValue.i
+Global M5AudioEnable.i,M5AudioClock.i,M5AudioLastX.i,M5AudioLastY.i
+Global M5Timer.i,M5TimerFlag.i,M5TimerRun.i
+Global M5SampleCycles.i,M5PcmArea.i
+Global Dim M5PulseArea.i(2)
+Global Dim M5PulseCarry.i(2)
+Global Dim M5Prg.i(5)
+Global Dim M5Chr.i(12)
+Global Dim M5RamSlots.i(4)
+Global Dim M5SpriteSlots.i(8)
+Global Dim M5Ram.a(131072)
+Global Dim M5Ex.a(1024)
+Global Dim M5SoundReg.a(8)
+Global Dim M5Length.i(2)
+Global Dim M5Period.i(2)
+Global Dim M5PulseTimer.i(2)
+Global Dim M5Seq.i(2)
+Global Dim M5EnvStart.i(2)
+Global Dim M5EnvDiv.i(2)
+Global Dim M5EnvDecay.i(2)
+#M5_SPRITE_PATTERN=$0350C000
+
+Declare M5AudioInit()
+Declare M5SoundWrite(addr.i,value.i)
+Declare PpuFetchTile()
+Declare PpuSpritesRaw()
+Declare ApuMixSample()

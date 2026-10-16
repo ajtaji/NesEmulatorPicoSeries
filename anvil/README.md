@@ -66,9 +66,11 @@ are skipped; different files with the same name in `2:/NES` are replaced. It
 does not delete extra games or change boot files/settings. Its private bundle
 must not be committed. The copy tool is bounded to 4096 files and 256 MiB per
 batch; the selector displays up to 4096 games. Filenames must fit 255 UTF-8 bytes.
-ROM loading supports up to 512 KiB PRG and 256 KiB CHR for MMC3,
+ROM loading supports up to 1 MiB PRG and 1 MiB CHR for MMC5,
+512 KiB PRG and 256 KiB CHR for MMC3,
 256 KiB PRG and 128 KiB CHR for standard MMC1, and the original sizes for
-mappers 0/2/66. Invalid/truncated files and unsupported mappers stay
+mappers 0/2/66. CNROM supports 32 KiB PRG/32 KiB CHR, AxROM 256 KiB PRG
+and 8 KiB CHR RAM, and Color Dreams 128 KiB PRG/128 KiB CHR. Invalid/truncated files and unsupported mappers stay
 in the selector with an error message. Cartridge RAM is volatile: battery-backed saves are not written to disk.
 
 ## Modules and ownership
@@ -94,15 +96,25 @@ in the selector with an error message. Cartridge RAM is volatile: battery-backed
   joins it and returns to Anvil.
 * `selector.pi4` scans and loads files through Anvil ABI 1.7. The immutable
   UxROM views match `rom_catalog.prg_views`; no opcode, guest rendering or APU
-  behavior is changed. Raw PRG uses `0x03200000` (512 KiB), CHR uses
-  `0x03300000` (256 KiB), and PRG views use `0x03400000` (1 MiB). These are
+  behavior is changed. Raw PRG uses `0x03200000` (up to 1 MiB), CHR uses
+  `0x03300000` (up to 1 MiB), and PRG views use `0x03400000` (1 MiB). These are
   separate from stacks, framebuffer storage and the GPU/DMA arenas.
-  MMC1/MMC3 copy changed banks into a 32 KiB CPU window at `0x03500000`,
+  Managed mappers copy changed banks into a 32 KiB CPU window at `0x03500000`,
   an 8 KiB CHR window at `0x03508000`, and its decoded shadow at `0x0350A000`.
   `mappers.pi4` owns register state, PRG RAM, CHR aliases and CIRAM mirroring.
   MMC3 observes filtered PPU A12 rises and contributes a separate IRQ source;
-  the APU IRQ cannot clear it. These are bus/scheduler adapters: the opcode
-  interpreter, PPU rendering procedures, APU and SBC/A2DP code are unchanged.
+  the APU IRQ cannot clear it. The CPU interpreter and output transport are
+  unchanged. MMC5 has separate cartridge video/audio modules; small entry
+  adapters retain the original tile/sprite/mixer algorithms for other games.
+  `mapper5_video.pi4` supplies independent sprite/BG CHR, extended attributes,
+  fill and vertical split data, plus the repeated-NT-read scanline detector.
+  The optimized observer skips interior fetches that cannot trigger detection;
+  native checks compare its complete state with the unbatched implementation.
+  `mapper5_audio.pi4` owns two pulses, independent envelope/length clocks, PCM
+  and cartridge IRQ state. Timer segments are integrated at the existing PCM
+  sample cadence; ultrasonic periods retain their DAC mean without alias buzz.
+  Cartridge output is mixed before the APU publishes its PCM write index.
+  Base APU channels/filter, stereo SBC and Bluetooth device code are preserved.
   The default video plugin retains its complete menu image at `0x07400000`
   (4,096,000 bytes). List changes trigger a full GPU redraw; FPS changes draw
   only the HUD strip. Each presentation still publishes a complete frame by
@@ -168,8 +180,9 @@ rather than assuming every audio packet was delivered without interruption.
 checks of every packed CHR tile-fetch address against the portable reference.
 `--verify-audio` in a Bluetooth build runs the existing mono/stereo SBC oracle
 vectors and returns without opening the radio or starting emulation.
-`--verify-mappers` runs synthetic MMC1/MMC3 bank, RAM protection, CHR alias,
-mirroring, IRQ edge/reload/acknowledgement and session-reset checks.
+`--verify-mappers` runs synthetic bank, RAM protection, CHR alias, mirroring,
+IRQ and session-reset checks, all 65,536 multiplier pairs, fixed expansion
+sound waveform checks, and 140,000 optimized/unbatched MMC5 bus-state comparisons.
 `--verify-rom` exercises malformed headers and short reads, scans exFAT, and
 compares the loaded Mario/Duck Hunt, Contra and Castlevania PRG/CHR images to
 host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
@@ -178,11 +191,11 @@ host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
 compiler must be given `--entry-returns --wants-services`, with separate image,
 BSS and stack addresses as in `build_anvil.py`.
 
-The Anvil mapper set is **0, 1, 2, 4 and 66**. Mapper 1 implements standard
+The Anvil mapper set is **0, 1, 2, 3, 4, 5, 7, 11 and 66**. Mapper 1 implements standard
 MMC1 serial registers, PRG/CHR modes, one-screen/H/V mirroring and 8 KiB RAM.
 Outer-bank and extra-RAM boards (SUROM/SXROM etc.) are unsupported. Mapper 4
 implements MMC3 B/C banks, RAM protection, mirroring/four-screen RAM and the
-filtered A12 IRQ counter. MMC6 and nonzero NES 2.0 submappers are unsupported.
+filtered A12 IRQ counter. MMC6 and nonzero MMC1/MMC3 submappers are unsupported.
 The bounded iNES/NES 2.0 parser rejects trainers, extended size encodings,
 unsupported RAM and PAL-only images. Mapper support does not imply every ROM
 works: existing PPU 8-pixel rendering granularity, documented-opcode coverage
@@ -194,3 +207,35 @@ On-board mapper results and the six-game menu/resume sequence are recorded in
 cover clocking, details, A12, scanline timing and revision B. Test binaries and
 commercial ROMs are not included. Hardware register references:
 [MMC1](https://www.nesdev.org/wiki/MMC1), [MMC3](https://www.nesdev.org/wiki/MMC3).
+
+## Additional cartridge hardware: 3, 7, 11 and 5
+
+CNROM (3) selects an 8 KiB CHR bank; AxROM (7) selects 32 KiB PRG and one-screen
+CIRAM; Color Dreams (11) independently selects 32 KiB PRG and 8 KiB CHR banks.
+NES 2.0 submapper 1 disables bus conflicts and submapper 2 enables AND conflicts.
+Legacy CNROM defaults to conflicts; AxROM and Color Dreams default to none, as
+recommended by [NESdev's submapper convention](https://www.nesdev.org/wiki/NES_2.0_submappers).
+Unusual CNROM RAM/oversize/security-diode boards are outside this implementation.
+
+MMC5 (5) implements four PRG/CHR modes, protected banked RAM, ExRAM access modes,
+fill/arbitrary nametable sources, 8x16 sprite/BG separation, extended attributes,
+CL-style vertical split, multiplier, scanline IRQ/status and cartridge sound.
+The MMC5A timer is implemented; peripheral pins/debug devices are not. IRQs and
+PPUDATA interactions remain bounded by the existing instruction/8-pixel PPU
+timing; this is not a new cycle-exact PPU. Expansion sound gain/reconstruction
+is approximate. Battery RAM remains volatile.
+
+NES 2.0 gives an explicit PRG RAM size (0/8/16/32/64/128 KiB supported). Legacy
+iNES size zero uses a 64 KiB superset without per-game CRC tables. This avoids
+pretending that incomplete old headers identify an exact MMC5 board. MMC5 CHR
+RAM boards and nonzero MMC5 submappers are rejected. Raw ROM windows fit before
+the existing PRG views; the decoded pool is 1 MiB. Stack, GPU, DMA and Anvil
+ownership are unchanged.
+
+See [Diagnostics/more-mappers-results.json](Diagnostics/more-mappers-results.json)
+for current native checks, independent CHR/ExRAM demonstrations and measured
+mixed-mapper game sessions. Independent sources/binaries are kept outside the
+repository: [CHR bank test](https://github.com/christopherpow/nes-test-roms/tree/master/mmc5test_v2),
+[executable ExRAM test](https://github.com/christopherpow/nes-test-roms/tree/master/exram).
+Hardware references: [MMC5](https://www.nesdev.org/wiki/MMC5),
+[CNROM](https://www.nesdev.org/wiki/CNROM), [Color Dreams](https://www.nesdev.org/wiki/INES_Mapper_011).

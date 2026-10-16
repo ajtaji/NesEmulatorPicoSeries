@@ -99,11 +99,24 @@ Procedure.i NesReadSlow(addr.i)
   addr=addr&$FFFF
   If addr>=$8000
     v=PeekA(PrgBase+addr-$8000)
+    If CartMapper=5
+      v=M5PrgRead(addr)
+      If addr=$FFFA Or addr=$FFFB : M5ScanReset() : EndIf
+      If addr<$C000 And M5PcmMode<>0
+        CpuNow() : NesRpc(0,0,0,CpuCycles) : M5PcmRead(v) : CpuEndWindow()
+      EndIf
+    EndIf
   ElseIf addr<$2000
     v=M(addr&$7FF)
   ElseIf addr>=$6000
     v=NesOpenBus
     If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : v=MapRam(addr&8191) : EndIf
+    If CartMapper=5 : v=M5PrgRead(addr) : EndIf
+  ElseIf addr>=$5C00 And addr<$6000 And CartMapper=5
+    v=M5Read(addr)
+  ElseIf addr>=$5000 And CartMapper=5
+    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
+    v=M5Read(addr) : CpuEndWindow()
   ElseIf addr=$4016
     If NesStrobe
       v=(NesController&1)|$40
@@ -150,7 +163,7 @@ Procedure NesWrite(addr.i, value.i)
   If addr<$2000
     M(addr&$7FF)=value
   ElseIf addr>=$6000
-    If CartMapper=1 Or CartMapper=4
+    If MapManaged
       CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
       MapperWrite(addr,value,CpuCycles+AccessPhase) : CpuEndWindow()
     ElseIf addr>=$8000 And (CartMapper=66 Or CartMapper=2)
@@ -158,6 +171,9 @@ Procedure NesWrite(addr.i, value.i)
       If CartConflicts : value=value&PeekA(PrgBase+addr-$8000) : EndIf
       CartBank(value)
     EndIf
+  ElseIf addr>=$5000 And CartMapper=5
+    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
+    M5Write(addr,value) : CpuEndWindow()
   ElseIf addr=$4016
     NesStrobe=value&1 : NesLatch=NesController : NesLatch2=0
   ElseIf addr=$4014
@@ -234,14 +250,21 @@ EndProcedure
 ; Bus DMA source read on core 1 (DMC). Never calls the RPC producer or touches
 ; reserved CPU globals. PRG comes from core 1's own queue-ordered bank view.
 Procedure.i WorkerRead(addr.i)
+  Protected v.i
   addr=addr&$FFFF
   If addr<$2000
     ProcedureReturn M(addr&$7FF)
   EndIf
   If addr>=$6000
     If addr>=$8000
+      If CartMapper=5
+        v=M5PrgRead(addr)
+        If addr<$C000 And M5PcmMode<>0 : M5PcmRead(v) : EndIf
+        ProcedureReturn v
+      EndIf
       ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)
     EndIf
+    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf
     If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
     ProcedureReturn 0
   EndIf
@@ -250,6 +273,7 @@ EndProcedure
 ; The same bus read for OAM DMA executed on core 0, with core 0's bank view.
 Procedure.i NesDmaRead(addr.i)
   addr=addr&$FFFF
+  If CartMapper=5 And addr>=$6000 : ProcedureReturn M5PrgRead(addr) : EndIf
   If addr>=$6000 And addr<$8000 And (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
   If addr<$2000
     ProcedureReturn M(addr&$7FF)

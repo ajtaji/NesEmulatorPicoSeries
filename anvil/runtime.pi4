@@ -52,7 +52,7 @@ Procedure LoadCartridge()
   RenderTop=@FrameTop(0) : FrameBottom=@FrameBottomStore(0)
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   ChrWritable=CartChrRam
-  If CartMapper=1 Or CartMapper=4
+  If CartMapper=1 Or CartMapper=3 Or CartMapper=4 Or CartMapper=5 Or CartMapper=7 Or CartMapper=11
     For bank=0 To MapChrBytes/8192-1
       Chr=CartChr+bank*8192 : Pattern=@Decoded(bank*8192)
       For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next

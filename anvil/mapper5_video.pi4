@@ -1,0 +1,119 @@
+; MMC5 bus substitutions. Pixel composition, sprites and RGB conversion use
+; the existing renderer. Normal cartridges call the original tile fetch.
+Procedure M5FetchTile()
+  Protected tile.i,attr.i,palette.i,row.i,bank.i,bits.i,column.i,y.i,offset.i,split.i,set.i
+  column=(PpuDot>>3)+WI : split=0
+  If (M5Split&128)<>0 And M5ExMode<2 And (M5PpuMask&24)<>0
+    If M5Split&64 : split=column>=(M5Split&31) : Else : split=column<(M5Split&31) : EndIf
+  EndIf
+  If split
+    y=(PpuLine+M5SplitScroll) % 240 : column=column&31
+    offset=(y>>3)*32+column : tile=M5Ex(offset)
+    attr=M5Ex(960+((y>>5)*8)+(column>>2))
+    palette=((attr>>((((y>>3)&2)<<1)|(column&2)))&3)*4
+    row=tile*16+((WAddr>>12)&7)*2
+    bank=(M5SplitBank*4)&((MapChrBytes/1024)-1)
+    bits=PeekU(@Decoded(bank*1024)+row)
+  Else
+    tile=Nt(WAddr&$FFF)
+    If M5ExMode=1 And (M5PpuMask&24)<>0
+      attr=M5Ex(WAddr&1023) : palette=(attr>>6)*4
+      bank=(((attr&63)|(M5ChrHigh<<6))*4)&((MapChrBytes/1024)-1)
+      row=tile*16+((WAddr>>12)&7)*2
+      bits=PeekU(@Decoded(bank*1024)+row)
+    Else
+      attr=Nt($3C0|(WAddr&$C00)|((WAddr>>4)&$38)|((WAddr>>2)&7))
+      palette=((attr>>(((WAddr>>4)&4)|(WAddr&2)))&3)*4
+      row=((PpuCtrl&16)<<8)+tile*16+((WAddr>>12)&7)*2
+      set=0
+      If (M5PpuControl&32)<>0
+        set=M5LastSet : If (M5PpuMask&24)<>0 : set=1 : EndIf
+      EndIf
+      bank=M5ChrBank(row>>10,set)
+      bits=PeekU(@Decoded(bank*1024)+(row&1023))
+    EndIf
+  EndIf
+  palette=palette*$01010101
+  WLo=PixelSpread(bits&255)|palette : WHi=PixelSpread(bits>>8)|palette
+EndProcedure
+Procedure M5PpuRead(addr.i,dot.i)
+  ; Three identical NT fetches arm detection; the following attribute fetch
+  ; starts the line. Any read refreshes the three-CPU-cycle idle detector.
+  If dot-M5LastRead>=9
+    M5InFrame=0 : M5Matches=0 : M5LastAddr=-1
+  EndIf
+  If M5Matches>=2
+    M5Matches=0 : MapIrqClocks=MapIrqClocks+1
+    If M5InFrame=0
+      M5InFrame=1 : M5Scanline=0 : M5Pending=0
+    Else
+      M5Scanline=(M5Scanline+1)&255
+      If M5Scanline=M5IrqTarget And M5IrqTarget<>0
+        M5Pending=1 : MapIrqAssertions=MapIrqAssertions+1
+      EndIf
+      If M5Scanline=240 : M5ScanReset() : EndIf
+    EndIf
+    M5IrqUpdate()
+  ElseIf addr>=$2000 And addr<$3000 And addr=M5LastAddr
+    M5Matches=M5Matches+1
+  Else
+    M5Matches=0
+  EndIf
+  M5LastRead=dot : M5LastAddr=addr
+EndProcedure
+Procedure M5PpuTicks(cycles.i)
+  Protected left.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i,fast.i,last.i
+  If M5Timer>0 And M5TimerRun<>0
+    M5Timer=M5Timer-cycles
+    If M5Timer<=0 : M5Timer=0 : M5TimerRun=0 : M5TimerFlag=1 : M5IrqUpdate() : EndIf
+  EndIf
+  left=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While left>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    edge=width : fast=0
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      ; Actual four bus fetches per tile and the two repeated end-of-line NT
+      ; fetches; the PPU's current pixel renderer remains independent.
+      If dot>=5 And dot<337 And M5Matches=0 And M5LastAddr=0
+        ; Interior tile fetches cannot form the repeated NT sequence. Skip
+        ; them in one block, retaining the exact final bus address/time.
+        edge=337 : fast=1
+      ElseIf dot<339
+        If dot=0 : edge=1 : Else : edge=((dot-1)/2+1)*2+1 : EndIf
+      EndIf
+    EndIf
+    step=edge-dot : If step>left : step=left : EndIf
+    dot=dot+step : left=left-step : M5Dots=M5Dots+step
+    If fast
+      If M5Dots-step-M5LastRead>=9 : M5InFrame=0 : EndIf
+      last=dot : If (last&1)=0 : last=last-1 : EndIf
+      If last>335 : last=335 : EndIf
+      M5LastRead=M5Dots-(dot-last) : M5Matches=0 : M5LastAddr=0
+      If last<257 Or last>=321
+        If (last&7)=1 : M5LastAddr=$2000 : ElseIf (last&7)=3 : M5LastAddr=$23C0 : EndIf
+      EndIf
+    EndIf
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot>=337 : addr=$2000
+        ElseIf dot<257 Or dot>=321
+          If (dot&7)=1 : addr=$2000 : ElseIf (dot&7)=3 : addr=$23C0 : EndIf
+        EndIf
+        M5PpuRead(addr,M5Dots)
+      EndIf
+    EndIf
+  Wend
+  If M5Dots-M5LastRead>=9 : M5InFrame=0 : M5Matches=0 : M5LastAddr=-1 : EndIf
+EndProcedure
+Procedure M5PpuNotice(addr.i,value.i)
+  ; MMC5 decodes the real PPU addresses, not their mirrors.
+  If addr=$2000 : M5PpuControl=value : M5ChrUpdate()
+  ElseIf addr=$2001
+    If (M5PpuMask&24)=0 And (value&24)<>0 : M5ScanReset() : EndIf
+    M5PpuMask=value
+    If (value&24)=0 : M5InFrame=0 : M5LastAddr=-1 : M5Matches=0 : EndIf
+  ElseIf addr=$4014 : M5ScanReset() : EndIf
+EndProcedure

@@ -177,7 +177,7 @@ Procedure ApuTick(dt.i)
     EndIf
   Wend
 EndProcedure
-Procedure ApuMixSample()
+Procedure ApuMixSampleBase()
   Protected c.i, duty.i, pulse.i, noise.i, target.i, x.i
   pulse=0 : noise=0
   For c=0 To 1
@@ -256,6 +256,7 @@ Procedure ApuAdvance(dt.i)
     If step>event-ApuFrameClock
       step=event-ApuFrameClock
     EndIf
+    If CartMapper=5 : M5AudioAdvance(step) : EndIf
     ApuTick(step)
     ApuFrameClock=ApuFrameClock+step
     If ApuResetDelay>0

@@ -5,15 +5,16 @@ Procedure PpuWrite(addr.i, value.i)
   If CartMapper=4 And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
   If addr<$2000
     If ChrWritable
-      If CartMapper=1 Or CartMapper=4
+      If MapManaged
         MapperChrWrite(addr,value)
       Else
         PokeA(Chr+addr,value) : PpuDecode(addr)
       EndIf
     EndIf
   ElseIf addr<$3F00
+    If CartMapper=5 : M5NtWrite(addr,value) : ProcedureReturn : EndIf
     ntAddress=PpuNtAddr(addr)
-    If CartMapper=1 Or CartMapper=4
+    If MapManaged
       MapCiram(ntAddress)=value : offset=addr&1023
       For table=0 To 3
         If MapNtSlots(table)=ntAddress/1024 : Nt(table*1024+offset)=value : EndIf

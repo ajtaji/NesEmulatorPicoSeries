@@ -195,3 +195,8 @@ guest session and return to the ROM selector. `ExitRequested` still returns
 to Anvil. The lifecycle adapter suspends Bluetooth while the selector is
 active, resets guest PCM/state, and resumes the same connection for a new game.
 Other audio plugins use their existing `AudioStop()` / `AudioBegin()` contract.
+
+MMC5 expansion sound is part of the cartridge producer, mixed into the same
+signed 16-bit 48 kHz ring before publication. Output plugins and stereo SBC
+transport do not need mapper-specific code. Mapper-specific tile substitutions
+similarly happen before the existing frame/presentation boundary.

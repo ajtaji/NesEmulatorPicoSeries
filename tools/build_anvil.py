@@ -58,7 +58,7 @@ def main():
         shim.write_text((a.anvil/'RaspberryPi4/Lib/bt_uart.pi4').read_text().replace('BtuPower(1)','NesBtPower(1)'))
         source+=f'XIncludeFile "{shim.as_posix()}"\n'
     source+='\n'.join(['#CPU_TIMING=1','#CPU_ASM_TAIL=0','#NES_SPLIT=0',
-      '#CART_CHR_BANKS=32','#PPU_PROFILE=0',f'#TEST_SECONDS={a.seconds}',
+      '#CART_CHR_BANKS=128','#PPU_PROFILE=0',f'#TEST_SECONDS={a.seconds}',
       '#NES_VIDEO_BACKEND=2',f'#NES_AUDIO_BACKEND={2 if a.bluetooth_peer_wrapper or a.audio_plugin else 0}'])+'\n'
     def inc(path):
         return f'XIncludeFile "{Path(path).resolve().as_posix()}"\n'
@@ -96,13 +96,23 @@ def main():
     cart=(ROOT/'anvil/cartridge.pi4').read_text()
     if a.rom:
         from rom_catalog import read_rom,validate,prg_views
-        c=read_rom(a.rom)
-        if c.mapper in (1,4):
+        c=read_rom(a.rom,ram_limit=131072)
+        if c.mapper in (1,3,4,5,7,11):
             header=a.rom.read_bytes()[:16]
-            if (header[7]&12)!=8 and header[8]>1:
+            if c.mapper in (1,4) and (header[7]&12)!=8 and header[8]>1:
                 raise ValueError('unsupported Anvil MMC PRG RAM size')
-            if c.submapper or c.trainer or c.ram_size>8192 or len(c.chr)>(131072 if c.mapper==1 else 262144) or len(c.prg)>(262144 if c.mapper==1 else 524288):
-                raise ValueError('unsupported Anvil MMC board geometry')
+            if c.mapper!=5 and c.ram_size>(8192 if c.mapper in (1,4) else 0):
+                raise ValueError('unsupported Anvil cartridge RAM')
+            if c.mapper==5 and (c.ram_size>131072 or (c.ram_size and (c.ram_size<8192 or c.ram_size&(c.ram_size-1)))):
+                raise ValueError('unsupported MMC5 RAM geometry')
+            if c.mapper==5 and (header[7]&12)==8 and header[11]:
+                raise ValueError('MMC5 CHR RAM boards are unsupported')
+            prg_max={1:262144,3:32768,4:524288,5:1048576,7:262144,11:131072}[c.mapper]
+            chr_max={1:131072,3:32768,4:262144,5:1048576,7:0,11:131072}[c.mapper]
+            if c.trainer or len(c.prg)>prg_max or len(c.chr)>chr_max or (c.submapper>2 if c.mapper in (3,7,11) else c.submapper!=0):
+                raise ValueError('unsupported Anvil mapper geometry')
+            if c.mapper in (3,5,11) and not c.chr:
+                raise ValueError('mapper requires CHR ROM')
         else:
             validate(c)
         prg=prg_views(c)
@@ -113,9 +123,9 @@ def main():
         cart+=f'''Procedure CartSelectBuiltin(number.i)
   CartMapper={c.mapper} : CartPrgBanks={len(prg)//32768} : CartChrBanks={len(c.chr)//8192 or 2}
   CartPrg=?CartridgeData : CartChr=?ChrData : CartChrRam={int(not c.chr)}
-  CartConflicts={int(c.conflicts)} : PpuMirroring={c.mirror}
+  CartConflicts={int(c.submapper==2 if c.mapper in (7,11) else c.conflicts)} : PpuMirroring={c.mirror}
   MapPrgBytes={len(c.prg)} : MapChrBytes={len(c.chr) or 8192} : MapChrRam={int(not c.chr)}
-  MapBattery={int(c.battery)} : MapFourScreen=0
+  MapBattery={int(c.battery)} : MapFourScreen=0 : MapRamBytes={65536 if c.mapper==5 and (header[7]&12)!=8 and header[8]==0 else c.ram_size}
 EndProcedure
 '''
     private=a.out.with_suffix('.cartridge.pi4'); private.write_text(cart)
