@@ -58,7 +58,7 @@ for index,(cart,*_) in enumerate(games):
     elapsed=time.monotonic()-ready
     for at,key in ([(2,b's'),(8,b'R'),(10,b'a'),(13,b'0')]+([(5,b's')] if cart.mapper in (4,66,47,118,119,206) else [])+([(12,b's'),(14,b'R'),(18,b's'),(22,b'a'),(25,b'0')] if args.deep_start else [])+([(5,b's'),(12,b's')] if cart.mapper==1 else [])):
      if elapsed>=at and at not in sent:s.write(key);sent.add(at)
-    if elapsed>=(40 if group in ('regression','gameplay','lolo') else 30 if args.deep_start else 18):break
+    if elapsed>=args.seconds:break
   if not ready:raise RuntimeError('No game startup header: '+repr(lines[-5:]))
   s.write(b'mi');time.sleep(.3)
   for _ in range(3):
@@ -77,11 +77,15 @@ for index,(cart,*_) in enumerate(games):
    if {'cycles','frames','lcd','us','err','stop'}<=row.keys():rows.append(row)
   if len(rows)<10:raise RuntimeError(f'Only {len(rows)} telemetry rows')
   us=sum(row['us'] for row in rows);result={k:sum(row[k] for row in rows)*1e6/us for k in ['cycles','frames','lcd','samples']};result.update(firmware_sha256=firmware_hash,title=cart.path.name,mapper=cart.mapper,target=target,seconds=us/1e6,errors=max(row['err'] for row in rows),stopped=max(row['stop'] for row in rows),debt_first=rows[0]['debt'],debt_last=rows[-1]['debt'],bt_live=min(row.get('bt_live',0) for row in rows),colours=len(set(pixels)))
+  # Startup buffering is separate from playback. The framebuffer dump occurs
+  # after these rows and deliberately pauses emulation, so it is excluded.
+  steady=rows[2:] or rows
+  first=steady[0].get('audio_underrun',steady[0].get('bt_underrun',0))
+  last=steady[-1].get('audio_underrun',steady[-1].get('bt_underrun',0))
+  result.update(audio_underrun_first=first,audio_underrun_last=last,audio_underrun_steady_delta=last-first)
   results.append(result);(out/(slug+'.json')).write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result),flush=True)
   if result['errors'] or result['stopped']:raise RuntimeError('Board error or stopped CPU')
  finally:
   s.close();(out/(slug+'.txt')).write_text('\n'.join(line for line in lines if 'peer' not in line.lower() and 'address' not in line.lower())+'\n');reset()
 (out/'games.json').write_text(json.dumps(results,indent=2)+'\n')
 print('STOPPED boot menu',port,flush=True)
-
-
