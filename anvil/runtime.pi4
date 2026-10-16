@@ -14,7 +14,10 @@ CompilerEndIf
 CompilerIf #NES_VERIFY_ROM=1
 Declare.i RomLoaderTests()
 CompilerEndIf
-Global StartUs.i, EmulateUs.i, EmulateCalls.i
+CompilerIf #NES_VERIFY_MAPPERS=1
+Declare.i MapperTests()
+CompilerEndIf
+Global EmulateUs.i, EmulateCalls.i
 
 ; Descriptor caches are used only by the Thumb renderer, not this backend.
 Procedure PpuUpdateDescriptor(addr.i)
@@ -36,7 +39,7 @@ Procedure NesSync()
   Wend
   If WorkerNmi<>NesSeenNmi
     NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
-  ElseIf WorkerIrq<>0 And FI=0
+  ElseIf (WorkerIrq|MapIrq)<>0 And FI=0
     CpuInterrupt($FFFE)
   EndIf
 EndProcedure
@@ -49,7 +52,13 @@ Procedure LoadCartridge()
   RenderTop=@FrameTop(0) : FrameBottom=@FrameBottomStore(0)
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   ChrWritable=CartChrRam
-  If CartChrRam
+  If CartMapper=1 Or CartMapper=4
+    For bank=0 To MapChrBytes/8192-1
+      Chr=CartChr+bank*8192 : Pattern=@Decoded(bank*8192)
+      For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
+    Next
+    MapperInit()
+  ElseIf CartChrRam
     Chr=@Decoded(0)+8192 : CartChr=Chr : Pattern=@Decoded(0)
   Else
     For bank=0 To CartChrBanks-1
@@ -65,52 +74,8 @@ Procedure LoadCartridge()
   For i=0 To 511 : Rgb64(i)=PeekU(?RgbData+i*2) : Next
   PpuColours()
 EndProcedure
-Procedure.i Main()
-  Protected t.i,target.i,elapsed.i,nextInput.i,status.i
-  CaptureServices()
-  If ServicesBegin()=0 : ProcedureReturn 100 : EndIf
-  *svc_parallel=ServiceSlot(185)
-  *svc_cores=ServiceSlot(184)
-  If svc_cap(13)=0 Or svc_cap(7)=0 : ProcedureReturn 101 : EndIf
-  If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
-  CompilerIf #NES_VERIFY_CODEC=1
-    t=AudioCodecTests() : PlatformEnd() : ProcedureReturn t
-  CompilerEndIf
-  CompilerIf #NES_VERIFY_CORE=1
-    LoadCartridge() : t=CoreTests() : PlatformEnd() : ProcedureReturn t
-  CompilerEndIf
-  CompilerIf #NES_VERIFY_ROM=1
-    t=RomLoaderTests() : PlatformEnd() : ProcedureReturn t
-  CompilerEndIf
-  If svc_cores()<2 : PlatformEnd() : ProcedureReturn 104 : EndIf
-  VideoBegin()
-  If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
-  CompilerIf #NES_ROM_SELECTOR=1
-    If RomSelector()=0
-      VideoAbort() : svc_flush() : svc_capture() : PlatformEnd()
-      ProcedureReturn VideoError
-    EndIf
-    HudAt=0 : HudPut("VIDEO -- FPS   EMU -- FPS") : HudDirty=1
-  CompilerEndIf
-  LoadCartridge() : CpuReset()
-  If VideoStart(@FrameTop(0),FrameBottom)=0 : VideoError=214 : EndIf
-  t=NesHostUs() : status=VideoPoll()
-  While status=0 And VideoError=0
-    SafetyPet()
-    If NesHostUs()-t>2000000 : VideoError=215 : Break : EndIf
-    status=VideoPoll()
-  Wend
-  If status<0 : VideoError=216 : EndIf
-  If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
-  AudioConfigure() : AudioBegin()
-  StartUs=NesHostUs()
-  HudSince=StartUs : HudFrames=VideoFrames : HudEmu=WorkerFrames
-  JobArgs(0)=0 : JobArgs(1)=1
-  While ExitRequested=0 And Stopped=0 And WorkerError=0 And VideoError=0
-    ComputeDone=0 : SliceEnd=NesHostUs()+2000000
-    If svc_parallel(@ApplicationJob,@JobArgs(0),8,2)<>0 : ParallelError=1 : Break : EndIf
-    If #TEST_SECONDS>0 And NesHostUs()-StartUs>=#TEST_SECONDS*1000000 : Break : EndIf
-  Wend
+Procedure RecordGame()
+  Protected at.i
   ; Fixed diagnostic block inside the declared payload RAM window.
   PokeI($02F00000,$4E455350) : PokeI($02F00008,NesHostUs()-StartUs)
   PokeI($02F00010,CpuCycles) : PokeI($02F00018,WorkerFrames)
@@ -125,8 +90,76 @@ Procedure.i Main()
   PokeI($02F000B0,AudioWireErrors) : PokeI($02F000B8,ParallelError)
   AudioDiagnostics($02F000C0)
   PokeI($02F001A0,InputSeen)
-  AudioStop() : VideoAbort() : svc_flush()
-  svc_capture()
-  PlatformEnd()
+  PokeI($02F00300,GameSessions) : PokeI($02F00308,CartMapper)
+  PokeI($02F00310,MapIrqClocks) : PokeI($02F00318,MapIrqAssertions)
+  PokeI($02F00320,MenuRequested)
+  If GameSessions<=16
+    at=$02F01000+(GameSessions-1)*128
+    PokeI(at,CartMapper) : PokeI(at+8,NesHostUs()-StartUs)
+    PokeI(at+16,WorkerFrames) : PokeI(at+24,VideoFrames) : PokeI(at+32,CpuCycles)
+    PokeI(at+40,ApuSamples) : PokeI(at+48,Stopped+WorkerError+VideoError+ParallelError)
+    PokeI(at+56,AudioLive) : PokeI(at+64,AudioWireErrors)
+    PokeI(at+72,RomChosen) : PokeI(at+80,MapIrqClocks) : PokeI(at+88,MapIrqAssertions)
+    PokeI(at+96,MenuRequested) : PokeI(at+104,ExitRequested)
+    PokeI(at+112,M($F8)) : PokeI(at+120,PC)
+  EndIf
+EndProcedure
+Procedure.i Main()
+  Protected t.i,target.i,elapsed.i,nextInput.i,status.i
+  CaptureServices()
+  If ServicesBegin()=0 : ProcedureReturn 100 : EndIf
+  *svc_parallel=ServiceSlot(185)
+  *svc_cores=ServiceSlot(184)
+  If svc_cap(13)=0 Or svc_cap(7)=0 : ProcedureReturn 101 : EndIf
+  If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
+  GuestClear($02F00000,8192)
+  CompilerIf #NES_VERIFY_CODEC=1
+    t=AudioCodecTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  CompilerIf #NES_VERIFY_CORE=1
+    LoadCartridge() : t=CoreTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  CompilerIf #NES_VERIFY_ROM=1
+    t=RomLoaderTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  CompilerIf #NES_VERIFY_MAPPERS=1
+    t=MapperTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  If svc_cores()<2 : PlatformEnd() : ProcedureReturn 104 : EndIf
+  VideoBegin()
+  If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
+  AudioConfigure()
+  Repeat
+    GuestReset()
+  CompilerIf #NES_ROM_SELECTOR=1
+    If RomSelector()=0
+      Break
+    EndIf
+    HudAt=0 : HudPut("VIDEO -- FPS   EMU -- FPS") : HudDirty=1
+  CompilerEndIf
+  LoadCartridge() : CpuReset()
+  If VideoStart(@FrameTop(0),FrameBottom)=0 : VideoError=214 : EndIf
+  t=NesHostUs() : status=VideoPoll()
+  While status=0 And VideoError=0
+    SafetyPet()
+    If NesHostUs()-t>2000000 : VideoError=215 : Break : EndIf
+    status=VideoPoll()
+  Wend
+  If status<0 : VideoError=216 : EndIf
+  If VideoError : Break : EndIf
+  AudioSessionBegin()
+  StartUs=NesHostUs()
+  HudSince=StartUs : HudFrames=VideoFrames : HudEmu=WorkerFrames
+  JobArgs(0)=0 : JobArgs(1)=1
+  While ExitRequested=0 And MenuRequested=0 And Stopped=0 And WorkerError=0 And VideoError=0
+    ComputeDone=0 : SliceEnd=NesHostUs()+2000000
+    If svc_parallel(@ApplicationJob,@JobArgs(0),8,2)<>0 : ParallelError=1 : Break : EndIf
+    If #TEST_SECONDS>0 And NesHostUs()-StartUs>=#TEST_SECONDS*1000000 : Break : EndIf
+  Wend
+    GameSessions=GameSessions+1 : RecordGame()
+    If MenuRequested=0 Or ExitRequested<>0 Or Stopped<>0 Or WorkerError<>0 Or VideoError<>0 Or ParallelError<>0 : Break : EndIf
+    AudioSessionPause()
+  ForEver
+  AudioStop() : VideoAbort() : svc_flush() : svc_capture() : PlatformEnd()
   ProcedureReturn Stopped+WorkerError+VideoError+ParallelError
 EndProcedure

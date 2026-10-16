@@ -1,6 +1,6 @@
 ; Cartridge loading and selector state. No guest CPU, PPU or audio changes.
 ; ROMs live on partition 2 (exFAT), never on the boot partition.
-Global RomLoaded.i
+Global RomLoaded.i,RomChosen.i=-1
 CompilerIf #NES_ROM_SELECTOR=1
 #ROM_MAX_FILES=4096
 #ROM_NAME_BYTES=256
@@ -16,7 +16,7 @@ Global RomCount.i,RomPage.i,RomMore.i,RomStatus.i,RomMenuActive.i
 Global RomRevision.i
 Global RomMenuStart.i,RomMenuFrames.i,RomMenuSince.i,RomMenuBase.i,RomMenuFps.i
 Global RomMapper.i,RomPrgBytes.i,RomChrBytes.i,RomSubmapper.i
-Global RomMenuPressed.i,RomChosen.i=-1
+Global RomMenuPressed.i
 
 Procedure.i RomServices()
   If Header32(8)<7 Or Header32(12)<198 : ProcedureReturn 0 : EndIf
@@ -82,7 +82,7 @@ Procedure RomScan()
 EndProcedure
 ; Validate before committing cartridge metadata or reading bank data.
 Procedure.i RomValidateHeader(fileBytes.i)
-  Protected flags.i,nes2.i,banks.i
+  Protected flags.i,nes2.i,banks.i,ram.i,lo.i,hi.i
   RomStatus=0
   If fileBytes<16 Or RomHeader(0)<>78 Or RomHeader(1)<>69 Or RomHeader(2)<>83 Or RomHeader(3)<>26
     RomStatus="Invalid iNES header" : ProcedureReturn 0
@@ -90,27 +90,40 @@ Procedure.i RomValidateHeader(fileBytes.i)
   flags=RomHeader(6) : nes2=(RomHeader(7)&12)=8
   RomMapper=(flags>>4)|(RomHeader(7)&240) : RomSubmapper=0
   If nes2 : RomMapper=RomMapper|((RomHeader(8)&15)<<8) : RomSubmapper=RomHeader(8)>>4 : EndIf
-  If RomMapper<>0 And RomMapper<>2 And RomMapper<>66
-    RomStatus="Unsupported mapper - supported: 0, 2, 66" : ProcedureReturn 0
+  If RomMapper<>0 And RomMapper<>1 And RomMapper<>2 And RomMapper<>4 And RomMapper<>66
+    RomStatus="Unsupported mapper - supported: 0, 1, 2, 4, 66" : ProcedureReturn 0
   EndIf
-  If flags&12 : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
+  If (flags&4)<>0 Or ((flags&8)<>0 And RomMapper<>4) : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
   If (nes2<>0 And (RomHeader(12)&3)<>0 And (RomHeader(12)&3)<>2) Or (nes2=0 And (RomHeader(9)&1)<>0)
     RomStatus="PAL timing is unsupported" : ProcedureReturn 0
   EndIf
   If (RomHeader(7)&3)<>0 : RomStatus="VS / PlayChoice systems are unsupported" : ProcedureReturn 0 : EndIf
   If nes2
+    lo=RomHeader(10)&15 : hi=RomHeader(10)>>4 : ram=0
+    If lo>0 : ram=64<<lo : EndIf
+    If hi>0 : ram=ram+(64<<hi) : EndIf
+    If ram>8192 Or (ram>0 And RomMapper<>1 And RomMapper<>4) : RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0 : EndIf
     If RomHeader(9)<>0 : RomStatus="Extended ROM sizes are unsupported" : ProcedureReturn 0 : EndIf
-    If RomHeader(10)<>0 Or RomHeader(11)>7
+    If (RomHeader(10)&15)>7 Or (RomHeader(10)>>4)>7 Or RomHeader(11)>7
       RomStatus="Cartridge RAM size is unsupported" : ProcedureReturn 0
     EndIf
   EndIf
+  If nes2=0 And (RomMapper=1 Or RomMapper=4) And RomHeader(8)>1
+    RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0
+  EndIf
   RomPrgBytes=RomHeader(4)*16384 : RomChrBytes=RomHeader(5)*8192
-  If RomPrgBytes=0 Or RomPrgBytes>524288 Or RomChrBytes>16384
+  If RomPrgBytes=0 Or RomPrgBytes>524288 Or RomChrBytes>262144
     RomStatus="ROM exceeds supported PRG / CHR sizes" : ProcedureReturn 0
   EndIf
   banks=RomHeader(4)
-  If (banks&(banks-1))<>0 Or RomHeader(5)=3
+  If (banks&(banks-1))<>0 Or (RomHeader(5)&(RomHeader(5)-1))<>0
     RomStatus="Bank counts must be powers of two" : ProcedureReturn 0
+  EndIf
+  If (RomMapper=1 And (RomPrgBytes>262144 Or RomChrBytes>131072)) Or ((RomMapper<>1 And RomMapper<>4) And RomChrBytes>16384)
+    RomStatus="Unsupported cartridge board size" : ProcedureReturn 0
+  EndIf
+  If (RomMapper=1 Or RomMapper=4) And RomSubmapper<>0
+    RomStatus="Unsupported MMC board submapper" : ProcedureReturn 0
   EndIf
   If RomMapper=0 And (RomPrgBytes>32768 Or RomChrBytes>8192)
     RomStatus="Unsupported NROM geometry" : ProcedureReturn 0
@@ -172,6 +185,12 @@ Procedure.i RomLoad(index.i)
       CartPrgBanks=1
     EndIf
   EndIf
+  MapPrgBytes=RomPrgBytes : MapChrBytes=RomChrBytes : MapChrRam=RomChrBytes=0
+  MapBattery=(RomHeader(6)&2)<>0 : MapFourScreen=(RomHeader(6)&8)<>0
+  If MapChrRam
+    MapChrBytes=8192
+    For i=0 To 8191 : PokeA(#ROM_RAW_CHR+i,0) : Next
+  EndIf
   CartMapper=RomMapper : CartChr=#ROM_RAW_CHR : CartChrRam=RomChrBytes=0
   CartChrBanks=RomChrBytes/8192 : If CartChrRam : CartChrBanks=2 : EndIf
   CartConflicts=(RomMapper=2 Or RomMapper=66) And RomSubmapper<>1
@@ -183,8 +202,11 @@ EndProcedure
 ; -3 refresh. EXIT uses the shared ExitRequested flag.
 Procedure.i RomSelector()
   Protected action.i,index.i,now.i,dt.i,c.i
+  RomLoaded=0 : RomMenuFrames=0 : RomMenuBase=0 : RomMenuFps=0
   RomMenuActive=1 : RomMenuStart=NesHostUs() : RomMenuSince=RomMenuStart
-  RomScan() : svc_flush()
+  RomScan()
+  If RomChosen>=0 And RomChosen<RomCount : RomPage=RomChosen/8 : EndIf
+  svc_flush()
   While ExitRequested=0 And VideoError=0
     SafetyPet() : action=InputMenuPoll()
     If action=-1 And RomPage>0 : RomPage=RomPage-1 : EndIf

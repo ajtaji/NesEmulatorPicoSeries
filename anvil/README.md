@@ -32,9 +32,11 @@ The default opens the touch ROM selector on **exFAT partition 2, `2:/NES`**.
 Copy `.nes` files into that folder; no rebuild is needed when games change.
 Tap a title to play, use the letters to jump through the sorted list, or
 PREVIOUS/NEXT to page. REFRESH rereads the folder. EXIT returns to Anvil from
-both the selector and the game. Relaunch the same application to pick another
-game. The D-pad, A/B, Start and Select controls are preserved during gameplay.
-The selector remains silent; Bluetooth starts only after a game is chosen.
+both the selector and the game. During play, MENU returns to the selector
+so another game can be loaded without restarting the application. The D-pad, A/B, Start and Select controls are preserved during gameplay.
+The selector remains silent; Bluetooth starts after a game is chosen, suspends
+on MENU and resumes for the next game. Guest state is reset only after both
+workers have joined.
 
 `--no-selector` builds the original demonstration cartridge. `--rom <game.nes>`
 retains the embedded single-game diagnostic mode. `--seconds 10` enables a
@@ -64,9 +66,10 @@ are skipped; different files with the same name in `2:/NES` are replaced. It
 does not delete extra games or change boot files/settings. Its private bundle
 must not be committed. The copy tool is bounded to 4096 files and 256 MiB per
 batch; the selector displays up to 4096 games. Filenames must fit 255 UTF-8 bytes.
-ROM loading supports at most 512 KiB PRG and 16 KiB CHR within the existing
-mapper geometry limits. Invalid/truncated files and unsupported mappers stay
-in the selector with an error message. Battery save RAM is not implemented.
+ROM loading supports up to 512 KiB PRG and 256 KiB CHR for MMC3,
+256 KiB PRG and 128 KiB CHR for standard MMC1, and the original sizes for
+mappers 0/2/66. Invalid/truncated files and unsupported mappers stay
+in the selector with an error message. Cartridge RAM is volatile: battery-backed saves are not written to disk.
 
 ## Modules and ownership
 
@@ -86,14 +89,20 @@ in the selector with an error message. Battery save RAM is not implemented.
   The current backend supports the tested 1280x800 logical, rotated 800x1280
   DSI surface. Another screen belongs in another video plugin.
 * `input_touch.pi4` translates Anvil's screen-space contacts to NES button
-  bits. The host UI has D-pad, A, B, Start, Select and Exit. Multiple contact
+  bits. The host UI has D-pad, A, B, Start, Select, MENU and EXIT. Multiple contact
   IDs are tracked independently. Exit signals the guest worker to stop,
   joins it and returns to Anvil.
 * `selector.pi4` scans and loads files through Anvil ABI 1.7. The immutable
   UxROM views match `rom_catalog.prg_views`; no opcode, guest rendering or APU
   behavior is changed. Raw PRG uses `0x03200000` (512 KiB), CHR uses
-  `0x03300000` (16 KiB), and PRG views use `0x03400000` (1 MiB). These are
+  `0x03300000` (256 KiB), and PRG views use `0x03400000` (1 MiB). These are
   separate from stacks, framebuffer storage and the GPU/DMA arenas.
+  MMC1/MMC3 copy changed banks into a 32 KiB CPU window at `0x03500000`,
+  an 8 KiB CHR window at `0x03508000`, and its decoded shadow at `0x0350A000`.
+  `mappers.pi4` owns register state, PRG RAM, CHR aliases and CIRAM mirroring.
+  MMC3 observes filtered PPU A12 rises and contributes a separate IRQ source;
+  the APU IRQ cannot clear it. These are bus/scheduler adapters: the opcode
+  interpreter, PPU rendering procedures, APU and SBC/A2DP code are unchanged.
   The default video plugin retains its complete menu image at `0x07400000`
   (4,096,000 bytes). List changes trigger a full GPU redraw; FPS changes draw
   only the HUD strip. Each presentation still publishes a complete frame by
@@ -114,7 +123,8 @@ modules at build time. No indirect call or plugin lookup is added to a guest
 opcode, PPU pixel or APU sample. The video and PCM contracts are the same as
 [OUTPUTS.md](../OUTPUTS.md). Anvil lifecycle additions are:
 
-* Input: `InputPoll()` updates `NesController` and `ExitRequested`.
+* Input: `InputPoll()` updates `NesController`, `MenuRequested` and `ExitRequested`.
+  MENU requests a joined guest stop and selector return; EXIT ends the app.
   With the selector enabled, `InputMenuPoll()` returns 1..8 for visible rows,
   -1/-2 for previous/next, -3 for refresh, or 100..125 for A..Z. EXIT updates
   `ExitRequested`. While `RomMenuActive` is set, normal input polling must not
@@ -158,6 +168,8 @@ rather than assuming every audio packet was delivered without interruption.
 checks of every packed CHR tile-fetch address against the portable reference.
 `--verify-audio` in a Bluetooth build runs the existing mono/stereo SBC oracle
 vectors and returns without opening the radio or starting emulation.
+`--verify-mappers` runs synthetic MMC1/MMC3 bank, RAM protection, CHR alias,
+mirroring, IRQ edge/reload/acknowledgement and session-reset checks.
 `--verify-rom` exercises malformed headers and short reads, scans exFAT, and
 compares the loaded Mario/Duck Hunt, Contra and Castlevania PRG/CHR images to
 host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
@@ -166,7 +178,19 @@ host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
 compiler must be given `--entry-returns --wants-services`, with separate image,
 BSS and stack addresses as in `build_anvil.py`.
 
-The current emulator's supported mapper set remains **0, 2 and 66**. This
-port does not add mapper compatibility or pretend that all iNES games work.
-The Pi parser implements a bounded iNES/NES 2.0 subset for those mappers; it
-explicitly rejects extended NES 2.0 ROM-size encodings and unsupported RAM.
+The Anvil mapper set is **0, 1, 2, 4 and 66**. Mapper 1 implements standard
+MMC1 serial registers, PRG/CHR modes, one-screen/H/V mirroring and 8 KiB RAM.
+Outer-bank and extra-RAM boards (SUROM/SXROM etc.) are unsupported. Mapper 4
+implements MMC3 B/C banks, RAM protection, mirroring/four-screen RAM and the
+filtered A12 IRQ counter. MMC6 and nonzero NES 2.0 submappers are unsupported.
+The bounded iNES/NES 2.0 parser rejects trainers, extended size encodings,
+unsupported RAM and PAL-only images. Mapper support does not imply every ROM
+works: existing PPU 8-pixel rendering granularity, documented-opcode coverage
+and DMC/OAM/interrupt timing limits still apply. Pico mapper support is unchanged.
+
+On-board mapper results and the six-game menu/resume sequence are recorded in
+[Diagnostics/mapper-results.json](Diagnostics/mapper-results.json). Independent
+[Blargg MMC3 tests](https://github.com/christopherpow/nes-test-roms/tree/master/mmc3_irq_tests)
+cover clocking, details, A12, scanline timing and revision B. Test binaries and
+commercial ROMs are not included. Hardware register references:
+[MMC1](https://www.nesdev.org/wiki/MMC1), [MMC3](https://www.nesdev.org/wiki/MMC3).

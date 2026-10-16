@@ -9,7 +9,7 @@ Procedure DisplayWaitLine(line.i)
 EndProcedure
 Procedure DisplayFrame()
   While PeekI(@FramePending)<>PeekI(@FrameConsumed)
-    If PeekI(@ExitRequested)<>0 Or PeekI(@VideoError)<>0 : ProcedureReturn : EndIf
+    If PeekI(@ExitRequested)<>0 Or PeekI(@MenuRequested)<>0 Or PeekI(@VideoError)<>0 : ProcedureReturn : EndIf
   Wend
   FrameFence()
   PublishTop=RenderTop : PublishBottom=FrameBottom
@@ -22,13 +22,14 @@ Procedure DisplayFrame()
 EndProcedure
 Procedure.i NesComputeLoop()
   Protected target.i,t.i,elapsed.i
-  While PeekI(@ExitRequested)=0 And Stopped=0 And WorkerError=0 And PeekI(@VideoError)=0
+  While PeekI(@ExitRequested)=0 And PeekI(@MenuRequested)=0 And Stopped=0 And WorkerError=0 And PeekI(@VideoError)=0
     elapsed=NesHostUs()-StartUs
     If #TEST_SECONDS>0 And elapsed>=#TEST_SECONDS*1000000 : Break : EndIf
     If NesHostUs()>=SliceEnd : Break : EndIf
     target=NesDiv(elapsed*1789773,1000000)
     If CpuCycles<target
-      t=NesHostUs() : CpuRun(128) : NesSync()
+      t=NesHostUs() : CpuRun(MapperCpuBudget())
+      NesSync()
       EmulateUs=EmulateUs+NesHostUs()-t : EmulateCalls=EmulateCalls+1
     EndIf
   Wend

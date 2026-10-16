@@ -189,3 +189,9 @@ uses Neon Arcade/Vulkan and complete-frame DMA; Bluetooth consumes the same
 The Anvil touch selector adds `VideoMenuDraw()` and `InputMenuPoll()` to
 selector-enabled plugins; their contracts and exFAT ROM folder are documented
 in the Anvil README. `--no-selector` retains the smaller embedded-demo mode.
+
+On Anvil, gameplay input plugins may set `MenuRequested` to stop the joined
+guest session and return to the ROM selector. `ExitRequested` still returns
+to Anvil. The lifecycle adapter suspends Bluetooth while the selector is
+active, resets guest PCM/state, and resumes the same connection for a new game.
+Other audio plugins use their existing `AudioStop()` / `AudioBegin()` contract.

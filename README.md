@@ -254,3 +254,7 @@ licenses/   third-party licences
 MIT (see `LICENSE`). The CYW43439 Bluetooth firmware is included under its own
 licences (`licenses/CYW43439-*.txt`). The SBC prototype filter coefficients are
 cross-checked against BlueZ (`licenses/SBC-TABLES.md`, LGPL-2.1).
+
+The [Pi 4 / Anvil port](anvil/README.md) additionally supports standard MMC1
+(mapper 1) and MMC3 B/C (mapper 4). Its touch MENU button returns from a game
+to the exFAT ROM selector; EXIT returns to Anvil. Pico mapper support is unchanged.

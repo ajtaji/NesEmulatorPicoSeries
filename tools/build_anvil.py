@@ -26,6 +26,7 @@ def main():
     p.add_argument('--audio-plugin',type=Path,help='custom audio plugin; default silent, or Bluetooth when peer is supplied')
     p.add_argument('--verify-audio',action='store_true',help='run deterministic SBC vectors and return without emulation')
     p.add_argument('--verify-core',action='store_true',help='run CPU vectors and packed CHR differential checks')
+    p.add_argument('--verify-mappers',action='store_true',help='run MMC1/MMC3 register, RAM, mirroring, IRQ and reset tests')
     p.add_argument('--verify-rom',action='store_true',help='run on-board loader tests against the three exFAT test games')
     a=p.parse_args()
     a.out=a.out.resolve(); a.anvil=a.anvil.resolve()
@@ -33,6 +34,8 @@ def main():
     if a.seconds<0: p.error('--seconds must be nonnegative')
     if a.bluetooth_peer_wrapper and a.audio_plugin:
         p.error('choose --audio-plugin or --bluetooth-peer-wrapper, not both')
+    if sum(map(bool,(a.verify_rom,a.verify_core,a.verify_audio,a.verify_mappers)))>1:
+        p.error('choose only one verification mode')
     if a.verify_rom and (a.rom or a.no_selector or a.verify_core or a.verify_audio):
         p.error('--verify-rom requires selector mode and no other verification mode')
     includes=['RaspberryPi4/Lib/uart.pi4','RaspberryPi4/Lib/timer.pi4',
@@ -46,7 +49,7 @@ def main():
       'Anvil/Graphics/Vulkan/neon_vk_chrome.pi4']
     if a.bluetooth_peer_wrapper:
         includes += ['RaspberryPi4/Lib/gpio.pi4']
-    source=f'#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
+    source=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
     source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in includes)+'\n'
     if a.bluetooth_peer_wrapper:
         # Keep the dependency checkout unchanged. The adapter verifies BT_ON
@@ -79,7 +82,7 @@ def main():
     else:
         source+=inc(a.audio_plugin or ROOT/'anvil/audio_null.pi4')
         source+='Procedure AudioConfigure()\nEndProcedure\n'
-    for name in ('runtime','scheduler'):
+    for name in ('audio_session','runtime','guest_reset','scheduler'):
         source+=inc(ROOT/f'anvil/{name}.pi4')
     if a.verify_audio:
         if not a.bluetooth_peer_wrapper: p.error('--verify-audio currently requires the Bluetooth codec build')
@@ -88,10 +91,20 @@ def main():
         source+=inc(ROOT/'anvil/Tests/core.pi4')
     if a.verify_rom:
         source+=inc(ROOT/'anvil/Tests/rom_loader.pi4')
+    if a.verify_mappers:
+        source+=inc(ROOT/'anvil/Tests/mappers.pi4')
     cart=(ROOT/'anvil/cartridge.pi4').read_text()
     if a.rom:
         from rom_catalog import read_rom,validate,prg_views
-        c=read_rom(a.rom); validate(c)
+        c=read_rom(a.rom)
+        if c.mapper in (1,4):
+            header=a.rom.read_bytes()[:16]
+            if (header[7]&12)!=8 and header[8]>1:
+                raise ValueError('unsupported Anvil MMC PRG RAM size')
+            if c.submapper or c.trainer or c.ram_size>8192 or len(c.chr)>(131072 if c.mapper==1 else 262144) or len(c.prg)>(262144 if c.mapper==1 else 524288):
+                raise ValueError('unsupported Anvil MMC board geometry')
+        else:
+            validate(c)
         prg=prg_views(c)
         cart=cart[:cart.index('CartridgeData:')]
         def data(name,blob):
@@ -101,6 +114,8 @@ def main():
   CartMapper={c.mapper} : CartPrgBanks={len(prg)//32768} : CartChrBanks={len(c.chr)//8192 or 2}
   CartPrg=?CartridgeData : CartChr=?ChrData : CartChrRam={int(not c.chr)}
   CartConflicts={int(c.conflicts)} : PpuMirroring={c.mirror}
+  MapPrgBytes={len(c.prg)} : MapChrBytes={len(c.chr) or 8192} : MapChrRam={int(not c.chr)}
+  MapBattery={int(c.battery)} : MapFourScreen=0
 EndProcedure
 '''
     private=a.out.with_suffix('.cartridge.pi4'); private.write_text(cart)

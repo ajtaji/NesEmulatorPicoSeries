@@ -51,7 +51,7 @@ Procedure.i RomLoaderTests()
   RomTestHeader() : RomCheck(RomValidateHeader(24592),1)
   RomHeader(0)=0 : RomCheck(RomValidateHeader(24592),0)
   RomTestHeader() : RomCheck(RomValidateHeader(15),0) : RomCheck(RomValidateHeader(24591),0)
-  RomHeader(6)=64 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(6)=80 : RomCheck(RomValidateHeader(24592),0)
   RomHeader(6)=4 : RomCheck(RomValidateHeader(25104),0)
   RomHeader(6)=8 : RomCheck(RomValidateHeader(24592),0)
   RomTestHeader() : RomHeader(9)=1 : RomCheck(RomValidateHeader(24592),0)
@@ -68,6 +68,13 @@ Procedure.i RomLoaderTests()
   RomHeader(9)=1 : RomCheck(RomValidateHeader(24592),0)
   RomHeader(9)=0 : RomHeader(10)=7 : RomCheck(RomValidateHeader(24592),0)
   RomHeader(10)=0 : RomHeader(11)=8 : RomCheck(RomValidateHeader(24592),0)
+  ; Expanded CHR geometry must still obey bank-mask addressing.
+  RomTestHeader() : RomHeader(6)=16 : RomHeader(5)=5
+  RomCheck(RomValidateHeader(100000),0)
+  RomHeader(5)=16 : RomCheck(RomValidateHeader(147472),1)
+  RomHeader(5)=32 : RomCheck(RomValidateHeader(278544),0)
+  RomHeader(6)=64 : RomHeader(5)=32 : RomCheck(RomValidateHeader(278544),1)
+  RomHeader(8)=2 : RomCheck(RomValidateHeader(278544),0)
   RomCheck(RomServices(),1)
   saved=rom_read : *rom_read=@RomTestShort
   RomCheck(RomReadExact(0,@RomHeader(0),16),0) : *rom_read=saved

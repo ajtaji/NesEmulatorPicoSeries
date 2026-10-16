@@ -1,0 +1,265 @@
+{
+  "date": "2026-10-16",
+  "target": "Pi 4 / Anvil build 281 ABI 1.7",
+  "baseline_commit": "fd88630b001de0a8abb3a954b021431c50329e14",
+  "mapper_tests": {
+    "checks": 76,
+    "failures": 0
+  },
+  "core_tests": {
+    "checks": 132612,
+    "failures": 0
+  },
+  "game_sequence": [
+    {
+      "game": "Mario / Duck Hunt",
+      "mapper": 66,
+      "microseconds": 5004536,
+      "emulated_frames": 298,
+      "displayed_frames": 299,
+      "emulated_fps": 59.546,
+      "displayed_fps": 59.746,
+      "cpu_cycles": 8901943,
+      "audio_samples": 238741,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 710,
+      "irq_clocks": 0,
+      "irq_assertions": 0,
+      "menu_requested": 1,
+      "exit_requested": 0
+    },
+    {
+      "game": "Contra",
+      "mapper": 2,
+      "microseconds": 5006143,
+      "emulated_frames": 300,
+      "displayed_frames": 301,
+      "emulated_fps": 59.926,
+      "displayed_fps": 60.126,
+      "cpu_cycles": 8949488,
+      "audio_samples": 240016,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 168,
+      "irq_clocks": 0,
+      "irq_assertions": 0,
+      "menu_requested": 1,
+      "exit_requested": 0
+    },
+    {
+      "game": "Castlevania PRG 0",
+      "mapper": 2,
+      "microseconds": 5006142,
+      "emulated_frames": 300,
+      "displayed_frames": 301,
+      "emulated_fps": 59.926,
+      "displayed_fps": 60.126,
+      "cpu_cycles": 8949439,
+      "audio_samples": 240015,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 138,
+      "irq_clocks": 0,
+      "irq_assertions": 0,
+      "menu_requested": 1,
+      "exit_requested": 0
+    },
+    {
+      "game": "Metroid",
+      "mapper": 1,
+      "microseconds": 5006145,
+      "emulated_frames": 300,
+      "displayed_frames": 301,
+      "emulated_fps": 59.926,
+      "displayed_fps": 60.126,
+      "cpu_cycles": 8949472,
+      "audio_samples": 240016,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 471,
+      "irq_clocks": 0,
+      "irq_assertions": 0,
+      "menu_requested": 1,
+      "exit_requested": 0
+    },
+    {
+      "game": "Mega Man 3",
+      "mapper": 4,
+      "microseconds": 8003253,
+      "emulated_frames": 480,
+      "displayed_frames": 481,
+      "emulated_fps": 59.976,
+      "displayed_fps": 60.101,
+      "cpu_cycles": 14318383,
+      "audio_samples": 384005,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 459,
+      "irq_clocks": 98720,
+      "irq_assertions": 410,
+      "menu_requested": 1,
+      "exit_requested": 0
+    },
+    {
+      "game": "Kirby PRG 0",
+      "mapper": 4,
+      "microseconds": 8003254,
+      "emulated_frames": 479,
+      "displayed_frames": 480,
+      "emulated_fps": 59.851,
+      "displayed_fps": 59.976,
+      "cpu_cycles": 14292239,
+      "audio_samples": 383304,
+      "error_sum": 0,
+      "audio_live": 1,
+      "audio_wire_errors": 0,
+      "selector_index": 388,
+      "irq_clocks": 112801,
+      "irq_assertions": 230,
+      "menu_requested": 0,
+      "exit_requested": 1
+    }
+  ],
+  "sequence_payload_sha256": "ff9d564007d7fbadbb658833b2341ccdb48128aec0b4d325141bc4b983092ac5",
+  "mmc3_independent_tests": [
+    {
+      "name": "Details",
+      "result_byte_f8": 1,
+      "pc": "0xe635",
+      "rom_sha256": "0af95238b69806c072c28aed0fa8ad812157dfee928a6c9cea8d5420268baade",
+      "evidence": "guest result byte 1 = passed, at bounded return; some static test captions were incomplete in host captures"
+    },
+    {
+      "name": "Scanline timing",
+      "result_byte_f8": 1,
+      "pc": "0xe598",
+      "rom_sha256": "3369e8f73a96ec97918c6c9440804a369a19256c57df91e62881555f21528894",
+      "evidence": "guest result byte 1 = passed, at bounded return; some static test captions were incomplete in host captures"
+    },
+    {
+      "name": "MMC3 revision B",
+      "result_byte_f8": 1,
+      "pc": "0xe535",
+      "rom_sha256": "d8a2af42cdafe8046b36109e6f6ff71ca0d7f5d62c7d5953e0aa1d1828a86088",
+      "evidence": "guest result byte 1 = passed, at bounded return; some static test captions were incomplete in host captures"
+    },
+    {
+      "name": "Clocking",
+      "result": "PASSED",
+      "evidence": "on-board captured test screen",
+      "rom_sha256": "699d0644bd2b6ff4c9ba598c9609f4a3da536594b6363585b2caf82cf337ac88"
+    },
+    {
+      "name": "A12 clocking",
+      "result": "PASSED",
+      "evidence": "on-board captured test screen",
+      "rom_sha256": "3b936e1079f12bdc5e55aa82def017ddc76fd79e3879ff0478d41ca718302e7c"
+    }
+  ],
+  "preserved_sources": {
+    "cpu2a03.pi4": "015822228ea15117db58f660d4ff6c4873d52a015e474f64d5e57fd6efa4c9b6",
+    "apu.pi4": "f24094479815e18b6dca95e264fc9e640ca630aec755970005be1f750ef73f2f",
+    "sbc_encoder.pi4": "b820e1c37aafa919807fc00181d49ff5d693e453c99610f93b6c04f06d188443",
+    "audio_bluetooth.pi4": "623ec92f08ea7a61e97e848ea48a2241754a50044141a3f61263a60ab96be751",
+    "bt_h4.pi4": "441fa452bc8101ba1d2841d2764ce6e988d9984b623623a14f43a6bd7b5f9c74",
+    "PpuFetchTile": "c4d69175069992e29498c53931fba4959e9ebd584c46709bc61a94c31d1a22a9",
+    "PpuFetchTileReference": "16b23c05efde604e66fde936ee266672fd111c1ba0a2a23d9345ef059ed184bc",
+    "PpuSpritesReference": "4c4e39b0ba88c37891b9ed3fefac6658376989b6c88234eafe6b6722bd985eb6",
+    "PpuSpritesRaw": "b3fe11c0982ddc2bb7052341f1cbb82f152751c10a070ae415ac0cca0a356c1f",
+    "PpuRender8Reference": "8bfb2e54f0d60eb87f393da6b757c0591356ae1a03127cf675868866816b55c7",
+    "PpuRgbLineRaw": "d4daf56bd11d7a072124d25d532ae3c8b7704c8fc1f4321b9d4945bf40a6ad7c",
+    "PpuAdvanceReference": "95fbcc78e8d30403ddc13343c03cf853dfe904da2e87dbce0772c1085d81d4c0"
+  },
+  "limits": [
+    "Standard MMC1 up to 256 KiB PRG / 128 KiB CHR / 8 KiB RAM; outer-bank boards unsupported",
+    "MMC3 B/C up to 512 KiB PRG / 256 KiB CHR / 8 KiB RAM; MMC6 and nonzero submappers unsupported",
+    "Battery RAM is volatile; no save files",
+    "Existing rendering/opcode/DMA/interrupt accuracy limits remain",
+    "Short game smoke tests and error counters are not exhaustive compatibility or audible-quality proofs"
+  ],
+  "test_fixture": "Automated input plugin used only for this six-game sequence; production input remains physical touch",
+  "loader_tests": {
+    "checks": 53,
+    "failures": 0,
+    "directory_count": 857,
+    "microseconds": 217183
+  },
+  "codec_tests": {
+    "checks": 8448,
+    "failures": 0,
+    "microseconds": 11442
+  },
+  "physical_touch_test": {
+    "sessions": [
+      {
+        "mapper": 1,
+        "microseconds": 68479122,
+        "emulated_fps": 60.004,
+        "displayed_fps": 60.018,
+        "audio_live": 1,
+        "wire_errors": 0,
+        "selector_index": 471,
+        "menu_requested": 1,
+        "irq_assertions": 0
+      },
+      {
+        "mapper": 4,
+        "microseconds": 37592739,
+        "emulated_fps": 60.038,
+        "displayed_fps": 60.065,
+        "audio_live": 1,
+        "wire_errors": 0,
+        "selector_index": 470,
+        "menu_requested": 1,
+        "irq_assertions": 0
+      },
+      {
+        "mapper": 4,
+        "microseconds": 46449545,
+        "emulated_fps": 59.699,
+        "displayed_fps": 59.721,
+        "audio_live": 1,
+        "wire_errors": 0,
+        "selector_index": 458,
+        "menu_requested": 1,
+        "irq_assertions": 4016
+      }
+    ],
+    "user_feedback": "so far its looking good",
+    "user_confirmed_return_to_anvil": true,
+    "return_x0": 0,
+    "return_ms": 292100,
+    "exit_from_selector": true,
+    "transport_note": "board_run timeout expired while user was still testing; later last-run/readback verified clean return",
+    "audio_cumulative": {
+      "underruns": 50,
+      "overruns": 1,
+      "wire_errors": 0
+    },
+    "audio_note": "Counts include connection and three session starts; audible uninterrupted playback was not separately confirmed"
+  },
+  "installed": {
+    "path": "2:/payloads/NES.PMF",
+    "backup": "2:/payloads/NES-PRE-MMC.PMF",
+    "bytes": 1783720,
+    "sha256": "c4212753f9ffc5f7856a7fc8f0b9b2b57e423a36e75c47074850f7423e165152",
+    "crc32": "5B9804B7",
+    "readback_verified": true
+  },
+  "final_board_state": {
+    "emulation": "stopped; Anvil prompt",
+    "coretest_nonce": 290,
+    "error": 0,
+    "leases": {
+      "secondary": 0,
+      "gic": 0,
+      "watchdog": 0
+    }
+  }
+}

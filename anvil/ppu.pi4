@@ -41,32 +41,7 @@ CompilerIf #PPU_PROFILE=2
 Global GuardEnabled.i, GuardChecks.i, GuardFails.i, GuardLine.i, GuardDot.i, GuardGot.i, GuardExpected.i
 Global Dim GuardPixels.u(8)
 CompilerEndIf
-Procedure.i PpuNtAddr(addr.i)
-  Protected table.i
-  table=(addr>>10)&3
-  If PpuMirroring=1
-    table=table&1
-  Else
-    table=table&2
-  EndIf
-  ProcedureReturn (table<<10)|(addr&1023)
-EndProcedure
-Procedure.i PpuPalAddr(addr.i)
-  addr=addr&31
-  If (addr&$13)=$10
-    addr=addr-16
-  EndIf
-  ProcedureReturn addr
-EndProcedure
-Procedure.i PpuRead(addr.i)
-  addr=addr&$3FFF
-  If addr<$2000
-    ProcedureReturn PeekA(Chr+addr)
-  ElseIf addr<$3F00
-    ProcedureReturn Nt(PpuNtAddr(addr))
-  EndIf
-  ProcedureReturn Pal(PpuPalAddr(addr))
-EndProcedure
+XIncludeFile "ppu_bus_read.pi4"
 Procedure PpuColours()
   Protected i.i, c.i, e.i, changed.i, color.i
   e=(PpuMask>>5)*64
@@ -115,39 +90,7 @@ Procedure PpuBuildRgbPairs()
 EndProcedure
 Declare PpuUpdateDescriptor(addr.i)
 Declare PpuUpdateAttribute(addr.i)
-Procedure PpuWrite(addr.i, value.i)
-  Protected ntAddress.i
-  BgCacheAddr= -1 : RgbLastKey= -1
-  addr=addr&$3FFF
-  If addr<$2000
-    If ChrWritable
-      PokeA(Chr+addr,value) : PpuDecode(addr)
-    EndIf
-  ElseIf addr<$3F00
-    ntAddress=PpuNtAddr(addr)
-    Nt(ntAddress)=value
-    If PpuMirroring=1
-      Nt(ntAddress!$800)=value
-    Else
-      Nt(ntAddress!$400)=value
-    EndIf
-    If (ntAddress&$3FF)>=$3C0
-      If NameDescDirty=0
-        PpuUpdateAttribute(ntAddress)
-      EndIf
-    Else
-      PpuUpdateDescriptor(ntAddress)
-      If PpuMirroring=1
-        PpuUpdateDescriptor(ntAddress!$800)
-      Else
-        PpuUpdateDescriptor(ntAddress!$400)
-      EndIf
-    EndIf
-  Else
-    Pal(PpuPalAddr(addr))=value&63
-    PpuColours()
-  EndIf
-EndProcedure
+XIncludeFile "ppu_bus_write.pi4"
 ; Packed tile fetch, using duplicated nametable mirrors and predecoded CHR.
 ; r4-r7 are saved locally; reserved CPU registers r8-r11 are untouched.
 Global Dim PixelSpread.l(256)
@@ -563,5 +506,6 @@ EndProcedure
 
 
 Procedure PpuAdvance(cycles.i)
+  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf
   PpuAdvanceReference(cycles)
 EndProcedure

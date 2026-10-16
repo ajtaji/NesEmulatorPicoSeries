@@ -103,6 +103,7 @@ Procedure.i NesReadSlow(addr.i)
     v=M(addr&$7FF)
   ElseIf addr>=$6000
     v=NesOpenBus
+    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : v=MapRam(addr&8191) : EndIf
   ElseIf addr=$4016
     If NesStrobe
       v=(NesController&1)|$40
@@ -149,7 +150,10 @@ Procedure NesWrite(addr.i, value.i)
   If addr<$2000
     M(addr&$7FF)=value
   ElseIf addr>=$6000
-    If addr>=$8000 And (CartMapper=66 Or CartMapper=2)
+    If CartMapper=1 Or CartMapper=4
+      CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
+      MapperWrite(addr,value,CpuCycles+AccessPhase) : CpuEndWindow()
+    ElseIf addr>=$8000 And (CartMapper=66 Or CartMapper=2)
       CpuNow()
       If CartConflicts : value=value&PeekA(PrgBase+addr-$8000) : EndIf
       CartBank(value)
@@ -238,6 +242,7 @@ Procedure.i WorkerRead(addr.i)
     If addr>=$8000
       ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)
     EndIf
+    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
     ProcedureReturn 0
   EndIf
   ProcedureReturn 0
@@ -245,6 +250,7 @@ EndProcedure
 ; The same bus read for OAM DMA executed on core 0, with core 0's bank view.
 Procedure.i NesDmaRead(addr.i)
   addr=addr&$FFFF
+  If addr>=$6000 And addr<$8000 And (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
   If addr<$2000
     ProcedureReturn M(addr&$7FF)
   EndIf
