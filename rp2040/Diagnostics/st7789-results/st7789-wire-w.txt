@@ -1,0 +1,1 @@
+ST7789 wire checks=90 failures=0 spi_hz=50000000 frames=10 us=215358 PASS

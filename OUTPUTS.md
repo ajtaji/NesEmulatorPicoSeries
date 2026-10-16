@@ -10,6 +10,10 @@ virtual dispatch. Output API version 1 is declared in `outputs/state.pico`.
 | `#NES_VIDEO_BACKEND` | Headless | LAFVIN ST7796/SPI DMA | Your video plugin |
 | `#NES_AUDIO_BACKEND` | Silent | Bluetooth A2DP/SBC | Your audio plugin |
 
+Video backend **3** selects the bundled ST7789 driver for Pimoroni Pico Display
+Pack 2.0. It is available on both Picos; see [selection, wiring and validation](DISPLAY-PACK2.md).
+`tools/build.ps1 -Target rp2350 -Display display-pack2` selects its standard wrapper.
+
 Both constants must be set before including `runtime`. The normal `demo` and
 verification wrappers select 1/1. Selecting 0 or 2 excludes that output's
 bundled hardware libraries and implementation, not merely its initialization.

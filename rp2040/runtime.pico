@@ -21,6 +21,9 @@ CompilerIf #NES_VIDEO_BACKEND=1
   XIncludeFile "RP2040/Lib/spi.pico"
   XIncludeFile "RP2040/Lib/st7796.pico"
   XIncludeFile "outputs/video_st7796.pico"
+CompilerElseIf #NES_VIDEO_BACKEND=3
+  XIncludeFile "RP2040/Lib/spi.pico"
+  XIncludeFile "outputs/video_st7789.pico"
 CompilerElseIf #NES_VIDEO_BACKEND=0
   XIncludeFile "outputs/video_null.pico"
 CompilerEndIf

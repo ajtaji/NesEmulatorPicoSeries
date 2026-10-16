@@ -1,0 +1,2 @@
+> RP2350 ASSEMBLER: 95588 bytes of code run from SRAM at $20000000-$20017563, copied from flash at boot; 174456 bytes of SRAM left free, stacks and reserved windows excluded.
+ROM_TOTAL_RP2350|203928|4194304

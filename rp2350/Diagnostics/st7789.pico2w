@@ -1,0 +1,71 @@
+#CLOCK_KHZ=150000
+; SPI/DMA path test. Does not emulate a game or initialize Bluetooth.
+; A disconnected panel still passes: this cannot certify picture quality.
+#NES_VIDEO_BACKEND=3
+#NES_AUDIO_BACKEND=0
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico2"
+XIncludeFile "../cartridge.pico2"
+Global WireChecks.i,WireFailures.i
+Procedure WireCheck(actual.i,expected.i)
+  WireChecks=WireChecks+1
+  If actual<>expected : WireFailures=WireFailures+1 : EndIf
+EndProcedure
+Procedure WireMain()
+  Protected n.i,index.i,t.i,start.i,result.i,elapsed.i
+  SafetyBoot() : ClockInitKhz(150000) : TimerInit() : UsbSerialInit()
+  WaitUs(2000000) : FrameBottom=@FrameBottomStore(0)
+  VideoBegin()
+  ; Alternate-frame presentation must not write into a frame owned by DMA.
+  St7789FrameDivider=2 : St7789FramePhase=0
+  FrameTop(0)=$1234 : FrameBottomStore(0)=$5678
+  PpuLine=0 : PpuBeginLine()
+  WireCheck(FrameRow,@St7789DiscardRow(0)) : WireCheck(VideoFramePresent,0)
+  PokeU(FrameRow,$ABCD) : PokeU(FrameRow+510,$ABCD)
+  WireCheck(FrameTop(0),$1234) : WireCheck(FrameBottomStore(0),$5678)
+  PpuLine=239 : PpuBeginLine() : WireCheck(FrameRow,@St7789DiscardRow(0))
+  PpuSendLine() : WireCheck(DisplayReady,0)
+  PpuLine=0 : PpuBeginLine() : WireCheck(FrameRow,@FrameTop(0)) : WireCheck(VideoFramePresent,1)
+  PpuLine=120 : PpuBeginLine() : WireCheck(FrameRow,FrameBottom)
+  WireCheck(VideoMenuPeriodUs(),33278)
+  St7789FrameDivider=1 : St7789FramePhase=0
+  PpuLine=0 : PpuBeginLine() : WireCheck(VideoFramePresent,1)
+  WireCheck(VideoMenuPeriodUs(),16639)
+  For index=0 To 30719
+    FrameTop(index)=$F800 : FrameBottomStore(index)=$001F
+  Next
+  start=Micros()
+  For n=0 To 9
+    WireCheck(VideoStart(@FrameTop(0),FrameBottom),1)
+    WireCheck(VideoStart(@FrameTop(0),FrameBottom),0)
+    t=Micros() : result=0
+    While result=0 And Micros()-t<1000000
+      result=VideoPoll() : SafetyPet() : UsbSerialTask()
+    Wend
+    WireCheck(result,1) : WireCheck(VideoState,0)
+    WireCheck(PeekL(#SPI_DMA_CH0_COUNT),0)
+    WireCheck(PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY,0)
+    WireCheck((PeekL($D0000010)>>17)&1,1)
+  Next
+  elapsed=Micros()-start
+  WireCheck(VideoCanWriteLine(0),0) : WireCheck(VideoCanWriteLine(239),0)
+  WireCheck(VideoStart(@FrameTop(0),FrameBottom),1) : VideoAbort()
+  WireCheck(VideoState,0) : WireCheck(PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY,0)
+  WireCheck(PeekL($40080024)&#SPI_SSPDMACR_TXDMAE,0)
+  WireCheck(PeekL($40080000)&15,7)
+  WireCheck((PeekL($D0000010)>>17)&1,1)
+  Say("ST7789 wire checks=") : Num(WireChecks) : Say(" failures=") : Num(WireFailures)
+  Say(" spi_hz=") : Num(VideoClockHz()) : Say(" frames=10 us=") : Num(elapsed)
+  If WireFailures=0 : Say(" PASS") : Else : Say(" FAIL") : EndIf
+  Eol()
+  Repeat : UsbSerialTask() : SafetyPet() : ForEver
+EndProcedure
+WireMain()

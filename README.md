@@ -6,8 +6,20 @@ Games are not part of the firmware. You load your own `.nes` files onto the
 board's flash with a small Python tool, which has a window for everyday use and
 a command line for scripts.
 
-**This repository contains no ROMs and no firmware with ROMs in it.** Use games
-you are entitled to use.
+**No commercial game ROMs or private speaker configuration are included.** The
+original synthetic demo cartridge is bundled for checks. Load games you are
+entitled to use.
+
+**[Download firmware from Releases](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest).**
+Choose the chip and display that match your hardware:
+
+| Display | Pico W / RP2040 | Pico 2 W / RP2350 |
+|---|---|---|
+| LAFVIN ST7796, board tested | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w.uf2) | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w.uf2) |
+| Pico Display Pack 2.0 ST7789, experimental | [UF2, 30 FPS output](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-display-pack2.uf2) | [UF2, 60 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-display-pack2.uf2) |
+
+Display Pack physical-screen validation is pending. See [its driver notes](DISPLAY-PACK2.md)
+and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 
 ## Boards
 
@@ -257,6 +269,13 @@ rp2350/     reproducible Arm Pico 2 W port and the same board tests
 tools/      ROM loader (window and command line), firmware upload, build, capture
 licenses/   third-party licences
 ```
+
+## Pico Display Pack 2.0
+
+Select the ST7789 display plugin on either Pico with
+`tools/build.ps1 -Target rp2040 -Display display-pack2` or `-Target rp2350`.
+See [DISPLAY-PACK2.md](DISPLAY-PACK2.md) for wiring, the separate UF2 downloads,
+FPS counter placement and hardware validation status. LAFVIN remains the default.
 
 ## Licence
 

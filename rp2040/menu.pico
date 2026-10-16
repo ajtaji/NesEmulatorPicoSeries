@@ -97,7 +97,12 @@ Procedure.i BootMenu()
         Say("BOOT_SELECT index=") : Num(selected) : Say(" mapper=") : Num(CartMapper) : Eol()
       EndIf
       If now-nextFrame>=0
-        DisplayFrame() : nextFrame=now+16639
+        DisplayFrame()
+        CompilerIf #NES_VIDEO_BACKEND=3
+          nextFrame=now+VideoMenuPeriodUs()
+        CompilerElse
+          nextFrame=now+16639
+        CompilerEndIf
       EndIf
     EndIf
     previous=mask
