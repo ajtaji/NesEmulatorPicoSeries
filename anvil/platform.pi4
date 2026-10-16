@@ -1,0 +1,13 @@
+; CPU cache ownership belongs to the platform, not video/audio or the NES.
+; Match Anvil's WB attributes for resident code/state and secondary mailboxes.
+; DMA/framebuffer/GPU arenas stay NC, including every private GPU allocation.
+Procedure.i PlatformBegin()
+  MmuClearNc()
+  MmuAddNc($03E00000,$0D000000)
+  If MmuBuildTables($03F00000)<>0 : ProcedureReturn 0 : EndIf
+  MmuEnableCached()
+  ProcedureReturn 1
+EndProcedure
+Procedure PlatformEnd()
+  MmuDisableCachedFlushed()
+EndProcedure

@@ -1,0 +1,191 @@
+; Portable AArch64 SBC implementation, same fixed-point oracle as Pico.
+Procedure.i SbcSar(v.i,n.i)
+  If v<0 : ProcedureReturn -1-((-1-v)>>n) : EndIf
+  ProcedureReturn v>>n
+EndProcedure
+; Fixed-point SBC: 48 kHz, 8 subbands, 16 blocks, loudness, bitpool 28.
+; Mono is 64 bytes/frame; duplicated-channel stereo is 68 bytes/frame.
+; Analysis and quantizer follow SBC's mathematical filterbank/bitstream format.
+; Prototype coefficient values are tabulated by A2DP and cross-checked against
+; BlueZ sbc_tables.h (LGPL-2.1-or-later); cosine coefficients are generated.
+Global Dim SbcPcm.w(128)
+Global Dim SbcHistory.w(80)
+Global Dim SbcSub.w(128)
+Global Dim SbcY.i(16)
+Global Dim SbcScale.a(16)
+Global Dim SbcBits.a(16)
+Global Dim SbcNeed.i(16)
+Global Dim SbcEncoded.a(68)
+Global SbcStereo.i
+Global SbcAcc.i, SbcShift.i, SbcBitValue.i, SbcBitCount.i, SbcByte.i
+Procedure SbcAllocate()
+  Protected k.i, maximum.i, slice.i, count.i, pending.i, v.i, index.i
+  maximum= -5
+  For k=0 To 7+SbcStereo*8
+    If SbcScale(k)=0
+      SbcNeed(k)= -5
+    Else
+      v=SbcScale(k)-PeekB(?SbcOffsets+(k&7))
+      If v>0 : v=v>>1 : EndIf
+      SbcNeed(k)=v
+    EndIf
+    If SbcNeed(k)>maximum : maximum=SbcNeed(k) : EndIf
+  Next
+  slice=maximum+1 : count=0 : pending=0
+  Repeat
+    slice=slice-1 : count=count+pending : pending=0
+    For k=0 To 7+SbcStereo*8
+      v=SbcNeed(k)
+      If v>slice+1 And v<slice+16
+        pending=pending+1
+      ElseIf v=slice+1
+        pending=pending+2
+      EndIf
+    Next
+  Until count+pending>=28
+  If count+pending=28 : count=count+pending : slice=slice-1 : EndIf
+  For k=0 To 7+SbcStereo*8
+    SbcBits(k)=0
+    If SbcNeed(k)>=slice+2
+      v=SbcNeed(k)-slice : If v>16 : v=16 : EndIf
+      SbcBits(k)=v
+    EndIf
+  Next
+  k=0
+  While count<28 And k<8+SbcStereo*8
+    index=k
+    If SbcStereo : index=(k>>1)|((k&1)<<3) : EndIf
+    If SbcBits(index)>=2 And SbcBits(index)<16
+      SbcBits(index)=SbcBits(index)+1 : count=count+1
+    ElseIf SbcNeed(index)=slice+1 And 28>count+1
+      SbcBits(index)=2 : count=count+2
+    EndIf
+    k=k+1
+  Wend
+  k=0
+  While count<28 And k<8+SbcStereo*8
+    index=k
+    If SbcStereo : index=(k>>1)|((k&1)<<3) : EndIf
+    If SbcBits(index)<16 : SbcBits(index)=SbcBits(index)+1 : count=count+1 : EndIf
+    k=k+1
+  Wend
+EndProcedure
+Global SbcProtoPtr.i, SbcCosPtr.i, SbcCosEnd.i, SbcAnalysisBlock.i
+; Linear analysis window: samples 0..127 are this frame (newest first), 128..207
+; the previous 80. Block b's 80-sample window starts at (15-b)*8, so history is
+; copied once per frame instead of shifted for every block. The 16-term
+; matrixing uses the table's exact symmetries (cols i/8-i equal, 12 zero,
+; i/24-i negated) as 8 terms; integer sums are unchanged.
+Global Dim SbcWindow.i(104)
+Global Dim SbcZ.i(8)
+Procedure SbcAnalyze()
+  Protected block.i,i.i,j.i,k.i,sum.i,v.i
+  For block=0 To 15
+    For i=79 To 8 Step -1 : SbcHistory(i)=SbcHistory(i-8) : Next
+    For i=0 To 7 : SbcHistory(i)=SbcPcm(block*8+7-i) : Next
+    For i=0 To 15
+      sum=0
+      For j=0 To 4 : k=i+j*16 : sum=sum+SbcHistory(k)*PeekW(?SbcProto+k*2) : Next
+      SbcY(i)=SbcSar(sum,16)
+    Next
+    For k=0 To 7
+      sum=0
+      For i=0 To 15 : sum=sum+SbcY(i)*PeekW(?SbcCos+(k*16+i)*2) : Next
+      v=SbcSar(sum,12)
+      If v>32767 : v=32767 : ElseIf v< -32767 : v= -32767 : EndIf
+      SbcSub(block*8+k)=v
+    Next
+  Next
+EndProcedure
+; Scale factor per subband: smallest s (<=15) with every |sample| < 2^(s+1).
+; Channel 1 of duplicated stereo shares channel 0's factors.
+Procedure SbcScaleFactors()
+  Protected k.i,b.i,v.i,peak.i,scale.i
+  For k=0 To 7
+    peak=0
+    For b=0 To 15
+      v=SbcSub(b*8+k) : If v<0 : v= -v : EndIf
+      If v>peak : peak=v : EndIf
+    Next
+    scale=0
+    While scale<15 And peak>=(1<<(scale+1)) : scale=scale+1 : Wend
+    SbcScale(k)=scale : SbcScale(k+8)=scale
+  Next
+EndProcedure
+; Quantize every allocated sample, (sub*levels >> (scale+1) + levels) >> 1
+; clamped to 0..levels, and pack MSB-first from SbcByte.
+Procedure SbcPack()
+  Protected block.i,k.i,bits.i,levels.i,q.i,v.i,count.i
+  v=0 : count=0
+  For block=0 To 15
+    For k=0 To 7+SbcStereo*8
+      bits=SbcBits(k)
+      If bits>0
+        levels=(1<<bits)-1
+        q=SbcSar(SbcSar(SbcSub(block*8+(k&7))*levels,SbcScale(k)+1)+levels,1)
+        If q<0 : q=0 : ElseIf q>levels : q=levels : EndIf
+        v=(v<<bits)|q : count=count+bits
+        While count>=8
+          count=count-8 : SbcEncoded(SbcByte)=(v>>count)&255 : SbcByte=SbcByte+1
+        Wend
+        v=v&((1<<count)-1)
+      EndIf
+    Next
+  Next
+  SbcBitValue=v : SbcBitCount=count
+EndProcedure
+Global Dim SbcCrcTable.a(256)
+Global SbcCrcReady.i
+Procedure SbcEncode()
+  Protected i.i, k.i, crc.i, bit.i
+  SbcAnalyze()
+  SbcScaleFactors()
+  SbcAllocate()
+  SbcEncoded(0)=$9C : SbcEncoded(1)=$F1|(SbcStereo<<3) : SbcEncoded(2)=28 : SbcEncoded(3)=0
+  For k=0 To 3+SbcStereo*4 : SbcEncoded(4+k)=(SbcScale(k*2)<<4)|SbcScale(k*2+1) : Next
+  If SbcCrcReady=0
+    ; CRC-8, polynomial $1D, MSB first: table form of the bitwise update.
+    For i=0 To 255
+      crc=i
+      For bit=0 To 7
+        If crc&$80 : crc=((crc<<1)!$1D)&255 : Else : crc=(crc<<1)&255 : EndIf
+      Next
+      SbcCrcTable(i)=crc
+    Next
+    SbcCrcReady=1
+  EndIf
+  crc=15
+  For i=1 To 7+SbcStereo*4
+    If i<>3 : crc=SbcCrcTable((crc!SbcEncoded(i))&255) : EndIf
+  Next
+  SbcEncoded(3)=crc : SbcBitValue=0 : SbcBitCount=0 : SbcByte=8+SbcStereo*4
+  SbcPack()
+EndProcedure
+DataSection
+SbcOffsets:
+  Data.b -4,0,0,0,0,0,1,2
+SbcProto:
+  Data.w 0,5,11,18,27,37,48,58,66,69,65,53,30,-6,-54,-115
+  Data.w 185,263,343,418,480,521,532,502,424,290,96,-161,-480,-856,-1280,-1743
+  Data.w 2228,2719,3197,3644,4039,4367,4612,4764,4815,4764,4612,4367,4039,3644,3197,2719
+  Data.w -2228,-1743,-1280,-856,-480,-161,96,290,424,502,532,521,480,418,343,263
+  Data.w -185,-115,-54,-6,30,53,65,69,66,58,48,37,27,18,11,5
+SbcCos:
+  Data.w 2896,3406,3784,4017,4096,4017,3784,3406,2896,2276,1567,799,0,-799,-1567,-2276
+  Data.w -2896,-799,1567,3406,4096,3406,1567,-799,-2896,-4017,-3784,-2276,0,2276,3784,4017
+  Data.w -2896,-4017,-1567,2276,4096,2276,-1567,-4017,-2896,799,3784,3406,0,-3406,-3784,-799
+  Data.w 2896,-2276,-3784,799,4096,799,-3784,-2276,2896,3406,-1567,-4017,0,4017,1567,-3406
+  Data.w 2896,2276,-3784,-799,4096,-799,-3784,2276,2896,-3406,-1567,4017,0,-4017,1567,3406
+  Data.w -2896,4017,-1567,-2276,4096,-2276,-1567,4017,-2896,-799,3784,-3406,0,3406,-3784,799
+  Data.w -2896,799,1567,-3406,4096,-3406,1567,799,-2896,4017,-3784,2276,0,-2276,3784,-4017
+  Data.w 2896,-3406,3784,-4017,4096,-4017,3784,-3406,2896,-2276,1567,-799,0,799,-1567,2276
+SbcCos8:
+  Data.w 2896,3406,3784,4017,4096,2276,1567,799
+  Data.w -2896,-799,1567,3406,4096,-4017,-3784,-2276
+  Data.w -2896,-4017,-1567,2276,4096,799,3784,3406
+  Data.w 2896,-2276,-3784,799,4096,3406,-1567,-4017
+  Data.w 2896,2276,-3784,-799,4096,-3406,-1567,4017
+  Data.w -2896,4017,-1567,-2276,4096,-799,3784,-3406
+  Data.w -2896,799,1567,-3406,4096,4017,-3784,2276
+  Data.w 2896,-3406,3784,-4017,4096,-2276,1567,-799
+EndDataSection

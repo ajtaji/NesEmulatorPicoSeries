@@ -1,0 +1,19 @@
+; Portable guest state and bus; platform/output plugins are selected by the entry.
+XIncludeFile "services.pi4"
+XIncludeFile "state.pi4"
+XIncludeFile "cpu2a03.pi4"
+XIncludeFile "bridge.pi4"
+Global RenderTop.i
+XIncludeFile "ppu.pi4"
+XIncludeFile "apu.pi4"
+XIncludeFile "audio_api.pi4"
+XIncludeFile "worker.pi4"
+Global ScreenW.i,ScreenH.i,VideoX.i,VideoY.i,VideoScale.i
+Global ExitRequested.i,VideoError.i,VideoFrames.i,VideoUs.i,TouchEvents.i
+Global InputSeen.i
+Global Dim ContactBits.i(16)
+Global Dim FrameBottomStore.u(30720)
+Global Dim AlternateTop.u(30720)
+Global Dim AlternateBottom.u(30720)
+Global FramePending.i,FrameConsumed.i,PublishTop.i,PublishBottom.i
+Global ComputeDone.i,SliceEnd.i,ParallelError.i

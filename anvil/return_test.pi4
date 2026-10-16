@@ -1,0 +1,17 @@
+; Small lifecycle proof before running the emulator.
+EnableExplicit
+#NES_NATIVE_TIMER=0
+XIncludeFile "services.pi4"
+Procedure.i Main()
+  Protected start.i
+  CaptureServices()
+  If ServicesBegin()=0 : ProcedureReturn 100 : EndIf
+  If svc_begin()<>0 : ProcedureReturn 101 : EndIf
+  svc_rect(0,120,800,200,$FF102030)
+  svc_text(40,180,"NES Anvil: returning to the monitor in one second",$FFFFFFFF,24)
+  svc_end()
+  start=Micros()
+  While Micros()-start<1000000 : SafetyPet() : Wend
+  svc_capture()
+  ProcedureReturn 0
+EndProcedure

@@ -1,0 +1,81 @@
+; Two complete frame buffers, single producer/consumer, release/acquire fences.
+; Anvil jobs are bounded to two seconds and joined before every exit.
+Procedure FrameFence()
+  ASM
+    dmb ish
+  EndASM
+EndProcedure
+Procedure DisplayWaitLine(line.i)
+EndProcedure
+Procedure DisplayFrame()
+  While PeekI(@FramePending)<>PeekI(@FrameConsumed)
+    If PeekI(@ExitRequested)<>0 Or PeekI(@VideoError)<>0 : ProcedureReturn : EndIf
+  Wend
+  FrameFence()
+  PublishTop=RenderTop : PublishBottom=FrameBottom
+  FrameFence() : FramePending=FramePending+1
+  If RenderTop=@FrameTop(0)
+    RenderTop=@AlternateTop(0) : FrameBottom=@AlternateBottom(0)
+  Else
+    RenderTop=@FrameTop(0) : FrameBottom=@FrameBottomStore(0)
+  EndIf
+EndProcedure
+Procedure.i NesComputeLoop()
+  Protected target.i,t.i,elapsed.i
+  While PeekI(@ExitRequested)=0 And Stopped=0 And WorkerError=0 And PeekI(@VideoError)=0
+    elapsed=NesHostUs()-StartUs
+    If #TEST_SECONDS>0 And elapsed>=#TEST_SECONDS*1000000 : Break : EndIf
+    If NesHostUs()>=SliceEnd : Break : EndIf
+    target=NesDiv(elapsed*1789773,1000000)
+    If CpuCycles<target
+      t=NesHostUs() : CpuRun(128) : NesSync()
+      EmulateUs=EmulateUs+NesHostUs()-t : EmulateCalls=EmulateCalls+1
+    EndIf
+  Wend
+  FrameFence() : ComputeDone=1
+  ProcedureReturn 0
+EndProcedure
+Procedure.i NesPresentationLoop()
+  Protected ticket.i,top.i,bottom.i,nextInput.i,now.i,start.i,status.i
+  Repeat
+    now=NesHostUs()
+    If now>SliceEnd+1000000 : ParallelError=2 : ExitRequested=1 : Break : EndIf
+    If now>=nextInput
+      InputPoll() : SafetyPet() : HudTick() : nextInput=now+4000
+    EndIf
+    AudioPoll()
+    ticket=PeekI(@FramePending)
+    If ticket<>FrameConsumed
+      FrameFence() : top=PublishTop : bottom=PublishBottom
+      If VideoStart(top,bottom)=0 : VideoError=214 : EndIf
+      start=NesHostUs() : status=VideoPoll()
+      While status=0 And VideoError=0
+        AudioPoll() : InputPoll() : SafetyPet()
+        If NesHostUs()-start>2000000 : VideoError=215 : VideoAbort() : Break : EndIf
+        status=VideoPoll()
+      Wend
+      If status<0 : VideoError=216 : VideoAbort() : EndIf
+      FrameFence() : FrameConsumed=ticket
+    EndIf
+    If PeekI(@ComputeDone)<>0 And FrameConsumed=PeekI(@FramePending) : Break : EndIf
+  ForEver
+  ProcedureReturn 0
+EndProcedure
+; Anvil lends a guarded 4 KiB secondary stack. Use our declared private
+; 1 MiB corridor for the interpreter's nested calls, then restore that stack.
+ProcedureNaked.i ApplicationJob()
+  ASM
+    ldr x9, [x0]
+    cbz x9, __nes_primary_job
+    mov x9, sp
+    movz x10, #$0310, lsl #16
+    mov sp, x10
+    stp x9, x30, [sp, #-16]!
+    bl nescomputeloop
+    ldp x9, x30, [sp], #16
+    mov sp, x9
+    ret
+__nes_primary_job:
+    b nespresentationloop
+  EndASM
+EndProcedure

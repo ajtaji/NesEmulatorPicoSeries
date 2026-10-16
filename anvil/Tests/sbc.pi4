@@ -1,0 +1,26 @@
+XIncludeFile "sbc_vectors.pi4"
+Procedure.i AudioCodecTests()
+  Protected stereo.i,block.i,i.i,expected.i,checks.i,failures.i,start.i
+  start=NesHostUs()
+  For stereo=0 To 1
+    SbcStereo=stereo
+    For i=0 To 79 : SbcHistory(i)=0 : Next
+    For block=0 To 63
+      For i=0 To 127 : SbcPcm(i)=PeekW(?CodecVectorPcm+(block*128+i)*2) : Next
+      SbcEncode()
+      For i=0 To 63+stereo*4
+        If stereo=0
+          expected=PeekA(?CodecVectorExpected+block*64+i)
+        Else
+          expected=PeekA(?CodecVectorStereo+block*68+i)
+        EndIf
+        checks=checks+1
+        If SbcEncoded(i)<>expected : failures=failures+1 : EndIf
+      Next
+      SafetyPet()
+    Next
+  Next
+  PokeI($02F00000,$53424354) : PokeI($02F00008,checks)
+  PokeI($02F00010,failures) : PokeI($02F00018,NesHostUs()-start)
+  ProcedureReturn failures
+EndProcedure

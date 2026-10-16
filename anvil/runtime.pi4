@@ -1,0 +1,119 @@
+; Scheduler: guest computation on core 1, hardware and Anvil calls on core 0.
+Global *svc_parallel,*svc_cores
+Global Dim JobArgs.i(2)
+Declare AudioConfigure()
+Declare AudioStop()
+Declare AudioDiagnostics(address.i)
+Declare VideoDiagnostics(address.i)
+CompilerIf #NES_VERIFY_CODEC=1
+Declare.i AudioCodecTests()
+CompilerEndIf
+CompilerIf #NES_VERIFY_CORE=1
+Declare.i CoreTests()
+CompilerEndIf
+Global StartUs.i, EmulateUs.i, EmulateCalls.i
+
+; Descriptor caches are used only by the Thumb renderer, not this backend.
+Procedure PpuUpdateDescriptor(addr.i)
+EndProcedure
+Procedure PpuUpdateAttribute(addr.i)
+EndProcedure
+Procedure CartPpuWriteNotice(addr.i,value.i)
+EndProcedure
+Procedure CartSelect(number.i)
+  CartSelectBuiltin(number)
+EndProcedure
+Procedure NesSync()
+  Protected stalls.i
+  NesRpc(0,0,0,CpuCycles)
+  stalls=WorkerDmcCycles-NesSeenDmc
+  While stalls>0
+    CpuCycles=CpuCycles+stalls : NesSeenDmc=WorkerDmcCycles
+    NesRpc(0,0,0,CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
+  Wend
+  If WorkerNmi<>NesSeenNmi
+    NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
+  ElseIf WorkerIrq<>0 And FI=0
+    CpuInterrupt($FFFE)
+  EndIf
+EndProcedure
+Procedure LoadCartridge()
+  Protected i.i,bank.i
+  CartSelect(0)
+  For i=0 To 255
+    PixelSpread(i)=(i&3)|(((i>>2)&3)<<8)|(((i>>4)&3)<<16)|(((i>>6)&3)<<24)
+  Next
+  RenderTop=@FrameTop(0) : FrameBottom=@FrameBottomStore(0)
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  ChrWritable=CartChrRam
+  If CartChrRam
+    Chr=@Decoded(0)+8192 : CartChr=Chr : Pattern=@Decoded(0)
+  Else
+    For bank=0 To CartChrBanks-1
+      Chr=CartChr+bank*8192 : Pattern=@Decoded(0)+bank*8192
+      For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
+    Next
+    Chr=CartChr : Pattern=@Decoded(0)
+  EndIf
+  For i=0 To 31 : LengthTable(i)=PeekA(?LengthData+i) : Next
+  For i=0 To 15 : NoiseTable(i)=PeekU(?NoiseData+i*2) : DmcTable(i)=PeekU(?DmcData+i*2) : Next
+  For i=0 To 30 : PulseMix(i)=PeekU(?PulseData+i*2) : Next
+  For i=0 To 202 : TndMix(i)=PeekU(?TndData+i*2) : Next
+  For i=0 To 511 : Rgb64(i)=PeekU(?RgbData+i*2) : Next
+  PpuColours()
+EndProcedure
+Procedure.i Main()
+  Protected t.i,target.i,elapsed.i,nextInput.i,status.i
+  CaptureServices()
+  If ServicesBegin()=0 : ProcedureReturn 100 : EndIf
+  *svc_parallel=ServiceSlot(185)
+  *svc_cores=ServiceSlot(184)
+  If svc_cap(13)=0 Or svc_cap(7)=0 : ProcedureReturn 101 : EndIf
+  If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
+  CompilerIf #NES_VERIFY_CODEC=1
+    t=AudioCodecTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  CompilerIf #NES_VERIFY_CORE=1
+    LoadCartridge() : t=CoreTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
+  If svc_cores()<2 : PlatformEnd() : ProcedureReturn 104 : EndIf
+  VideoBegin()
+  If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
+  LoadCartridge() : CpuReset()
+  If VideoStart(@FrameTop(0),FrameBottom)=0 : VideoError=214 : EndIf
+  t=NesHostUs() : status=VideoPoll()
+  While status=0 And VideoError=0
+    SafetyPet()
+    If NesHostUs()-t>2000000 : VideoError=215 : Break : EndIf
+    status=VideoPoll()
+  Wend
+  If status<0 : VideoError=216 : EndIf
+  If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
+  AudioConfigure() : AudioBegin()
+  StartUs=NesHostUs()
+  HudSince=StartUs : HudFrames=VideoFrames : HudEmu=WorkerFrames
+  JobArgs(0)=0 : JobArgs(1)=1
+  While ExitRequested=0 And Stopped=0 And WorkerError=0 And VideoError=0
+    ComputeDone=0 : SliceEnd=NesHostUs()+2000000
+    If svc_parallel(@ApplicationJob,@JobArgs(0),8,2)<>0 : ParallelError=1 : Break : EndIf
+    If #TEST_SECONDS>0 And NesHostUs()-StartUs>=#TEST_SECONDS*1000000 : Break : EndIf
+  Wend
+  ; Fixed diagnostic block inside the declared payload RAM window.
+  PokeI($02F00000,$4E455350) : PokeI($02F00008,NesHostUs()-StartUs)
+  PokeI($02F00010,CpuCycles) : PokeI($02F00018,WorkerFrames)
+  PokeI($02F00020,VideoFrames) : PokeI($02F00028,ApuSamples)
+  PokeI($02F00030,EmulateUs) : PokeI($02F00038,VideoUs)
+  PokeI($02F00040,Stopped) : PokeI($02F00048,BadOpcode)
+  PokeI($02F00050,WorkerError) : PokeI($02F00058,ExitRequested)
+  PokeI($02F00060,TouchEvents) : PokeI($02F00068,VideoError)
+  VideoDiagnostics($02F00070)
+  PokeI($02F00090,AudioLive) : PokeI($02F00098,AudioPackets)
+  PokeI($02F000A0,AudioUnderruns) : PokeI($02F000A8,AudioOverruns)
+  PokeI($02F000B0,AudioWireErrors) : PokeI($02F000B8,ParallelError)
+  AudioDiagnostics($02F000C0)
+  PokeI($02F001A0,InputSeen)
+  AudioStop() : VideoAbort() : svc_flush()
+  svc_capture()
+  PlatformEnd()
+  ProcedureReturn Stopped+WorkerError+VideoError+ParallelError
+EndProcedure

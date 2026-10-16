@@ -1,0 +1,248 @@
+; Video plugin: Neon Arcade through Anvil's Vulkan implementation.
+; Resource creation derived from Anvil (MIT, PureMetal Labs, 2026).
+; This payload owns its private GPU arena/heap, never the monitor's arenas.
+Global NgInstance.i,NgPhysical.i,NgDevice.i,NgQueue.i,NgPool.i
+Global NgImage.i,NgMemory.i,NgView.i,NgRenderPass.i,NgFramebuffer.i
+Global NgImageBase.i,NgImagePitch.i,NgImageBytes.i
+Global NgWidth.i=800,NgHeight.i=1280,NgLogicalW.i=1280,NgLogicalH.i=800
+Global NgPitch.i=3200,NgRotation.i=90
+Global Dim NgPixels.l(61440)
+Global Dim NgClear.l(4)
+Global NgConvertUs.i,NgUploadUs.i,NgGpuUs.i,NgPresentUs.i
+Declare VideoUi()
+Declare VideoHudDraw()
+Declare.i VideoHudDirty()
+Declare VideoHudClean()
+Declare AudioPoll()
+Declare InputPoll()
+Procedure.i NgCreateTarget()
+  Define rc.i
+  Define count.i
+  Define priority.l
+  Define ici.VkInstanceCreateInfo
+  Define qci.VkDeviceQueueCreateInfo
+  Define dci.VkDeviceCreateInfo
+  Define pci.VkCommandPoolCreateInfo
+  Define imageInfo.VkImageCreateInfo
+  Define imageProps.VkImageFormatProperties
+  Define formatProps.VkFormatProperties
+  Define req.VkMemoryRequirements
+  Define alloc.VkMemoryAllocateInfo
+  Define viewInfo.VkImageViewCreateInfo
+  Define attachment.VkAttachmentDescription
+  Define attachmentRef.VkAttachmentReference
+  Define subpass.VkSubpassDescription
+  Define passInfo.VkRenderPassCreateInfo
+  Define frameInfo.VkFramebufferCreateInfo
+  Define mapped.i
+
+  If NeonGpuRangeMapped($05000000, $02000000) = 0
+    ProcedureReturn 200
+  EndIf
+  If AnvilVkV3dWindow($05000000, $02000000) <> #VK_SUCCESS
+    ProcedureReturn 200
+  EndIf
+  ici\sType = #VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+  rc = vkCreateInstance(@ici, 0, @NgInstance)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  count = 1
+  rc = vkEnumeratePhysicalDevices(NgInstance, @count, @NgPhysical)
+  If rc <> #VK_SUCCESS Or count <> 1 Or NgPhysical = 0 : ProcedureReturn 200 : EndIf
+
+  priority = 0
+  qci\sType = #VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
+  qci\queueCount = 1 : qci\pQueuePriorities = @priority
+  dci\sType = #VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO
+  dci\queueCreateInfoCount = 1 : dci\pQueueCreateInfos = @qci
+  rc = vkCreateDevice(NgPhysical, @dci, 0, @NgDevice)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  vkGetDeviceQueue(NgDevice, 0, 0, @NgQueue)
+  pci\sType = #VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
+  pci\flags = #VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+  rc = vkCreateCommandPool(NgDevice, @pci, 0, @NgPool)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+
+  vkGetPhysicalDeviceFormatProperties(NgPhysical, #VK_FORMAT_B8G8R8A8_UNORM, @formatProps)
+  If (formatProps\linearTilingFeatures & #VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) = 0
+    ProcedureReturn 200
+  EndIf
+  rc = vkGetPhysicalDeviceImageFormatProperties(NgPhysical, #VK_FORMAT_B8G8R8A8_UNORM, #VK_IMAGE_TYPE_2D, #VK_IMAGE_TILING_LINEAR, #VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | #VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, @imageProps)
+  If rc <> #VK_SUCCESS Or imageProps\maxExtent\width < NgWidth Or imageProps\maxExtent\height < NgHeight
+    ProcedureReturn 200
+  EndIf
+
+  imageInfo\sType = #VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+  imageInfo\imageType = #VK_IMAGE_TYPE_2D
+  imageInfo\format = #VK_FORMAT_B8G8R8A8_UNORM
+  imageInfo\extent\width = NgWidth : imageInfo\extent\height = NgHeight : imageInfo\extent\depth = 1
+  imageInfo\mipLevels = 1 : imageInfo\arrayLayers = 1
+  imageInfo\samples = #VK_SAMPLE_COUNT_1_BIT
+  imageInfo\tiling = #VK_IMAGE_TILING_LINEAR
+  imageInfo\usage = #VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | #VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+  imageInfo\sharingMode = #VK_SHARING_MODE_EXCLUSIVE
+  imageInfo\initialLayout = #VK_IMAGE_LAYOUT_UNDEFINED
+  rc = vkCreateImage(NgDevice, @imageInfo, 0, @NgImage)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  vkGetImageMemoryRequirements(NgDevice, NgImage, @req)
+  If req\size <= 0 Or req\size > $02000000 Or imageProps\maxResourceSize < req\size
+    ProcedureReturn 200
+  EndIf
+  alloc\sType = #VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+  alloc\allocationSize = req\size : alloc\memoryTypeIndex = 0
+  rc = vkAllocateMemory(NgDevice, @alloc, 0, @NgMemory)
+  If rc = #VK_SUCCESS : rc = vkBindImageMemory(NgDevice, NgImage, NgMemory, 0) : EndIf
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  NgImageBase = AnvilVkImageAddress(NgImage)
+  NgImagePitch = AnvilVkImageRowPitch(NgImage)
+  NgImageBytes = req\size
+  If NgImageBase = 0 Or NgImagePitch < NgWidth * 4 Or NgImagePitch * NgHeight > req\size
+    ProcedureReturn 200
+  EndIf
+  mapped = 0
+  rc = vkMapMemory(NgDevice, NgMemory, 0, #VK_WHOLE_SIZE, 0, @mapped)
+  If rc <> #VK_SUCCESS Or mapped <> NgImageBase : ProcedureReturn 200 : EndIf
+  vkUnmapMemory(NgDevice, NgMemory)
+
+  viewInfo\sType = #VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+  viewInfo\image = NgImage : viewInfo\viewType = #VK_IMAGE_VIEW_TYPE_2D
+  viewInfo\format = #VK_FORMAT_B8G8R8A8_UNORM
+  viewInfo\subresourceRange\aspectMask = #VK_IMAGE_ASPECT_COLOR_BIT
+  viewInfo\subresourceRange\levelCount = 1 : viewInfo\subresourceRange\layerCount = 1
+  rc = vkCreateImageView(NgDevice, @viewInfo, 0, @NgView)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+
+  attachment\format = #VK_FORMAT_B8G8R8A8_UNORM
+  attachment\samples = #VK_SAMPLE_COUNT_1_BIT
+  attachment\loadOp = #VK_ATTACHMENT_LOAD_OP_CLEAR
+  attachment\storeOp = #VK_ATTACHMENT_STORE_OP_STORE
+  attachment\stencilLoadOp = #VK_ATTACHMENT_LOAD_OP_DONT_CARE
+  attachment\stencilStoreOp = #VK_ATTACHMENT_STORE_OP_DONT_CARE
+  attachment\initialLayout = #VK_IMAGE_LAYOUT_UNDEFINED
+  attachment\finalLayout = #VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+  attachmentRef\attachment = 0 : attachmentRef\layout = #VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+  subpass\pipelineBindPoint = #VK_PIPELINE_BIND_POINT_GRAPHICS
+  subpass\colorAttachmentCount = 1 : subpass\pColorAttachments = @attachmentRef
+  passInfo\sType = #VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+  passInfo\attachmentCount = 1 : passInfo\pAttachments = @attachment
+  passInfo\subpassCount = 1 : passInfo\pSubpasses = @subpass
+  rc = vkCreateRenderPass(NgDevice, @passInfo, 0, @NgRenderPass)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  frameInfo\sType = #VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+  frameInfo\renderPass = NgRenderPass : frameInfo\attachmentCount = 1
+  frameInfo\pAttachments = @NgView : frameInfo\width = NgWidth
+  frameInfo\height = NgHeight : frameInfo\layers = 1
+  rc = vkCreateFramebuffer(NgDevice, @frameInfo, 0, @NgFramebuffer)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+
+  rc = NeonVkChromeCreateWithCapacities(NgPhysical, NgDevice, NgQueue, NgPool, NgRenderPass, NgFramebuffer, NgWidth, NgHeight, 128, 4096)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  rc = NeonVkChromeRebind(NgFramebuffer, NgLogicalW, NgLogicalH, NgWidth, NgHeight, NgPitch, NgRotation)
+  If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
+  ProcedureReturn 0
+EndProcedure
+
+
+Procedure VideoBegin()
+  Protected rc.i
+  ScreenW=svc_w() : ScreenH=svc_h()
+  If ScreenW<>1280 Or ScreenH<>800 : VideoError=201 : ProcedureReturn : EndIf
+  TimerInit()
+  If NeonArena($04000000,$01000000)<>0 : VideoError=202 : ProcedureReturn : EndIf
+  If NeonSurface($07000000,800,1280,3200)<>0 : VideoError=203 : ProcedureReturn : EndIf
+  NeonSurfaceMapSpan($00400000)
+  If NeonRenderCapacity(1280,1280)<>0 : VideoError=204 : ProcedureReturn : EndIf
+  If NeonGpuExtraMap($05000000,$02000000)<>0 : VideoError=205 : ProcedureReturn : EndIf
+  If NeonInit()<>0 : VideoError=206 : ProcedureReturn : EndIf
+  NeonPalette() : NeonFontDefaults() : NeonFontUse(?dsp_font8x16,8,16,32,126)
+  NeonFontSetup(#NEON_FONT_SMALL,2,0)
+  rc=NgCreateTarget()
+  If rc<>0 : VideoError=rc : ProcedureReturn : EndIf
+  DmaClearUncached() : DmaAddUncached($03000000,$10000000)
+  If DmaSetScratch($03E00000,4096)=0 Or DmaSetBounds($08A00000,800*1280*4)=0
+    VideoError=211 : ProcedureReturn
+  EndIf
+  If DmaInit()=0 : VideoError=212 : ProcedureReturn : EndIf
+  NgClear(3)=$3F800000
+  svc_flush()
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn 0
+EndProcedure
+Procedure NgPresent()
+  Protected src.i,dst.i,n.i,line.i,previous.i,start.i
+  src=NgImageBase : dst=$08A00000 : n=800*1280*4
+  ; Both private GPU target and Anvil's configured DSI front are NC.
+  ; Full GPU frame has completed before publication. No LCD line streaming.
+  previous=PeekL($FE400048)&$FFF : start=NesHostUs()
+  Repeat
+    line=PeekL($FE400048)&$FFF
+    If line<previous : Break : EndIf
+    previous=line : AudioPoll() : InputPoll() : SafetyPet()
+  Until NesHostUs()-start>=20000
+  If VideoFrames=0
+    If DmaCopy2D(dst,3200,src,NgImagePitch,3200,1280)=0 : VideoError=213 : EndIf
+  Else
+    ; Rotation 90: logical game rectangle becomes physical (220,384,480,512).
+    ; Independent host FPS strip, also rotated by the Vulkan backend.
+    If VideoHudDirty()
+      If DmaCopy2D(dst+750*4,3200,src+750*4,NgImagePitch,50*4,700)=0 : VideoError=213 : EndIf
+    EndIf
+    If DmaCopy2D(dst+384*3200+220*4,3200,src+384*NgImagePitch+220*4,NgImagePitch,480*4,512)=0 : VideoError=213 : EndIf
+  EndIf
+EndProcedure
+Procedure.i VideoStart(top.i,bottom.i)
+  Protected i.i,c.i,src.i,t.i,rc.i
+  t=NesHostUs()
+  For i=0 To 61439
+    If i<30720 : src=top+i*2 : Else : src=bottom+(i-30720)*2 : EndIf
+    c=PeekU(src)
+    NgPixels(i)=$FF000000|((c&$F800)<<8)|((c&$7E0)<<5)|((c&31)<<3)
+  Next
+  NgConvertUs=NgConvertUs+NesHostUs()-t : t=NesHostUs()
+  rc=NeonVkChromeImageSpriteReplaceBGRA(@NgPixels(0),256,240)
+  NgUploadUs=NgUploadUs+NesHostUs()-t : t=NesHostUs()
+  If rc<>0 : VideoError=207 : ProcedureReturn 0 : EndIf
+  If NeonVkChromeBegin(@NgClear(0))<>0 : VideoError=208 : ProcedureReturn 0 : EndIf
+  If VideoFrames=0
+    VideoUi()
+  ElseIf VideoHudDirty()
+    VideoHudDraw()
+  EndIf
+  rc=NeonVkChromeImageSpriteDraw(VideoX,VideoY,0,0,256,240,256*VideoScale,240*VideoScale,$FFFFFFFF)
+  If rc<>0 : VideoError=209 : ProcedureReturn 0 : EndIf
+  If NeonVkChromeEnd()<>0 : VideoError=210 : ProcedureReturn 0 : EndIf
+  NeonVkChromePresentConsume()
+  NgGpuUs=NgGpuUs+NesHostUs()-t : t=NesHostUs()
+  NgPresent()
+  VideoHudClean()
+  NgPresentUs=NgPresentUs+NesHostUs()-t
+  VideoFrames=VideoFrames+1
+  VideoUs=NgConvertUs+NgUploadUs+NgGpuUs+NgPresentUs
+  ProcedureReturn 1
+EndProcedure
+Procedure.i VideoPoll()
+  ProcedureReturn 1
+EndProcedure
+Procedure.i VideoCanWriteLine(line.i)
+  ProcedureReturn 1
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,w.i,h.i,pixels.i)
+EndProcedure
+Procedure VideoAbort()
+  If DmaReady()<>0 : DmaAbort() : EndIf
+  If NgDevice<>0 : vkDeviceWaitIdle(NgDevice) : EndIf
+  NeonVkChromeDestroy()
+  If NgFramebuffer<>0 : vkDestroyFramebuffer(NgDevice,NgFramebuffer,0) : EndIf
+  If NgRenderPass<>0 : vkDestroyRenderPass(NgDevice,NgRenderPass,0) : EndIf
+  If NgView<>0 : vkDestroyImageView(NgDevice,NgView,0) : EndIf
+  If NgImage<>0 : vkDestroyImage(NgDevice,NgImage,0) : EndIf
+  If NgMemory<>0 : vkFreeMemory(NgDevice,NgMemory,0) : EndIf
+  If NgPool<>0 : vkDestroyCommandPool(NgDevice,NgPool,0) : EndIf
+  If NgDevice<>0 : vkDestroyDevice(NgDevice,0) : EndIf
+  If NgInstance<>0 : vkDestroyInstance(NgInstance,0) : EndIf
+  If Neon_Ready()<>0 : NeonShutdown() : EndIf
+EndProcedure
+Procedure VideoDiagnostics(address.i)
+  PokeI(address,NgConvertUs) : PokeI(address+8,NgUploadUs)
+  PokeI(address+16,NgGpuUs) : PokeI(address+24,NgPresentUs)
+EndProcedure

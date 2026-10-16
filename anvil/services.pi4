@@ -1,0 +1,45 @@
+; Anvil ABI client: no resident hardware driver is duplicated here.
+Global Services.i
+Global *svc_pet, *svc_us, *svc_w, *svc_h, *svc_begin, *svc_end
+Global *svc_rect, *svc_text, *svc_touch, *svc_flush, *svc_cap, *svc_capture
+Global Dim TouchEvent.q(4)
+
+Procedure CaptureServices()
+  ASM
+    adrp x1, global_services
+    add x1, x1, #:lo12:global_services
+    str x0, [x1]
+  EndASM
+EndProcedure
+Procedure.i Header32(off.i)
+  ProcedureReturn PeekA(Services+off)|(PeekA(Services+off+1)<<8)|(PeekA(Services+off+2)<<16)|(PeekA(Services+off+3)<<24)
+EndProcedure
+Procedure.i ServiceSlot(n.i)
+  ProcedureReturn PeekI(Services+16+n*8)
+EndProcedure
+Procedure.i ServicesBegin()
+  If Services=0 : ProcedureReturn 0 : EndIf
+  If Header32(0)<>$53564E41 Or Header32(4)<>1 Or Header32(8)<3 Or Header32(12)<192 : ProcedureReturn 0 : EndIf
+  *svc_pet=ServiceSlot(6) : *svc_us=ServiceSlot(11) : *svc_cap=ServiceSlot(4)
+  *svc_w=ServiceSlot(24) : *svc_h=ServiceSlot(25)
+  *svc_begin=ServiceSlot(27) : *svc_end=ServiceSlot(28)
+  *svc_rect=ServiceSlot(29) : *svc_text=ServiceSlot(30)
+  *svc_capture=ServiceSlot(37)
+  *svc_touch=ServiceSlot(40) : *svc_flush=ServiceSlot(42)
+  ProcedureReturn 1
+EndProcedure
+Procedure.i NesHostUs()
+  CompilerIf #NES_NATIVE_TIMER=1
+    ProcedureReturn Micros()
+  CompilerElse
+    ProcedureReturn svc_us()
+  CompilerEndIf
+EndProcedure
+Procedure SafetyPet()
+  svc_pet()
+EndProcedure
+Procedure UsbSerialTask()
+EndProcedure
+Procedure.i NesDiv(a.i,b.i)
+  ProcedureReturn a/b
+EndProcedure

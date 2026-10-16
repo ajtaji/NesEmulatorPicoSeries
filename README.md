@@ -17,11 +17,17 @@ you are entitled to use.
 | Raspberry Pi Pico | RP2040 | Same firmware; not yet run on a board here (no Bluetooth audio) |
 | Raspberry Pi Pico 2 W | RP2350 Arm | Runs; diagnostics and three-game board tests pass |
 | Raspberry Pi Pico 2 | RP2350 Arm | Same port; not yet run on a board here (no Bluetooth audio) |
+| Raspberry Pi 4 / Anvil | BCM2711 AArch64 | [Returning application, Neon/Vulkan, touch and Bluetooth](anvil/README.md) |
 | Pimoroni Pico Plus 2 / Pico Plus 2 W | RP2350B + 8 MB PSRAM | Planned; not ported yet |
 | Pimoroni Pico 2 W with a PSRAM kit | RP2350A + PSRAM | Planned; not ported yet |
 
 Each chip family has its own folder (`rp2040/` and `rp2350/`). A port is added only after
 it has run on a board.
+
+The [Pi 4 / Anvil port](anvil/README.md) uses separate video, audio and input
+modules, on-screen controls and host FPS counters. EXIT returns to Anvil.
+Its initial ROM selection is at build time; the Pico flash ROM store remains
+specific to the Pico firmware.
 
 ## Measured on a Pico W
 

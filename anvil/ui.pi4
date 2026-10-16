@@ -1,0 +1,26 @@
+Procedure VideoButton(x.i,y.i,w.i,h.i,*label)
+  Neon_Box(x,y,w,h,$FF25364A)
+  Neon_Text(#NEON_FONT_SMALL,x+10,y+28,*label,$FFFFFFFF)
+EndProcedure
+Procedure VideoHudDraw()
+  Neon_Text(#NEON_FONT_SMALL,8,26,@HudBuffer(0),$FFFFFFFF)
+EndProcedure
+Procedure.i VideoHudDirty()
+  ProcedureReturn HudDirty
+EndProcedure
+Procedure VideoHudClean()
+  HudDirty=0
+EndProcedure
+Procedure VideoUi()
+  VideoScale=2
+  If ScreenW<1000 Or ScreenH<700 : VideoScale=1 : EndIf
+  VideoX=(ScreenW-256*VideoScale)/2 : VideoY=100
+  Neon_Box(0,0,ScreenW,ScreenH,$FF080D16)
+  Neon_Text(#NEON_FONT_SMALL,8,26,@HudBuffer(0),$FFFFFFFF)
+  VideoButton(ScreenW-140,10,130,65,"EXIT")
+  VideoButton(100,210,100,120,"UP") : VideoButton(100,470,100,120,"DOWN")
+  VideoButton(0,340,100,120,"LEFT") : VideoButton(200,340,100,120,"RIGHT")
+  VideoButton(ScreenW-140,340,130,140,"A") : VideoButton(ScreenW-290,340,130,140,"B")
+  VideoButton(ScreenW/2-190,ScreenH-95,180,75,"SELECT")
+  VideoButton(ScreenW/2,ScreenH-95,160,75,"START")
+EndProcedure

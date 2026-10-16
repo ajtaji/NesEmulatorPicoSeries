@@ -1,0 +1,23 @@
+; PCM producer is the unchanged APU. A consumer runs on core 1 (NES_SPLIT=2).
+; Copy into plugin-owned staging buffers; never DMA directly from the APU ring.
+Procedure AudioReset()
+  AudioReadCursor=ApuSamples
+EndProcedure
+Procedure.i AudioRead(destination.i, capacity.i)
+  Protected count.i, i.i
+  If destination=0 Or capacity<=0 : ProcedureReturn 0 : EndIf
+  If capacity>4096 : capacity=4096 : EndIf
+  count=ApuSamples-AudioReadCursor
+  FrameFence()
+  If count>4096
+    AudioOverruns=AudioOverruns+1 : AudioReadCursor=ApuSamples-4096 : count=4096
+  ElseIf count<0
+    AudioReadCursor=ApuSamples : ProcedureReturn 0
+  EndIf
+  If count>capacity : count=capacity : EndIf
+  For i=0 To count-1
+    PokeW(destination+i*2,Pcm((AudioReadCursor+i)&4095))
+  Next
+  AudioReadCursor=AudioReadCursor+count
+  ProcedureReturn count
+EndProcedure

@@ -1,0 +1,30 @@
+Global Checks.i,Failures.i,FirstCheck.i,FirstGot.i,FirstExpected.i
+Procedure Check(actual.i,expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    If Failures=1 : FirstCheck=Checks : FirstGot=actual : FirstExpected=expected : EndIf
+  EndIf
+EndProcedure
+XIncludeFile "zp.pi4"
+Procedure.i CoreTests()
+  Protected i.i,ctrl.i,lo.i,hi.i,start.i
+  start=NesHostUs()
+  ZpVectorTests()
+  Chr=$03200000 : Pattern=@Decoded(0)
+  For i=0 To 8191 : PokeA(Chr+i,(i*37+(i>>4))&255) : Next
+  For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
+  For i=0 To 4095 : Nt(i)=(i*17+(i>>3))&255 : Next
+  For ctrl=0 To 1
+    PpuCtrl=ctrl*16
+    For i=0 To 32767
+      WAddr=i : PpuFetchTileReference() : lo=WLo : hi=WHi
+      PpuFetchTile() : Check(WLo,lo) : Check(WHi,hi)
+      If (i&255)=0 : SafetyPet() : EndIf
+    Next
+  Next
+  PokeI($02F00000,$434F5245) : PokeI($02F00008,Checks)
+  PokeI($02F00010,Failures) : PokeI($02F00018,NesHostUs()-start)
+  PokeI($02F00020,FirstCheck) : PokeI($02F00028,FirstGot) : PokeI($02F00030,FirstExpected)
+  ProcedureReturn Failures
+EndProcedure

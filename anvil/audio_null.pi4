@@ -1,0 +1,13 @@
+; No audio device; the APU still runs and PCM capture is available.
+Procedure AudioBegin()
+  AudioRunning=0 : AudioLive=0 : AudioQueueSlack=0 : AudioReset()
+EndProcedure
+Procedure AudioPoll()
+  AudioWorked=0
+EndProcedure
+
+Procedure AudioStop()
+EndProcedure
+Procedure AudioDiagnostics(address.i)
+  PokeI(address,0)
+EndProcedure

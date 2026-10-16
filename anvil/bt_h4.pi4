@@ -1,0 +1,190 @@
+; CYW43455 UART H4 adapter for the existing L2CAP/AVDTP/A2DP plugin.
+; The serial console's PL011 is borrowed only while the payload runs.
+; Every modified mux, pull and UART register is restored on exit.
+Global Dim bt_tx.a(320)
+Global Dim bt_ev.a(320)
+Global bt_aclmax.i=27,bt_credits.i=1,bt_credit0.i=1,bt_verbose.i
+Global BtInitError.i,BtBorrowed.i,BtRxType.i,BtRxHave.i,BtRxNeed.i
+Global BtControlRequest.i
+Global BtPowerBefore.i= -1,BtPowerAfter.i= -1,BtPowerSetError.i,BtPowerGetError.i
+Global Dim BtSavedUart.l(6)
+Global Dim BtSavedGpio.l(5)
+Global Dim BtUartOffsets.i(6)
+Declare InputPoll()
+Procedure.i NesBtPowerState()
+  If MailboxReady()=0 : If MailboxInit()=0 : ProcedureReturn -1 : EndIf : EndIf
+  If MailboxBegin($00030041,4,8)=0 : ProcedureReturn -1 : EndIf
+  MailboxSetWord(0,128)
+  If MailboxSend()=0 : BtPowerGetError=MailboxError() : ProcedureReturn -1 : EndIf
+  If MailboxWord(0)<>0 : ProcedureReturn -1 : EndIf
+  ProcedureReturn MailboxWord(1)&1
+EndProcedure
+Procedure.i NesBtPower(on.i)
+  Protected state.i,polarity.i
+  state=NesBtPowerState()
+  If BtPowerBefore<0 : BtPowerBefore=state : EndIf
+  If state=on : BtPowerAfter=state : ProcedureReturn 1 : EndIf
+  If state<0 : ProcedureReturn 0 : EndIf
+  ; Retain polarity exactly as the Linux firmware-expander driver does.
+  If MailboxBegin($00030043,4,20)=0 : ProcedureReturn 0 : EndIf
+  MailboxSetWord(0,128)
+  If MailboxSend()=0 Or MailboxWord(0)<>0 : ProcedureReturn 0 : EndIf
+  polarity=MailboxWord(2)
+  If MailboxBegin($00038043,24,24)=0 : ProcedureReturn 0 : EndIf
+  MailboxSetWord(0,128) : MailboxSetWord(1,1) : MailboxSetWord(2,polarity)
+  MailboxSetWord(3,0) : MailboxSetWord(4,0) : MailboxSetWord(5,on)
+  MailboxSend() : BtPowerSetError=MailboxError()
+  BtPowerAfter=NesBtPowerState()
+  If BtPowerAfter=on : ProcedureReturn 1 : EndIf
+  If MailboxBegin($00038041,8,8)=0 : ProcedureReturn 0 : EndIf
+  MailboxSetWord(0,128) : MailboxSetWord(1,on)
+  MailboxSend() : BtPowerSetError=MailboxError()
+  BtPowerAfter=NesBtPowerState()
+  If BtPowerAfter=on : ProcedureReturn 1 : EndIf
+  ProcedureReturn 0
+EndProcedure
+Procedure BtYield()
+  SafetyPet() : InputPoll()
+EndProcedure
+Procedure BtDelay(ms.i)
+  Protected start.i
+  start=NesHostUs()
+  While NesHostUs()-start<ms*1000 And ExitRequested=0 : BtYield() : Wend
+EndProcedure
+Procedure.i BtBorrow()
+  Protected i.i,t.i
+  BtUartOffsets(0)=$24 : BtUartOffsets(1)=$28 : BtUartOffsets(2)=$2C
+  BtUartOffsets(3)=$30 : BtUartOffsets(4)=$38 : BtUartOffsets(5)=$34
+  t=NesHostUs()
+  While BtuRd($18)&8
+    If NesHostUs()-t>100000 : ProcedureReturn 0 : EndIf
+  Wend
+  For i=0 To 5 : BtSavedUart(i)=BtuRd(BtUartOffsets(i)) : Next
+  BtSavedGpio(0)=PeekL($FE200004) : BtSavedGpio(1)=PeekL($FE20000C)
+  For i=0 To 2 : BtSavedGpio(i+2)=PeekL($FE2000E4+i*4) : Next
+  BtBorrowed=1
+  PokeL($FE200004,BtSavedGpio(0)&(~((7<<12)|(7<<15))))
+  ProcedureReturn BtuOpen()
+EndProcedure
+Procedure BtRestore()
+  Protected i.i
+  If BtBorrowed=0 : ProcedureReturn : EndIf
+  BtuClose()
+  If BtPowerBefore=0 : NesBtPower(0) : EndIf
+  BtuWr($30,0)
+  ; FEN must transition to zero: discard Bluetooth RX/TX FIFO contents
+  ; before these bytes can become local console keystrokes after return.
+  BtuWr($2C,0)
+  BtuWr($44,$7FF)
+  For i=0 To 2 : BtuWr(BtUartOffsets(i),BtSavedUart(i)) : Next
+  BtuWr($38,BtSavedUart(4)) : BtuWr($34,BtSavedUart(5))
+  PokeL($FE200004,BtSavedGpio(0)) : PokeL($FE20000C,BtSavedGpio(1))
+  For i=0 To 2 : PokeL($FE2000E4+i*4,BtSavedGpio(i+2)) : Next
+  BtuWr($30,BtSavedUart(3)) : BtuBarrier()
+  BtBorrowed=0
+EndProcedure
+Procedure.i BtRingWrite(total.i)
+  Protected i.i,n.i
+  n=bt_tx(0)|(bt_tx(1)<<8)
+  If n<1 Or n>316 : AudioWireErrors=AudioWireErrors+1 : ProcedureReturn 1 : EndIf
+  If BtuPut(bt_tx(3))=0 : AudioWireErrors=AudioWireErrors+1 : ProcedureReturn 1 : EndIf
+  For i=0 To n-1
+    If BtuPut(bt_tx(4+i))=0 : AudioWireErrors=AudioWireErrors+1 : ProcedureReturn 1 : EndIf
+  Next
+  ProcedureReturn 0
+EndProcedure
+Procedure.i BtRx(budget.i)
+  Protected n.i,b.i,finish.i
+  For n=0 To 511
+    b=BtuGet() : If b<0 : ProcedureReturn 0 : EndIf
+    If BtRxType=0
+      If b=4 Or b=2
+        BtRxType=b : BtRxHave=0
+        If b=4 : BtRxNeed=2 : Else : BtRxNeed=4 : EndIf
+        bt_ev(3)=b
+      Else
+        AudioWireErrors=AudioWireErrors+1
+      EndIf
+    Else
+      If BtRxHave<316 : bt_ev(4+BtRxHave)=b : EndIf
+      BtRxHave=BtRxHave+1
+      If BtRxType=4 And BtRxHave=2
+        BtRxNeed=2+bt_ev(5)
+      ElseIf BtRxType=2 And BtRxHave=4
+        BtRxNeed=4+bt_ev(6)+(bt_ev(7)<<8)
+      EndIf
+      If BtRxHave=BtRxNeed
+        finish=BtRxHave+4 : BtRxType=0
+        If finish>320 : AudioWireErrors=AudioWireErrors+1 : ProcedureReturn 0 : EndIf
+        bt_ev(0)=(finish-4)&255 : bt_ev(1)=(finish-4)>>8 : bt_ev(2)=0
+        ProcedureReturn finish
+      EndIf
+    EndIf
+  Next
+  ProcedureReturn 0
+EndProcedure
+Procedure.i BtCreditEvent()
+  Protected i.i,n.i
+  If bt_ev(3)<>4 Or bt_ev(4)<>$13 : ProcedureReturn 0 : EndIf
+  n=bt_ev(6)
+  For i=0 To n-1
+    If 10+i*4>=320 : AudioWireErrors=AudioWireErrors+1 : Break : EndIf
+    bt_credits=bt_credits+bt_ev(9+i*4)+(bt_ev(10+i*4)<<8)
+  Next
+  If bt_credits>bt_credit0 : bt_credits=bt_credit0 : EndIf
+  ProcedureReturn 1
+EndProcedure
+Procedure.i BtHciCmd(opcode.i,plen.i)
+  bt_tx(0)=(3+plen)&255 : bt_tx(1)=(3+plen)>>8 : bt_tx(2)=0 : bt_tx(3)=1
+  bt_tx(4)=opcode&255 : bt_tx(5)=opcode>>8 : bt_tx(6)=plen
+  ProcedureReturn BtRingWrite(plen+7)
+EndProcedure
+Procedure.i BtCmd(opcode.i,plen.i)
+  Protected start.i,n.i
+  If BtHciCmd(opcode,plen)<>0 : ProcedureReturn 0 : EndIf
+  start=NesHostUs()
+  While NesHostUs()-start<1000000 And ExitRequested=0
+    n=BtRx(1)
+    If n>0
+      If bt_ev(3)=4 And bt_ev(4)=$0E And (bt_ev(7)|(bt_ev(8)<<8))=opcode
+        If bt_ev(9)=0 : ProcedureReturn 1 : EndIf
+        ProcedureReturn 0
+      EndIf
+      BtCreditEvent()
+    EndIf
+    BtYield()
+  Wend
+  ProcedureReturn 0
+EndProcedure
+Procedure.i BtBegin()
+  Protected pos.i,n.i,op.i,plen.i,i.i
+  If BtBorrow()=0 : ProcedureReturn 1 : EndIf
+  BtDelay(120)
+  While BtuGet()>=0 : Wend
+  If BtCmd($0C03,0)<>1 : ProcedureReturn 2 : EndIf
+  BtDelay(100)
+  If BtCmd($FC2E,0)<>1 : ProcedureReturn 3 : EndIf
+  BtDelay(50)
+  n=#BT_PATCH_BYTES : pos=0
+  While pos+3<=n And ExitRequested=0
+    op=PeekA(?BtPatch+pos)|(PeekA(?BtPatch+pos+1)<<8)
+    plen=PeekA(?BtPatch+pos+2) : pos=pos+3
+    If pos+plen>n : ProcedureReturn 4 : EndIf
+    For i=0 To plen-1 : bt_tx(7+i)=PeekA(?BtPatch+pos+i) : Next
+    If BtCmd(op,plen)<>1 : ProcedureReturn 5 : EndIf
+    pos=pos+plen
+  Wend
+  If pos<>n : ProcedureReturn 6 : EndIf
+  BtDelay(250)
+  If BtCmd($0C03,0)<>1 : ProcedureReturn 7 : EndIf
+  BtDelay(100)
+  bt_tx(7)=0 : bt_tx(8)=0
+  For i=0 To 3 : bt_tx(9+i)=(3000000>>(8*i))&255 : Next
+  If BtCmd($FC18,6)<>1 : ProcedureReturn 8 : EndIf
+  If BtuSetBaud(3000000)=0 : ProcedureReturn 8 : EndIf
+  If BtCmd($1005,0)<>1 : ProcedureReturn 9 : EndIf
+  bt_aclmax=bt_ev(10)|(bt_ev(11)<<8) : bt_credit0=bt_ev(13)|(bt_ev(14)<<8)
+  If bt_aclmax<249 Or bt_credit0<1 : ProcedureReturn 9 : EndIf
+  bt_credits=bt_credit0
+  ProcedureReturn 0
+EndProcedure

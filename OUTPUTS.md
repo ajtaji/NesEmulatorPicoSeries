@@ -176,3 +176,13 @@ tools/build.ps1 -Compiler path\to\PureMetalForge.exe -Source rp2350/Diagnostics/
 The existing full emulator suite and board gameplay measurements validate the
 bundled devices. A third-party plugin also needs its own device-level validation;
 the PCM example makes no untested DAC hardware claims.
+
+## Pi 4 / Anvil
+
+The [Anvil port](anvil/README.md) selects video, input and audio modules with
+`tools/build_anvil.py --video-plugin`, `--input-plugin` and `--audio-plugin`.
+Its scheduler runs guest computation on core 1 and all device/service calls on
+core 0. This differs from the Pico ownership described above. Plugins must
+release their resources before Main returns to Anvil. The default video module
+uses Neon Arcade/Vulkan and complete-frame DMA; Bluetooth consumes the same
+48 kHz signed PCM ring. The initial port has build-time plugin selection.

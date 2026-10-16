@@ -1,0 +1,170 @@
+{
+  "date": "2026-10-16",
+  "target": "Raspberry Pi 4 BCM2711 / Anvil build 281",
+  "abi": "1.7",
+  "anvil_dependency": "b79122db24f361eded4f076a6da48e4dd429d63d",
+  "compiler_sha256": "297a34050a009c1b866f692b2b7284c03dbc0f5385345a7cd8e2297c05be1e06",
+  "tests": [
+    {
+      "name": "CPU zero-page and packed CHR differential",
+      "checks": 132612,
+      "failures": 0,
+      "microseconds": 34303
+    },
+    {
+      "name": "SBC mono/stereo byte oracle",
+      "checks": 8448,
+      "failures": 0,
+      "microseconds": 11417
+    }
+  ],
+  "runs": [
+    {
+      "game": "Mario / Duck Hunt",
+      "seconds": 60.016773,
+      "emulated_frames": 3599,
+      "displayed_frames": 3601,
+      "display_includes_initial_blank": true,
+      "emu_fps": 59.9666,
+      "video_fps": 59.9999,
+      "cpu_cycles": 107207349,
+      "pcm_samples": 2875199,
+      "exit_requested": false,
+      "touch_events": 181,
+      "input_bits_seen": 203,
+      "audio_live": true,
+      "audio_packets": 7367,
+      "audio_underruns": 13,
+      "audio_overruns": 1,
+      "errors": {
+        "stopped": 0,
+        "bad_opcode": 0,
+        "worker": 0,
+        "video": 0,
+        "audio_wire": 0,
+        "parallel": 0,
+        "bt_init": 0
+      },
+      "video_ms_per_frame": {
+        "rgb_conversion": 1.2122,
+        "texture_upload": 1.2474,
+        "gpu_submission_and_completion": 6.8552,
+        "presentation_including_vsync_wait": 7.2282
+      },
+      "payload_sha256": "b2a24424d54478b28ea79799e0bf2f30e905099884b47d9825d4472c26be15d1"
+    },
+    {
+      "game": "Contra",
+      "seconds": 15.011338,
+      "emulated_frames": 899,
+      "displayed_frames": 900,
+      "display_includes_initial_blank": true,
+      "emu_fps": 59.8881,
+      "video_fps": 59.9547,
+      "cpu_cycles": 26798193,
+      "pcm_samples": 718702,
+      "exit_requested": false,
+      "touch_events": 0,
+      "input_bits_seen": 0,
+      "audio_live": true,
+      "audio_packets": 1727,
+      "audio_underruns": 3,
+      "audio_overruns": 1,
+      "errors": {
+        "stopped": 0,
+        "bad_opcode": 0,
+        "worker": 0,
+        "video": 0,
+        "audio_wire": 0,
+        "parallel": 0,
+        "bt_init": 0
+      },
+      "video_ms_per_frame": {
+        "rgb_conversion": 1.212,
+        "texture_upload": 1.2405,
+        "gpu_submission_and_completion": 6.8536,
+        "presentation_including_vsync_wait": 7.316
+      },
+      "payload_sha256": "e52795313fd3bbf2c8db2e756230cdc477f32635ff34e0f39a09d6c6edf00a4a"
+    },
+    {
+      "game": "Castlevania",
+      "seconds": 30.997721,
+      "emulated_frames": 1859,
+      "displayed_frames": 1860,
+      "display_includes_initial_blank": true,
+      "emu_fps": 59.9722,
+      "video_fps": 60.0044,
+      "cpu_cycles": 55389267,
+      "pcm_samples": 1485487,
+      "exit_requested": true,
+      "touch_events": 8,
+      "input_bits_seen": 8,
+      "audio_live": true,
+      "audio_packets": 3449,
+      "audio_underruns": 1,
+      "audio_overruns": 1,
+      "errors": {
+        "stopped": 0,
+        "bad_opcode": 0,
+        "worker": 0,
+        "video": 0,
+        "audio_wire": 0,
+        "parallel": 0,
+        "bt_init": 0
+      },
+      "video_ms_per_frame": {
+        "rgb_conversion": 1.212,
+        "texture_upload": 1.2406,
+        "gpu_submission_and_completion": 6.848,
+        "presentation_including_vsync_wait": 7.2977
+      },
+      "payload_sha256": "1c3729b85e5718dce05175939d055f6c6c596602bd5ce67ed7726a5674ecdf25"
+    },
+    {
+      "game": "Original demo, final startup lifecycle",
+      "seconds": 3.008072,
+      "emulated_frames": 180,
+      "displayed_frames": 181,
+      "display_includes_initial_blank": true,
+      "emu_fps": 59.839,
+      "video_fps": 60.1714,
+      "cpu_cycles": 5369382,
+      "pcm_samples": 144001,
+      "exit_requested": false,
+      "touch_events": 0,
+      "input_bits_seen": 0,
+      "audio_live": false,
+      "audio_packets": 0,
+      "audio_underruns": 0,
+      "audio_overruns": 0,
+      "errors": {
+        "stopped": 0,
+        "bad_opcode": 0,
+        "worker": 0,
+        "video": 0,
+        "audio_wire": 0,
+        "parallel": 0,
+        "bt_init": 0
+      },
+      "video_ms_per_frame": {
+        "rgb_conversion": 1.2159,
+        "texture_upload": 1.3163,
+        "gpu_submission_and_completion": 6.586,
+        "presentation_including_vsync_wait": 4.4771
+      },
+      "payload_sha256": "ab7abd80b266fa953657ce0fc09c6a8b6475da0ab5cf14bcdd0e6a07b0960f65"
+    }
+  ],
+  "user_confirmation": "Mario touch controls and clear Bluetooth audio confirmed; Castlevania EXIT pressed and observed in trace.",
+  "post_run": "Anvil network console responds; coretest error=0; secondary/gic/watchdog leases=0. Emulation stopped.",
+  "limitations": [
+    "Mapper support remains 0, 2, 66. No general all-mapper compatibility claim.",
+    "Pi ROM selection is build time; no Pico flash-store reuse.",
+    "Underrun/overrun counters include connection startup. No zero-drop claim.",
+    "Video backend validated only on logical 1280x800, physical rotated 800x1280 DSI.",
+    "Guest PPU remains instruction-timestamped; it is not dot/bus accurate.",
+    "Game tests used the synchronous Neon backend; replacement asynchronous hardware plugins need device validation.",
+    "Final runtime adds bounded initial VideoPoll handling, verified on board with original demo; game runs precede that lifecycle-only change."
+  ]
+}

@@ -1,0 +1,35 @@
+; Host overlay only; never writes the PPU's RGB565 buffers.
+Global Dim HudBuffer.a(80)
+Global HudAt.i,HudSince.i,HudFrames.i,HudEmu.i
+Global HudDirty.i=1
+Procedure HudPut(*s)
+  Protected i.i,c.i
+  i=0 : c=PeekA(*s)
+  While c<>0 And HudAt<79
+    HudBuffer(HudAt)=c : HudAt=HudAt+1 : i=i+1 : c=PeekA(*s+i)
+  Wend
+  HudBuffer(HudAt)=0
+EndProcedure
+Procedure HudNumber(value.i)
+  Protected div.i
+  div=10000
+  While div>1 And value<div : div=div/10 : Wend
+  Repeat
+    HudBuffer(HudAt)=48+value/div : HudAt=HudAt+1
+    value=value-(value/div)*div : div=div/10
+  Until div=0
+  HudBuffer(HudAt)=0
+EndProcedure
+Procedure HudTick()
+  Protected now.i,dt.i,fps.i
+  now=NesHostUs() : dt=now-HudSince
+  If dt>=1000000
+    HudDirty=1
+    HudAt=0 : HudPut("VIDEO ")
+    fps=(VideoFrames-HudFrames)*10000000/dt : HudNumber(fps/10) : HudPut(".") : HudNumber(fps-(fps/10)*10)
+    HudPut(" FPS   EMU ")
+    fps=(WorkerFrames-HudEmu)*10000000/dt : HudNumber(fps/10) : HudPut(".") : HudNumber(fps-(fps/10)*10)
+    HudPut(" FPS")
+    HudSince=now : HudFrames=VideoFrames : HudEmu=WorkerFrames
+  EndIf
+EndProcedure

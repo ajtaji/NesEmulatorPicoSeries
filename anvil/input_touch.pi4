@@ -1,0 +1,32 @@
+; Input plugin: Anvil screen-space multi-touch, independent of video hardware.
+Procedure InputPoll()
+  Protected i.i, n.i, x.i, y.i, id.i, state.i, bits.i
+  For n=0 To 31
+    If svc_touch(@TouchEvent(0))<=0 : Break : EndIf
+    TouchEvents=TouchEvents+1
+    x=PeekL(@TouchEvent(0)) : y=PeekL(@TouchEvent(0)+4)
+    id=PeekL(@TouchEvent(0)+8) : state=PeekL(@TouchEvent(0)+12)
+    If id>=0 And id<16
+      bits=0
+      If state<2
+        If x>=ScreenW-140 And y<85 : ExitRequested=1 : EndIf
+        If x<300 And y>=200 And y<600
+          If x<100 : bits=bits|64 : EndIf
+          If x>=200 : bits=bits|128 : EndIf
+          If y<330 : bits=bits|16 : EndIf
+          If y>=470 : bits=bits|32 : EndIf
+        EndIf
+        If x>=ScreenW-140 And y>=300 And y<560 : bits=bits|1 : EndIf
+        If x>=ScreenW-290 And x<ScreenW-150 And y>=300 And y<560 : bits=bits|2 : EndIf
+        If y>=ScreenH-100
+          If x>=ScreenW/2 And x<ScreenW/2+170 : bits=bits|8 : EndIf
+          If x>=ScreenW/2-170 And x<ScreenW/2 : bits=bits|4 : EndIf
+        EndIf
+      EndIf
+      ContactBits(id)=bits
+    EndIf
+  Next
+  NesController=0
+  For i=0 To 15 : NesController=NesController|ContactBits(i) : Next
+  InputSeen=InputSeen|NesController
+EndProcedure
