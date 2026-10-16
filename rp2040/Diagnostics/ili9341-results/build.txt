@@ -1,0 +1,5 @@
+> RP2040 ASSEMBLER: 48668 bytes of code run from SRAM at $20000000-$2000BE1B, copied from flash at boot; 11676 bytes of SRAM left free, stacks and reserved windows excluded.
+ROM_TOTAL_RP2040|133188|2097152
+firmware=nes-pico-w-ili9341.uf2
+sha256=0f519658204a0cdbc7c1cc5a848ae3234514dcdd2d0411c4845be36bfbe1395c
+physical_test=bare Pico COM14, ILI9341

@@ -766,11 +766,11 @@ EndProcedure
 CompilerEndIf
 Declare DisplayWaitLine(line.i)
 Declare DisplayFrame()
-CompilerIf #NES_VIDEO_BACKEND=3
+CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4
   Declare.i VideoLineTarget(line.i)
 CompilerEndIf
 ProcedureRAM PpuBeginLine()
-  CompilerIf #NES_VIDEO_BACKEND=3
+  CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4
     FrameRow=VideoLineTarget(PpuLine)
     If FrameRow<>0 : ProcedureReturn : EndIf
   CompilerEndIf
@@ -783,7 +783,7 @@ ProcedureRAM PpuBeginLine()
 EndProcedure
 ProcedureRAM PpuSendLine()
   If PpuLine=239
-    CompilerIf #NES_VIDEO_BACKEND=3
+    CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4
       If VideoFramePresent=0 : ProcedureReturn : EndIf
     CompilerEndIf
     DisplayFrame()

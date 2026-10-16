@@ -14,6 +14,13 @@ Video backend **3** selects the bundled ST7789 driver for Pimoroni Pico Display
 Pack 2.0. It is available on both Picos; see [selection, wiring and validation](DISPLAY-PACK2.md).
 `tools/build.ps1 -Target rp2350 -Display display-pack2` selects its standard wrapper.
 
+Video backend **4** selects a standalone ILI9341 on SPI1 for either chip.
+`tools/build.ps1 -Target rp2040 -Display ili9341` selects its bare-board wrapper
+(silent audio, USB controls). See [wiring, clocks and validation](ILI9341.md).
+The driver owns SPI1, DMA channel 0, GP10/11/12/13/16/17; do not share these
+resources with an audio or input plugin. Set `InputPhysicalEnabled=0` before
+`Main()` to disable the LAFVIN physical controls independently of video/audio.
+
 Both constants must be set before including `runtime`. The normal `demo` and
 verification wrappers select 1/1. Selecting 0 or 2 excludes that output's
 bundled hardware libraries and implementation, not merely its initialization.

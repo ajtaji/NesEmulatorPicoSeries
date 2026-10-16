@@ -22,7 +22,8 @@
 #ROMSTORE_MAX = 63
 Global RomCount.i, RomScanned.i, RomStoreEnabled.i=1
 Global Dim RomEntry.i(#ROMSTORE_MAX)
-Global Dim RomCrcTable.l(255)
+; PureMetal dimensions are element counts: CRC indices cover 0..255.
+Global Dim RomCrcTable.l(256)
 Global RomCrcReady.i
 Global Dim RomBuf.a(4096)
 Global Dim RomLine.a(80)

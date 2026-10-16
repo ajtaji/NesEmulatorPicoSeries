@@ -1,0 +1,108 @@
+; SPI/DMA path test. Does not emulate a game or initialize Bluetooth.
+; Controller ID requires the attached SPI1 display. VRAM dumps are exploratory,
+; not included in the pass count: this module returns FF for RAMRD.
+#NES_VIDEO_BACKEND=4
+#NES_AUDIO_BACKEND=0
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+Global WireChecks.i,WireFailures.i
+Procedure WireCheck(actual.i,expected.i)
+  WireChecks=WireChecks+1
+  If actual<>expected : WireFailures=WireFailures+1 : EndIf
+EndProcedure
+Procedure Ili9341DumpPixel(x.i,y.i,expected.i)
+  Protected n.i,value.i
+  ; Reading is slow regardless of the write-clock experiment.
+  SpiBegin(1,10,11,12,100)
+  Ili9341Command($D9) : SpiWrite8(1,$10) : Ili9341Pin(13,1)
+  Ili9341Command($2A)
+  SpiWrite8(1,(32+x)>>8) : SpiWrite8(1,32+x) : SpiWrite8(1,(32+x)>>8) : SpiWrite8(1,32+x)
+  Ili9341Command($2B)
+  SpiWrite8(1,y>>8) : SpiWrite8(1,y) : SpiWrite8(1,y>>8) : SpiWrite8(1,y)
+  Ili9341Command($2E)
+  Say("VRAM x=") : Num(x) : Say(" y=") : Num(y) : Say(" expected=") : Num(expected) : Say(" raw=")
+  For n=0 To 4
+    value=SpiWrite8(1,0)&255 : Num(value) : UsbSerialWrite(44)
+  Next
+  Ili9341Pin(13,1) : Eol()
+  SpiBegin(1,10,11,12,Ili9341SpiKhz)
+EndProcedure
+Procedure WireMain()
+  Protected n.i,index.i,t.i,start.i,result.i,elapsed.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  WaitUs(2000000) : FrameBottom=@FrameBottomStore(0)
+  VideoBegin()
+  Say("ILI9341 id=") : Num(Ili9341Id) : Eol() : WireCheck(Ili9341Id,$9341)
+  InputPhysicalEnabled=0 : InputHost=$A5 : InputPoll()
+  WireCheck(NesController,$A5) : WireCheck(InputMask,0) : WireCheck(InputPolls,0)
+  InputHost=0 : InputPoll() : WireCheck(NesController,0)
+  ; Alternate-frame presentation must not write into a frame owned by DMA.
+  Ili9341FrameDivider=2 : Ili9341FramePhase=0
+  FrameTop(0)=$1234 : FrameBottomStore(0)=$5678
+  PpuLine=0 : PpuBeginLine()
+  WireCheck(FrameRow,@Ili9341DiscardRow(0)) : WireCheck(VideoFramePresent,0)
+  PokeU(FrameRow,$ABCD) : PokeU(FrameRow+510,$ABCD)
+  WireCheck(FrameTop(0),$1234) : WireCheck(FrameBottomStore(0),$5678)
+  PpuLine=239 : PpuBeginLine() : WireCheck(FrameRow,@Ili9341DiscardRow(0))
+  PpuSendLine() : WireCheck(DisplayReady,0)
+  PpuLine=0 : PpuBeginLine() : WireCheck(FrameRow,@FrameTop(0)) : WireCheck(VideoFramePresent,1)
+  PpuLine=120 : PpuBeginLine() : WireCheck(FrameRow,FrameBottom)
+  WireCheck(VideoMenuPeriodUs(),33278)
+  Ili9341FrameDivider=1 : Ili9341FramePhase=0
+  PpuLine=0 : PpuBeginLine() : WireCheck(VideoFramePresent,1)
+  WireCheck(VideoMenuPeriodUs(),16639)
+  For index=0 To 30719
+    FrameTop(index)=$F800 : FrameBottomStore(index)=$001F
+  Next
+  start=Micros()
+  For n=0 To 9
+    WireCheck(VideoStart(@FrameTop(0),FrameBottom),1)
+    WireCheck(VideoStart(@FrameTop(0),FrameBottom),0)
+    t=Micros() : result=0
+    While result=0 And Micros()-t<1000000
+      result=VideoPoll() : SafetyPet() : UsbSerialTask()
+    Wend
+    WireCheck(result,1) : WireCheck(VideoState,0)
+    WireCheck(PeekL(#SPI_DMA_CH0_COUNT),0)
+    WireCheck(PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY,0)
+    WireCheck((PeekL($D0000010)>>13)&1,1)
+  Next
+  elapsed=Micros()-start
+  WireCheck(VideoCanWriteLine(0),0) : WireCheck(VideoCanWriteLine(239),0)
+  WireCheck(VideoStart(@FrameTop(0),FrameBottom),1) : VideoAbort()
+  WireCheck(VideoState,0) : WireCheck(PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY,0)
+  WireCheck(PeekL($40040024)&#SPI_SSPDMACR_TXDMAE,0)
+  WireCheck(PeekL($40040000)&15,7)
+  WireCheck((PeekL($D0000010)>>13)&1,1)
+  ; A gradient exercises native RGB565 ordering and both DMA half-buffers.
+  For index=0 To 61439
+    n=index&255 : t=index>>8
+    result=((n&31)<<11)|((t&63)<<5)|((n!t)&31)
+    If index<30720 : FrameTop(index)=result
+    Else : FrameBottomStore(index-30720)=result : EndIf
+  Next
+  WireCheck(VideoStart(@FrameTop(0),FrameBottom),1)
+  t=Micros() : result=0
+  While result=0 And Micros()-t<1000000 : result=VideoPoll() : SafetyPet() : UsbSerialTask() : Wend
+  WireCheck(result,1)
+  For index=0 To 11
+    n=(index*37+5)&255 : t=(index*53+17) % 240
+    result=((n&31)<<11)|((t&63)<<5)|((n!t)&31)
+    Ili9341DumpPixel(n,t,result)
+  Next
+  Say("ILI9341 wire checks=") : Num(WireChecks) : Say(" failures=") : Num(WireFailures)
+  Say(" spi_hz=") : Num(VideoClockHz()) : Say(" frames=10 us=") : Num(elapsed)
+  If WireFailures=0 : Say(" PASS") : Else : Say(" FAIL") : EndIf
+  Eol()
+  Repeat : UsbSerialTask() : SafetyPet() : ForEver
+EndProcedure
+WireMain()
