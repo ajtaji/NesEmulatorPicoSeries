@@ -29,7 +29,7 @@ if (!$Source) {
 } elseif ($PSBoundParameters.ContainsKey('Display')) {
     throw '-Display selects the standard wrapper; use -Source alone for custom wrappers.'
 }
-$sourceTarget = if ($Source.EndsWith('.pico2w')) { 'rp2350' } else { 'rp2040' }
+$sourceTarget = if ($Source -match '\.pico2w?$') { 'rp2350' } else { 'rp2040' }
 if ($PSBoundParameters.ContainsKey('Target') -and $Target -ne $sourceTarget) {
     throw '-Target does not match the source wrapper extension.'
 }
@@ -74,7 +74,7 @@ if ($VerifyNes) {
     if (!$Port) { throw '-VerifyNes requires -Port; compilation alone cannot pass verification.' }
 }
 if ($Port) {
-    $target = if ($sourcePath.EndsWith('.pico2w')) { 'rp2350' } else { 'rp2040' }
+    $target = if ($sourcePath -match '\.pico2w?$') { 'rp2350' } else { 'rp2040' }
     & py -3 (Join-Path $PSScriptRoot 'upload_pack.py') $outputPath --compiler $Compiler --port $Port --target $target
     if ($LASTEXITCODE -ne 0) { throw 'Validated firmware upload failed.' }
     $capturePath = $outputPath + '.board.log'

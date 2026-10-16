@@ -1,0 +1,79 @@
+; Standalone RP2350 display-register probe. No NES or wireless initialization.
+; Bare Pico: GP10 SCK, GP11 MOSI, GP12 MISO, GP13 CS, GP16 DC, GP17 RESET.
+; VCC=3V3 OUT, common GND; leave LED and SD-card header disconnected.
+; No traffic until USB 'i' (read) or 'r' (hardware reset, then read).
+EnableExplicit
+XIncludeFile "RP2350/Lib/clocks.pico2"
+XIncludeFile "RP2350/Lib/timer.pico2"
+XIncludeFile "RP2350/Lib/uart.pico2"
+XIncludeFile "RP2350/Lib/usb_serial.pico2"
+XIncludeFile "RP2350/Lib/safety.pico2"
+XIncludeFile "RP2350/Lib/bits.pico2"
+XIncludeFile "RP2350/Lib/wiring.pico2"
+XIncludeFile "RP2350/Lib/spi.pico2"
+XIncludeFile "../io.pico2"
+Global Dim ProbeBytes.a(8)
+Procedure ProbeHex(value.i)
+  Protected hi.i,lo.i
+  hi=(value>>4)&15 : lo=value&15
+  If hi<10 : UsbSerialWrite(48+hi) : Else : UsbSerialWrite(55+hi) : EndIf
+  If lo<10 : UsbSerialWrite(48+lo) : Else : UsbSerialWrite(55+lo) : EndIf
+EndProcedure
+Procedure ProbeReset()
+  digitalWrite(13,1) : digitalWrite(17,0) : WaitUs(20000)
+  digitalWrite(17,1) : WaitUs(150000)
+EndProcedure
+Procedure ProbeRead(command.i,count.i)
+  Protected n.i,value.i
+  SpiFlush(1)
+  digitalWrite(13,0) : digitalWrite(16,0)
+  SpiWrite8(1,command) : digitalWrite(16,1)
+  For n=0 To count-1
+    value=SpiWrite8(1,0) : ProbeBytes(n)=value&255
+  Next
+  digitalWrite(13,1)
+  Say("REG ") : ProbeHex(command) : Say(" raw=")
+  For n=0 To count-1
+    ProbeHex(ProbeBytes(n)) : UsbSerialWrite(32)
+  Next
+  Say("spi_error=") : Num(SpiError(1)) : Eol()
+EndProcedure
+Procedure ProbeSnapshot()
+  Protected attempt.i,matches.i
+  Say("DISPLAY_ID BEGIN; raw bytes include controller dummy clocks") : Eol()
+  For attempt=1 To 3
+    ProbeRead($D3,8)
+    If SpiError(1)=0 And ProbeBytes(1)=0 And ProbeBytes(2)=$93 And ProbeBytes(3)=$41
+      matches=matches+1
+    EndIf
+  Next
+  ProbeRead($04,8) : ProbeRead($09,8)
+  ProbeRead($DA,4) : ProbeRead($DB,4) : ProbeRead($DC,4)
+  If matches=3
+    Say("CANDIDATE ILI9341: D3 returned 00 93 41 consistently; verify panel separately")
+  Else
+    Say("UNCONFIRMED: preserve raw replies; all 00/FF is not a controller identification")
+  EndIf
+  Eol() : Say("DISPLAY_ID END") : Eol()
+EndProcedure
+Procedure ProbeMain()
+  Protected key.i,wasReady.i,ready.i
+  SafetyBoot() : ClockInitKhz(125000) : TimerInit() : UsbSerialInit()
+  ; Set inactive levels before switching these GPIOs into output mode.
+  digitalWrite(13,1) : digitalWrite(16,1) : digitalWrite(17,1)
+  pinMode(13,#OUTPUT) : pinMode(16,#OUTPUT) : pinMode(17,#OUTPUT)
+  pinMode(12,#INPUT_PULLUP)
+  SpiBegin(1,10,11,12,100)
+  Repeat
+    UsbSerialTask() : SafetyPet() : ready=UsbSerialReady()
+    If ready<>0 And wasReady=0
+      Say("DISPLAY_ID RP2350 SPI1 SCK=10 MOSI=11 MISO=12 CS=13 DC=16 RESET=17 hz=")
+      Num(SpiHz(1)) : Eol()
+      Say("Send i=read registers, r=hardware reset then read. No automatic display initialization.") : Eol()
+    EndIf
+    wasReady=ready : key=UsbSerialRead()
+    If key=105 : ProbeSnapshot()
+    ElseIf key=114 : ProbeReset() : ProbeSnapshot() : EndIf
+  ForEver
+EndProcedure
+ProbeMain()
