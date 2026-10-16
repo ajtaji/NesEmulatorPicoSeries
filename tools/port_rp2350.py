@@ -44,6 +44,8 @@ def port(text, name):
         text = text.replace('St7789FrameDivider.i=2', 'St7789FrameDivider.i=1')
     if name == 'st7789.picow':
         text = text.replace('$4003C024', '$40080024').replace('$4003C000', '$40080000')
+    if name == 'display_id.pico':
+        text = text.replace('Standalone RP2040', 'Standalone RP2350').replace('DISPLAY_ID RP2040', 'DISPLAY_ID RP2350')
     if name == 'math.pico':
         # All NES call sites divide nonnegative bounded timing/count values.
         # The RP2040 SIO divider does not exist on RP2350; M33 has native divide.
