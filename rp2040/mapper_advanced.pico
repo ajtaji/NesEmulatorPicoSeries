@@ -1,0 +1,348 @@
+; RP2350 cartridge windows. The original CPU fetch and pixel engines remain.
+ProcedureRAM.i PicoAdvancedSupported(mapper.i)
+  ProcedureReturn mapper=1 Or mapper=4 Or mapper=13 Or mapper=47 Or mapper=118 Or mapper=119 Or mapper=206
+EndProcedure
+ProcedureRAM.i PicoMmc3(mapper.i)
+  ProcedureReturn mapper=4 Or mapper=47 Or mapper=118 Or mapper=119
+EndProcedure
+ProcedureRAM PicoPrgMap(slot.i,bank.i)
+  Protected bias.i,started.i
+  If CartMapper=47 : bank=(bank&15)|(PicoOuter<<4) : EndIf
+  bank=bank&((PicoPrgBytes/8192)-1)
+  If PicoPrgSlots(slot)<>bank
+    started=Micros() : bias=CartPrg+bank*8192-$8000-slot*8192
+    PicoPrgBiases(slot)=bias : PicoPrgSlots(slot)=bank : PicoPrgChanged=1
+    If PicoPrgFenceNeeded
+      ; Immutable bank views: earlier DMC work reads the old worker mapping;
+      ; this timestamped event changes only the worker's subsequent reads.
+      NesPost(6,slot,bias,PicoBankStamp)
+    Else
+      PicoWorkerBiases(slot)=bias
+    EndIf
+    PicoPrgCopyUs=PicoPrgCopyUs+Micros()-started : PicoPrgCopies=PicoPrgCopies+1
+  EndIf
+EndProcedure
+ProcedureRAM PicoChrMap(slot.i,bank.i)
+  Protected tag.i,raw.i,bits.i,started.i
+  If CartMapper=47 : bank=(bank&127)|(PicoOuter<<7) : EndIf
+  If CartChrRam Or (CartMapper=119 And (bank&64)<>0)
+    bank=bank&((PicoChrRamBytes/1024)-1) : tag=256+bank
+    raw=@PicoChrRam(bank*1024) : bits=@PicoChrRamDecoded(bank*1024)
+  Else
+    bank=bank&((PicoChrBytes/1024)-1) : tag=bank
+    raw=CartChr+bank*1024 : bits=PicoChrDecoded+bank*1024
+  EndIf
+  If PicoChrSlots(slot)<>tag
+    started=Micros()
+    PicoCopy((@Decoded(0)+8192)+slot*1024,raw,1024)
+    PicoCopy(@Decoded(0)+slot*1024,bits,1024)
+    PicoChrSlots(slot)=tag : PicoInvalidateChr()
+    PicoChrCopyUs=PicoChrCopyUs+Micros()-started : PicoChrCopies=PicoChrCopies+1
+  EndIf
+EndProcedure
+ProcedureRAM PicoTxMirror()
+  Protected table.i,page.i,i.i
+  For table=0 To 3
+    If PicoSelect&128 : page=(PicoRegs(table+2)>>7)&1
+    Else : page=(PicoRegs(table/2)>>7)&1 : EndIf
+    If PicoNtSlots(table)<>page
+      PicoNtSlots(table)=page
+      PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+page*1024,1024)
+      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+page*2048,2048)
+      BgCacheAddr=-1 : RgbLastKey=-1
+    EndIf
+  Next
+EndProcedure
+ProcedureRAM PicoMmc3PrgUpdate()
+  Protected bank.i
+    bank=PicoRegs(6)&63
+    If (PicoSelect&64)<>0 And CartMapper<>206
+      PicoPrgMap(0,PicoPrgBytes/8192-2) : PicoPrgMap(2,bank)
+    Else
+      PicoPrgMap(0,bank) : PicoPrgMap(2,PicoPrgBytes/8192-2)
+    EndIf
+    PicoPrgMap(1,PicoRegs(7)&63) : PicoPrgMap(3,PicoPrgBytes/8192-1)
+EndProcedure
+ProcedureRAM PicoMmc3ChrUpdate()
+  Protected base.i,i.i
+    base=0 : If (PicoSelect&128)<>0 And CartMapper<>206 : base=4 : EndIf
+    PicoChrMap(base,PicoRegs(0)&254) : PicoChrMap(base+1,PicoRegs(0)|1)
+    PicoChrMap(base+2,PicoRegs(1)&254) : PicoChrMap(base+3,PicoRegs(1)|1)
+    base=base!4
+    For i=0 To 3 : PicoChrMap(base+i,PicoRegs(i+2)) : Next
+    If CartMapper=118 : PicoTxMirror() : EndIf
+EndProcedure
+ProcedureRAM PicoAdvancedUpdate()
+  Protected i.i,bank.i,mode.i,mirror.i
+  If CartMapper=1
+    mode=(PicoControl>>2)&3 : bank=PicoPrgReg&15
+    If mode<2
+      For i=0 To 3 : PicoPrgMap(i,(bank&14)*2+i) : Next
+    ElseIf mode=2
+      PicoPrgMap(0,0) : PicoPrgMap(1,1) : PicoPrgMap(2,bank*2) : PicoPrgMap(3,bank*2+1)
+    Else
+      PicoPrgMap(0,bank*2) : PicoPrgMap(1,bank*2+1)
+      PicoPrgMap(2,PicoPrgBytes/8192-2) : PicoPrgMap(3,PicoPrgBytes/8192-1)
+    EndIf
+    For i=0 To 7
+      bank=(PicoChrLow&30)*4+i
+      If PicoControl&16
+        If i<4 : bank=PicoChrLow*4+i : Else : bank=PicoChrHigh*4+i-4 : EndIf
+      EndIf
+      PicoChrMap(i,bank)
+    Next
+    mirror=PicoControl&3
+    If mirror<2 : mirror=mirror+2 : Else : mirror=(mirror&1)!1 : EndIf
+    PicoMirrorSet(mirror) : PicoRamEnable=(PicoPrgReg&16)=0
+  ElseIf CartMapper=13
+    For i=0 To 3
+      PicoPrgMap(i,i) : PicoChrMap(i,i) : PicoChrMap(i+4,(PicoChrLow&3)*4+i)
+    Next
+  Else
+    PicoMmc3PrgUpdate() : PicoMmc3ChrUpdate()
+  EndIf
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=(@Decoded(0)+8192) : Pattern=@Decoded(0) : ChrWritable=1
+EndProcedure
+Procedure PicoAdvancedInit()
+  Protected i.i
+  PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
+  PicoControl=12 : PicoShift=16 : PicoChrLow=0 : PicoChrHigh=0 : PicoPrgReg=0 : PicoLastWrite=-10
+  PicoSelect=0 : PicoIrq=0 : PicoIrqEnable=0 : PicoIrqLatch=0 : PicoIrqCount=0 : PicoIrqReload=0
+  PicoDots=0 : PicoA12High=0 : PicoLowSince=0 : PicoSpriteBits=255
+  PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoIrqDot=0 : PicoChrRamBytes=8192
+  If CartMapper=13 : PicoChrRamBytes=16384 : PicoMirrorSet(1) : EndIf
+  For i=0 To 7 : PicoRegs(i)=0 : PicoChrSlots(i)=-1 : Next
+  PicoRegs(1)=2 : PicoRegs(2)=4 : PicoRegs(3)=5 : PicoRegs(4)=6 : PicoRegs(5)=7 : PicoRegs(7)=1
+  For i=0 To 3 : PicoPrgSlots(i)=-1 : Next
+  For i=0 To 8191 : PicoPrgRam(i)=0 : Next
+  For i=0 To 16383 : PicoChrRam(i)=0 : PicoChrRamDecoded(i)=0 : Next
+  PicoRamEnable=1 : If CartMapper=13 Or CartMapper=206 : PicoRamEnable=0 : EndIf
+  PicoAdvancedUpdate()
+EndProcedure
+ProcedureRAM PicoAdvancedWrite(addr.i,value.i,stamp.i)
+  Protected commit.i,syncPpu.i
+  ; RAM writes do not alter PPU mapping or the DMC's $8000-$FFFF bus.
+  If addr<$8000 And CartMapper<>47
+    If addr>=$6000 And PicoRamEnable And PicoRamPresent And PicoRamProtect=0
+      PicoPrgRam(addr&8191)=value
+    EndIf
+    ProcedureReturn
+  EndIf
+  syncPpu=1
+  If PicoMmc3(CartMapper) Or CartMapper=206
+    If addr>=$8000 And addr<$A000
+      If addr&1
+        commit=PicoSelect&7
+        If commit>=6 Or PicoRegs(commit)=value : syncPpu=0 : EndIf
+      Else
+        If CartMapper=206 Or ((PicoSelect!value)&128)=0 : syncPpu=0 : EndIf
+      EndIf
+    ElseIf (addr&$E001)=$A001 : syncPpu=0
+    EndIf
+  EndIf
+  If syncPpu : PpuSync(stamp) : EndIf
+  ; PRG switches publish timestamped worker page events, with no mutable copy.
+  PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
+  If CartMapper=13
+    If addr>=$8000 : PicoChrLow=value&3 : PicoAdvancedUpdate() : EndIf
+  ElseIf CartMapper=206
+    If addr>=$8000
+      If addr&1
+        commit=PicoSelect&7 : value=value&63
+        If PicoRegs(commit)<>value
+          PicoRegs(commit)=value
+          If commit<6 : PicoMmc3ChrUpdate() : Else : PicoMmc3PrgUpdate() : EndIf
+        EndIf
+      Else : PicoSelect=value&7 : EndIf
+    EndIf
+  ElseIf addr<$8000
+    If addr>=$6000
+      If CartMapper=47
+        If PicoRamEnable And PicoRamProtect=0 : PicoOuter=value&1 : PicoAdvancedUpdate() : EndIf
+      ElseIf PicoRamEnable And PicoRamPresent And PicoRamProtect=0
+        PicoPrgRam(addr&8191)=value
+      EndIf
+    EndIf
+  ElseIf CartMapper=1
+    commit=stamp-PicoLastWrite : PicoLastWrite=stamp
+    If commit=1 And (value&128)=0 : PicoPrgFenceNeeded=0 : CpuEndWindow() : ProcedureReturn : EndIf
+    If value&128 : PicoShift=16 : PicoControl=PicoControl|12 : PicoAdvancedUpdate()
+    Else
+      commit=PicoShift&1 : PicoShift=(PicoShift>>1)|((value&1)<<4)
+      If commit
+        If addr<$A000 : PicoControl=PicoShift
+        ElseIf addr<$C000 : PicoChrLow=PicoShift
+        ElseIf addr<$E000 : PicoChrHigh=PicoShift
+        Else : PicoPrgReg=PicoShift : EndIf
+        PicoShift=16 : PicoAdvancedUpdate()
+      EndIf
+    EndIf
+  Else
+    Select addr&$E001
+      Case $8000
+        commit=PicoSelect!value : PicoSelect=value
+        If commit&64 : PicoMmc3PrgUpdate() : EndIf
+        If commit&128 : PicoMmc3ChrUpdate() : EndIf
+      Case $8001
+        commit=PicoSelect&7
+        If PicoRegs(commit)<>value
+          PicoRegs(commit)=value
+          If commit<6 : PicoMmc3ChrUpdate() : Else : PicoMmc3PrgUpdate() : EndIf
+        EndIf
+      Case $A000 : If CartMapper<>118 : PicoMirrorSet((value&1)!1) : EndIf
+      Case $A001 : PicoRamEnable=(value&128)<>0 : PicoRamProtect=(value&64)<>0
+      Case $C000 : PicoIrqLatch=value
+      Case $C001 : PicoIrqReload=1
+      Case $E000 : PicoIrqEnable=0 : PicoIrq=0
+      Case $E001 : PicoIrqEnable=1
+    EndSelect
+  EndIf
+  PicoPrgFenceNeeded=0
+  If WorkerNmi<>NesSeenNmi Or (PicoMmc3(CartMapper) And addr>=$C000)
+    CpuEndWindow()
+  EndIf
+EndProcedure
+Procedure PicoAdvancedChrWrite(addr.i,value.i)
+  Protected tag.i,offset.i,row.i,bits.i,slot.i
+  tag=PicoChrSlots(addr>>10)
+  If tag<256 : ProcedureReturn : EndIf
+  offset=(tag-256)*1024+(addr&1023)
+  PicoChrRam(offset)=value : PokeA(Chr+addr,value) : PpuDecode(addr)
+  row=(addr&$1FF0)+(addr&7)*2 : bits=PeekU(Pattern+row)
+  PokeU(@PicoChrRamDecoded((tag-256)*1024)+(row&1023),bits)
+  For slot=0 To 7
+    If PicoChrSlots(slot)=tag
+      PokeA(Chr+slot*1024+(addr&1023),value)
+      PokeU(Pattern+slot*1024+(row&1023),bits)
+    EndIf
+  Next
+  PicoInvalidateChr()
+EndProcedure
+ProcedureRAM PicoA12(addr.i,dot.i)
+  Protected high.i
+  high=(addr&$1000)<>0
+  If high<>PicoA12High
+    If high=0 : PicoLowSince=dot
+    ElseIf dot-PicoLowSince>=10
+      PicoIrqClocks=PicoIrqClocks+1
+      If PicoIrqCount=0 Or PicoIrqReload : PicoIrqCount=PicoIrqLatch
+      Else : PicoIrqCount=PicoIrqCount-1 : EndIf
+      PicoIrqReload=0
+      If PicoIrqCount=0 And PicoIrqEnable
+        If PicoIrq=0 : PicoIrqAssertions=PicoIrqAssertions+1 : PicoIrqDot=dot : EndIf
+        PicoIrq=1
+      EndIf
+    EndIf
+    PicoA12High=high
+  EndIf
+EndProcedure
+ProcedureRAM PicoSpriteFetch(line.i)
+  Protected i.i,n.i,nextLine.i,first.i,sprite.i
+  PicoSpriteBits=0
+  If (PpuCtrl&32)=0
+    If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
+    ProcedureReturn
+  EndIf
+  PicoSpriteBits=255 : nextLine=line+1 : If line=261 : nextLine=0 : EndIf
+  If nextLine<240
+    ; Reuse the renderer's physical OAM evaluation. A second 64-sprite scan
+    ; on every line dominated the mapper observer in 8x16-sprite games.
+    If OamCacheDirty : PpuBuildSpriteCache() : EndIf
+    n=CachedCount(nextLine) : If n>8 : n=8 : EndIf
+    For i=0 To n-1
+      sprite=CachedSprite(nextLine*8+i)
+      If (Oam(sprite*4+1)&1)=0 : PicoSpriteBits=PicoSpriteBits&($FF!(1<<i)) : EndIf
+    Next
+    ProcedureReturn
+  EndIf
+  ; Native visible-row cache stops at 239; fetches on line 239 evaluate 240.
+  For i=0 To 63
+    first=Oam(i*4)+1
+    If nextLine>=first And nextLine<first+16
+      If (Oam(i*4+1)&1)=0 : PicoSpriteBits=PicoSpriteBits&($FF!(1<<n)) : EndIf
+      n=n+1 : If n=8 : Break : EndIf
+    EndIf
+  Next
+EndProcedure
+ProcedureRAM PicoMmc3Ticks(cycles.i)
+  Protected remaining.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
+  Protected region.i,high.i,targetDot.i,lastLow.i,firstHigh.i,firstLow.i,endDot.i
+  remaining=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While remaining>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    ; With 8x8 sprites both pattern-table selections are fixed. Across a
+    ; complete rendered scanline, only the first high fetch after a long
+    ; low gap can clock MMC3; all intervening low pulses are four dots.
+    If dot=0 And remaining>=width And (PpuCtrl&32)=0 And (PpuMask&24)<>0 And (line<240 Or line=261)
+      PicoA12(0,PicoDots+1)
+      If PpuCtrl&16
+        PicoA12($1000,PicoDots+5)
+        If (PpuCtrl&8)=0
+          PicoA12(0,PicoDots+257) : PicoA12($1000,PicoDots+325)
+        EndIf
+        PicoA12(0,PicoDots+337)
+      ElseIf PpuCtrl&8
+        PicoA12($1000,PicoDots+261) : PicoA12(0,PicoDots+321)
+      EndIf
+      PicoSpriteBits=0 : If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
+      PicoDots=PicoDots+width : remaining=remaining-width
+      line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Continue
+    EndIf
+    region=0 : high=0
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      If dot<257 : region=1 : high=(PpuCtrl&16)<>0
+      ElseIf dot<321 : region=2 : high=PicoSpriteBits=255
+      ElseIf dot<337 : region=3 : high=(PpuCtrl&16)<>0 : EndIf
+    EndIf
+    ; In a constant-high pattern region, only the first high fetch can
+    ; follow a qualifying low interval. Later low pulses are four dots.
+    ; Evaluate that first edge, then preserve the exact final electrical
+    ; level and last falling edge analytically.
+    If high
+      targetDot=336 : If region=1 : targetDot=256 : ElseIf region=2 : targetDot=320 : EndIf
+      step=targetDot-dot : If step>remaining : step=remaining : EndIf
+      If step>0
+        endDot=dot+step
+        firstLow=((dot+7)&$FFFFFFF8)+1
+        firstHigh=((dot+3)&$FFFFFFF8)+5
+        If firstLow<firstHigh And firstLow<=endDot : PicoA12(0,PicoDots+firstLow-dot) : EndIf
+        If firstHigh<=endDot : PicoA12($1000,PicoDots+firstHigh-dot) : EndIf
+        lastLow=((endDot-1)&$FFFFFFF8)+1
+        If lastLow>firstHigh And lastLow<=endDot : PicoLowSince=PicoDots+lastLow-dot : EndIf
+        edge=((endDot-1)&$FFFFFFFC)+1
+        If edge>dot : PicoA12High=(edge&7)=5 : EndIf
+        dot=endDot : remaining=remaining-step : PicoDots=PicoDots+step
+        Continue
+      EndIf
+    EndIf
+    edge=width
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      If dot<337
+        If dot=0 : edge=1 : Else : edge=((dot-1)&$FFFFFFFC)+5 : EndIf
+        If (PpuCtrl&16)=0 And PicoA12High=0
+          If dot<257 : edge=257 : ElseIf dot>=321 : edge=337 : EndIf
+        EndIf
+        ; A whole sprite fetch interval can stay on pattern table zero.
+        If dot>=257 And dot<321 And PicoSpriteBits=0 And PicoA12High=0 : edge=321 : EndIf
+      EndIf
+    EndIf
+    step=edge-dot : If step>remaining : step=remaining : EndIf
+    dot=dot+step : remaining=remaining-step : PicoDots=PicoDots+step
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot=257 : PicoSpriteFetch(line) : EndIf
+        If (dot&7)=5
+          If dot<257 Or dot>=321 : addr=(PpuCtrl&16)<<8
+          ElseIf (PicoSpriteBits&(1<<((dot-261)>>3)))<>0 : addr=$1000 : EndIf
+        EndIf
+        PicoA12(addr,PicoDots)
+      EndIf
+    EndIf
+  Wend
+EndProcedure
+

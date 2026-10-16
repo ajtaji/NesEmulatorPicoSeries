@@ -21,6 +21,7 @@ Global NesInstructions.i, Opnd.i
 Global PpuStatusDeadline.i, PpuStatusBits.i, NesPollPtr.i, NesPollCount.i, NesPollCycles.i
 Global NesIdleEnabled.i=1, NesIdleExtra.i, NesIdleBatched.i
 Global NesOpenBus.i
+Global CpuIrqDelay.i
 Global PrgBase.i, PrgBias.i
 ReserveRegister PC = r8, A = r9, Res = r10, Left = r11
 
@@ -1138,7 +1139,8 @@ __cpu_ifd_19:
   NextOp(5)
 Op28: ; $28 PLP imp
   Pop(Tmp)
-  CpuSetStatus(Tmp)
+  CpuIrqDelay=FI : CpuSetStatus(Tmp)
+  Budget=Budget-Left : Left=0
   NextOp(4)
 Op29: ; $29 AND imm
   ASM Uses PC
@@ -1705,6 +1707,7 @@ Op40: ; $40 RTI imp
   Pop(Lo)
   Pop(Hi)
   PC = Lo | (Hi << 8)
+  CpuIrqDelay=0 : Budget=Budget-Left : Left=0
   NextOp(6)
 Op41: ; $41 EOR inx
   AccessPhase = 5
@@ -2172,7 +2175,8 @@ __cpu_ifd_41:
   M(Ea) = Res : NesOpenBus = Res
   NextOp(6)
 Op58: ; $58 CLI imp
-  FI = 0
+  CpuIrqDelay=FI : FI = 0
+  Budget=Budget-Left : Left=0
   NextOp(2)
 Op59: ; $59 EOR aby
   AccessPhase = 3

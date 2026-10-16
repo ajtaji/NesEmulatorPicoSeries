@@ -21,7 +21,10 @@ Global NesInstructions.i, Opnd.i
 Global PpuStatusDeadline.i, PpuStatusBits.i, NesPollPtr.i, NesPollCount.i, NesPollCycles.i
 Global NesIdleEnabled.i=1, NesIdleExtra.i, NesIdleBatched.i
 Global NesOpenBus.i
+Global CpuIrqDelay.i
 Global PrgBase.i, PrgBias.i
+Global PicoPrgPaged.i,PagedReady.i
+Global Dim DispatchPaged.Label(256)
 ReserveRegister PC = r8, A = r9, Res = r10, Left = r11
 
 ; N is bit 7 of FN; Z means low byte of FZ is zero.
@@ -102,7 +105,7 @@ Procedure.i CpuInterrupt(vector.i)
   ProcedureReturn 1
 EndProcedure
 
-ProcedureRAM.i CpuRun(n.i)
+ProcedureRAM.i CpuRunFlat(n.i)
 ; Each opcode owns its tail. Assembly only implements computed dispatch;
 ; operands and instruction semantics remain in checked PureMetal source.
 Macro DispatchNext()
@@ -111,7 +114,7 @@ Macro DispatchNext()
       mov r0, r8
       ldr r1, =$8000
       cmp r0, r1
-      blo __ul_cpurun_slowfetch
+      blo __ul_cpurunflat_slowfetch
       ldr r1, =global_prgbias
       ldr r1, [r1]
       ldrb r2, [r1, r0]
@@ -1138,7 +1141,8 @@ __cpu_ifd_19:
   NextOp(5)
 Op28: ; $28 PLP imp
   Pop(Tmp)
-  CpuSetStatus(Tmp)
+  CpuIrqDelay=FI : CpuSetStatus(Tmp)
+  Budget=Budget-Left : Left=0
   NextOp(4)
 Op29: ; $29 AND imm
   ASM Uses PC
@@ -1705,6 +1709,7 @@ Op40: ; $40 RTI imp
   Pop(Lo)
   Pop(Hi)
   PC = Lo | (Hi << 8)
+  CpuIrqDelay=0 : Budget=Budget-Left : Left=0
   NextOp(6)
 Op41: ; $41 EOR inx
   AccessPhase = 5
@@ -2172,7 +2177,8 @@ __cpu_ifd_41:
   M(Ea) = Res : NesOpenBus = Res
   NextOp(6)
 Op58: ; $58 CLI imp
-  FI = 0
+  CpuIrqDelay=FI : FI = 0
+  Budget=Budget-Left : Left=0
   NextOp(2)
 Op59: ; $59 EOR aby
   AccessPhase = 3
@@ -5903,4 +5909,6446 @@ Done:
   CpuCycles = NesRunStart + Budget - Left
   CpuInWindow = 0
   ProcedureReturn CpuCycles - NesRunStart
+EndProcedure
+
+ProcedureRAM.i CpuRunPaged(n.i)
+; Each opcode owns its tail. Assembly only implements computed dispatch;
+; operands and instruction semantics remain in checked PureMetal source.
+Macro PagedDispatchNext()
+  CompilerIf #CPU_ASM_TAIL = 1
+    ASM Uses PC
+      mov r0, r8
+      ldr r1, =$8000
+      cmp r0, r1
+      blo __ul_cpurunpaged_slowfetch
+      lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+      ldrb r2, [r1, r0]
+      adds r0, #1
+      lsls r0, r0, #16
+      lsrs r0, r0, #16
+      mov r8, r0
+      lsls r2, r2, #2
+      ldr r1, =global_dispatchpaged
+      ldr r1, [r1, r2]
+      bx r1
+    EndASM
+  CompilerElse
+    Tmp = NesRead(PC)
+    PC = (PC + 1) & $FFFF
+    Goto DispatchPaged(Tmp)
+  CompilerEndIf
+EndMacro
+Macro PagedNextOp(c)
+  Tick(c)
+  If Left <= 0
+    Goto Done
+  EndIf
+  PagedDispatchNext()
+EndMacro
+  If n <= 0
+    ProcedureReturn 0
+  EndIf
+  If Stopped
+    ProcedureReturn 0
+  EndIf
+  If PagedReady = 0
+    For InitIndex = 0 To 255
+      DispatchPaged(InitIndex) = ?Illegal
+    Next
+    DispatchPaged($00) = ?Op00
+    DispatchPaged($01) = ?Op01
+    DispatchPaged($05) = ?Op05
+    DispatchPaged($06) = ?Op06
+    DispatchPaged($08) = ?Op08
+    DispatchPaged($09) = ?Op09
+    DispatchPaged($0A) = ?Op0A
+    DispatchPaged($0D) = ?Op0D
+    DispatchPaged($0E) = ?Op0E
+    DispatchPaged($10) = ?Op10
+    DispatchPaged($11) = ?Op11
+    DispatchPaged($15) = ?Op15
+    DispatchPaged($16) = ?Op16
+    DispatchPaged($18) = ?Op18
+    DispatchPaged($19) = ?Op19
+    DispatchPaged($1D) = ?Op1D
+    DispatchPaged($1E) = ?Op1E
+    DispatchPaged($20) = ?Op20
+    DispatchPaged($21) = ?Op21
+    DispatchPaged($24) = ?Op24
+    DispatchPaged($25) = ?Op25
+    DispatchPaged($26) = ?Op26
+    DispatchPaged($28) = ?Op28
+    DispatchPaged($29) = ?Op29
+    DispatchPaged($2A) = ?Op2A
+    DispatchPaged($2C) = ?Op2C
+    DispatchPaged($2D) = ?Op2D
+    DispatchPaged($2E) = ?Op2E
+    DispatchPaged($30) = ?Op30
+    DispatchPaged($31) = ?Op31
+    DispatchPaged($35) = ?Op35
+    DispatchPaged($36) = ?Op36
+    DispatchPaged($38) = ?Op38
+    DispatchPaged($39) = ?Op39
+    DispatchPaged($3D) = ?Op3D
+    DispatchPaged($3E) = ?Op3E
+    DispatchPaged($40) = ?Op40
+    DispatchPaged($41) = ?Op41
+    DispatchPaged($45) = ?Op45
+    DispatchPaged($46) = ?Op46
+    DispatchPaged($48) = ?Op48
+    DispatchPaged($49) = ?Op49
+    DispatchPaged($4A) = ?Op4A
+    DispatchPaged($4C) = ?Op4C
+    DispatchPaged($4D) = ?Op4D
+    DispatchPaged($4E) = ?Op4E
+    DispatchPaged($50) = ?Op50
+    DispatchPaged($51) = ?Op51
+    DispatchPaged($55) = ?Op55
+    DispatchPaged($56) = ?Op56
+    DispatchPaged($58) = ?Op58
+    DispatchPaged($59) = ?Op59
+    DispatchPaged($5D) = ?Op5D
+    DispatchPaged($5E) = ?Op5E
+    DispatchPaged($60) = ?Op60
+    DispatchPaged($61) = ?Op61
+    DispatchPaged($65) = ?Op65
+    DispatchPaged($66) = ?Op66
+    DispatchPaged($68) = ?Op68
+    DispatchPaged($69) = ?Op69
+    DispatchPaged($6A) = ?Op6A
+    DispatchPaged($6C) = ?Op6C
+    DispatchPaged($6D) = ?Op6D
+    DispatchPaged($6E) = ?Op6E
+    DispatchPaged($70) = ?Op70
+    DispatchPaged($71) = ?Op71
+    DispatchPaged($75) = ?Op75
+    DispatchPaged($76) = ?Op76
+    DispatchPaged($78) = ?Op78
+    DispatchPaged($79) = ?Op79
+    DispatchPaged($7D) = ?Op7D
+    DispatchPaged($7E) = ?Op7E
+    DispatchPaged($81) = ?Op81
+    DispatchPaged($84) = ?Op84
+    DispatchPaged($85) = ?Op85
+    DispatchPaged($86) = ?Op86
+    DispatchPaged($88) = ?Op88
+    DispatchPaged($8A) = ?Op8A
+    DispatchPaged($8C) = ?Op8C
+    DispatchPaged($8D) = ?Op8D
+    DispatchPaged($8E) = ?Op8E
+    DispatchPaged($90) = ?Op90
+    DispatchPaged($91) = ?Op91
+    DispatchPaged($94) = ?Op94
+    DispatchPaged($95) = ?Op95
+    DispatchPaged($96) = ?Op96
+    DispatchPaged($98) = ?Op98
+    DispatchPaged($99) = ?Op99
+    DispatchPaged($9A) = ?Op9A
+    DispatchPaged($9D) = ?Op9D
+    DispatchPaged($A0) = ?OpA0
+    DispatchPaged($A1) = ?OpA1
+    DispatchPaged($A2) = ?OpA2
+    DispatchPaged($A4) = ?OpA4
+    DispatchPaged($A5) = ?OpA5
+    DispatchPaged($A6) = ?OpA6
+    DispatchPaged($A8) = ?OpA8
+    DispatchPaged($A9) = ?OpA9
+    DispatchPaged($AA) = ?OpAA
+    DispatchPaged($AC) = ?OpAC
+    DispatchPaged($AD) = ?OpAD
+    DispatchPaged($AE) = ?OpAE
+    DispatchPaged($B0) = ?OpB0
+    DispatchPaged($B1) = ?OpB1
+    DispatchPaged($B4) = ?OpB4
+    DispatchPaged($B5) = ?OpB5
+    DispatchPaged($B6) = ?OpB6
+    DispatchPaged($B8) = ?OpB8
+    DispatchPaged($B9) = ?OpB9
+    DispatchPaged($BA) = ?OpBA
+    DispatchPaged($BC) = ?OpBC
+    DispatchPaged($BD) = ?OpBD
+    DispatchPaged($BE) = ?OpBE
+    DispatchPaged($C0) = ?OpC0
+    DispatchPaged($C1) = ?OpC1
+    DispatchPaged($C4) = ?OpC4
+    DispatchPaged($C5) = ?OpC5
+    DispatchPaged($C6) = ?OpC6
+    DispatchPaged($C8) = ?OpC8
+    DispatchPaged($C9) = ?OpC9
+    DispatchPaged($CA) = ?OpCA
+    DispatchPaged($CC) = ?OpCC
+    DispatchPaged($CD) = ?OpCD
+    DispatchPaged($CE) = ?OpCE
+    DispatchPaged($D0) = ?OpD0
+    DispatchPaged($D1) = ?OpD1
+    DispatchPaged($D5) = ?OpD5
+    DispatchPaged($D6) = ?OpD6
+    DispatchPaged($D8) = ?OpD8
+    DispatchPaged($D9) = ?OpD9
+    DispatchPaged($DD) = ?OpDD
+    DispatchPaged($DE) = ?OpDE
+    DispatchPaged($E0) = ?OpE0
+    DispatchPaged($E1) = ?OpE1
+    DispatchPaged($E4) = ?OpE4
+    DispatchPaged($E5) = ?OpE5
+    DispatchPaged($E6) = ?OpE6
+    DispatchPaged($E8) = ?OpE8
+    DispatchPaged($E9) = ?OpE9
+    DispatchPaged($EA) = ?OpEA
+    DispatchPaged($EC) = ?OpEC
+    DispatchPaged($ED) = ?OpED
+    DispatchPaged($EE) = ?OpEE
+    DispatchPaged($F0) = ?OpF0
+    DispatchPaged($F1) = ?OpF1
+    DispatchPaged($F5) = ?OpF5
+    DispatchPaged($F6) = ?OpF6
+    DispatchPaged($F8) = ?OpF8
+    DispatchPaged($F9) = ?OpF9
+    DispatchPaged($FD) = ?OpFD
+    DispatchPaged($FE) = ?OpFE
+    PagedReady = 1
+  EndIf
+  If NesStall
+    CpuCycles = CpuCycles + NesStall
+    NesStall = 0
+  EndIf
+  NesRunStart = CpuCycles
+  CpuInWindow = 1
+  Budget = n
+  Left = n
+  PagedDispatchNext()
+SlowFetch:
+  Tmp = NesRead(PC)
+  PC = (PC + 1) & $FFFF
+  Goto DispatchPaged(Tmp)
+Illegal:
+  PC = (PC - 1) & $FFFF
+  BadOpcode = NesRead(PC)
+  Stopped = 1
+  Goto Done
+Op00: ; $00 BRK imp
+  PC = (PC + 1) & $FFFF
+  Push(PC >> 8)
+  Push(PC & 255)
+  Tmp = CpuStatus() | $10
+  Push(Tmp)
+  FI = 1
+  PC = NesRead($FFFE) | (NesRead($FFFF) << 8)
+  PagedNextOp(7)
+Op01: ; $01 ORA inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_1
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_1
+__pg_cpu_ifs_1:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_1:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_124
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_124
+__pg_cpu_irl_124:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_124
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_124
+__pg_cpu_irs_124:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_124:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(6)
+Op05: ; $05 ORA zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_2
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_2
+__pg_cpu_ifs_2:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_2:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(3)
+Op06: ; $06 ASL zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_3
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_3
+__pg_cpu_ifs_3:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_3:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+Op08: ; $08 PHP imp
+  Tmp = CpuStatus() | $10
+  Push(Tmp)
+  PagedNextOp(3)
+Op09: ; $09 ORA imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_4
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_4
+__pg_cpu_ifs_4:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_4:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  A = A | Opnd
+  NZ(A)
+  PagedNextOp(2)
+Op0A: ; $0A ASL acc
+  Res = A << 1
+  FC = Res
+  A = Res & 255
+  NZ(A)
+  PagedNextOp(2)
+Op0D: ; $0D ORA abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_5
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_5
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_5
+__pg_cpu_ias_5:
+    bl cpufetchaddressslow
+__pg_cpu_iad_5:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_125
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_125
+__pg_cpu_irl_125:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_125
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_125
+__pg_cpu_irs_125:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_125:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op0E: ; $0E ASL abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_6
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_6
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_6
+__pg_cpu_ias_6:
+    bl cpufetchaddressslow
+__pg_cpu_iad_6:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_126
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_126
+__pg_cpu_irl_126:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_126
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_126
+__pg_cpu_irs_126:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_126:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(6)
+Op10: ; $10 BPL rel
+  If (FN & $80) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_7
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_7
+__pg_cpu_ifs_7:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_7:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+Op11: ; $11 ORA iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_8
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_8
+__pg_cpu_ifs_8:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_8:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_127
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_127
+__pg_cpu_irl_127:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_127
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_127
+__pg_cpu_irs_127:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_127:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(5)
+Op15: ; $15 ORA zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_9
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_9
+__pg_cpu_ifs_9:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_9:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op16: ; $16 ASL zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_10
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_10
+__pg_cpu_ifs_10:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_10:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+Op18: ; $18 CLC imp
+  FC = 0
+  PagedNextOp(2)
+Op19: ; $19 ORA aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_11
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_11
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_11
+__pg_cpu_ias_11:
+    bl cpufetchaddressslow
+__pg_cpu_iad_11:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_128
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_128
+__pg_cpu_irl_128:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_128
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_128
+__pg_cpu_irs_128:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_128:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op1D: ; $1D ORA abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_12
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_12
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_12
+__pg_cpu_ias_12:
+    bl cpufetchaddressslow
+__pg_cpu_iad_12:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_129
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_129
+__pg_cpu_irl_129:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_129
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_129
+__pg_cpu_irs_129:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_129:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A | NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op1E: ; $1E ASL abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_13
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_13
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_13
+__pg_cpu_ias_13:
+    bl cpufetchaddressslow
+__pg_cpu_iad_13:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_130
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_130
+__pg_cpu_irl_130:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_130
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_130
+__pg_cpu_irs_130:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_130:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+Op20: ; $20 JSR abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_14
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_14
+__pg_cpu_ifs_14:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_14:
+    ldr r1, =global_lo
+    str r2, [r1]
+  EndASM
+  Push(PC >> 8)
+  Push(PC & 255)
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_15
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_15
+__pg_cpu_ifs_15:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_15:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  PC = Lo | (Opnd << 8)
+  PagedNextOp(6)
+Op21: ; $21 AND inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_16
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_16
+__pg_cpu_ifs_16:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_16:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_131
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_131
+__pg_cpu_irl_131:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_131
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_131
+__pg_cpu_irs_131:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_131:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(6)
+Op24: ; $24 BIT zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_17
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_17
+__pg_cpu_ifs_17:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_17:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  FN = Value
+  FV = Value << 1
+  FZ = A & Value
+  PagedNextOp(3)
+Op25: ; $25 AND zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_18
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_18
+__pg_cpu_ifs_18:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_18:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(3)
+Op26: ; $26 ROL zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_19
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_19
+__pg_cpu_ifs_19:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_19:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+Op28: ; $28 PLP imp
+  Pop(Tmp)
+  CpuIrqDelay=FI : CpuSetStatus(Tmp)
+  Budget=Budget-Left : Left=0
+  PagedNextOp(4)
+Op29: ; $29 AND imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_20
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_20
+__pg_cpu_ifs_20:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_20:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  A = A & Opnd
+  NZ(A)
+  PagedNextOp(2)
+Op2A: ; $2A ROL acc
+  Res = (A << 1) | ((FC >> 8) & 1)
+  FC = Res
+  A = Res & 255
+  NZ(A)
+  PagedNextOp(2)
+Op2C: ; $2C BIT abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_21
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_21
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_21
+__pg_cpu_ias_21:
+    bl cpufetchaddressslow
+__pg_cpu_iad_21:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_132
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_132
+__pg_cpu_irl_132:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_132
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_132
+__pg_cpu_irs_132:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_132:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  FN = Value
+  FV = Value << 1
+  FZ = A & Value
+  PagedNextOp(4)
+Op2D: ; $2D AND abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_22
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_22
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_22
+__pg_cpu_ias_22:
+    bl cpufetchaddressslow
+__pg_cpu_iad_22:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_133
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_133
+__pg_cpu_irl_133:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_133
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_133
+__pg_cpu_irs_133:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_133:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op2E: ; $2E ROL abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_23
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_23
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_23
+__pg_cpu_ias_23:
+    bl cpufetchaddressslow
+__pg_cpu_iad_23:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_134
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_134
+__pg_cpu_irl_134:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_134
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_134
+__pg_cpu_irs_134:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_134:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(6)
+Op30: ; $30 BMI rel
+  If (FN & $80) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_24
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_24
+__pg_cpu_ifs_24:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_24:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+Op31: ; $31 AND iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_25
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_25
+__pg_cpu_ifs_25:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_25:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_135
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_135
+__pg_cpu_irl_135:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_135
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_135
+__pg_cpu_irs_135:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_135:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(5)
+Op35: ; $35 AND zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_26
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_26
+__pg_cpu_ifs_26:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_26:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op36: ; $36 ROL zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_27
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_27
+__pg_cpu_ifs_27:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_27:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+Op38: ; $38 SEC imp
+  FC = $100
+  PagedNextOp(2)
+Op39: ; $39 AND aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_28
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_28
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_28
+__pg_cpu_ias_28:
+    bl cpufetchaddressslow
+__pg_cpu_iad_28:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_136
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_136
+__pg_cpu_irl_136:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_136
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_136
+__pg_cpu_irs_136:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_136:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op3D: ; $3D AND abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_29
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_29
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_29
+__pg_cpu_ias_29:
+    bl cpufetchaddressslow
+__pg_cpu_iad_29:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_137
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_137
+__pg_cpu_irl_137:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_137
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_137
+__pg_cpu_irs_137:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_137:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A & NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op3E: ; $3E ROL abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_30
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_30
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_30
+__pg_cpu_ias_30:
+    bl cpufetchaddressslow
+__pg_cpu_iad_30:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_138
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_138
+__pg_cpu_irl_138:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_138
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_138
+__pg_cpu_irs_138:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_138:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+Op40: ; $40 RTI imp
+  Pop(Tmp)
+  CpuSetStatus(Tmp)
+  Pop(Lo)
+  Pop(Hi)
+  PC = Lo | (Hi << 8)
+  CpuIrqDelay=0 : Budget=Budget-Left : Left=0
+  PagedNextOp(6)
+Op41: ; $41 EOR inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_31
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_31
+__pg_cpu_ifs_31:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_31:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_139
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_139
+__pg_cpu_irl_139:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_139
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_139
+__pg_cpu_irs_139:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_139:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(6)
+Op45: ; $45 EOR zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_32
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_32
+__pg_cpu_ifs_32:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_32:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(3)
+Op46: ; $46 LSR zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_33
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_33
+__pg_cpu_ifs_33:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_33:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+Op48: ; $48 PHA imp
+  Push(A)
+  PagedNextOp(3)
+Op49: ; $49 EOR imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_34
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_34
+__pg_cpu_ifs_34:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_34:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  A = A ! Opnd
+  NZ(A)
+  PagedNextOp(2)
+Op4A: ; $4A LSR acc
+  FC = A << 8
+  A = A >> 1
+  NZ(A)
+  PagedNextOp(2)
+Op4C: ; $4C JMP abs
+  AccessPhase = 2
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_35
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_35
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_35
+__pg_cpu_ias_35:
+    bl cpufetchaddressslow
+__pg_cpu_iad_35:
+  EndASM
+  If Ea=((PC-3)&$FFFF)
+  If NesIdleEnabled<>0 And Left>3 And NesStall=0 And (Ea<$1FFE Or Ea>=$8000)
+    NesIdleExtra=NesDiv(Left-1,3)
+    Left=Left-NesIdleExtra*3
+    NesInstructions=NesInstructions+NesIdleExtra
+    NesIdleBatched=NesIdleBatched+NesIdleExtra
+  EndIf
+  EndIf
+  PC = Ea
+  PagedNextOp(3)
+Op4D: ; $4D EOR abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_36
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_36
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_36
+__pg_cpu_ias_36:
+    bl cpufetchaddressslow
+__pg_cpu_iad_36:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_140
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_140
+__pg_cpu_irl_140:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_140
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_140
+__pg_cpu_irs_140:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_140:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op4E: ; $4E LSR abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_37
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_37
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_37
+__pg_cpu_ias_37:
+    bl cpufetchaddressslow
+__pg_cpu_iad_37:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_141
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_141
+__pg_cpu_irl_141:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_141
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_141
+__pg_cpu_irs_141:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_141:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(6)
+Op50: ; $50 BVC rel
+  If (FV & $80) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_38
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_38
+__pg_cpu_ifs_38:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_38:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+Op51: ; $51 EOR iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_39
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_39
+__pg_cpu_ifs_39:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_39:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_142
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_142
+__pg_cpu_irl_142:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_142
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_142
+__pg_cpu_irs_142:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_142:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(5)
+Op55: ; $55 EOR zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_40
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_40
+__pg_cpu_ifs_40:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_40:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op56: ; $56 LSR zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_41
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_41
+__pg_cpu_ifs_41:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_41:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+Op58: ; $58 CLI imp
+  CpuIrqDelay=FI : FI = 0
+  Budget=Budget-Left : Left=0
+  PagedNextOp(2)
+Op59: ; $59 EOR aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_42
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_42
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_42
+__pg_cpu_ias_42:
+    bl cpufetchaddressslow
+__pg_cpu_iad_42:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_143
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_143
+__pg_cpu_irl_143:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_143
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_143
+__pg_cpu_irs_143:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_143:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op5D: ; $5D EOR abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_43
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_43
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_43
+__pg_cpu_ias_43:
+    bl cpufetchaddressslow
+__pg_cpu_iad_43:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_144
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_144
+__pg_cpu_irl_144:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_144
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_144
+__pg_cpu_irs_144:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_144:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = A ! NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+Op5E: ; $5E LSR abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_44
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_44
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_44
+__pg_cpu_ias_44:
+    bl cpufetchaddressslow
+__pg_cpu_iad_44:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_145
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_145
+__pg_cpu_irl_145:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_145
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_145
+__pg_cpu_irs_145:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_145:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+Op60: ; $60 RTS imp
+  Pop(Lo)
+  Pop(Hi)
+  PC = ((Lo | (Hi << 8)) + 1) & $FFFF
+  PagedNextOp(6)
+Op61: ; $61 ADC inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_45
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_45
+__pg_cpu_ifs_45:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_45:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_146
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_146
+__pg_cpu_irl_146:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_146
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_146
+__pg_cpu_irs_146:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_146:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(6)
+Op65: ; $65 ADC zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_46
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_46
+__pg_cpu_ifs_46:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_46:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(3)
+Op66: ; $66 ROR zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_47
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_47
+__pg_cpu_ifs_47:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_47:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+Op68: ; $68 PLA imp
+  Pop(A)
+  NZ(A)
+  PagedNextOp(4)
+Op69: ; $69 ADC imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_48
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_48
+__pg_cpu_ifs_48:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_48:
+    ldr r1, =global_value
+    str r2, [r1]
+  EndASM
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(2)
+Op6A: ; $6A ROR acc
+  Res = (A >> 1) | ((FC >> 1) & $80)
+  FC = A << 8
+  A = Res
+  NZ(A)
+  PagedNextOp(2)
+Op6C: ; $6C JMP ind
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_49
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_49
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_49
+__pg_cpu_ias_49:
+    bl cpufetchaddressslow
+__pg_cpu_iad_49:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_147
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_147
+__pg_cpu_irl_147:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_147
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_147
+__pg_cpu_irs_147:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_147:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  PC = NesOpenBus | (NesRead((Ea & $FF00) | ((Ea + 1) & 255)) << 8)
+  PagedNextOp(5)
+Op6D: ; $6D ADC abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_50
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_50
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_50
+__pg_cpu_ias_50:
+    bl cpufetchaddressslow
+__pg_cpu_iad_50:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_148
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_148
+__pg_cpu_irl_148:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_148
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_148
+__pg_cpu_irs_148:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_148:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(4)
+Op6E: ; $6E ROR abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_51
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_51
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_51
+__pg_cpu_ias_51:
+    bl cpufetchaddressslow
+__pg_cpu_iad_51:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_149
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_149
+__pg_cpu_irl_149:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_149
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_149
+__pg_cpu_irs_149:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_149:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(6)
+Op70: ; $70 BVS rel
+  If (FV & $80) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_52
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_52
+__pg_cpu_ifs_52:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_52:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+Op71: ; $71 ADC iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_53
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_53
+__pg_cpu_ifs_53:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_53:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_150
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_150
+__pg_cpu_irl_150:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_150
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_150
+__pg_cpu_irs_150:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_150:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(5)
+Op75: ; $75 ADC zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_54
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_54
+__pg_cpu_ifs_54:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_54:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(4)
+Op76: ; $76 ROR zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_55
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_55
+__pg_cpu_ifs_55:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_55:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+Op78: ; $78 SEI imp
+  FI = 1
+  PagedNextOp(2)
+Op79: ; $79 ADC aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_56
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_56
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_56
+__pg_cpu_ias_56:
+    bl cpufetchaddressslow
+__pg_cpu_iad_56:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_151
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_151
+__pg_cpu_irl_151:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_151
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_151
+__pg_cpu_irs_151:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_151:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(4)
+Op7D: ; $7D ADC abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_57
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_57
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_57
+__pg_cpu_ias_57:
+    bl cpufetchaddressslow
+__pg_cpu_iad_57:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_152
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_152
+__pg_cpu_irl_152:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_152
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_152
+__pg_cpu_irs_152:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_152:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Res = A + Value + ((FC >> 8) & 1)
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  PagedNextOp(4)
+Op7E: ; $7E ROR abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_58
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_58
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_58
+__pg_cpu_ias_58:
+    bl cpufetchaddressslow
+__pg_cpu_iad_58:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_153
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_153
+__pg_cpu_irl_153:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_153
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_153
+__pg_cpu_irs_153:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_153:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+Op81: ; $81 STA inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_59
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_59
+__pg_cpu_ifs_59:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_59:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  If Ea<$2000
+    M(Ea&$7FF)=A : NesOpenBus=A
+  Else
+    NesWrite(Ea, A)
+  EndIf
+  PagedNextOp(6)
+Op84: ; $84 STY zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_60
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_60
+__pg_cpu_ifs_60:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_60:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  M(Ea) = Y : NesOpenBus = Y
+  PagedNextOp(3)
+Op85: ; $85 STA zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_61
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_61
+__pg_cpu_ifs_61:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_61:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  M(Ea) = A : NesOpenBus = A
+  PagedNextOp(3)
+Op86: ; $86 STX zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_62
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_62
+__pg_cpu_ifs_62:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_62:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  M(Ea) = X : NesOpenBus = X
+  PagedNextOp(3)
+Op88: ; $88 DEY imp
+  Y = (Y - 1) & 255
+  NZ(Y)
+  PagedNextOp(2)
+Op8A: ; $8A TXA imp
+  A = X
+  NZ(A)
+  PagedNextOp(2)
+Op8C: ; $8C STY abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_63
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_63
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_63
+__pg_cpu_ias_63:
+    bl cpufetchaddressslow
+__pg_cpu_iad_63:
+  EndASM
+  If Ea<$2000
+    M(Ea&$7FF)=Y : NesOpenBus=Y
+  Else
+    NesWrite(Ea, Y)
+  EndIf
+  PagedNextOp(4)
+Op8D: ; $8D STA abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_64
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_64
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_64
+__pg_cpu_ias_64:
+    bl cpufetchaddressslow
+__pg_cpu_iad_64:
+  EndASM
+  If Ea<$2000
+    M(Ea&$7FF)=A : NesOpenBus=A
+  Else
+    NesWrite(Ea, A)
+  EndIf
+  PagedNextOp(4)
+Op8E: ; $8E STX abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_65
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_65
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_65
+__pg_cpu_ias_65:
+    bl cpufetchaddressslow
+__pg_cpu_iad_65:
+  EndASM
+  If Ea<$2000
+    M(Ea&$7FF)=X : NesOpenBus=X
+  Else
+    NesWrite(Ea, X)
+  EndIf
+  PagedNextOp(4)
+Op90: ; $90 BCC rel
+  If (FC & $100) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_66
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_66
+__pg_cpu_ifs_66:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_66:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+Op91: ; $91 STA iny
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_67
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_67
+__pg_cpu_ifs_67:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_67:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Ea = (Ea + Y) & $FFFF
+  If Ea<$2000
+    M(Ea&$7FF)=A : NesOpenBus=A
+  Else
+    NesWrite(Ea, A)
+  EndIf
+  PagedNextOp(6)
+Op94: ; $94 STY zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_68
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_68
+__pg_cpu_ifs_68:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_68:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  M(Ea) = Y : NesOpenBus = Y
+  PagedNextOp(4)
+Op95: ; $95 STA zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_69
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_69
+__pg_cpu_ifs_69:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_69:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  M(Ea) = A : NesOpenBus = A
+  PagedNextOp(4)
+Op96: ; $96 STX zpy
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_70
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_70
+__pg_cpu_ifs_70:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_70:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + Y) & 255
+  M(Ea) = X : NesOpenBus = X
+  PagedNextOp(4)
+Op98: ; $98 TYA imp
+  A = Y
+  NZ(A)
+  PagedNextOp(2)
+Op99: ; $99 STA aby
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_71
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_71
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_71
+__pg_cpu_ias_71:
+    bl cpufetchaddressslow
+__pg_cpu_iad_71:
+  EndASM
+  Ea = (Ea + Y) & $FFFF
+  If Ea<$2000
+    M(Ea&$7FF)=A : NesOpenBus=A
+  Else
+    NesWrite(Ea, A)
+  EndIf
+  PagedNextOp(5)
+Op9A: ; $9A TXS imp
+  S = X
+  PagedNextOp(2)
+Op9D: ; $9D STA abx
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_72
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_72
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_72
+__pg_cpu_ias_72:
+    bl cpufetchaddressslow
+__pg_cpu_iad_72:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  If Ea<$2000
+    M(Ea&$7FF)=A : NesOpenBus=A
+  Else
+    NesWrite(Ea, A)
+  EndIf
+  PagedNextOp(5)
+OpA0: ; $A0 LDY imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_73
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_73
+__pg_cpu_ifs_73:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_73:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  Y = Opnd
+  NZ(Y)
+  PagedNextOp(2)
+OpA1: ; $A1 LDA inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_74
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_74
+__pg_cpu_ifs_74:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_74:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_154
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_154
+__pg_cpu_irl_154:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_154
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_154
+__pg_cpu_irs_154:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_154:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(6)
+OpA2: ; $A2 LDX imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_75
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_75
+__pg_cpu_ifs_75:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_75:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  X = Opnd
+  NZ(X)
+  PagedNextOp(2)
+OpA4: ; $A4 LDY zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_76
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_76
+__pg_cpu_ifs_76:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_76:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Y = NesOpenBus
+  NZ(Y)
+  PagedNextOp(3)
+OpA5: ; $A5 LDA zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_77
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_77
+__pg_cpu_ifs_77:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_77:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(3)
+OpA6: ; $A6 LDX zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_78
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_78
+__pg_cpu_ifs_78:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_78:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  X = NesOpenBus
+  NZ(X)
+  PagedNextOp(3)
+OpA8: ; $A8 TAY imp
+  Y = A
+  NZ(Y)
+  PagedNextOp(2)
+OpA9: ; $A9 LDA imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_79
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_79
+__pg_cpu_ifs_79:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_79:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  A = Opnd
+  NZ(A)
+  PagedNextOp(2)
+OpAA: ; $AA TAX imp
+  X = A
+  NZ(X)
+  PagedNextOp(2)
+OpAC: ; $AC LDY abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_80
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_80
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_80
+__pg_cpu_ias_80:
+    bl cpufetchaddressslow
+__pg_cpu_iad_80:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_155
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_155
+__pg_cpu_irl_155:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_155
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_155
+__pg_cpu_irs_155:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_155:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Y = NesOpenBus
+  NZ(Y)
+  PagedNextOp(4)
+OpAD: ; $AD LDA abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_81
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_81
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_81
+__pg_cpu_ias_81:
+    bl cpufetchaddressslow
+__pg_cpu_iad_81:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_156
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_156
+__pg_cpu_irl_156:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_156
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_156
+__pg_cpu_irs_156:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_156:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+OpAE: ; $AE LDX abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_82
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_82
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_82
+__pg_cpu_ias_82:
+    bl cpufetchaddressslow
+__pg_cpu_iad_82:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_157
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_157
+__pg_cpu_irl_157:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_157
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_157
+__pg_cpu_irs_157:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_157:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  X = NesOpenBus
+  NZ(X)
+  PagedNextOp(4)
+OpB0: ; $B0 BCS rel
+  If (FC & $100) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_83
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_83
+__pg_cpu_ifs_83:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_83:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  PagedNextOp(2)
+OpB1: ; $B1 LDA iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_84
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_84
+__pg_cpu_ifs_84:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_84:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_158
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_158
+__pg_cpu_irl_158:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_158
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_158
+__pg_cpu_irs_158:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_158:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(5)
+OpB4: ; $B4 LDY zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_85
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_85
+__pg_cpu_ifs_85:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_85:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Y = NesOpenBus
+  NZ(Y)
+  PagedNextOp(4)
+OpB5: ; $B5 LDA zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_86
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_86
+__pg_cpu_ifs_86:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_86:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+OpB6: ; $B6 LDX zpy
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_87
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_87
+__pg_cpu_ifs_87:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_87:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + Y) & 255
+  NesOpenBus = M(Ea)
+  X = NesOpenBus
+  NZ(X)
+  PagedNextOp(4)
+OpB8: ; $B8 CLV imp
+  FV = 0
+  PagedNextOp(2)
+OpB9: ; $B9 LDA aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_88
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_88
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_88
+__pg_cpu_ias_88:
+    bl cpufetchaddressslow
+__pg_cpu_iad_88:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_159
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_159
+__pg_cpu_irl_159:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_159
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_159
+__pg_cpu_irs_159:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_159:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+OpBA: ; $BA TSX imp
+  X = S
+  NZ(X)
+  PagedNextOp(2)
+OpBC: ; $BC LDY abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_89
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_89
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_89
+__pg_cpu_ias_89:
+    bl cpufetchaddressslow
+__pg_cpu_iad_89:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_160
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_160
+__pg_cpu_irl_160:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_160
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_160
+__pg_cpu_irs_160:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_160:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Y = NesOpenBus
+  NZ(Y)
+  PagedNextOp(4)
+OpBD: ; $BD LDA abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_90
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_90
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_90
+__pg_cpu_ias_90:
+    bl cpufetchaddressslow
+__pg_cpu_iad_90:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_161
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_161
+__pg_cpu_irl_161:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_161
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_161
+__pg_cpu_irs_161:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_161:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  A = NesOpenBus
+  NZ(A)
+  PagedNextOp(4)
+OpBE: ; $BE LDX aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_91
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_91
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_91
+__pg_cpu_ias_91:
+    bl cpufetchaddressslow
+__pg_cpu_iad_91:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_162
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_162
+__pg_cpu_irl_162:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_162
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_162
+__pg_cpu_irs_162:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_162:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  X = NesOpenBus
+  NZ(X)
+  PagedNextOp(4)
+OpC0: ; $C0 CPY imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_92
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_92
+__pg_cpu_ifs_92:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_92:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  Res = Y - Opnd
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(2)
+OpC1: ; $C1 CMP inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_93
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_93
+__pg_cpu_ifs_93:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_93:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_163
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_163
+__pg_cpu_irl_163:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_163
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_163
+__pg_cpu_irs_163:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_163:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(6)
+OpC4: ; $C4 CPY zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_94
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_94
+__pg_cpu_ifs_94:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_94:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Res = Y - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(3)
+OpC5: ; $C5 CMP zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_95
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_95
+__pg_cpu_ifs_95:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_95:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(3)
+OpC6: ; $C6 DEC zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_96
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_96
+__pg_cpu_ifs_96:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_96:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+OpC8: ; $C8 INY imp
+  Y = (Y + 1) & 255
+  NZ(Y)
+  PagedNextOp(2)
+OpC9: ; $C9 CMP imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_97
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_97
+__pg_cpu_ifs_97:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_97:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  Res = A - Opnd
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(2)
+OpCA: ; $CA DEX imp
+  X = (X - 1) & 255
+  NZ(X)
+  PagedNextOp(2)
+OpCC: ; $CC CPY abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_98
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_98
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_98
+__pg_cpu_ias_98:
+    bl cpufetchaddressslow
+__pg_cpu_iad_98:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_164
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_164
+__pg_cpu_irl_164:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_164
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_164
+__pg_cpu_irs_164:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_164:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = Y - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpCD: ; $CD CMP abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_99
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_99
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_99
+__pg_cpu_ias_99:
+    bl cpufetchaddressslow
+__pg_cpu_iad_99:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_165
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_165
+__pg_cpu_irl_165:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_165
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_165
+__pg_cpu_irs_165:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_165:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpCE: ; $CE DEC abs
+  AccessPhase = 2
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_100
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_100
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_100
+__pg_cpu_ias_100:
+    bl cpufetchaddressslow
+__pg_cpu_iad_100:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_166
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_166
+__pg_cpu_irl_166:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_166
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_166
+__pg_cpu_irs_166:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_166:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(3)
+OpD0: ; $D0 BNE rel
+  If (FZ & 255) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_101
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_101
+__pg_cpu_ifs_101:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_101:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  If Res=-6
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And X>0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFFA
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr)=$AD And PeekA(NesPollPtr+1)=2 And PeekA(NesPollPtr+2)=$20 And PeekA(NesPollPtr+3)=$E8 And PeekA(NesPollPtr+4)=$D0 And PeekA(NesPollPtr+5)=$FA
+      NesPollCycles=9
+      If (Base&$FF00)<>(PC&$FF00)
+        NesPollCycles=10
+      EndIf
+      NesPollCount=NesDiv(Left-3,NesPollCycles)
+      Tmp=NesDiv(PpuStatusDeadline-(NesRunStart+Budget-Left)+4,NesPollCycles)
+      If NesPollCount>Tmp
+        NesPollCount=Tmp
+      EndIf
+      If NesPollCount>255-X
+        NesPollCount=255-X
+      EndIf
+      If NesPollCount>0
+        Tick(NesPollCount*NesPollCycles)
+        NesInstructions=NesInstructions+NesPollCount*3
+        NesIdleBatched=NesIdleBatched+NesPollCount*3
+        A=NesPollStatusDone()
+        X=X+NesPollCount : FN=X : FZ=X : NesOpenBus=$FA
+      EndIf
+    EndIf
+  EndIf
+  EndIf
+  PagedNextOp(2)
+OpD1: ; $D1 CMP iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_102
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_102
+__pg_cpu_ifs_102:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_102:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_167
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_167
+__pg_cpu_irl_167:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_167
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_167
+__pg_cpu_irs_167:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_167:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(5)
+OpD5: ; $D5 CMP zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_103
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_103
+__pg_cpu_ifs_103:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_103:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpD6: ; $D6 DEC zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_104
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_104
+__pg_cpu_ifs_104:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_104:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+OpD8: ; $D8 CLD imp
+  FD = 0
+  PagedNextOp(2)
+OpD9: ; $D9 CMP aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_105
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_105
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_105
+__pg_cpu_ias_105:
+    bl cpufetchaddressslow
+__pg_cpu_iad_105:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_168
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_168
+__pg_cpu_irl_168:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_168
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_168
+__pg_cpu_irs_168:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_168:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpDD: ; $DD CMP abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_106
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_106
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_106
+__pg_cpu_ias_106:
+    bl cpufetchaddressslow
+__pg_cpu_iad_106:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_169
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_169
+__pg_cpu_irl_169:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_169
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_169
+__pg_cpu_irs_169:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_169:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = A - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpDE: ; $DE DEC abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_107
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_107
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_107
+__pg_cpu_ias_107:
+    bl cpufetchaddressslow
+__pg_cpu_iad_107:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_170
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_170
+__pg_cpu_irl_170:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_170
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_170
+__pg_cpu_irs_170:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_170:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+OpE0: ; $E0 CPX imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_108
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_108
+__pg_cpu_ifs_108:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_108:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+  Res = X - Opnd
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(2)
+OpE1: ; $E1 SBC inx
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_109
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_109
+__pg_cpu_ifs_109:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_109:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Tmp = (Tmp + X) & 255
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_171
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_171
+__pg_cpu_irl_171:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_171
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_171
+__pg_cpu_irs_171:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_171:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(6)
+OpE4: ; $E4 CPX zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_110
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_110
+__pg_cpu_ifs_110:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_110:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Res = X - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(3)
+OpE5: ; $E5 SBC zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_111
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_111
+__pg_cpu_ifs_111:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_111:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(3)
+OpE6: ; $E6 INC zpg
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_112
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_112
+__pg_cpu_ifs_112:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_112:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(5)
+OpE8: ; $E8 INX imp
+  X = (X + 1) & 255
+  NZ(X)
+  PagedNextOp(2)
+OpE9: ; $E9 SBC imm
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_113
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_113
+__pg_cpu_ifs_113:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_113:
+    ldr r1, =global_value
+    str r2, [r1]
+  EndASM
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(2)
+OpEA: ; $EA NOP imp
+  PagedNextOp(2)
+OpEC: ; $EC CPX abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_114
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_114
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_114
+__pg_cpu_ias_114:
+    bl cpufetchaddressslow
+__pg_cpu_iad_114:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_172
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_172
+__pg_cpu_irl_172:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_172
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_172
+__pg_cpu_irs_172:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_172:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Res = X - NesOpenBus
+  NZ(Res)
+  FC = ~Res
+  PagedNextOp(4)
+OpED: ; $ED SBC abs
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_115
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_115
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_115
+__pg_cpu_ias_115:
+    bl cpufetchaddressslow
+__pg_cpu_iad_115:
+  EndASM
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_173
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_173
+__pg_cpu_irl_173:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_173
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_173
+__pg_cpu_irs_173:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_173:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(4)
+OpEE: ; $EE INC abs
+  AccessPhase = 5
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_116
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_116
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_116
+__pg_cpu_ias_116:
+    bl cpufetchaddressslow
+__pg_cpu_iad_116:
+  EndASM
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_174
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_174
+__pg_cpu_irl_174:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_174
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_174
+__pg_cpu_irs_174:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_174:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(6)
+OpF0: ; $F0 BEQ rel
+  If (FZ & 255) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_117
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_117
+__pg_cpu_ifs_117:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_117:
+    ldr r1, =global_opnd
+    str r2, [r1]
+  EndASM
+    Res = (Opnd ! 128) - 128
+    PC = (PC + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Tick(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  If Res=-7
+  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And (PpuStatusBits&$40)=0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFF9
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr)=$AD And PeekA(NesPollPtr+1)=2 And PeekA(NesPollPtr+2)=$20 And PeekA(NesPollPtr+3)=$29 And PeekA(NesPollPtr+4)=$40 And PeekA(NesPollPtr+5)=$F0 And PeekA(NesPollPtr+6)=$F9
+      NesPollCycles=9
+      If (Base&$FF00)<>(PC&$FF00)
+        NesPollCycles=10
+      EndIf
+      NesPollCount=NesDiv(Left-3,NesPollCycles)
+      Tmp=NesDiv(PpuStatusDeadline-(NesRunStart+Budget-Left)+4,NesPollCycles)
+      If NesPollCount>Tmp
+        NesPollCount=Tmp
+      EndIf
+      If NesPollCount>0
+        Tick(NesPollCount*NesPollCycles)
+        NesInstructions=NesInstructions+NesPollCount*3
+        NesIdleBatched=NesIdleBatched+NesPollCount*3
+        NesPollStatusDone()
+        FN=0 : FZ=0 : NesOpenBus=$F9
+      EndIf
+    EndIf
+  EndIf
+  EndIf
+  If Res=-4
+  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And Left>9 And PC>=$8000 And PC<=$FFFC
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr)=$A5 And PeekA(NesPollPtr+2)=$F0 And PeekA(NesPollPtr+3)=$FC And M(PeekA(NesPollPtr+1))=0
+      NesPollCycles=6
+      If (Base&$FF00)<>(PC&$FF00)
+        NesPollCycles=7
+      EndIf
+      NesPollCount=NesDiv(Left-3,NesPollCycles)
+      Tick(NesPollCount*NesPollCycles)
+      NesInstructions=NesInstructions+NesPollCount*2
+      NesIdleBatched=NesIdleBatched+NesPollCount*2
+      FN=0 : FZ=0 : NesOpenBus=$FC
+    EndIf
+  EndIf
+  EndIf
+  PagedNextOp(2)
+OpF1: ; $F1 SBC iny
+  AccessPhase = 4
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_118
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_118
+__pg_cpu_ifs_118:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_118:
+    ldr r1, =global_tmp
+    str r2, [r1]
+  EndASM
+  Lo = M(Tmp) : Hi = M((Tmp + 1) & 255) : NesOpenBus = Hi
+  Ea = Lo | (Hi << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_175
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_175
+__pg_cpu_irl_175:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_175
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_175
+__pg_cpu_irs_175:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_175:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(5)
+OpF5: ; $F5 SBC zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_119
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_119
+__pg_cpu_ifs_119:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_119:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(4)
+OpF6: ; $F6 INC zpx
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ifs_120
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+    b __pg_cpu_ifd_120
+__pg_cpu_ifs_120:
+    bl cpufetchbyteslow
+    movs r2, r0
+__pg_cpu_ifd_120:
+    ldr r1, =global_ea
+    str r2, [r1]
+  EndASM
+  Ea = (Ea + X) & 255
+  NesOpenBus = M(Ea)
+  Value = NesOpenBus
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Value : NesOpenBus = Value
+  M(Ea) = Res : NesOpenBus = Res
+  PagedNextOp(6)
+OpF8: ; $F8 SED imp
+  FD = 1
+  PagedNextOp(2)
+OpF9: ; $F9 SBC aby
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_121
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_121
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_121
+__pg_cpu_ias_121:
+    bl cpufetchaddressslow
+__pg_cpu_iad_121:
+  EndASM
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_176
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_176
+__pg_cpu_irl_176:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_176
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_176
+__pg_cpu_irs_176:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_176:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(4)
+OpFD: ; $FD SBC abx
+  AccessPhase = 3
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_122
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_122
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_122
+__pg_cpu_ias_122:
+    bl cpufetchaddressslow
+__pg_cpu_iad_122:
+  EndASM
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_177
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_177
+__pg_cpu_irl_177:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_177
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_177
+__pg_cpu_irs_177:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_177:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+    A = Res & 255
+  PagedNextOp(4)
+OpFE: ; $FE INC abx
+  AccessPhase = 6
+  ASM Uses PC
+    mov r0, r8
+    ldr r1, =$8000
+    cmp r0, r1
+    blo __pg_cpu_ias_123
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
+    beq __pg_cpu_ias_123
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    adds r0, #1
+    ldrb r3, [r1, r0]
+    ldr r1, =global_nesopenbus
+    str r3, [r1]
+    lsls r3, r3, #8
+    orrs r2, r3
+    ldr r1, =global_ea
+    str r2, [r1]
+    adds r0, #1
+    lsls r0, r0, #16
+    lsrs r0, r0, #16
+    mov r8, r0
+    b __pg_cpu_iad_123
+__pg_cpu_ias_123:
+    bl cpufetchaddressslow
+__pg_cpu_iad_123:
+  EndASM
+  Ea = (Ea + X) & $FFFF
+  AccessPhase = AccessPhase - 2
+  ASM
+    ldr r0, =global_ea
+    ldr r0, [r0]
+    lsrs r1, r0, #15
+    beq __pg_cpu_irl_178
+    lsrs r3, r0, #11
+    movs r1, #12
+    ands r3, r1
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_178
+__pg_cpu_irl_178:
+    lsrs r1, r0, #13
+    bne __pg_cpu_irs_178
+    lsls r0, r0, #21
+    lsrs r0, r0, #21
+    ldr r1, =global_m
+    ldrb r2, [r1, r0]
+    b __pg_cpu_ird_178
+__pg_cpu_irs_178:
+    bl nesread
+    movs r2, r0
+__pg_cpu_ird_178:
+    ldr r1, =global_nesopenbus
+    str r2, [r1]
+  EndASM
+  Value = NesOpenBus
+  AccessPhase = AccessPhase + 2
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  AccessPhase = AccessPhase - 1
+  NesWrite(Ea, Value)
+  AccessPhase = AccessPhase + 1
+  NesWrite(Ea, Res)
+  PagedNextOp(7)
+Done:
+  CpuCycles = NesRunStart + Budget - Left
+  CpuInWindow = 0
+  ProcedureReturn CpuCycles - NesRunStart
+EndProcedure
+
+ProcedureRAM.i CpuRun(n.i)
+  If PicoPrgPaged : ProcedureReturn CpuRunPaged(n) : EndIf
+  ProcedureReturn CpuRunFlat(n)
 EndProcedure

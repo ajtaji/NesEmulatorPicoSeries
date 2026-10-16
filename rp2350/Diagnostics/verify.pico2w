@@ -691,6 +691,11 @@ Procedure TestMain()
   StatusPollingTests()
   Say("STEP ZpVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   ZpVectorTests()
+  CompilerIf #PICO_ADVANCED=1
+    ; The paged dispatcher must pass the same opcode vectors as the flat one.
+    For i=0 To 3 : PicoPrgBiases(i)=PrgBias : Next
+    PicoPrgPaged=1 : ZpVectorTests() : FastFetchAndIdleTests() : PicoPrgPaged=0
+  CompilerEndIf
   Say("STEP FastFetchAndIdleTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   FastFetchAndIdleTests()
   Say("STEP PollLoopTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()

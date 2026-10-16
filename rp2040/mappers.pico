@@ -1,0 +1,361 @@
+; Whole immutable PRG views preserve the original computed-goto fast fetch.
+; Decoded CHR is stored beside ROM data in flash and copied on bank changes.
+Procedure.i PicoSupported(mapper.i)
+  Select mapper
+    Case 0 : ProcedureReturn 1
+    Case 2 : ProcedureReturn 1
+    Case 3 : ProcedureReturn 1
+    Case 7 : ProcedureReturn 1
+    Case 11 : ProcedureReturn 1
+    Case 34 : ProcedureReturn 1
+    Case 41 : ProcedureReturn 1
+    Case 66 : ProcedureReturn 1
+    Case 71 : ProcedureReturn 1
+    Case 79 : ProcedureReturn 1
+    Case 144 : ProcedureReturn 1
+    Case 148 : ProcedureReturn 1
+    Case 232 : ProcedureReturn 1
+  EndSelect
+  CompilerIf #PICO_ADVANCED=1
+    ProcedureReturn PicoAdvancedSupported(mapper)
+  CompilerEndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM PicoCopy(dst.i,src.i,bytes.i)
+  ASM
+    push {r4, r5, r6}
+__pico_map_bulk:
+    cmp r2, #16
+    blo __pico_map_copy
+    ldmia r1!, {r3, r4, r5, r6}
+    stmia r0!, {r3, r4, r5, r6}
+    subs r2, #16
+    b __pico_map_bulk
+__pico_map_copy:
+    cmp r2, #0
+    beq __pico_map_copy_done
+    ldr r3, [r1]
+    str r3, [r0]
+    adds r0, #4
+    adds r1, #4
+    subs r2, #4
+    b __pico_map_copy
+__pico_map_copy_done:
+    pop {r4, r5, r6}
+  EndASM
+EndProcedure
+Procedure PicoInvalidateChr()
+  BgCacheAddr=-1 : RgbLastKey=-1 : RgbPairsDirty=1
+  ; Active-window mappers reuse CHR-bank key zero. Flush tags on every change
+  ; so banks beyond the old two-bit key cannot alias converted RGB rows.
+  PpuChrBank=0
+EndProcedure
+Procedure PicoChrSwitch(bank.i)
+  bank=bank&(CartChrBanks-1)
+  If CartChrSelected=bank And Chr=CartChr+bank*8192 : ProcedureReturn : EndIf
+  Chr=CartChr+bank*8192 : Pattern=@Decoded(0)
+  PicoCopy(Pattern,PicoChrDecoded+bank*8192,8192)
+  CartChrSelected=bank : PicoInvalidateChr()
+EndProcedure
+Procedure PicoChrFour(slot.i,bank.i)
+  bank=bank&((PicoChrBytes/4096)-1)
+  PicoCopy((@Decoded(0)+8192)+slot*4096,CartChr+bank*4096,4096)
+  PicoCopy(@Decoded(0)+slot*4096,PicoChrDecoded+bank*4096,4096)
+  Chr=(@Decoded(0)+8192) : Pattern=@Decoded(0) : PicoInvalidateChr()
+EndProcedure
+Procedure PicoMirrorSet(mode.i)
+  Protected table.i,physical.i,i.i
+  If mode=PicoMirror : ProcedureReturn : EndIf
+  PicoMirror=mode
+  For table=0 To 3
+    physical=0
+    If mode=0 : physical=table>>1 : EndIf
+    If mode=1 : physical=table&1 : EndIf
+    If mode=3 : physical=1 : EndIf
+    PicoNtSlots(table)=physical
+    PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+physical*1024,1024)
+    CompilerIf #PICO_ADVANCED=1
+      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+physical*2048,2048)
+    CompilerEndIf
+  Next
+  NameDescDirty=1
+  CompilerIf #PICO_ADVANCED=1
+    NameDescDirty=0
+  CompilerEndIf
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+Procedure.i PicoNtRead(addr.i)
+  ProcedureReturn PicoCiram(PicoNtSlots((addr>>10)&3)*1024+(addr&1023))
+EndProcedure
+CompilerIf #PICO_ADVANCED=1
+ProcedureRAM PicoNtDescriptor(page.i,offset.i)
+  Protected base.i,attr.i,palette.i,desc.i,table.i
+  base=page*1024
+  attr=PicoCiram(base|$3C0|((offset>>4)&$38)|((offset>>2)&7))
+  palette=(attr>>(((offset>>4)&4)|(offset&2)))&3
+  desc=PicoCiram(base+offset)|(palette<<8) : PicoNtDesc(base+offset)=desc
+  For table=0 To 3
+    If PicoNtSlots(table)=page : NameDesc(table*1024+offset)=desc : EndIf
+  Next
+EndProcedure
+CompilerEndIf
+Procedure PicoNtWrite(addr.i,value.i)
+  Protected table.i,page.i,offset.i,dst.i,base.i,x.i,y.i
+  page=PicoNtSlots((addr>>10)&3) : offset=addr&1023
+  PicoCiram(page*1024+offset)=value
+  For table=0 To 3
+    If PicoNtSlots(table)=page
+      dst=table*1024+offset : Nt(dst)=value
+      CompilerIf #PICO_ADVANCED=0
+        If offset<960
+          PpuUpdateDescriptor(dst)
+        ElseIf NameDescDirty=0
+          PpuUpdateDescriptor(dst)
+          base=(dst&$C00)|((offset&$38)<<4)|((offset&7)<<2)
+          For y=0 To 3
+            For x=0 To 3 : PpuUpdateDescriptor(base+y*32+x) : Next
+          Next
+        EndIf
+      CompilerEndIf
+    EndIf
+  Next
+  CompilerIf #PICO_ADVANCED=1
+    PicoNtDescriptor(page,offset)
+    If offset>=960
+      base=((offset&$38)<<4)|((offset&7)<<2)
+      For y=0 To 3
+        For x=0 To 3 : PicoNtDescriptor(page,base+y*32+x) : Next
+      Next
+    EndIf
+  CompilerEndIf
+EndProcedure
+Procedure PicoMapperInit()
+  CompilerIf #PICO_ADVANCED=1
+    PicoPrgPaged=0
+  CompilerEndIf
+  Protected i.i
+  PicoMapActive=CartMapper<>0 And CartMapper<>2 And CartMapper<>66
+  PicoIrq=0 : PicoIrqEnable=0 : PicoSelect=0 : PicoOuter=0 : PicoValue=0
+  PicoRamEnable=0 : PicoRamProtect=0 : PicoChrLow=0 : PicoChrHigh=1
+  PicoMirror=-1
+  If PicoMapActive=0 : ProcedureReturn : EndIf
+  For i=0 To 2047
+    PicoCiram(i)=0
+    CompilerIf #PICO_ADVANCED=1
+      PicoNtDesc(i)=0
+    CompilerEndIf
+  Next
+  PicoMirrorSet(PpuMirroring)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoAdvancedSupported(CartMapper) : PicoAdvancedInit() : ProcedureReturn : EndIf
+  CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+    If CartMapper=34 And CartChrRam=0
+      PicoRamEnable=1
+      For i=0 To 8191 : PicoPrgRam(i)=0 : Next
+    EndIf
+  CompilerEndIf
+  CartChrSelected=-1
+  If CartChrRam=0
+    PicoChrSwitch(0)
+    If CartMapper=34 : PicoChrFour(0,0) : PicoChrFour(1,1) : EndIf
+  EndIf
+  If CartMapper=7 : PicoMirrorSet(2) : EndIf
+  If CartMapper=71 And PicoSubmapper=1 : PicoSelect=1 : EndIf
+EndProcedure
+Procedure PicoMapperWrite(addr.i,value.i,stamp.i)
+  Protected bank.i,chrBank.i,rom.i
+  CompilerIf #PICO_ADVANCED=1
+    If PicoAdvancedSupported(CartMapper) : PicoAdvancedWrite(addr,value,stamp) : ProcedureReturn : EndIf
+  CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+    If CartMapper=34 And CartChrRam=0 And PicoRamPresent And addr>=$6000 And addr<$8000 : PicoPrgRam(addr&8191)=value : EndIf
+  CompilerEndIf
+  ; PRG events retain the original queue ordering for DMC reads. PPU changes
+  ; are applied on their owning core only after the previous pixels complete.
+  If CartMapper=79
+    If (addr&$E100)<>$4100 : ProcedureReturn : EndIf
+  ElseIf CartMapper=34 And CartChrRam=0
+    If addr<$7FFD Or addr>$7FFF : ProcedureReturn : EndIf
+  ElseIf CartMapper=41
+    If addr<$6000 Or (addr>=$6800 And addr<$8000) : ProcedureReturn : EndIf
+  ElseIf addr<$8000
+    ProcedureReturn
+  EndIf
+  PpuSync(stamp)
+  If addr>=$8000 And CartConflicts
+    rom=PeekA(PrgBase+addr-$8000) : value=value&rom
+    If CartMapper=144 : value=value|(rom&1) : EndIf
+  EndIf
+  bank=CartPrgSelected : chrBank=CartChrSelected
+  Select CartMapper
+    Case 3 : chrBank=value&3
+    Case 7 : bank=value&7 : PicoMirrorSet(2+((value>>4)&1))
+    Case 11 : bank=value&3 : chrBank=(value>>4)&15
+    Case 34
+      If CartChrRam : bank=value
+      ElseIf addr=$7FFD : bank=value&1
+      ElseIf addr=$7FFE : PicoChrFour(0,value&15)
+      ElseIf addr=$7FFF : PicoChrFour(1,value&15) : EndIf
+    Case 41
+      If addr<$6800
+        bank=addr&7 : PicoSelect=addr&4 : PicoOuter=(PicoOuter&3)|((addr>>1)&12)
+        PicoMirrorSet(((addr>>5)&1)!1)
+      ElseIf PicoSelect<>0 : PicoOuter=(PicoOuter&12)|(value&3) : EndIf
+      chrBank=PicoOuter
+    Case 71
+      If addr>=$9000 And addr<$A000 : PicoSelect=1 : EndIf
+      If addr>=$C000 Or PicoSelect=0 : bank=value
+      ElseIf addr>=$9000 And addr<$A000 : PicoMirrorSet(3-((value>>4)&1)) : EndIf
+    Case 79 : bank=(value>>3)&1 : chrBank=value&7
+    Case 144 : bank=value&15 : chrBank=(value>>4)&15
+    Case 148 : bank=(value>>3)&1 : chrBank=value&7
+    Case 232
+      If addr<$C000
+        PicoOuter=(value>>3)&3
+        If PicoSubmapper=1 : PicoOuter=((value>>4)&1)|((value>>2)&2) : EndIf
+      Else : PicoValue=value&3 : EndIf
+      bank=PicoOuter*4+PicoValue
+  EndSelect
+  bank=bank&(CartPrgBanks-1)
+  If bank<>CartPrgSelected : CartPrgSwitch(bank) : EndIf
+  If CartChrRam=0 And CartMapper<>34 : PicoChrSwitch(chrBank) : EndIf
+  CpuEndWindow()
+EndProcedure
+Procedure.i PicoRamRead(addr.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoRamEnable And PicoRamPresent : ProcedureReturn PicoPrgRam(addr&8191) : EndIf
+  CompilerEndIf
+  ProcedureReturn NesOpenBus
+EndProcedure
+Procedure PicoChrWrite(addr.i,value.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoAdvancedSupported(CartMapper) : PicoAdvancedChrWrite(addr,value) : ProcedureReturn : EndIf
+  CompilerEndIf
+  PokeA(Chr+addr,value) : PpuDecode(addr)
+EndProcedure
+ProcedureRAM PicoPpuNotice(addr.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoMmc3(CartMapper) : PicoA12(addr,PicoDots) : EndIf
+  CompilerEndIf
+EndProcedure
+ProcedureRAM PicoPpuTicks(cycles.i)
+  Protected started.i
+  CompilerIf #PICO_ADVANCED=1
+    If PicoMmc3(CartMapper)
+      CompilerIf #PPU_PROFILE=1
+        started=Micros()
+      CompilerEndIf
+      PicoMmc3Ticks(cycles)
+      CompilerIf #PPU_PROFILE=1
+        PicoObserverUs=PicoObserverUs+Micros()-started
+      CompilerEndIf
+    EndIf
+  CompilerEndIf
+EndProcedure
+ProcedureRAM.i PicoCpuBudget()
+  CompilerIf #PICO_ADVANCED=1
+    Protected clocks.i,assertions.i,irq.i,count.i,reload.i,high.i,low.i,dots.i,bits.i,irqDot.i,budget.i,started.i
+    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0
+      If PicoIrq : ProcedureReturn 1 : EndIf
+      CompilerIf #PPU_PROFILE=1
+        started=Micros()
+      CompilerEndIf
+      clocks=PicoIrqClocks : assertions=PicoIrqAssertions : irq=PicoIrq
+      count=PicoIrqCount : reload=PicoIrqReload : high=PicoA12High
+      low=PicoLowSince : dots=PicoDots : bits=PicoSpriteBits : irqDot=PicoIrqDot
+      ; Predict with the same electrical model, then restore every IRQ field.
+      ; PPU register/OAM writes end the CPU window and invalidate this horizon.
+      PicoMmc3Ticks(256) : budget=256
+      If PicoIrq : budget=NesDiv(PicoIrqDot-dots+2,3) : EndIf
+      PicoIrqClocks=clocks : PicoIrqAssertions=assertions : PicoIrq=irq
+      PicoIrqCount=count : PicoIrqReload=reload : PicoA12High=high
+      PicoLowSince=low : PicoDots=dots : PicoSpriteBits=bits : PicoIrqDot=irqDot
+      PicoPredictCalls=PicoPredictCalls+1
+      CompilerIf #PPU_PROFILE=1
+        PicoPredictUs=PicoPredictUs+Micros()-started
+      CompilerEndIf
+      If budget<1 : budget=1 : EndIf
+      ProcedureReturn budget
+    EndIf
+  CompilerEndIf
+  ProcedureReturn 256
+EndProcedure
+
+CompilerIf #PICO_ADVANCED=1
+  XIncludeFile "mapper_advanced.pico"
+CompilerEndIf
+
+Procedure PicoRegisterNotice(reg.i)
+  If reg=6 Or reg=7 : PicoPpuNotice(PpuV&$3FFF) : PicoCpuPpuChanged() : EndIf
+EndProcedure
+
+Procedure PicoPrgFlat()
+  CompilerIf #PICO_ADVANCED=1
+    PicoPrgPaged=0
+  CompilerEndIf
+EndProcedure
+ProcedureRAM.i PicoCpuPrgRead(addr.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoPrgPaged : ProcedureReturn PeekA(PicoPrgBiases((addr>>13)&3)+addr) : EndIf
+  CompilerEndIf
+  ProcedureReturn PeekA(PrgBase+addr-$8000)
+EndProcedure
+ProcedureRAM.i PicoWorkerPrgRead(addr.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoPrgPaged : ProcedureReturn PeekA(PicoWorkerBiases((addr>>13)&3)+addr) : EndIf
+  CompilerEndIf
+  ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)
+EndProcedure
+Procedure PicoWorkerPrgSet(slot.i,bias.i)
+  CompilerIf #PICO_ADVANCED=1
+    PicoWorkerBiases(slot)=bias
+  CompilerEndIf
+EndProcedure
+
+CompilerIf #PICO_ADVANCED=1
+; Internal Thumb fetch helper: preserve address r0 and result scratch r2.
+ProcedureNaked PicoPrgFetchBias()
+  ASM
+    ldr r1, =global_picoprgpaged
+    ldr r1, [r1]
+    cmp r1, #0
+    beq __pico_prg_fetch_flat
+    lsrs r3, r0, #13
+    movs r1, #3
+    ands r3, r1
+    lsls r3, r3, #2
+    ldr r1, =global_picoprgbiases
+    ldr r1, [r1, r3]
+    bx lr
+__pico_prg_fetch_flat:
+    ldr r1, =global_prgbias
+    ldr r1, [r1]
+    bx lr
+  EndASM
+EndProcedure
+CompilerEndIf
+
+ProcedureRAM PicoCpuPpuChanged()
+  CompilerIf #PICO_ADVANCED=1
+    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0 : CpuEndWindow() : EndIf
+  CompilerEndIf
+EndProcedure
+
+ProcedureRAM.i PicoQuickWrite(addr.i,value.i)
+  CompilerIf #PICO_ADVANCED=1
+    If PicoMmc3(CartMapper)
+      Select addr&$E001
+        Case $8000
+          If ((PicoSelect!value)&192)=0
+            PicoSelect=value : PicoQuickWrites=PicoQuickWrites+1 : ProcedureReturn 1
+          EndIf
+        Case $8001
+          If PicoRegs(PicoSelect&7)=value
+            PicoQuickWrites=PicoQuickWrites+1 : ProcedureReturn 1
+          EndIf
+      EndSelect
+    EndIf
+  CompilerEndIf
+  ProcedureReturn 0
+EndProcedure

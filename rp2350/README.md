@@ -31,7 +31,9 @@ Hardware changes are limited to:
   derived from `ClockSysConfigKhz()`.
 
 The radio image lives at flash offset `$200000`. Firmware must end before
-`$50000`; the existing ROM store and directory layout remain unchanged.
+`$50000`. The directory remains at `$50000`; version-2 game data extends
+from `$51000` to `$1FEFFF`, with `$1FF000` reserved for board checks.
+Use `--target rp2350` in the ROM loader. See [Pico mapper support](../PICO-MAPPERS.md).
 Firmware release images contain the original demo and no commercial games.
 Speaker addresses belong in private wrappers outside Git.
 
@@ -47,3 +49,7 @@ seconds. Each final `*-board.json` summarizes all 40 sampled intervals; matching
 text files retain the raw counters. These are finite workload samples, not a
 guarantee for every scene or game. Bluetooth underruns are cumulative and include
 startup; compare their first and last values to identify new playback underruns.
+
+The current mapper/interrupt revision passes 1,928,288 full checks and 59,923
+focused checks. See [current results](../PICO-MMC3-NMI-RESULTS.md); the
+verification-board.txt file above is an earlier baseline.

@@ -1,0 +1,29 @@
+; RP2350-only cartridge storage; excluded from RP2040 firmware.
+Global PicoPrgFenceNeeded.i,PicoBankStamp.i,PicoPrgChanged.i
+Global Dim PicoPrgBiases.i(4)
+Global Dim PicoWorkerBiases.i(4)
+Global Dim PicoPrgRam.a(8192)
+Global Dim PicoChrRam.a(16384)
+Global Dim PicoChrRamDecoded.a(16384)
+Global Dim PicoPrgSlots.i(4)
+Global Dim PicoChrSlots.i(8)
+Global Dim PicoRegs.i(8)
+Global PicoControl.i,PicoShift.i,PicoPrgReg.i,PicoLastWrite.i
+Global PicoIrqLatch.i,PicoIrqCount.i,PicoIrqReload.i,PicoA12High.i,PicoLowSince.i,PicoDots.i,PicoSpriteBits.i
+Global PicoIrqClocks.i,PicoIrqAssertions.i,PicoChrRamBytes.i
+Declare.i PicoAdvancedSupported(mapper.i)
+Declare.i PicoMmc3(mapper.i)
+Declare PicoAdvancedInit()
+Declare PicoAdvancedUpdate()
+Declare PicoAdvancedWrite(addr.i,value.i,stamp.i)
+Declare PicoAdvancedChrWrite(addr.i,value.i)
+Declare PicoA12(addr.i,dot.i)
+Declare PicoMmc3Ticks(cycles.i)
+
+Global PicoPrgCopyUs.i,PicoChrCopyUs.i,PicoFenceUs.i,PicoPrgCopies.i,PicoChrCopies.i,PicoObserverUs.i
+
+Global PicoIrqDot.i,PicoPredictCalls.i,PicoPredictUs.i
+
+Global Dim PicoNtDesc.u(2048)
+
+Global PicoQuickWrites.i

@@ -385,5 +385,13 @@ for line in s[a:b].split('\n'):
     else:
         body.append(line)
 s=s[:a]+'\n'.join(body)+s[b:]
+# Interrupt-mask instructions end the host window when they unmask IRQs.
+# CLI/PLP poll the old I flag, so the host executes one following instruction
+# before taking a pending IRQ. RTI restores I before polling and has no delay.
+s=s.replace('Global NesOpenBus.i','Global NesOpenBus.i\nGlobal CpuIrqDelay.i')
+s=s.replace('  FI = 0\n  NextOp(2)\nOp59:', '  CpuIrqDelay=FI : FI = 0\n  Budget=Budget-Left : Left=0\n  NextOp(2)\nOp59:')
+s=s.replace('  CpuSetStatus(Tmp)\n  NextOp(4)', '  CpuIrqDelay=FI : CpuSetStatus(Tmp)\n  Budget=Budget-Left : Left=0\n  NextOp(4)')
+s=s.replace('  PC = Lo | (Hi << 8)\n  NextOp(6)\nOp41:', '  PC = Lo | (Hi << 8)\n  CpuIrqDelay=0 : Budget=Budget-Left : Left=0\n  NextOp(6)\nOp41:')
+
 (root/'cpu2a03.pico').write_text(s)
 print('Generated NES bus/cycle-budget core; decimal arithmetic disabled')

@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rom_loader
-from rom_catalog import read_rom, validate, prg_views
+from pico_cartridge import read_pico_rom, pico_prg, stored_chr, ENDS
 
 CAPACITY = rom_loader.END - rom_loader.DATA
 
@@ -63,6 +63,10 @@ class LoaderWindow:
         ttk.Label(board, text='Board port:').pack(side='left')
         self.port = ttk.Combobox(board, width=12, state='readonly')
         self.port.pack(side='left', padx=6)
+        self.target = ttk.Combobox(board, width=9, state='readonly', values=('rp2040','rp2350'))
+        self.target.set('rp2040')
+        self.target.pack(side='left', padx=6)
+        self.target.bind('<<ComboboxSelected>>', self.change_target)
         ttk.Button(board, text='Refresh', command=self.refresh_ports).pack(side='left')
         self.clear_button = ttk.Button(board, text='Empty the store', command=self.clear)
         self.clear_button.pack(side='right')
@@ -86,8 +90,7 @@ class LoaderWindow:
         for name in paths:
             path = Path(name)
             try:
-                cart = read_rom(path)
-                validate(cart)
+                cart = read_pico_rom(path,self.target.get())
             except (OSError, ValueError) as error:
                 refused.append(str(error))
                 continue
@@ -126,9 +129,17 @@ class LoaderWindow:
     @staticmethod
     def store_size(cart):
         sector = rom_loader.SECTOR
-        return (-(-len(prg_views(cart)) // sector) + -(-len(cart.chr) // sector)) * sector
+        return (-(-len(pico_prg(cart)) // sector) + -(-len(stored_chr(cart)) // sector)) * sector
+
+    def change_target(self, event=None):
+        paths = [p for p, _ in self.games]
+        self.games.clear()
+        if paths: self.add(paths)
+        else: self.update_capacity()
 
     def update_capacity(self):
+        CAPACITY = ENDS[self.target.get()] - rom_loader.DATA
+        self.capacity['maximum'] = CAPACITY
         used = sum(self.store_size(c) for _, c in self.games)
         self.capacity['value'] = min(used, CAPACITY)
         over = used > CAPACITY
@@ -161,7 +172,7 @@ class LoaderWindow:
             messagebox.showinfo('Nothing to load', 'Add one or more .nes files first.')
             return
         try:
-            games, directory, blobs = rom_loader.layout([p for p, _ in self.games])
+            games, directory, blobs = rom_loader.layout([p for p, _ in self.games], self.target.get())
         except ValueError as error:
             messagebox.showerror('Cannot load these games', str(error))
             return
@@ -209,6 +220,7 @@ class LoaderWindow:
 
     def set_busy(self, busy):
         self.busy = busy
+        self.target['state'] = 'disabled' if busy else 'readonly'
         state = 'disabled' if busy else 'normal'
         for b in (self.add_button, self.remove_button, self.up_button, self.down_button,
                   self.load_button, self.clear_button):

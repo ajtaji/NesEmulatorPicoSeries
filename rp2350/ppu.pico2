@@ -60,6 +60,12 @@ ProcedureRAM.i PpuPalAddr(addr.i)
 EndProcedure
 ProcedureRAM.i PpuRead(addr.i)
   addr=addr&$3FFF
+  CompilerIf #NES_PICO_MAPPERS=1
+    If PicoMapActive
+      If addr<$3F00 : PicoPpuNotice(addr) : EndIf
+      If addr>=$2000 And addr<$3F00 : ProcedureReturn PicoNtRead(addr) : EndIf
+    EndIf
+  CompilerEndIf
   If addr<$2000
     ProcedureReturn PeekA(Chr+addr)
   ElseIf addr<$3F00
@@ -119,6 +125,17 @@ ProcedureRAM PpuWrite(addr.i, value.i)
   Protected ntAddress.i
   BgCacheAddr= -1 : RgbLastKey= -1
   addr=addr&$3FFF
+  CompilerIf #NES_PICO_MAPPERS=1
+    If PicoMapActive
+      If addr<$3F00 : PicoPpuNotice(addr) : EndIf
+      If addr<$2000
+        If ChrWritable : PicoChrWrite(addr,value) : EndIf
+        ProcedureReturn
+      ElseIf addr<$3F00
+        PicoNtWrite(addr,value) : ProcedureReturn
+      EndIf
+    EndIf
+  CompilerEndIf
   If addr<$2000
     If ChrWritable
       PokeA(Chr+addr,value) : PpuDecode(addr)

@@ -7,6 +7,9 @@ ProcedureRAM PpuSync(stamp.i)
     WorkerError=21
   ElseIf dt>0
     timer=Micros()
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive : PicoPpuTicks(dt) : EndIf
+    CompilerEndIf
     PpuAdvance(dt)
     WorkerPpuUs=WorkerPpuUs+Micros()-timer
     PpuClock=stamp
@@ -126,6 +129,10 @@ ProcedureRAM WorkerCommand(command.i, addr.i, value.i, stamp.i)
     Chr=CartChr+value*8192 : Pattern=@Decoded(0)+value*8192
   ElseIf command=5
     WorkerPrgBase=value
+  CompilerIf #NES_PICO_MAPPERS=1
+  ElseIf command=6
+    PicoWorkerPrgSet(addr,value)
+  CompilerEndIf
   EndIf
 EndProcedure
 ProcedureRAM Core1Main()

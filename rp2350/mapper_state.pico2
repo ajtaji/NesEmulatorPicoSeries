@@ -1,0 +1,35 @@
+; Cartridge-only adapters. Advanced bank windows are enabled on RP2350.
+#NES_PICO_MAPPERS=1
+#PICO_ADVANCED=1
+Global PicoMapActive.i,PicoMapVersion.i,PicoChrDecoded.i,PicoChrBytes.i,PicoPrgBytes.i,PicoSubmapper.i
+Global PicoMirror.i,PicoSelect.i,PicoOuter.i,PicoValue.i,PicoChrLow.i,PicoChrHigh.i
+Global PicoIrq.i,PicoIrqEnable.i,PicoRamEnable.i=1,PicoRamProtect.i,PicoRamPresent.i
+Global Dim PicoCiram.a(2048)
+Global Dim PicoNtSlots.a(4)
+Declare.i PicoSupported(mapper.i)
+Declare PicoMapperInit()
+Declare PicoMapperWrite(addr.i,value.i,stamp.i)
+Declare PicoMirrorSet(mode.i)
+Declare PicoChrSwitch(bank.i)
+Declare PicoChrFour(slot.i,bank.i)
+Declare.i PicoNtRead(addr.i)
+Declare PicoNtWrite(addr.i,value.i)
+Declare.i PicoRamRead(addr.i)
+Declare PicoChrWrite(addr.i,value.i)
+Declare PicoPpuTicks(cycles.i)
+Declare PicoPpuNotice(addr.i)
+Declare.i PicoCpuBudget()
+CompilerIf #PICO_ADVANCED=1
+  XIncludeFile "mapper_advanced_state.pico2"
+CompilerEndIf
+
+Declare PicoRegisterNotice(reg.i)
+
+Declare PicoPrgFlat()
+Declare.i PicoCpuPrgRead(addr.i)
+Declare.i PicoWorkerPrgRead(addr.i)
+Declare PicoWorkerPrgSet(slot.i,bias.i)
+
+Declare PicoCpuPpuChanged()
+
+Declare.i PicoQuickWrite(addr.i,value.i)

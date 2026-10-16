@@ -12,6 +12,9 @@ Global WorkerBusyUs.i, WorkerDisplayUs.i, WorkerDisplayed.i
 Global WorkerDisplay.i=1, WorkerFrameDivider.i=2, WorkerPaused.i
 Global NesBridgeError.i, NesController.i, NesLatch.i, NesStrobe.i
 Global NesLatch2.i
+CompilerIf #NES_PICO_MAPPERS=1
+Global NesNmiDelay.i
+CompilerEndIf
 Global NesSeenNmi.i, NesSeenDmc.i, NesRpcCalls.i, NesRpcWaitUs.i
 Global CartMapper.i, CartPrgBanks.i=1, CartChrBanks.i=1, CartPrg.i, CartChr.i
 Global CartPrgSelected.i, CartChrSelected.i
@@ -94,8 +97,7 @@ ProcedureRAM.i NesRead(addr.i)
     ldr r1, =$8000
     cmp r0, r1
     blo __nes_read_ram
-    ldr r1, =global_prgbias
-    ldr r1, [r1]
+    bl picoprgfetchbias
     ldrb r0, [r1, r0]
     b __nes_read_publish
 __nes_read_ram:
@@ -132,11 +134,17 @@ ProcedureRAM.i NesReadSlow(addr.i)
   Protected v.i
   addr=addr&$FFFF
   If addr>=$8000
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive : ProcedureReturn PicoCpuPrgRead(addr) : EndIf
+    CompilerEndIf
     v=PeekA(PrgBase+addr-$8000)
   ElseIf addr<$2000
     v=M(addr&$7FF)
   ElseIf addr>=$6000
     v=NesOpenBus
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive : v=PicoRamRead(addr) : EndIf
+    CompilerEndIf
   ElseIf addr=$4016
     If NesStrobe
       v=(NesController&1)|$40
@@ -159,6 +167,9 @@ ProcedureRAM.i NesReadSlow(addr.i)
           PpuSync(CpuCycles+AccessPhase)
         EndIf
         v=PpuRegRead(addr&7)
+        CompilerIf #NES_PICO_MAPPERS=1
+          If PicoMapActive And (addr&7)=7 : PicoRegisterNotice(addr&7) : EndIf
+        CompilerEndIf
       Else
         v=NesRpc(1,addr,0,CpuCycles+AccessPhase)
       EndIf
@@ -183,11 +194,21 @@ ProcedureRAM NesWrite(addr.i, value.i)
   If addr<$2000
     M(addr&$7FF)=value
   ElseIf addr>=$6000
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive
+        If PicoQuickWrite(addr,value) : ProcedureReturn : EndIf
+        CpuNow() : PicoMapperWrite(addr,value,CpuCycles+AccessPhase) : ProcedureReturn
+      EndIf
+    CompilerEndIf
     If addr>=$8000 And (CartMapper=66 Or CartMapper=2)
       CpuNow()
       If CartConflicts : value=value&PeekA(PrgBase+addr-$8000) : EndIf
       CartBank(value)
     EndIf
+  CompilerIf #NES_PICO_MAPPERS=1
+  ElseIf addr>=$4020 And PicoMapActive
+    CpuNow() : PicoMapperWrite(addr,value,CpuCycles+AccessPhase)
+  CompilerEndIf
   ElseIf addr=$4016
     NesStrobe=value&1 : NesLatch=NesController : NesLatch2=0
   ElseIf addr=$4014
@@ -206,7 +227,18 @@ ProcedureRAM NesWrite(addr.i, value.i)
         PpuSync(CpuCycles+AccessPhase)
         ; CHR RAM writes invalidate converted cartridge rows before the existing PPU write.
         If CartChrRam<>0 : CartPpuWriteNotice(addr,value) : EndIf
+        CompilerIf #NES_PICO_MAPPERS=1
+          NesNmiDelay=WorkerNmi
+        CompilerEndIf
         PpuRegWrite(addr&7,value)
+        CompilerIf #NES_PICO_MAPPERS=1
+          ; This edge is raised on the final write cycle, after interrupt polling.
+          NesNmiDelay=(NesNmiDelay<>WorkerNmi)
+          PicoCpuPpuChanged()
+        CompilerEndIf
+        CompilerIf #NES_PICO_MAPPERS=1
+          If PicoMapActive And ((addr&7)=6 Or (addr&7)=7) : PicoRegisterNotice(addr&7) : EndIf
+        CompilerEndIf
       ElseIf addr=$4015
         ; Synchronous, so core 0 sees a DMC start (DmcBytes) before the next window.
         NesRpc(2,addr,value,CpuCycles+AccessPhase)
@@ -270,8 +302,14 @@ ProcedureRAM.i WorkerRead(addr.i)
   EndIf
   If addr>=$6000
     If addr>=$8000
+      CompilerIf #NES_PICO_MAPPERS=1
+        If PicoMapActive : ProcedureReturn PicoWorkerPrgRead(addr) : EndIf
+      CompilerEndIf
       ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)
     EndIf
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive : ProcedureReturn PicoRamRead(addr) : EndIf
+    CompilerEndIf
     ProcedureReturn 0
   EndIf
   ProcedureReturn 0
@@ -279,10 +317,16 @@ EndProcedure
 ; The same bus read for OAM DMA executed on core 0, with core 0's bank view.
 ProcedureRAM.i NesDmaRead(addr.i)
   addr=addr&$FFFF
+  CompilerIf #NES_PICO_MAPPERS=1
+    If addr>=$6000 And addr<$8000 And PicoMapActive : ProcedureReturn PicoRamRead(addr) : EndIf
+  CompilerEndIf
   If addr<$2000
     ProcedureReturn M(addr&$7FF)
   EndIf
   If addr>=$8000
+    CompilerIf #NES_PICO_MAPPERS=1
+      If PicoMapActive : ProcedureReturn PicoCpuPrgRead(addr) : EndIf
+    CompilerEndIf
     ProcedureReturn PeekA(PrgBase+addr-$8000)
   EndIf
   ProcedureReturn 0
@@ -296,8 +340,7 @@ ProcedureRAM.i CpuFetchByte()
     ldr r1, =$8000
     cmp r0, r1
     blo __cpu_fetch_byte_slow
-    ldr r1, =global_prgbias
-    ldr r1, [r1]
+    bl picoprgfetchbias
     ldrb r2, [r1, r0]
     adds r0, #1
     lsls r0, r0, #16
@@ -326,11 +369,12 @@ ProcedureRAM CpuFetchAddress()
     ldr r1, =$8000
     cmp r0, r1
     blo __cpu_fetch_address_slow
-    ldr r1, =$ffff
-    cmp r0, r1
+    lsls r1, r0, #19
+    lsrs r1, r1, #19
+    ldr r3, =$1fff
+    cmp r1, r3
     beq __cpu_fetch_address_slow
-    ldr r1, =global_prgbias
-    ldr r1, [r1]
+    bl picoprgfetchbias
     ldrb r2, [r1, r0]
     adds r0, #1
     ldrb r3, [r1, r0]
