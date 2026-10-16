@@ -1,11 +1,13 @@
 ; LAFVIN carrier: BTN1 GP15=A, BTN2 GP14=B; joystick GP26/27.
 ; Core 0 samples at 1 kHz. No input work in the CPU dispatch loop.
+Global InputPhysicalEnabled.i=1
 Global InputX.i, InputY.i, InputButtons.i, InputCandidate.i, InputDebounce.i
 Global InputDirections.i, InputMask.i, InputHost.i, InputLatch.i, InputPulse.i, InputPulseTime.i
 Global InputStartCount.i, InputSelectCount.i
 Global InputLast.i, InputPolls.i, InputErrors.i, InputBusyUs.i
 Global InputCenterX.i=2048, InputCenterY.i=2048
 Procedure InputBegin()
+  If InputPhysicalEnabled=0 : InputMask=0 : ProcedureReturn : EndIf
   pinMode(15,#INPUT_PULLUP) : pinMode(14,#INPUT_PULLUP)
   analogReadResolution(12)
   InputX=analogRead(26) : InputY=analogRead(27)
@@ -66,6 +68,9 @@ Procedure InputUpdate(x.i,y.i,buttons.i,stamp.i)
 EndProcedure
 Procedure InputPoll()
   Protected now.i, buttons.i
+  If InputPhysicalEnabled=0
+    InputMask=0 : NesController=InputHost : ProcedureReturn
+  EndIf
   now=Micros()
   If now-InputLast<1000
     ProcedureReturn

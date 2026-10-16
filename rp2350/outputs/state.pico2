@@ -1,5 +1,5 @@
 ; Compile-time output ABI. Set both backend constants in the entry wrapper:
-; Video: 0=headless, 1=LAFVIN, 2=wrapper plugin, 3=Pico Display Pack 2.0.
+; Video: 0=headless, 1=LAFVIN, 2=wrapper plugin, 3=Pico Display Pack 2.0, 4=ILI9341 SPI1.
 ; Audio: 0=silent, 1=Bluetooth, 2=wrapper plugin.
 #NES_OUTPUT_API_VERSION=1
 #NES_VIDEO_WIDTH=256
@@ -7,7 +7,7 @@
 #NES_VIDEO_HALF_ROWS=120
 #NES_AUDIO_RATE=48000
 #NES_AUDIO_RING_SAMPLES=4096
-CompilerIf #NES_VIDEO_BACKEND=3
+CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4
   Global VideoFramePresent.i=1
 CompilerEndIf
 Global AudioRunning.i, AudioLive.i, AudioWorked.i, AudioBusyUs.i

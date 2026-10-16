@@ -5,7 +5,12 @@ RP2040 tree is the semantic source; this folder contains the generated port.
 Use the root README for wiring, builds, ROM loading, and supported mappers.
 Video and audio backends are independently selected in the wrapper; see
 [the output plugin guide](../OUTPUTS.md) for the interface and custom examples.
-The LCD is rotated 90 degrees left from the RP2040 landscape layout, using the
+The standalone [ILI9341 SPI1 backend](../ILI9341.md) can also be selected with
+`tools/build.ps1 -Target rp2350 -Display ili9341`. That panel has been tested on
+the bare RP2040 Pico; the RP2350 ILI9341 build is compiled only. Its default
+profile uses silent audio and USB controls, independently of the video driver.
+
+The LAFVIN LCD is rotated 90 degrees left from the RP2040 landscape layout, using the
 ST7796 controller's rotation setting. The 256x240 NES frame is centered at
 (32,120) in 320x480 portrait coordinates. DMA still sends the completed frame;
 the emulated framebuffer and PPU rendering are unchanged. The host FPS overlay

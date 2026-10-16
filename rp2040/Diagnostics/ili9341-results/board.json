@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-16",
+  "port": "COM14",
+  "board": "bare Raspberry Pi Pico RP2040",
+  "usb_serial": "E6609103C3949B22",
+  "controller_id": "0x9341",
+  "physical_picture_confirmation": "operator confirmed colors and orientation correct",
+  "audio_output": "silent; no physical audio device",
+  "physical_input": "disabled; USB controls used",
+  "final_state": "stopped at four-ROM boot menu",
+  "menu_fps": 30.0,
+  "vram_readback": "FF only; not validated",
+  "diagnostic_images": {
+    "ili9341-native-w": "6a1964b06b6a3afcd4f0f09029622c942547d22ca4f9e3c0079ac821539e544a",
+    "ili9341-regression-full-w": "06bcd04a55abc8ab4466dce9315c631b5d20d97ce97ee5349cccd84bf586ff74"
+  }
+}

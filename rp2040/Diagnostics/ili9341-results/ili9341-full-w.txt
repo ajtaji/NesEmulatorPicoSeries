@@ -1,0 +1,20 @@
+CPU BENCH cycles=2000202 us=288652 host_cycles_per_guest_cycle_x100=2886
+CPU BENCH2 cycles=2000030 us=327978 host_cycles_per_guest_cycle_x100=3279
+STEP ComparePpuAdvance checks=16701 failures=0 error=0
+STEP InputTests checks=20285 failures=0 error=0
+STEP PackedRenderTests checks=20310 failures=0 error=0
+STEP RenderRunTests checks=58198 failures=0 error=0
+STEP AttributeUpdateTests checks=1660764 failures=0 error=0
+STEP SequentialRenderTests checks=1664860 failures=0 error=0
+STEP LocalMmioTests checks=1699804 failures=0 error=0
+STEP StatusPollingTests checks=1699814 failures=0 error=0
+STEP ZpVectorTests checks=1727424 failures=0 error=0
+STEP FastFetchAndIdleTests checks=1728964 failures=0 error=0
+STEP PollLoopTests checks=1728980 failures=0 error=0
+STEP AudioStopTests checks=1912583 failures=0 error=0
+STEP CodecVectorTests checks=1913111 failures=0 error=0
+SBC TIMING analyze_us_x100=15877 encode_us_x100=25825
+STEP BluetoothBufferTests checks=1921559 failures=0 error=0
+STEP RomStoreTests checks=1921566 failures=0 error=0
+STEP CartridgeViewTests checks=1926694 failures=0 error=0
+NES board checks=1926732 failures=0 PASS

@@ -1,0 +1,5 @@
+> RP2350 ASSEMBLER: 91660 bytes of code run from SRAM at $20000000-$2001660B, copied from flash at boot; 184108 bytes of SRAM left free, stacks and reserved windows excluded.
+ROM_TOTAL_RP2350|174388|4194304
+firmware=nes-pico2-w-ili9341.uf2
+sha256=6ebe4ababf8b06736035080e10963e3cea35d3ecc22d51e356bb4a1208c961ec
+physical_test=not performed; compiled only

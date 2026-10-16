@@ -1,0 +1,153 @@
+; ILI9341 320x240 landscape output on SPI1; no extra frame allocation.
+; GP10 SCK, GP11 MOSI, GP12 MISO, GP13 CS, GP16 DC, GP17 RESET.
+; LED connects to 3V3 OUT, not a GPIO. Controller setup: see ILI9341.md.
+; Initial register sequence derived from Adafruit's BSD-licensed driver.
+Global Ili9341SpiKhz.i=40000
+Global Ili9341Id.i
+Global Ili9341FrameDivider.i=2,Ili9341FramePhase.i
+Global Dim Ili9341DiscardRow.u(256)
+Global VideoTop.i,VideoBottom.i,VideoHalf.i,VideoState.i
+ProcedureRAM.i VideoLineTarget(line.i)
+  ; Retain all PPU work, but store alternate frames in a disposable scanline.
+  ; This leaves the completed DMA buffers untouched during the discarded frame.
+  If line=0
+    Ili9341FramePhase=Ili9341FramePhase+1 : VideoFramePresent=0
+    If Ili9341FrameDivider<=1 Or Ili9341FramePhase>=Ili9341FrameDivider
+      Ili9341FramePhase=0 : VideoFramePresent=1
+    EndIf
+  EndIf
+  If VideoFramePresent=0 : ProcedureReturn @Ili9341DiscardRow(0) : EndIf
+  ProcedureReturn 0
+EndProcedure
+Procedure.i VideoMenuPeriodUs()
+  If Ili9341FrameDivider<=1 : ProcedureReturn 16639 : EndIf
+  ProcedureReturn 16639*Ili9341FrameDivider
+EndProcedure
+ProcedureRAM Ili9341Pin(pin.i,value.i)
+  If value<>0 : PokeL($D0000018,1<<pin)
+  Else : PokeL($D0000020,1<<pin) : EndIf
+EndProcedure
+Procedure Ili9341Command(command.i)
+  Ili9341Pin(13,0) : Ili9341Pin(16,0)
+  SpiWrite8(1,command)
+  Ili9341Pin(16,1)
+EndProcedure
+Procedure Ili9341Setting(command.i,value.i)
+  Ili9341Command(command) : SpiWrite8(1,value) : Ili9341Pin(13,1)
+EndProcedure
+Procedure Ili9341Window(x0.i,y0.i,x1.i,y1.i)
+  Ili9341Command($2A)
+  SpiWrite8(1,x0>>8) : SpiWrite8(1,x0) : SpiWrite8(1,x1>>8) : SpiWrite8(1,x1)
+  Ili9341Command($2B)
+  SpiWrite8(1,y0>>8) : SpiWrite8(1,y0) : SpiWrite8(1,y1>>8) : SpiWrite8(1,y1)
+  Ili9341Command($2C)
+EndProcedure
+Procedure.i Ili9341ReadIndex(command.i,index.i)
+  Ili9341Command($D9) : SpiWrite8(1,$10+index) : Ili9341Pin(13,1)
+  Ili9341Command(command)
+  index=SpiWrite8(1,0) : Ili9341Pin(13,1)
+  ProcedureReturn index&255
+EndProcedure
+Procedure VideoBegin()
+  Protected p.i,command.i,count.i,n.i
+  Ili9341Pin(13,1) : Ili9341Pin(16,1) : Ili9341Pin(17,1)
+  pinMode(13,#OUTPUT) : pinMode(16,#OUTPUT) : pinMode(17,#OUTPUT)
+  pinMode(12,#INPUT_PULLUP)
+  SpiPeriFromSys(ClockSysConfigKhz()) : SpiBegin(1,10,11,12,100)
+  Ili9341Pin(17,0) : delay(20) : Ili9341Pin(17,1) : delay(150)
+  Ili9341Id=(Ili9341ReadIndex($D3,2)<<8)|Ili9341ReadIndex($D3,3)
+  SpiBegin(1,10,11,12,Ili9341SpiKhz)
+  p=?Ili9341Init
+  Repeat
+    command=PeekA(p) : p=p+1
+    If command=0 : Break : EndIf
+    count=PeekA(p) : p=p+1 : Ili9341Command(command)
+    If count>0
+      For n=0 To count-1 : SpiWrite8(1,PeekA(p)) : p=p+1 : Next
+    EndIf
+    Ili9341Pin(13,1)
+  ForEver
+  Ili9341Command($11) : Ili9341Pin(13,1) : delay(120)
+  Ili9341Setting($36,$28)
+  Ili9341Command($29) : Ili9341Pin(13,1) : delay(20)
+  Ili9341Window(0,0,319,239) : SpiDmaFill16(1,0,76800)
+  Ili9341Pin(13,1) : VideoState=0
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn SpiHz(1)
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+  Protected column.i
+  ; HUD's 17 glyphs become FPS/value and EMU/value in a 32-pixel margin.
+  ; This translation never touches a pixel of either NES framebuffer.
+  If width=8 And height=10 And y=4 And x>=4 And x<=132 And ((x-4)&7)=0
+    column=(x-4)>>3
+    If column=8 : ProcedureReturn : EndIf
+    If column<8 : y=4+(column>>2)*12
+    Else : column=column-9 : y=32+(column>>2)*12 : EndIf
+    x=(column&3)*8
+  EndIf
+  If width<=0 Or height<=0 Or x<0 Or y<0 Or x+width>320 Or y+height>240 : ProcedureReturn : EndIf
+  If VideoState<>0 : ProcedureReturn : EndIf
+  Ili9341Window(x,y,x+width-1,y+height-1)
+  SpiDmaSend16(1,pixels,width*height) : Ili9341Pin(13,1)
+EndProcedure
+ProcedureRAM VideoDmaStart(pointer.i)
+  PokeL(#SPI_DMA_CH0_READ,pointer)
+  PokeL(#SPI_DMA_CH0_WRITE,$40088008)
+  PokeL(#SPI_DMA_CH0_COUNT,30720)
+  PokeL(#SPI_DMA_CH0_CTRL,#SPI_DMA_EN|#SPI_DMA_SIZE_HALF|#SPI_DMA_INCR_READ|(#SPI_DMA_TREQ_SPI1_TX<<#SPI_DMA_TREQ_SHIFT))
+EndProcedure
+ProcedureRAM.i VideoStart(top.i,bottom.i)
+  If VideoState<>0 : ProcedureReturn 0 : EndIf
+  VideoTop=top : VideoBottom=bottom
+  Ili9341Window(32,0,287,239)
+  SpiDmaInit() : SpiSetBits(1,16)
+  PokeL($40088024,PeekL($40088024)|#SPI_SSPDMACR_TXDMAE)
+  VideoHalf=0 : VideoState=1 : VideoDmaStart(VideoTop)
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  If PeekL(#SPI_DMA_CH0_CTRL)&$60000000 : ProcedureReturn -1 : EndIf
+  If VideoState=1
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0
+      VideoHalf=1 : NesFence()
+      VideoDmaStart(VideoBottom) : VideoState=2
+    EndIf
+  ElseIf VideoState=2
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0 And (PeekL($4008800C)&#SPI_SR_BSY)=0
+      SpiDmaRestore(1) : Ili9341Pin(13,1) : VideoState=0
+      ProcedureReturn 1
+    EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  Protected finish.i,half.i
+  half=PeekL(@VideoHalf)
+  If line<0 Or line>=240 Or VideoState=0 : ProcedureReturn 0 : EndIf
+  If line<120
+    If half=1 : ProcedureReturn 1 : EndIf
+    finish=VideoTop+(line+1)*512
+  Else
+    If half=0 : ProcedureReturn 0 : EndIf
+    finish=VideoBottom+(line-119)*512
+  EndIf
+  If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)<>0
+    If PeekL(#SPI_DMA_CH0_READ)>=finish : ProcedureReturn 1 : EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM VideoAbort()
+  SpiDmaAbort(1) : SpiDmaRestore(1) : Ili9341Pin(13,1) : VideoState=0
+EndProcedure
+DataSection
+Ili9341Init:
+  Data.a $EF,3,$03,$80,$02,$CF,3,$00,$C1,$30,$ED,4,$64,$03,$12,$81
+  Data.a $E8,3,$85,$00,$78,$CB,5,$39,$2C,$00,$34,$02,$F7,1,$20,$EA,2,$00,$00
+  Data.a $C0,1,$23,$C1,1,$10,$C5,2,$3E,$28,$C7,1,$86
+  Data.a $3A,1,$55,$B1,2,$00,$18,$B6,3,$08,$82,$27,$F2,1,$00,$26,1,$01
+  Data.a $E0,15,$0F,$31,$2B,$0C,$0E,$08,$4E,$F1,$37,$07,$10,$03,$0E,$09,$00
+  Data.a $E1,15,$00,$0E,$14,$03,$11,$07,$31,$C1,$48,$08,$0F,$0C,$31,$36,$0F
+  Data.a 0
+EndDataSection
