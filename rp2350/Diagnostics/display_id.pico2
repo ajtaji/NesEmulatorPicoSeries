@@ -13,6 +13,7 @@ XIncludeFile "RP2350/Lib/wiring.pico2"
 XIncludeFile "RP2350/Lib/spi.pico2"
 XIncludeFile "../io.pico2"
 Global Dim ProbeBytes.a(8)
+Global Dim ProbeIndexedBytes.a(4)
 Procedure ProbeHex(value.i)
   Protected hi.i,lo.i
   hi=(value>>4)&15 : lo=value&15
@@ -38,6 +39,19 @@ Procedure ProbeRead(command.i,count.i)
   Next
   Say("spi_error=") : Num(SpiError(1)) : Eol()
 EndProcedure
+Procedure ProbeIndexedRead(command.i)
+  Protected index.i
+  Say("REG ") : ProbeHex(command) : Say(" indexed=")
+  For index=0 To 3
+    digitalWrite(13,0) : digitalWrite(16,0) : SpiWrite8(1,$D9)
+    digitalWrite(16,1) : SpiWrite8(1,$10+index) : digitalWrite(13,1)
+    digitalWrite(13,0) : digitalWrite(16,0) : SpiWrite8(1,command)
+    digitalWrite(16,1) : ProbeIndexedBytes(index)=SpiWrite8(1,0)&255
+    digitalWrite(13,1)
+    ProbeHex(ProbeIndexedBytes(index)) : UsbSerialWrite(32)
+  Next
+  Say("spi_error=") : Num(SpiError(1)) : Eol()
+EndProcedure
 Procedure ProbeSnapshot()
   Protected attempt.i,matches.i
   Say("DISPLAY_ID BEGIN; raw bytes include controller dummy clocks") : Eol()
@@ -49,7 +63,13 @@ Procedure ProbeSnapshot()
   Next
   ProbeRead($04,8) : ProbeRead($09,8)
   ProbeRead($DA,4) : ProbeRead($DB,4) : ProbeRead($DC,4)
-  If matches=3
+  For attempt=1 To 3
+    ProbeIndexedRead($D3)
+    If SpiError(1)=0 And ProbeIndexedBytes(1)=0 And ProbeIndexedBytes(2)=$93 And ProbeIndexedBytes(3)=$41
+      matches=matches+1
+    EndIf
+  Next
+  If matches>=3
     Say("CANDIDATE ILI9341: D3 returned 00 93 41 consistently; verify panel separately")
   Else
     Say("UNCONFIRMED: preserve raw replies; all 00/FF is not a controller identification")

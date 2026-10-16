@@ -1,0 +1,14 @@
+DISPLAY_ID BEGIN; raw bytes include controller dummy clocks
+REG D3 raw=FF FF FF FF FF FF FF FF spi_error=0
+REG D3 raw=FF FF FF FF FF FF FF FF spi_error=0
+REG D3 raw=FF FF FF FF FF FF FF FF spi_error=0
+REG 04 raw=00 00 00 7F FF FF FF FF spi_error=0
+REG 09 raw=00 30 80 00 7F FF FF FF spi_error=0
+REG DA raw=00 FF FF FF spi_error=0
+REG DB raw=00 FF FF FF spi_error=0
+REG DC raw=00 FF FF FF spi_error=0
+REG D3 indexed=41 00 93 41 spi_error=0
+REG D3 indexed=41 00 93 41 spi_error=0
+REG D3 indexed=41 00 93 41 spi_error=0
+CANDIDATE ILI9341: D3 returned 00 93 41 consistently; verify panel separately
+DISPLAY_ID END
