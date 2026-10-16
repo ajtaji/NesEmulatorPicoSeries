@@ -1,0 +1,14 @@
+ILI9341 id=37697
+VRAM x=5 y=17 expected=10804 raw=255,255,255,255,255,
+VRAM x=42 y=70 expected=20684 raw=255,255,255,255,255,
+VRAM x=79 y=123 expected=32628 raw=255,255,255,255,255,
+VRAM x=116 y=176 expected=42500 raw=255,255,255,255,255,
+VRAM x=153 y=229 expected=52412 raw=255,255,255,255,255,
+VRAM x=190 y=42 expected=62804 raw=255,255,255,255,255,
+VRAM x=227 y=95 expected=7164 raw=255,255,255,255,255,
+VRAM x=8 y=148 expected=17052 raw=255,255,255,255,255,
+VRAM x=45 y=201 expected=26916 raw=255,255,255,255,255,
+VRAM x=82 y=14 expected=37340 raw=255,255,255,255,255,
+VRAM x=119 y=67 expected=47220 raw=255,255,255,255,255,
+VRAM x=156 y=120 expected=59140 raw=255,255,255,255,255,
+ILI9341 wire checks=97 failures=0 spi_hz=75000000 frames=10 us=143801 PASS
