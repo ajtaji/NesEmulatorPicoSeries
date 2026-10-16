@@ -11,6 +11,9 @@ CompilerEndIf
 CompilerIf #NES_VERIFY_CORE=1
 Declare.i CoreTests()
 CompilerEndIf
+CompilerIf #NES_VERIFY_ROM=1
+Declare.i RomLoaderTests()
+CompilerEndIf
 Global StartUs.i, EmulateUs.i, EmulateCalls.i
 
 ; Descriptor caches are used only by the Thumb renderer, not this backend.
@@ -21,7 +24,7 @@ EndProcedure
 Procedure CartPpuWriteNotice(addr.i,value.i)
 EndProcedure
 Procedure CartSelect(number.i)
-  CartSelectBuiltin(number)
+  If RomLoaded=0 : CartSelectBuiltin(number) : EndIf
 EndProcedure
 Procedure NesSync()
   Protected stalls.i
@@ -76,9 +79,19 @@ Procedure.i Main()
   CompilerIf #NES_VERIFY_CORE=1
     LoadCartridge() : t=CoreTests() : PlatformEnd() : ProcedureReturn t
   CompilerEndIf
+  CompilerIf #NES_VERIFY_ROM=1
+    t=RomLoaderTests() : PlatformEnd() : ProcedureReturn t
+  CompilerEndIf
   If svc_cores()<2 : PlatformEnd() : ProcedureReturn 104 : EndIf
   VideoBegin()
   If VideoError : VideoAbort() : PlatformEnd() : ProcedureReturn VideoError : EndIf
+  CompilerIf #NES_ROM_SELECTOR=1
+    If RomSelector()=0
+      VideoAbort() : svc_flush() : svc_capture() : PlatformEnd()
+      ProcedureReturn VideoError
+    EndIf
+    HudAt=0 : HudPut("VIDEO -- FPS   EMU -- FPS") : HudDirty=1
+  CompilerEndIf
   LoadCartridge() : CpuReset()
   If VideoStart(@FrameTop(0),FrameBottom)=0 : VideoError=214 : EndIf
   t=NesHostUs() : status=VideoPoll()

@@ -1,0 +1,97 @@
+{
+  "date": "2026-10-16",
+  "target": "Pi 4 / Anvil build 281 ABI 1.7",
+  "rom_folder": "2:/NES (exFAT partition 2)",
+  "copy": {
+    "files_written": 857,
+    "files_identical_skipped": 0,
+    "bytes_verified": 185620366,
+    "result": 0,
+    "verification": "Every saved file reopened and compared byte for byte with host bundle data",
+    "ram_bundle_sha256": "d2ebf07b693b396f973ed6f630304fc615715be026c0a16f805a4399b70988f0"
+  },
+  "loader_tests": {
+    "checks": 48,
+    "failures": 0,
+    "first_failure": 0,
+    "directory_count": 857,
+    "microseconds": 215291,
+    "includes": [
+      "malformed and truncated headers",
+      "unsupported mapper / trainer / four-screen / PAL / system / RAM / size refusal",
+      "short-read rejection",
+      "full PRG-window and CHR FNV-1a comparisons with rom_catalog for Mario/Duck Hunt, Contra, Castlevania",
+      "CHR RAM / CHR bank metadata"
+    ]
+  },
+  "unchanged": [
+    "CPU opcode interpreter",
+    "PPU rendering",
+    "APU",
+    "audio bridge",
+    "Pico firmware"
+  ],
+  "supported_mappers": [
+    0,
+    2,
+    66
+  ],
+  "touch_game_test": {
+    "game": "Rygar (U).nes",
+    "seconds": 12.078469,
+    "video_fps": 60.02416365849016,
+    "emu_fps": 59.94137170861638,
+    "exit_requested": true,
+    "audio_live": true,
+    "audio_underruns_including_startup": 2,
+    "audio_overruns_including_startup": 1,
+    "cpu_video_worker_parallel_bt_init_wire_errors": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "menu_count": 857,
+    "selected_index": 629,
+    "rom_loaded": true,
+    "user_confirmation": "seems to work, played rygar"
+  },
+  "final_menu_test": {
+    "steady_present_fps": 60.0,
+    "frames_including_initial_render": 355,
+    "seconds_including_scan_and_first_render": 6.032481,
+    "video_error": 0,
+    "exit": "six-second bounded test",
+    "bluetooth_started": false,
+    "optimization": "Retain complete menu at 0x07400000; draw list on page/status/refresh changes; redraw only HUD strip for FPS. Complete-frame DMA at vertical sync."
+  },
+  "installed_application": {
+    "path": "2:/payloads/NES.PMF",
+    "bytes": 1758612,
+    "sha256": "7c8d3dbe0380252ff42692fcb8ec9feceb04ba338b7247466331fce9b740eec8",
+    "crc32": "FDDD9685",
+    "readback_verified": true
+  },
+  "optimized_menu_to_game_test": {
+    "seconds": 6.005021,
+    "video_fps": 60.116359293331364,
+    "emu_fps": 59.9498319822695,
+    "chosen_index": 629,
+    "loaded": 1,
+    "menu_fps": 52.7,
+    "audio_live": 1,
+    "errors": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "method": "Test-only input plugin selects Rygar after two seconds; six-second bounded game run; production input unchanged."
+  }
+}

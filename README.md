@@ -26,7 +26,8 @@ it has run on a board.
 
 The [Pi 4 / Anvil port](anvil/README.md) uses separate video, audio and input
 modules, on-screen controls and host FPS counters. EXIT returns to Anvil.
-Its initial ROM selection is at build time; the Pico flash ROM store remains
+Its touch ROM selector reads `.nes` files from `2:/NES` on the exFAT data
+partition, so changing games needs no rebuild. The Pico flash ROM store remains
 specific to the Pico firmware.
 
 ## Measured on a Pico W

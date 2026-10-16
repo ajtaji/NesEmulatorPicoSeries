@@ -1,6 +1,9 @@
 ; Input plugin: Anvil screen-space multi-touch, independent of video hardware.
 Procedure InputPoll()
   Protected i.i, n.i, x.i, y.i, id.i, state.i, bits.i
+  CompilerIf #NES_ROM_SELECTOR=1
+    If RomMenuActive : ProcedureReturn : EndIf
+  CompilerEndIf
   For n=0 To 31
     If svc_touch(@TouchEvent(0))<=0 : Break : EndIf
     TouchEvents=TouchEvents+1
@@ -30,3 +33,27 @@ Procedure InputPoll()
   For i=0 To 15 : NesController=NesController|ContactBits(i) : Next
   InputSeen=InputSeen|NesController
 EndProcedure
+CompilerIf #NES_ROM_SELECTOR=1
+Procedure.i InputMenuPoll()
+  Protected n.i,x.i,y.i,state.i,action.i
+  For n=0 To 31
+    If svc_touch(@TouchEvent(0))<=0 : Break : EndIf
+    TouchEvents=TouchEvents+1
+    x=PeekL(@TouchEvent(0)) : y=PeekL(@TouchEvent(0)+4)
+    state=PeekL(@TouchEvent(0)+12)
+    If state=0
+      If x>=ScreenW-140 And y<85 : ExitRequested=1 : EndIf
+      If y>=140 And y<636 And x>=32 And x<ScreenW-32
+        If (y-140) % 62<54 : action=(y-140)/62+1 : EndIf
+      EndIf
+      If y>=90 And y<128 And x>=32 And x<1176 : action=100+(x-32)/44 : EndIf
+      If y>=700 And y<780
+        If x>=32 And x<212 : action=-1 : EndIf
+        If x>=232 And x<412 : action=-2 : EndIf
+        If x>=442 And x<642 : action=-3 : EndIf
+      EndIf
+    EndIf
+  Next
+  ProcedureReturn action
+EndProcedure
+CompilerEndIf

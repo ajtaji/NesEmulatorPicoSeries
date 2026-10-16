@@ -3,6 +3,8 @@
 #NES_NATIVE_TIMER=1
 #NES_VERIFY_CODEC=0
 #NES_VERIFY_CORE=0
+#NES_VERIFY_ROM=0
+#NES_ROM_SELECTOR=0
 XIncludeFile "RaspberryPi4/Lib/uart.pi4"
 XIncludeFile "RaspberryPi4/Lib/timer.pi4"
 XIncludeFile "RaspberryPi4/Lib/mailbox.pi4"

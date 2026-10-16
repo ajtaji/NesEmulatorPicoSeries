@@ -18,6 +18,7 @@ def main():
     p.add_argument('--anvil',required=True,type=Path)
     p.add_argument('--out',required=True,type=Path)
     p.add_argument('--rom',type=Path)
+    p.add_argument('--no-selector',action='store_true',help='use the embedded demo instead of the exFAT ROM menu')
     p.add_argument('--seconds',type=int,default=0,help='automatic test exit in seconds; 0 plays until Exit')
     p.add_argument('--bluetooth-peer-wrapper',type=Path,help='private Pico wrapper containing one six-byte peer Data.a')
     p.add_argument('--video-plugin',type=Path,default=ROOT/'anvil/video_neon.pi4')
@@ -25,12 +26,15 @@ def main():
     p.add_argument('--audio-plugin',type=Path,help='custom audio plugin; default silent, or Bluetooth when peer is supplied')
     p.add_argument('--verify-audio',action='store_true',help='run deterministic SBC vectors and return without emulation')
     p.add_argument('--verify-core',action='store_true',help='run CPU vectors and packed CHR differential checks')
+    p.add_argument('--verify-rom',action='store_true',help='run on-board loader tests against the three exFAT test games')
     a=p.parse_args()
     a.out=a.out.resolve(); a.anvil=a.anvil.resolve()
     a.out.parent.mkdir(parents=True,exist_ok=True)
     if a.seconds<0: p.error('--seconds must be nonnegative')
     if a.bluetooth_peer_wrapper and a.audio_plugin:
         p.error('choose --audio-plugin or --bluetooth-peer-wrapper, not both')
+    if a.verify_rom and (a.rom or a.no_selector or a.verify_core or a.verify_audio):
+        p.error('--verify-rom requires selector mode and no other verification mode')
     includes=['RaspberryPi4/Lib/uart.pi4','RaspberryPi4/Lib/timer.pi4',
       'RaspberryPi4/Lib/mailbox.pi4','RaspberryPi4/Lib/mmu.pi4',
       'RaspberryPi4/Lib/dma.pi4','RaspberryPi4/Lib/display.pi4',
@@ -42,7 +46,7 @@ def main():
       'Anvil/Graphics/Vulkan/neon_vk_chrome.pi4']
     if a.bluetooth_peer_wrapper:
         includes += ['RaspberryPi4/Lib/gpio.pi4']
-    source=f'#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n'
+    source=f'#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
     source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in includes)+'\n'
     if a.bluetooth_peer_wrapper:
         # Keep the dependency checkout unchanged. The adapter verifies BT_ON
@@ -59,7 +63,7 @@ def main():
     for name in ('hud','platform'):
         source+=inc(ROOT/f'anvil/{name}.pi4')
     if a.video_plugin.resolve()==(ROOT/'anvil/video_neon.pi4').resolve():
-        source+=inc(ROOT/'anvil/ui.pi4')
+        source+=inc(ROOT/'anvil/ui.pi4')+inc(ROOT/'anvil/video_menu_neon.pi4')
     if a.bluetooth_peer_wrapper:
         patch=(a.anvil/'Firmware/CYW43455/BCM4345C0.hcd').read_bytes()
         source+=f'#BT_PATCH_BYTES={len(patch)}\n'
@@ -82,6 +86,8 @@ def main():
         source+=inc(ROOT/'anvil/Tests/sbc.pi4')
     if a.verify_core:
         source+=inc(ROOT/'anvil/Tests/core.pi4')
+    if a.verify_rom:
+        source+=inc(ROOT/'anvil/Tests/rom_loader.pi4')
     cart=(ROOT/'anvil/cartridge.pi4').read_text()
     if a.rom:
         from rom_catalog import read_rom,validate,prg_views
