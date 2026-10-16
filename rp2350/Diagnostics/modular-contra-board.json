@@ -1,0 +1,17 @@
+{
+  "cycles": 1789765.8188296387,
+  "frames": 60.096835901589785,
+  "lcd": 60.02183985013189,
+  "samples": 47996.84796595459,
+  "seconds": 40.002106,
+  "intervals": 40,
+  "minimum_frames": 60,
+  "errors": 0,
+  "stopped": 0,
+  "debt_first": -2,
+  "debt_last": 58,
+  "audio_live": 1,
+  "underrun_first": 1,
+  "underrun_last": 1,
+  "bt_live": 1
+}

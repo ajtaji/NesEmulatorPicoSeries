@@ -149,7 +149,18 @@ demo cartridge.
 
 ## Audio
 
-Audio output is meant to be modular. Today the one output is **Bluetooth A2DP**
+Video and audio are independently selectable compile-time plugins. The bundled
+ST7796/DMA and Bluetooth backends are selected by the normal wrappers; headless,
+silent, and custom outputs can be selected independently. See [OUTPUTS.md](OUTPUTS.md)
+for the RGB565/PCM interfaces, ownership rules, custom wrappers, and examples.
+Replacing a screen or audio device does not require editing CPU/PPU/APU code.
+On Pico 2 W, the output-interface suite passes 80 checks in addition to the full
+1,926,732 emulator checks. The modular build retains approximately 60 displayed
+FPS and 48,000 PCM samples/second in the three 40-second game tests. Details are
+in `rp2350/Diagnostics/MODULAR-OUTPUT-RESULTS.md`; RP2040 is compile-tested for
+this refactor and has not had a new physical-board run.
+
+The bundled hardware audio backend is **Bluetooth A2DP**
 (SBC, 48 kHz stereo) on the Pico W's CYW43439 radio, which was built to verify
 that the emulated audio is correct. The published firmware has no speaker
 configured and is therefore silent. To use a speaker, build your own firmware

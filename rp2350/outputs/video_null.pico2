@@ -1,0 +1,19 @@
+; Headless video backend. A submitted frame is consumed on the next poll.
+Procedure VideoBegin()
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoStart(top.i, bottom.i)
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  ProcedureReturn 0
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+EndProcedure
+ProcedureRAM VideoAbort()
+EndProcedure

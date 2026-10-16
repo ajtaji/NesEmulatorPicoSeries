@@ -17,7 +17,7 @@ Procedure HudGlyph(glyph.i)
       HudPixels(y*8+x)=c
     Next
   Next
-  Tft796BlitRect(4+HudColumn*8,4,8,10,@HudPixels(0))
+  VideoHudRect(4+HudColumn*8,4,8,10,@HudPixels(0))
   HudColumn=HudColumn+1
 EndProcedure
 Procedure HudNumber(tenths.i)

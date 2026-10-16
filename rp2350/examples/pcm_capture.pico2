@@ -1,0 +1,18 @@
+; Custom audio example: copies PCM into a plugin-owned staging buffer.
+; It intentionally drives no DAC. Replace the consume step with your device.
+Global Dim ExamplePcm.w(256)
+Global ExampleSamples.i
+Procedure AudioBegin()
+  AudioReset() : AudioQueueSlack=0 : AudioLive=1 : AudioRunning=1
+EndProcedure
+ProcedureRAM AudioPoll()
+  Protected start.i, count.i
+  AudioWorked=0
+  If AudioRunning=0 : ProcedureReturn : EndIf
+  start=Micros() : count=AudioRead(@ExamplePcm(0),256)
+  If count>0
+    ; Consume/copy these count samples before reusing ExamplePcm.
+    ExampleSamples=ExampleSamples+count : AudioPackets=AudioPackets+1 : AudioWorked=1
+    AudioBusyUs=AudioBusyUs+Micros()-start
+  EndIf
+EndProcedure

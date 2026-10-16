@@ -156,8 +156,8 @@ ProcedureRAM Core1Main()
       QTail=(slot+1)&127
       QComplete=QComplete+1
     EndIf
-    NesBluetoothPoll()
-    ; Idle time: a pass that applied no bus event and did no Bluetooth work.
-    If i=0 And BtAudioWorked=0 : Core1IdleUs=Core1IdleUs+Micros()-p : EndIf
+    AudioPoll()
+    ; Idle time: a pass that applied no bus event and did no audio output work.
+    If i=0 And AudioWorked=0 : Core1IdleUs=Core1IdleUs+Micros()-p : EndIf
   ForEver
 EndProcedure

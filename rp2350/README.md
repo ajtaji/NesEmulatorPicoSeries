@@ -3,6 +3,8 @@
 Regenerate with `py -3 tools/port_rp2350.py` from the repository root. The
 RP2040 tree is the semantic source; this folder contains the generated port.
 Use the root README for wiring, builds, ROM loading, and supported mappers.
+Video and audio backends are independently selected in the wrapper; see
+[the output plugin guide](../OUTPUTS.md) for the interface and custom examples.
 The LCD is rotated 90 degrees left from the RP2040 landscape layout, using the
 ST7796 controller's rotation setting. The 256x240 NES frame is centered at
 (32,120) in 320x480 portrait coordinates. DMA still sends the completed frame;

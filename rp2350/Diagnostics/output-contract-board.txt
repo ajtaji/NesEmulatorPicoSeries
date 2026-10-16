@@ -1,0 +1,1 @@
+OUTPUT board checks=80 failures=0 PASS

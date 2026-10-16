@@ -3,11 +3,10 @@ Global Dim BtPeer.a(6)
 Global Dim LinkPayload.a(256)
 Global LinkHandle.i= -1, SignalRemote.i, ConfigAck.i, ConfigPeer.i, AvStarted.i
 Global SignalId.i=1, SinkSeid.i, AvTransaction.i
-Global MediaRemote.i, MediaAck.i, MediaPeer.i, MediaConfigId.i, MediaConnect.i, StreamReady.i
+Global MediaRemote.i, MediaAck.i, MediaPeer.i, MediaConfigId.i, MediaConnect.i
 Global AudioSequence.i, AudioTimestamp.i
 Global BtPeerConfigured.i, BtLogEnabled.i=1, BtLastEvent.i, BtLastStatus.i
 Global BtAudioRead.i, BtAudioFrames.i, BtAudioLastPoll.i, BtAudioLastEncode.i
-Global BtAudioPackets.i, BtAudioUnderruns.i, BtAudioOverruns.i, BtAudioBusyUs.i, BtAudioWorked.i
 Global Dim BtAudioPayload.a(204)
 
 Procedure StageAddress()
@@ -144,7 +143,7 @@ Procedure AvReceive(at.i,n.i)
     SignalSend(2,SignalId,4) : SignalId=SignalId+1
 
   ElseIf signal=7
-    StreamReady=1
+    AudioLive=1
 
   EndIf
 EndProcedure
@@ -189,7 +188,7 @@ ProcedureReturn
     EndIf
   ElseIf event=$05
 
-    LinkHandle= -1 : StreamReady=0
+    LinkHandle= -1 : AudioLive=0
   ElseIf event=$0F
 
   Else
@@ -209,11 +208,11 @@ Procedure NesBluetoothSetPeer(src.i)
   ; This speaker plays stereo correctly; mono playback left a persistent buzz.
   SbcStereo=1 : BtPeerConfigured=1
 EndProcedure
-Procedure NesBluetoothBegin()
+Procedure AudioBegin()
   Protected t.i, rc.i, n.i, lastAttempt.i, report.i
   If BtPeerConfigured=0 : ProcedureReturn : EndIf
   PrintN("NES Bluetooth: initializing speaker")
-  BtLogEnabled=1 : bt_verbose=1 : BtAudioRunning=0
+  BtLogEnabled=1 : bt_verbose=1 : AudioRunning=0
   rc=BtBegin() : Print("BT BEGIN rc=") : PrintDecN(rc)
   Print("BT ACL max=") : PrintDec(bt_aclmax) : Print(" credits=") : PrintDecN(bt_credit0)
   If rc<>0 : ProcedureReturn : EndIf
@@ -225,7 +224,7 @@ Procedure NesBluetoothBegin()
   cyw43_verify=0
   NesRadioCheck()
   ConnectSpeaker() : t=Micros() : lastAttempt=t
-  While StreamReady=0 And Micros()-t<45000000
+  While AudioLive=0 And Micros()-t<45000000
     n=BtRx(1) : If n>0 : LinkEvent(n) : EndIf
     UsbSerialTask() : SafetyPet()
     If Micros()-report>1000000
@@ -237,22 +236,22 @@ Procedure NesBluetoothBegin()
       ConnectSpeaker() : lastAttempt=Micros()
     EndIf
   Wend
-  If StreamReady<>0
+  If AudioLive<>0
     BtAudioRead=ApuSamples : BtAudioLastEncode=Micros()
-    BtLogEnabled=0 : bt_verbose=0 : BtAudioRunning=1
+    BtLogEnabled=0 : bt_verbose=0 : AudioQueueSlack=1536 : AudioRunning=1
   Else
     PrintN("NES Bluetooth unavailable; continuing without audio")
   EndIf
 EndProcedure
-ProcedureRAM NesBluetoothPoll()
+ProcedureRAM AudioPoll()
   Protected t.i, start.i, n.i, i.i, index.i, value.i, work.i
-  If BtAudioRunning=0 : ProcedureReturn : EndIf
+  If AudioRunning=0 : ProcedureReturn : EndIf
   start=Micros() : t=start
   If BtControlRequest<>0
     work=1
     LinkPayload(2)=SinkSeid<<2
-    If StreamReady
-      AvSend(9,1) : StreamReady=0
+    If AudioLive
+      AvSend(9,1) : AudioLive=0
     Else
       AvSend(7,1)
     EndIf
@@ -262,10 +261,10 @@ ProcedureRAM NesBluetoothPoll()
     BtAudioLastPoll=t : work=1
     n=BtRx(1) : If n>0 : LinkEvent(n) : EndIf
   EndIf
-  If StreamReady<>0
+  If AudioLive<>0
     n=ApuSamples-BtAudioRead
     If n>4096
-      BtAudioOverruns=BtAudioOverruns+1 : BtAudioRead=ApuSamples-128 : n=128
+      AudioOverruns=AudioOverruns+1 : BtAudioRead=ApuSamples-128 : n=128
     EndIf
     If BtAudioFrames<3 And (n>=128 Or t-BtAudioLastEncode>8000)
       work=1
@@ -275,7 +274,7 @@ ProcedureRAM NesBluetoothPoll()
         BtAudioRead=BtAudioRead+128
       Else
         For i=0 To 127 : SbcPcm(i)=0 : Next
-        BtAudioUnderruns=BtAudioUnderruns+1
+        AudioUnderruns=AudioUnderruns+1
       EndIf
       SbcEncode()
       index=BtAudioFrames*(64+SbcStereo*4)
@@ -292,11 +291,11 @@ ProcedureRAM NesBluetoothPoll()
       For i=0 To 191+SbcStereo*12 : LinkPayload(13+i)=BtAudioPayload(i) : Next
       If LinkSend(MediaRemote,205+SbcStereo*12)<>0
         AudioTimestamp=AudioTimestamp+384 : AudioSequence=(AudioSequence+1)&$FFFF
-        BtAudioPackets=BtAudioPackets+1 : BtAudioFrames=0
+        AudioPackets=AudioPackets+1 : BtAudioFrames=0
       EndIf
     EndIf
   EndIf
   ; Only polls that did work count, so this is Bluetooth load, not idle spin.
-  If work : BtAudioBusyUs=BtAudioBusyUs+Micros()-start : EndIf
-  BtAudioWorked=work
+  If work : AudioBusyUs=AudioBusyUs+Micros()-start : EndIf
+  AudioWorked=work
 EndProcedure

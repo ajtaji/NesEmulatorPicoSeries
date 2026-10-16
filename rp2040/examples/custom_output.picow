@@ -1,0 +1,16 @@
+#NES_VIDEO_BACKEND=2
+#NES_AUDIO_BACKEND=2
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+XIncludeFile "../outputs/video_null.pico"
+XIncludeFile "pcm_capture.pico"
+Main()

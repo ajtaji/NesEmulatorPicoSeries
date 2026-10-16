@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-16",
+  "api_version": 1,
+  "full_board_checks": 1926732,
+  "output_board_checks": 80,
+  "failures": 0,
+  "protected_algorithms_source_commit": "df6baf0066a28bf2ca8ae2424849d27a6a7e24b3",
+  "rp2040_status": "compile tested; not attached for hardware retest",
+  "rp2350_status": "hardware tested on COM6; stock150MHz/75MHzSPI",
+  "artifacts": {
+    "firmware/nes-pico-w.uf2": {
+      "sha256": "853d857eebba8abdc4a22c48c359ac3d9b39940e04b5b649d1c54020285fe21d",
+      "end": "0x10026700"
+    },
+    "firmware/nes-pico2-w.uf2": {
+      "sha256": "9c7569ab7dca793eaff1ad985fbe76fd4d39b676659c8e8454082b02f25c991f",
+      "end": "0x10026100"
+    },
+    "rp2350/Diagnostics/verify-modular.uf2": {
+      "sha256": "1799c651476d26caa670976d7aea8158ad5df3c05f2219acfd6c48474bb2ddca",
+      "end": "0x10041500"
+    },
+    "rp2350/Diagnostics/outputs.uf2": {
+      "sha256": "62a615425fbb22f823e2ef9091189cdf7f494b6ade9c4df4a669d351fffffb66",
+      "end": "0x1001de00"
+    }
+  }
+}

@@ -1,6 +1,5 @@
-Global BtAudioRunning.i
 Global Dim BtSnapshot.a(320)
-Global BtSnapshotState.i, BtSnapshotSize.i, BtWireErrors.i, BtControlRequest.i
+Global BtSnapshotState.i, BtSnapshotSize.i, BtControlRequest.i
 ; RP2040 port of the HCI transport in PureMetal RP2350/Lib/bluetooth.pico2.
 ; Only radio backplane addresses are shared; MCU accesses use cyw43.pico.
 ; This supplies transport/initialization, not pairing, A2DP or an SBC codec.
@@ -55,13 +54,13 @@ EndProcedure
 
 Procedure BtBootWait()
   Protected t.i
-  If BtAudioRunning<>0 : ProcedureReturn : EndIf
+  If AudioRunning<>0 : ProcedureReturn : EndIf
   t=Micros()
   While Micros()-t<1000 : UsbSerialTask() : SafetyPet() : Wend
 EndProcedure
 Procedure.i BtWriteBytes(addr.i,src.i,n.i)
   Protected off.i, chunk.i, room.i
-  If BtAudioRunning=0 : ProcedureReturn Cyw43BpWriteBytes(addr,src,n) : EndIf
+  If AudioRunning=0 : ProcedureReturn Cyw43BpWriteBytes(addr,src,n) : EndIf
   If (addr&3)<>0 Or (n&3)<>0 : ProcedureReturn -1 : EndIf
   off=0
   While off<n
@@ -77,7 +76,7 @@ Procedure.i BtRingWrite(n.i)
   Protected waited.i
   waited = 0
   While BtRingSpace() < n
-    If BtAudioRunning<>0 : ProcedureReturn 1 : EndIf
+    If AudioRunning<>0 : ProcedureReturn 1 : EndIf
     UsbSerialTask()
     SafetyPet()
     BtBootWait()
@@ -94,11 +93,11 @@ Procedure.i BtRingWrite(n.i)
   If n > first
     BtWriteBytes(bt_rambase, @bt_tx[first], n - first)
   EndIf
-  If BtSnapshotState=1 And BtAudioRunning<>0 And n>128
+  If BtSnapshotState=1 And AudioRunning<>0 And n>128
     For first=0 To n-1 : BtSnapshot(first)=bt_tx(first) : Next
     For first=0 To n-1 Step 4
       If NesRadioRead(bt_rambase+((in+first)&4095))<>PeekL(@bt_tx(0)+first)
-        BtWireErrors=BtWireErrors+1
+        AudioWireErrors=AudioWireErrors+1
       EndIf
     Next
     BtSnapshotSize=n
@@ -133,7 +132,7 @@ Procedure.i BtRx(budget.i)
   Protected t.i
   t = 0
   While BtB2hAvail() < 4
-    If BtAudioRunning<>0 : ProcedureReturn 0 : EndIf
+    If AudioRunning<>0 : ProcedureReturn 0 : EndIf
     UsbSerialTask() : SafetyPet() : BtBootWait()
     t=t+1 : If t>=budget : ProcedureReturn 0 : EndIf
   Wend
@@ -151,7 +150,7 @@ Procedure.i BtRx(budget.i)
   EndIf
   t = 0
   While BtB2hAvail() < take
-    If BtAudioRunning<>0 : ProcedureReturn 0 : EndIf
+    If AudioRunning<>0 : ProcedureReturn 0 : EndIf
     UsbSerialTask()
     SafetyPet()
     BtBootWait()

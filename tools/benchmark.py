@@ -69,8 +69,11 @@ result.update(seconds=duration / 1e6, intervals=len(rows),
               minimum_frames=min(r['frames'] for r in rows),
               errors=max(r['err'] for r in rows), stopped=max(r['stop'] for r in rows),
               debt_first=rows[0]['debt'], debt_last=rows[-1]['debt'],
-              bt_live=min(r['bt_live'] for r in rows),
-              underrun_first=rows[0]['bt_underrun'], underrun_last=rows[-1]['bt_underrun'])
+              audio_live=min(r.get('audio_live', r.get('bt_live', 0)) for r in rows),
+              underrun_first=rows[0].get('audio_underrun', rows[0].get('bt_underrun', 0)),
+              underrun_last=rows[-1].get('audio_underrun', rows[-1].get('bt_underrun', 0)))
+if all('bt_live' in r for r in rows):
+    result['bt_live'] = min(r['bt_live'] for r in rows)
 print(json.dumps(result, indent=2))
 a.output.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8', newline='\n')
 if result['errors'] or result['stopped']:

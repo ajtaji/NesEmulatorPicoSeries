@@ -4,25 +4,36 @@ XIncludeFile "RP2350/Lib/timer.pico2"
 XIncludeFile "RP2350/Lib/uart.pico2"
 XIncludeFile "RP2350/Lib/usb_serial.pico2"
 XIncludeFile "RP2350/Lib/safety.pico2"
-XIncludeFile "RP2350/Lib/spi.pico2"
-XIncludeFile "RP2350/Lib/st7796.pico2"
-XIncludeFile "RP2350/Lib/cyw43_nvram.pico2"
 XIncludeFile "RP2350/Lib/bits.pico2"
 XIncludeFile "RP2350/Lib/wiring.pico2"
 XIncludeFile "RP2350/Lib/string_out.pico2"
-XIncludeFile "RP2350/Lib/cyw43.pico2"
 XIncludeFile "RP2350/Lib/flashid.pico2"
 XIncludeFile "RP2350/Lib/flash.pico2"
-XIncludeFile "bt_firmware.pico2"
-XIncludeFile "bt_radio.pico2"
-XIncludeFile "bt_transport.pico2"
-XIncludeFile "sbc_encoder.pico2"
+XIncludeFile "outputs/state.pico2"
 XIncludeFile "math.pico2"
 XIncludeFile "cpu2a03.pico2"
 XIncludeFile "bridge.pico2"
 XIncludeFile "ppu.pico2"
 XIncludeFile "apu.pico2"
-XIncludeFile "bt_audio.pico2"
+XIncludeFile "outputs/audio_api.pico2"
+CompilerIf #NES_VIDEO_BACKEND=1
+  XIncludeFile "RP2350/Lib/spi.pico2"
+  XIncludeFile "RP2350/Lib/st7796.pico2"
+  XIncludeFile "outputs/video_st7796.pico2"
+CompilerElseIf #NES_VIDEO_BACKEND=0
+  XIncludeFile "outputs/video_null.pico2"
+CompilerEndIf
+CompilerIf #NES_AUDIO_BACKEND=1
+  XIncludeFile "RP2350/Lib/cyw43_nvram.pico2"
+  XIncludeFile "RP2350/Lib/cyw43.pico2"
+  XIncludeFile "bt_firmware.pico2"
+  XIncludeFile "bt_radio.pico2"
+  XIncludeFile "bt_transport.pico2"
+  XIncludeFile "sbc_encoder.pico2"
+  XIncludeFile "bt_audio.pico2"
+CompilerElseIf #NES_AUDIO_BACKEND=0
+  XIncludeFile "outputs/audio_null.pico2"
+CompilerEndIf
 XIncludeFile "hud.pico2"
 XIncludeFile "display.pico2"
 XIncludeFile "worker.pico2"
@@ -45,7 +56,7 @@ ProcedureRAM NesSync()
     PpuSync(CpuCycles)
     ; Synchronous only while a DMC sample is really fetching (its stalls and
     ; IRQ belong inside this window); a latched $4015 bit 4 alone is not playback.
-    If CpuCycles-WorkerClock>512+BtAudioRunning*1536 Or PeekL(@DmcBytes)>0
+    If CpuCycles-WorkerClock>512+PeekL(@AudioQueueSlack) Or PeekL(@DmcBytes)>0
       NesRpc(0,0,0,CpuCycles)
       LastApuSend=CpuCycles
     ElseIf CpuCycles-LastApuSend>=256
@@ -179,17 +190,15 @@ Procedure Main()
     UsbSerialTask() : SafetyPet()
   Wend
   WaitUs(200000)
-  SpiPeriFromSys(ClockSysConfigKhz())
-  SpiBegin(0,2,3,-1,100000)
-  Tft796Begin(0,5,6,7) : Tft796Rotate(0) : Tft796Fill(0)
+  VideoBegin()
   LoadCartridge()
   InputBegin()
   Say("core1 launch=") : Num(NesLaunchCore1()) : Eol()
   While PeekL(@WorkerReady)=0 : SafetyPet() : Wend
   CartIndex=BootMenu() : LoadCartridge()
-  NesBluetoothBegin()
+  AudioBegin()
   Say("NES PureMetal RP2350 mapper=") : Num(CartMapper)
-  Say(" clk_khz=") : Num(ClockSysKhz()) : Say(" spi_hz=") : Num(SpiHz(0)) : Eol()
+  Say(" clk_khz=") : Num(ClockSysKhz()) : Say(" spi_hz=") : Num(VideoClockHz()) : Eol()
   CpuReset()
   tick=Micros() : report=tick : start=tick : cycles=CpuCycles
   display=WorkerDisplayed : frames=WorkerFrames : samples=ApuSamples
@@ -225,10 +234,12 @@ Procedure Main()
     ElseIf key=119
       DumpPcm()
       tick=Micros() : target=CpuCycles
+    CompilerIf #NES_AUDIO_BACKEND=1
     ElseIf key=113
       BtControlRequest=1
     ElseIf key=107
       BtSnapshotState=1
+    CompilerEndIf
     ElseIf key=106
       Say("INPUT x=") : Num(InputX) : Say(" y=") : Num(InputY)
       Say(" buttons=") : Num(InputButtons) : Say(" mask=") : Num(InputMask)
@@ -248,11 +259,13 @@ Procedure Main()
     If release<>0 And WorkerFrames-release>=0
       InputHost=0 : release=0
     EndIf
+    CompilerIf #NES_AUDIO_BACKEND=1
     If BtSnapshotState=2
       Say("SBC_BEGIN") : Eol()
       For captureByte=0 To BtSnapshotSize-1 : UsbSerialWrite(BtSnapshot(captureByte)) : Next
       Eol() : Say("SBC_END") : Eol() : BtSnapshotState=0
     EndIf
+    CompilerEndIf
     dt=Micros()-tick
     If dt>=176
       dt=NesDiv(dt,176) : tick=tick+dt*176 : target=target+dt*315
@@ -302,8 +315,12 @@ Procedure Main()
         Say(" guard_line=") : Num(GuardLine) : Say(" guard_dot=") : Num(GuardDot)
         Say(" guard_got=") : Num(GuardGot) : Say(" guard_expected=") : Num(GuardExpected)
       CompilerEndIf
-      Say(" bt_us=") : Num(BtAudioBusyUs-lastBt) : Say(" bt_live=") : Num(StreamReady) : Say(" bt_wire_errors=") : Num(BtWireErrors) : Say(" bt_overrun=") : Num(BtAudioOverruns)
-      Say(" bt_packets=") : Num(BtAudioPackets) : Say(" bt_underrun=") : Num(BtAudioUnderruns)
+      Say(" audio_us=") : Num(AudioBusyUs-lastBt) : Say(" audio_live=") : Num(AudioLive) : Say(" audio_wire_errors=") : Num(AudioWireErrors) : Say(" audio_overrun=") : Num(AudioOverruns)
+      Say(" audio_packets=") : Num(AudioPackets) : Say(" audio_underrun=") : Num(AudioUnderruns)
+      CompilerIf #NES_AUDIO_BACKEND=1
+      Say(" bt_us=") : Num(AudioBusyUs-lastBt) : Say(" bt_live=") : Num(AudioLive) : Say(" bt_wire_errors=") : Num(AudioWireErrors) : Say(" bt_overrun=") : Num(AudioOverruns)
+      Say(" bt_packets=") : Num(AudioPackets) : Say(" bt_underrun=") : Num(AudioUnderruns)
+      CompilerEndIf
       Say(" deferred=") : Num(PpuStatusDeferred-lastDeferred) : Say(" batched=") : Num(NesIdleBatched-lastBatched)
       Say(" debt=") : Num(target-CpuCycles) : Say(" pc=") : Num(PC)
       Say(" bank_calls=") : Num(CartBankCalls) : Say(" bank_changes=") : Num(CartBankChanges)
@@ -316,7 +333,7 @@ Procedure Main()
       Say(" stop=") : Num(Stopped) : Say(" opcode=") : Num(BadOpcode) : Eol()
       report=t : cycles=CpuCycles : frames=WorkerFrames : samples=ApuSamples
       display=WorkerDisplayed : busy=WorkerBusyUs : lastPpu=WorkerPpuUs : lastApu=WorkerApuUs : lastLcd=WorkerDisplayUs
-      lastBt=BtAudioBusyUs
+      lastBt=AudioBusyUs
       lastDeferred=PpuStatusDeferred : lastBatched=NesIdleBatched
       lastMisses=RgbMisses : lastName=NameBuildUs : lastPairs=PairBuilds
       lastRender=PpuRenderUs : lastSprites=PpuSpritesUs : lastRgb=PpuRgbUs : lastWait=DisplayWaitUs

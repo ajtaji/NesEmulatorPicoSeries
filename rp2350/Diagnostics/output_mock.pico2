@@ -1,0 +1,24 @@
+; Custom plugin used only by the output-contract board checks.
+Global MockStarts.i, MockPolls.i, MockAborts.i, MockTop.i, MockBottom.i
+Global MockResult.i, MockStartOk.i=1, MockHud.i
+Procedure VideoBegin()
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoStart(top.i,bottom.i)
+  MockStarts=MockStarts+1 : MockTop=top : MockBottom=bottom
+  ProcedureReturn MockStartOk
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  MockPolls=MockPolls+1 : ProcedureReturn MockResult
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  ProcedureReturn 0
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+  MockHud=MockHud+1
+EndProcedure
+ProcedureRAM VideoAbort()
+  MockAborts=MockAborts+1
+EndProcedure

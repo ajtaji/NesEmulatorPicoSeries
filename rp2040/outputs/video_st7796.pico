@@ -1,0 +1,60 @@
+; LAFVIN ST7796 + SPI0 DMA backend. Ownership is managed by display.pico.
+Global VideoTop.i, VideoBottom.i, VideoHalf.i, VideoState.i
+Procedure VideoBegin()
+  SpiPeriFromSys(200000)
+  SpiBegin(0,2,3,-1,100000)
+  Tft796Begin(0,5,6,7) : Tft796Rotate(1) : Tft796Fill(0)
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn SpiHz(0)
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+  Tft796BlitRect(x,y,width,height,pixels)
+EndProcedure
+ProcedureRAM VideoDmaStart(pointer.i)
+  PokeL(#SPI_DMA_CH0_READ,pointer)
+  PokeL(#SPI_DMA_CH0_WRITE,$4003C008)
+  PokeL(#SPI_DMA_CH0_COUNT,30720)
+  PokeL(#SPI_DMA_CH0_CTRL,#SPI_DMA_EN|#SPI_DMA_SIZE_HALF|#SPI_DMA_INCR_READ|(#SPI_DMA_TREQ_SPI0_TX<<15))
+EndProcedure
+ProcedureRAM.i VideoStart(top.i,bottom.i)
+  VideoTop=top : VideoBottom=bottom
+  Tft796Window(112,40,367,279)
+  SpiDmaInit() : SpiSetBits(0,16)
+  Tft796PinSet(tft796_dc,1) : Tft796PinSet(tft796_cs,0)
+  PokeL($4003C024,PeekL($4003C024)|#SPI_SSPDMACR_TXDMAE)
+  VideoHalf=0 : VideoState=1 : VideoDmaStart(VideoTop)
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  If VideoState=1
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0
+      VideoHalf=1 : NesFence()
+      VideoDmaStart(VideoBottom) : VideoState=2
+    EndIf
+  ElseIf VideoState=2
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0 And (PeekL($4003C00C)&#SPI_SR_BSY)=0
+      SpiDmaRestore(0) : Tft796PinSet(tft796_cs,1) : VideoState=0
+      ProcedureReturn 1
+    EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  Protected finish.i, half.i
+  half=PeekL(@VideoHalf)
+  If line<120
+    If half=1 : ProcedureReturn 1 : EndIf
+    finish=VideoTop+(line+1)*512
+  Else
+    If half=0 : ProcedureReturn 0 : EndIf
+    finish=VideoBottom+(line-119)*512
+  EndIf
+  If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)<>0
+    If PeekL(#SPI_DMA_CH0_READ)>=finish : ProcedureReturn 1 : EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM VideoAbort()
+  SpiDmaAbort(0) : SpiDmaRestore(0) : Tft796PinSet(tft796_cs,1) : VideoState=0
+EndProcedure

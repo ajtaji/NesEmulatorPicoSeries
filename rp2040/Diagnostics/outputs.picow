@@ -1,0 +1,87 @@
+#NES_VIDEO_BACKEND=2
+#NES_AUDIO_BACKEND=2
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+XIncludeFile "output_mock.pico"
+XIncludeFile "../examples/pcm_capture.pico"
+Global Checks.i, Failures.i
+Global Dim OutputSamples.w(4096)
+Procedure Check(actual.i, expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    Say("FAIL check=") : Num(Checks) : Say(" actual=") : Num(actual)
+    Say(" expected=") : Num(expected) : Eol()
+  EndIf
+EndProcedure
+Procedure OutputMain()
+  Protected start.i, i.i, before.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  start=Micros()
+  While UsbSerialReady()=0 And Micros()-start<10000000 : UsbSerialTask() : SafetyPet() : Wend
+  WaitUs(200000)
+  FrameBottom=@FrameBottomStore(0)
+  WorkerDisplay=0 : HudLastUs=Micros()
+  Check(DisplayReady,0) : Check(DisplayDone,0) : Check(MockStarts,0)
+  DisplayFrame() : Check(DisplayReady,1) : Check(MockStarts,0)
+  DisplayPoll() : Check(DisplayDone,1) : Check(MockStarts,0) : Check(WorkerDisplayed,0)
+  WorkerDisplay=1
+  DisplayFrame() : DisplayPoll()
+  Check(MockStarts,1) : Check(MockTop,@FrameTop(0)) : Check(MockBottom,FrameBottom)
+  Check(DisplayActive,2) : Check(DisplayDone,1) : Check(DisplayState,1)
+  DisplayPoll() : Check(MockPolls,1) : Check(DisplayDone,1) : Check(WorkerDisplayed,0)
+  MockResult=1 : DisplayPoll()
+  Check(DisplayDone,2) : Check(DisplayState,0) : Check(WorkerDisplayed,1)
+  DisplayPoll() : Check(MockStarts,1) : Check(WorkerDisplayed,1)
+  DisplayWaitLine(0) : DisplayWaitLine(239) : Check(WorkerError,0)
+  ; Error and timeout must abort without freeing a frame the backend still owns.
+  MockResult= -1 : DisplayFrame() : DisplayPoll() : DisplayPoll()
+  Check(MockAborts,1) : Check(WorkerError,10) : Check(DisplayDone,2)
+  WorkerError=0 : MockResult=0 : DisplayPoll()
+  DisplayStart=Micros()-2000001 : DisplayPoll()
+  Check(MockAborts,2) : Check(WorkerError,10) : Check(DisplayDone,2)
+  WorkerError=0 : MockStartOk=0 : DisplayPoll()
+  Check(MockAborts,3) : Check(WorkerError,10) : Check(DisplayDone,2)
+  ; Host HUD is routed to the video plugin and never changes emulated pixels.
+  before=FrameTop(0) : HudGlyph(10) : Check(MockHud,1) : Check(FrameTop(0),before)
+  ; Sample order, signed PCM, wraparound, overrun policy and invalid requests.
+  ApuSamples=0 : AudioReset()
+  Check(AudioRead(@OutputSamples(0),256),0)
+  For i=0 To 4095 : Pcm(i)=i-2048 : Next
+  ApuSamples=10 : Check(AudioRead(@OutputSamples(0),4),4)
+  For i=0 To 3 : Check(OutputSamples(i),i-2048) : Next
+  Check(AudioReadCursor,4) : Check(AudioRead(@OutputSamples(0),256),6)
+  For i=0 To 5 : Check(OutputSamples(i),i+4-2048) : Next
+  Check(AudioRead(0,128),0) : Check(AudioRead(@OutputSamples(0),0),0)
+  Check(AudioRead(@OutputSamples(0),-1),0) : Check(AudioReadCursor,10)
+  AudioReadCursor=4094 : ApuSamples=4100
+  Check(AudioRead(@OutputSamples(0),8),6)
+  For i=0 To 5 : Check(OutputSamples(i),((4094+i)&4095)-2048) : Next
+  AudioReadCursor=0 : ApuSamples=4100
+  Check(AudioRead(@OutputSamples(0),5000),4096) : Check(AudioOverruns,1)
+  Check(OutputSamples(0),-2044) : Check(OutputSamples(4095),-2045)
+  Check(AudioReadCursor,4100)
+  AudioReadCursor=$7FFFFFFE : ApuSamples=$80000004
+  Check(AudioRead(@OutputSamples(0),8),6) : Check(AudioReadCursor,$80000004)
+  For i=0 To 5 : Check(OutputSamples(i),((4094+i)&4095)-2048) : Next
+  AudioReadCursor=110 : ApuSamples=100
+  Check(AudioRead(@OutputSamples(0),8),0) : Check(AudioReadCursor,100)
+  AudioBegin() : Check(AudioRunning,1) : Check(AudioQueueSlack,0)
+  ApuSamples=104 : AudioPoll()
+  Check(ExampleSamples,4) : Check(AudioWorked,1) : Check(ExamplePcm(0),-1948)
+  AudioPoll() : Check(AudioWorked,0)
+  Say("OUTPUT board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
+  If Failures=0 : Say(" PASS") : Else : Say(" FAIL") : EndIf
+  Eol()
+  Repeat : UsbSerialTask() : SafetyPet() : ForEver
+EndProcedure
+OutputMain()
