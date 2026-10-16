@@ -25,7 +25,7 @@ unchanged. Video/audio plugin contracts and the left display rotation remain.
 ## Measured bottlenecks
 
 - The original Goal! Two sample spent 4,494,489 microseconds on 9,254 PRG-slot
-  copies, about 486 microseconds per copy. Pointer changes cost about 1–2
+  copies, about 486 microseconds per copy. Pointer changes cost about 1â€“2
   microseconds and publish a small ordered mapping event.
 - A pending but masked MMC3 IRQ forced one-instruction CPU windows. The multicart
   reached about 78,794 windows per second and roughly 584 ms/s of synchronization.
@@ -46,7 +46,7 @@ profile. Release builds disable detailed observer/predictor timers. Remaining
 Goal! Two scenes still run below 60 FPS; connected Bluetooth does not prove clear
 audio when emulation is slow. The PPU remains instruction-timestamped with its
 existing eight-pixel granularity, rather than a fully cycle-exact implementation.
-In the final Goal! Two title-screen sample, late intervals reached 57–58 FPS:
+In the final Goal! Two title-screen sample, late intervals reached 57â€“58 FPS:
 PPU synchronization accounted for about 550 ms/s and CPU execution about 380
 ms/s. An earlier IRQ-enabled cup-menu sample spent about 225 ms/s waiting for
 PPU RPCs. These counters overlap synchronization totals and must not be added
@@ -96,3 +96,43 @@ separately from the native correctness verdicts.
 USB controls: `s` Start, `a` A, `b` B, `u` up, `n` down, `l` left, `r` right,
 `R` held right and `0` release. `j` retains input diagnostics. Physical joystick
 and button/chord mappings are unchanged.
+
+## Final finite game runs
+
+All rates below include startup intervals in each sample; they are not selected
+peak figures. These are automated controller sequences and completed framebuffer
+captures, not exhaustive gameplay or listening verification. Raw counters and
+private test-image hashes are in `Diagnostics/mmc3-nmi/games.json` for each chip;
+public/private hashes are distinguished in `firmware/pico-mapper-manifest.json`.
+No CPU/bridge errors or stopped-CPU flags were reported in these samples.
+
+| Board | ROM | Mapper | Seconds | Emulated FPS | Display FPS | Steady audio underrun delta |
+|---|---|---:|---:|---:|---:|---:|
+| Pico W | Super Mario Bros - Duck Hunt (U).nes | 66 | 40.0 | 60.10 | 59.97 | 0 |
+| Pico W | Contra (U).nes | 2 | 40.0 | 60.10 | 59.97 | 0 |
+| Pico W | Castlevania (U) (PRG 0).nes | 2 | 40.0 | 60.10 | 59.97 | 0 |
+| Pico W | Gradius (U).nes | 3 | 40.0 | 60.10 | 59.97 | 0 |
+| Pico 2 W | Super Spike V'Ball - Nintendo World Cup (U) [!].nes | 47 | 20.0 | 60.10 | 60.05 | 0 |
+| Pico 2 W | Goal! Two (U).nes | 118 | 20.0 | 48.79 | 48.74 | 36 |
+| Pico 2 W | Pinbot (U).nes | 119 | 20.0 | 47.93 | 47.78 | 237 |
+| Pico 2 W | Metroid (U).nes | 1 | 20.0 | 60.10 | 60.00 | 79 |
+| Pico 2 W | Videomation (U).nes | 13 | 20.0 | 49.89 | 49.84 | 187 |
+| Pico 2 W | RBI Baseball (U).nes | 206 | 20.0 | 60.10 | 60.00 | 0 |
+| Pico 2 W | Adventures of Lolo 2 (U).nes | 4 | 40.0 | 59.02 | 58.92 | 0 |
+| Pico 2 W | Mega Man 3 (U) [!].nes | 4 | 40.0 | 57.42 | 57.32 | 2 |
+| Pico 2 W | Super Mario Bros - Duck Hunt (U).nes | 66 | 40.0 | 60.10 | 60.07 | 0 |
+| Pico 2 W | Contra (U).nes | 2 | 40.0 | 60.10 | 60.00 | 0 |
+| Pico 2 W | Castlevania (U) (PRG 0).nes | 2 | 40.0 | 60.10 | 60.05 | 0 |
+| Pico 2 W | Gradius (U).nes | 3 | 40.0 | 60.09 | 59.99 | 1 |
+
+The underrun delta omits the first two startup intervals and ends before the USB
+frame dump. It is a transport counter, not a subjective audio quality verdict.
+Games below real time can still produce irregular playback even with no new
+transport underruns. Historical black-screen Lolo 2 FPS is not comparable to
+rendered frames after the interrupt fix.
+
+Both physical boards were reset and verified in their stopped ROM menus after
+testing, with no game/audio stream running. Pico W retains Mario/Duck Hunt,
+Contra, Castlevania and Gradius. Pico 2 W retains those plus Metroid, Mega Man 3,
+Videomation, Double Strike, Lolo 2 and RBI Baseball. Menu refreshes remain about
+60 FPS. The ROM packs and private Bluetooth wrapper are excluded from Git.
