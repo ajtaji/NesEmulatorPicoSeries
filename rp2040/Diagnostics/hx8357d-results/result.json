@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-16",
+  "port": "COM14",
+  "board": "bare Raspberry Pi Pico RP2040",
+  "usb_serial": "E6609103C3949B22",
+  "host_clock_hz": 200000000,
+  "read_spi_request_hz": 100000,
+  "initialization_spi_request_hz": 1000000,
+  "drawing_spi_hz": 7692307,
+  "dimensions": [
+    480,
+    320
+  ],
+  "checks": 51,
+  "failures": 0,
+  "drawing_us": 379042,
+  "readback": {
+    "power_mode": "9C",
+    "pixel_format": "05",
+    "madctl_challenge": [
+      "60",
+      "A0"
+    ]
+  },
+  "physical_confirmation": "operator confirmed expected bars, border, corner numbers, centered outline, colors and orientation",
+  "raw_id_note": "Serial ID replies are preserved verbatim; no claim that the ID stream contains 0x8357",
+  "final_state": "static diagnostic pattern; USB/watchdog idle loop; NES and wireless not initialized",
+  "rom_store": "image ends 0x10004900, below ROM store at 0x10050000",
+  "firmware_sha256": "b52daeb2780420a4a7f995f7c49d19395a9b436b2d0e0dc7b65e5d6707b60785",
+  "source_sha256": "aad69aa5be9d94360671490a40fb6a996e5122fcb5c676b708c5d0aea5b75e79",
+  "rp2350": "generated diagnostic compiled; not flashed or physically tested"
+}

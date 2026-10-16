@@ -1,0 +1,168 @@
+; Standalone HX8357D SPI1 diagnostic, no NES/wireless initialization.
+; Adafruit breakout: VIN=USB VBUS, common GND, IM2 high (SPI), Lite default on.
+; GP10 SCK, GP11 MOSI, GP12 MISO, GP13 CS, GP16 DC, GP17 RESET.
+; Initialization values adapted from Adafruit_HX8357.cpp; see licenses/Adafruit-HX8357.txt.
+EnableExplicit
+XIncludeFile "RP2040/Lib/clocks.pico"
+XIncludeFile "RP2040/Lib/timer.pico"
+XIncludeFile "RP2040/Lib/uart.pico"
+XIncludeFile "RP2040/Lib/usb_serial.pico"
+XIncludeFile "RP2040/Lib/safety.pico"
+XIncludeFile "RP2040/Lib/bits.pico"
+XIncludeFile "RP2040/Lib/wiring.pico"
+XIncludeFile "RP2040/Lib/spi.pico"
+XIncludeFile "../io.pico"
+Global HxChecks.i,HxFailures.i,HxDrawUs.i,HxRun.i,HxStarted.i
+Global Dim HxReply.a(8)
+Procedure HxCheck(value.i,expected.i)
+  HxChecks=HxChecks+1
+  If value<>expected : HxFailures=HxFailures+1 : EndIf
+EndProcedure
+Procedure HxHex(value.i)
+  Protected digit.i
+  digit=(value>>4)&15
+  If digit<10 : UsbSerialWrite(48+digit) : Else : UsbSerialWrite(55+digit) : EndIf
+  digit=value&15
+  If digit<10 : UsbSerialWrite(48+digit) : Else : UsbSerialWrite(55+digit) : EndIf
+EndProcedure
+Procedure HxCommand(command.i)
+  digitalWrite(13,0) : digitalWrite(16,0)
+  SpiWrite8(1,command) : digitalWrite(16,1)
+EndProcedure
+Procedure HxSetting(command.i,value.i)
+  HxCommand(command) : SpiWrite8(1,value) : digitalWrite(13,1)
+EndProcedure
+Procedure HxRead(command.i)
+  Protected n.i
+  SpiFlush(1) : HxCommand(command)
+  For n=0 To 7 : HxReply(n)=SpiWrite8(1,0)&255 : Next
+  digitalWrite(13,1)
+  Say("HX REG ") : HxHex(command) : Say(" raw=")
+  For n=0 To 7 : HxHex(HxReply(n)) : UsbSerialWrite(32) : Next
+  Say("spi_error=") : Num(SpiError(1)) : Eol()
+EndProcedure
+Procedure HxSnapshot()
+  HxRead($04) : HxRead($D0) : HxRead($09)
+  HxRead($0A) : HxRead($0B) : HxRead($0C) : HxRead($0F)
+  HxRead($DA) : HxRead($DB) : HxRead($DC)
+EndProcedure
+Procedure HxInit()
+  Protected p.i,command.i,count.i,n.i
+  digitalWrite(17,0) : WaitUs(20000) : digitalWrite(17,1) : WaitUs(150000)
+  Say("HX before initialization") : Eol() : HxSnapshot()
+  HxCheck(SpiBegin(1,10,11,12,1000),1)
+  p=?HxInitData
+  Repeat
+    command=PeekA(p) : p=p+1
+    If command=0 : Break : EndIf
+    count=PeekA(p) : p=p+1
+    If (count&128)<>0
+      If command<>255 : HxCommand(command) : digitalWrite(13,1) : EndIf
+      WaitUs((count&127)*5000)
+    Else
+      HxCommand(command)
+      For n=0 To count-1 : SpiWrite8(1,PeekA(p)) : p=p+1 : Next
+      digitalWrite(13,1)
+    EndIf
+  ForEver
+  ; Landscape, equivalent to Adafruit rotation 1; RGB565 remains native.
+  HxSetting($36,$A0)
+  HxCheck(SpiError(1),0)
+EndProcedure
+Procedure HxRect(x.i,y.i,width.i,height.i,colour.i)
+  Protected x1.i,y1.i
+  If width<=0 Or height<=0 Or x<0 Or y<0 Or x+width>480 Or y+height>320
+    HxCheck(0,1) : ProcedureReturn
+  EndIf
+  x1=x+width-1 : y1=y+height-1
+  HxCommand($2A)
+  SpiWrite8(1,x>>8) : SpiWrite8(1,x) : SpiWrite8(1,x1>>8) : SpiWrite8(1,x1)
+  HxCommand($2B)
+  SpiWrite8(1,y>>8) : SpiWrite8(1,y) : SpiWrite8(1,y1>>8) : SpiWrite8(1,y1)
+  HxCommand($2C) : HxCheck(SpiDmaFill16(1,colour,width*height),1)
+  digitalWrite(13,1) : SafetyPet() : UsbSerialTask()
+EndProcedure
+Procedure HxDigit(number.i,x.i,y.i)
+  Protected bits.i
+  bits=PeekA(?HxDigits+number)
+  HxRect(x,y,32,48,0)
+  If bits&1 : HxRect(x+6,y+3,18,4,$FFFF) : EndIf
+  If bits&2 : HxRect(x+24,y+7,4,15,$FFFF) : EndIf
+  If bits&4 : HxRect(x+24,y+26,4,15,$FFFF) : EndIf
+  If bits&8 : HxRect(x+6,y+41,18,4,$FFFF) : EndIf
+  If bits&16 : HxRect(x+2,y+26,4,15,$FFFF) : EndIf
+  If bits&32 : HxRect(x+2,y+7,4,15,$FFFF) : EndIf
+  If bits&64 : HxRect(x+6,y+22,18,4,$FFFF) : EndIf
+EndProcedure
+Procedure HxPattern()
+  Protected n.i,t.i
+  HxCheck(SpiBegin(1,10,11,12,8000),1)
+  t=Micros()
+  For n=0 To 7 : HxRect(n*60,0,60,320,PeekU(?HxColours+n*2)) : Next
+  HxRect(0,0,480,2,$FFFF) : HxRect(0,318,480,2,$FFFF)
+  HxRect(0,2,2,316,$FFFF) : HxRect(478,2,2,316,$FFFF)
+  HxRect(112,40,256,2,$FFFF) : HxRect(112,278,256,2,$FFFF)
+  HxRect(112,42,2,236,$FFFF) : HxRect(366,42,2,236,$FFFF)
+  HxDigit(1,8,8) : HxDigit(2,440,8)
+  HxDigit(3,8,264) : HxDigit(4,440,264)
+  HxDrawUs=Micros()-t
+  HxCheck(SpiError(1),0)
+  HxCheck(PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY,0)
+  HxCheck(PeekL($40040024)&#SPI_SSPDMACR_TXDMAE,0)
+  HxCheck(PeekL($40040000)&15,7)
+  HxCheck(digitalRead(13),1)
+  Say("HX8357D checks=") : Num(HxChecks) : Say(" failures=") : Num(HxFailures)
+  Say(" draw_spi_hz=") : Num(SpiHz(1)) : Say(" draw_us=") : Num(HxDrawUs)
+  Say(" emulation=stopped; physical picture confirmation required") : Eol()
+EndProcedure
+Procedure HxRunTest()
+  HxChecks=0 : HxFailures=0 : HxRun=HxRun+1
+  Say("HX8357D DIAGNOSTIC BEGIN run=") : Num(HxRun) : Eol()
+  HxCheck(SpiPeriFromSys(ClockSysConfigKhz()),1)
+  HxCheck(SpiBegin(1,10,11,12,100),1)
+  HxInit()
+  HxCheck(SpiBegin(1,10,11,12,100),1)
+  Say("HX after initialization; landscape MADCTL=A0, COLMOD=55 requested") : Eol()
+  HxSnapshot()
+  ; A controlled register challenge distinguishes real readback from FF/00.
+  HxRead($0A) : HxCheck(HxReply(0)&$9C,$9C)
+  HxRead($0C) : HxCheck(HxReply(0)&7,5)
+  HxSetting($36,$60) : HxRead($0B) : HxCheck(HxReply(0),$60)
+  HxSetting($36,$A0) : HxRead($0B) : HxCheck(HxReply(0),$A0)
+  HxPattern()
+  Say("HX8357D DIAGNOSTIC END; i=read registers r=reset and repeat; NES stopped") : Eol()
+EndProcedure
+Procedure HxMain()
+  Protected ready.i,key.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  digitalWrite(13,1) : digitalWrite(16,1) : digitalWrite(17,1)
+  pinMode(13,#OUTPUT) : pinMode(16,#OUTPUT) : pinMode(17,#OUTPUT)
+  pinMode(12,#INPUT_PULLUP)
+  Repeat
+    UsbSerialTask() : SafetyPet() : ready=UsbSerialReady()
+    If ready<>0 And HxStarted=0
+      WaitUs(200000) : HxStarted=1 : HxRunTest()
+    EndIf
+    key=UsbSerialRead()
+    If key=114 : HxRunTest()
+    ElseIf key=105
+      digitalWrite(13,1) : SpiBegin(1,10,11,12,100) : HxSnapshot()
+    EndIf
+  ForEver
+EndProcedure
+DataSection
+HxDigits:
+  Data.a $3F,$06,$5B,$4F,$66,$6D,$7D,$07,$7F,$6F
+HxColours:
+  Data.u $FFFF,$FFE0,$07FF,$07E0,$F81F,$F800,$001F,$0000
+HxInitData:
+  Data.a $01,$94,$B9,$03,$FF,$83,$57,$FF,$E4,$B3,$04,$80,$00,$06
+  Data.a $06,$B6,$01,$25,$B0,$01,$68,$CC,$01,$05,$B1,$06,$00,$15
+  Data.a $1C,$1C,$83,$AA,$C0,$06,$50,$50,$01,$3C,$1E,$08,$B4,$07
+  Data.a $02,$40,$00,$2A,$2A,$0D,$78,$E0,$22,$02,$0A,$11,$1D,$23
+  Data.a $35,$41,$4B,$4B,$42,$3A,$27,$1B,$08,$09,$03,$02,$0A,$11
+  Data.a $1D,$23,$35,$41,$4B,$4B,$42,$3A,$27,$1B,$08,$09,$03,$00
+  Data.a $01,$3A,$01,$55,$36,$01,$C0,$35,$01,$00,$44,$02,$00,$02
+  Data.a $11,$9E,$29,$8A,$00
+EndDataSection
+HxMain()

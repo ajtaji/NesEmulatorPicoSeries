@@ -1,0 +1,29 @@
+HX8357D DIAGNOSTIC BEGIN run=1
+HX before initialization
+HX REG 04 raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG D0 raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 09 raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 0A raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 0B raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 0C raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 0F raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG DA raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG DB raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG DC raw=FF FF FF FF FF FF FF FF spi_error=0
+HX after initialization; landscape MADCTL=A0, COLMOD=55 requested
+HX REG 04 raw=80 40 00 7F FF FF FF FF spi_error=0
+HX REG D0 raw=FF FF FF FF FF FF FF FF spi_error=0
+HX REG 09 raw=E8 29 83 00 7F FF FF FF spi_error=0
+HX REG 0A raw=9C FF FF FF FF FF FF FF spi_error=0
+HX REG 0B raw=A0 FF FF FF FF FF FF FF spi_error=0
+HX REG 0C raw=05 FF FF FF FF FF FF FF spi_error=0
+HX REG 0F raw=C0 FF FF FF FF FF FF FF spi_error=0
+HX REG DA raw=00 FF FF FF FF FF FF FF spi_error=0
+HX REG DB raw=80 FF FF FF FF FF FF FF spi_error=0
+HX REG DC raw=00 FF FF FF FF FF FF FF spi_error=0
+HX REG 0A raw=9C FF FF FF FF FF FF FF spi_error=0
+HX REG 0C raw=05 FF FF FF FF FF FF FF spi_error=0
+HX REG 0B raw=60 FF FF FF FF FF FF FF spi_error=0
+HX REG 0B raw=A0 FF FF FF FF FF FF FF spi_error=0
+HX8357D checks=51 failures=0 draw_spi_hz=7692307 draw_us=379042 emulation=stopped; physical picture confirmation required
+HX8357D DIAGNOSTIC END; i=read registers r=reset and repeat; NES stopped

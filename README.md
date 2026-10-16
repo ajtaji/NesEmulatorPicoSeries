@@ -24,6 +24,9 @@ new builds directly from this repository; the other links use the published rele
 bare Pico/module combination has been physically tested. Builds are in
 `firmware/nes-pico-w-ili9341.uf2` and `firmware/nes-pico2-w-ili9341.uf2`.
 
+A standalone [Adafruit HX8357D SPI1 diagnostic](HX8357D.md) has also been board
+tested on the bare Pico. An NES output backend for it has not been added yet.
+
 Display Pack physical-screen validation is pending. See [its driver notes](DISPLAY-PACK2.md)
 and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 
