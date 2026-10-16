@@ -1,0 +1,4 @@
+; Nonnegative NES timing/count division using the M33 divider.
+ProcedureRAM.i NesDiv(dividend.i, divisor.i)
+  ProcedureReturn dividend/divisor
+EndProcedure

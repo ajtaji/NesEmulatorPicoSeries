@@ -1,4 +1,4 @@
-"""Load NES games into the Pico W's ROM store over USB serial.
+"""Load NES games into the Pico W / Pico 2 W ROM store over USB serial.
 
 The firmware holds no games. This tool checks each named iNES file, lays the
 games out in the board's ROM store (flash offset $50000, directory first,
@@ -174,7 +174,7 @@ def main():
 
 
 def find_ports():
-    """Serial ports of attached Raspberry Pi RP2040 boards (USB vendor 2E8A)."""
+    """Serial ports of attached Raspberry Pi Pico boards (USB vendor 2E8A)."""
     from serial.tools import list_ports
     return [p.device for p in list_ports.comports() if p.vid == 0x2E8A]
 

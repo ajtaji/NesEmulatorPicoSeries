@@ -1,0 +1,148 @@
+; RP2350 CYW43439 gSPI hot path. GP24 bidirectional data, GP25 CS, GP29 clock.
+; Same low-phase sampling and MSB-first word ordering as cyw43.pico.
+; Only the Bluetooth owner uses this bus after core-1 handoff.
+Global bt_rambase.l
+Global NesRadioWord.i, NesRadioFastEnabled.i
+Global Dim RadioScratch.a(64)
+Global Dim RadioSaved.i(16)
+ProcedureRAM NesRadioOut(value.i)
+  NesRadioWord=value
+  ASM
+    ldr r0, =global_nesradioword
+    ldr r4, [r0]
+    ldr r0, =$D0000018
+    ldr r1, =$D0000020
+    ldr r2, =$01000000
+    ldr r3, =$20000000
+    movs r5, #32
+__nes_radio_out:
+    lsls r4, r4, #1
+    bcc __nes_radio_zero
+    str r2, [r0]
+    b __nes_radio_clock
+__nes_radio_zero:
+    str r2, [r1]
+__nes_radio_clock:
+    str r3, [r0]
+    nop
+    nop
+    nop
+    str r3, [r1]
+    nop
+    subs r5, #1
+    bne __nes_radio_out
+  EndASM
+EndProcedure
+ProcedureRAM.i NesRadioIn()
+  ASM
+    ldr r0, =$D0000004
+    ldr r1, =$D0000018
+    ldr r2, =$D0000020
+    ldr r3, =$20000000
+    movs r4, #0
+    movs r5, #32
+__nes_radio_in:
+    ldr r6, [r0]
+    lsrs r6, r6, #25
+    adcs r4, r4
+    str r3, [r1]
+    nop
+    nop
+    nop
+    str r3, [r2]
+    nop
+    subs r5, #1
+    bne __nes_radio_in
+    ldr r0, =global_nesradioword
+    str r4, [r0]
+  EndASM
+  ProcedureReturn NesRadioWord
+EndProcedure
+ProcedureRAM NesRadioSelect()
+  PokeL($D0000020,$02000000) : PokeL($D0000038,$01000000)
+EndProcedure
+ProcedureRAM NesRadioIdle()
+  PokeL($D0000018,$02000000) : PokeL($D0000038,$01000000)
+  PokeL($D0000020,$21000000)
+EndProcedure
+ProcedureRAM NesRadioWindowByte(addr.i,value.i)
+  NesRadioSelect()
+  NesRadioOut($D0000000|((addr&$1FFFF)<<11)|1) : NesRadioOut(value)
+  PokeL($D0000040,$01000000) : cyw43_status=NesRadioIn() : NesRadioIdle()
+EndProcedure
+ProcedureRAM NesRadioWindow(addr.i)
+  Protected base.i, old.i
+  base=addr&$FFFF8000 : old=cyw43_win
+  If base=old : ProcedureReturn : EndIf
+  If old= -1 Or ((base>>8)&255)<>((old>>8)&255)
+    NesRadioWindowByte($1000A,(base>>8)&255)
+  EndIf
+  If old= -1 Or ((base>>16)&255)<>((old>>16)&255)
+    NesRadioWindowByte($1000B,(base>>16)&255)
+  EndIf
+  If old= -1 Or ((base>>24)&255)<>((old>>24)&255)
+    NesRadioWindowByte($1000C,(base>>24)&255)
+  EndIf
+  cyw43_win=base
+EndProcedure
+ProcedureRAM.i NesRadioRead(addr.i)
+  Protected i.i, value.i
+  If NesRadioFastEnabled=0 : ProcedureReturn Cyw43BpRead32(addr) : EndIf
+  NesRadioWindow(addr) : NesRadioSelect()
+  NesRadioOut($50000000|(((addr&$7FFF)|$8000)<<11)|4)
+  PokeL($D0000040,$01000000)
+  For i=1 To cyw43_pad>>2 : NesRadioIn() : Next
+  value=NesRadioIn() : cyw43_status=NesRadioIn() : NesRadioIdle()
+  ProcedureReturn value
+EndProcedure
+ProcedureRAM NesRadioWrite(addr.i,value.i)
+  If NesRadioFastEnabled=0 : Cyw43BpWrite32(addr,value) : ProcedureReturn : EndIf
+  NesRadioWindow(addr) : NesRadioSelect()
+  NesRadioOut($D0000000|(((addr&$7FFF)|$8000)<<11)|4) : NesRadioOut(value)
+  PokeL($D0000040,$01000000) : cyw43_status=NesRadioIn() : NesRadioIdle()
+EndProcedure
+ProcedureRAM NesRadioBlock(addr.i,src.i,n.i)
+  Protected i.i, value.i
+  NesRadioWindow(addr) : NesRadioSelect()
+  NesRadioOut($D0000000|(((addr&$7FFF)|$8000)<<11)|n)
+  For i=0 To n-1 Step 4
+    value=PeekA(src+i)|(PeekA(src+i+1)<<8)|(PeekA(src+i+2)<<16)|(PeekA(src+i+3)<<24)
+    NesRadioOut(value)
+  Next
+  PokeL($D0000040,$01000000) : cyw43_status=NesRadioIn() : NesRadioIdle()
+EndProcedure
+Procedure.i NesRadioCheck()
+  Protected expected.i, i.i, saved.i, got.i, failed.i, t.i, slow.i, fast.i, j.i
+  expected=Cyw43BpRead32($18000000)
+  t=Micros()
+  For i=0 To 31 : Cyw43BpRead32($18000000) : Next
+  slow=Micros()-t : NesRadioFastEnabled=1 : t=Micros()
+  For i=0 To 31
+    If NesRadioRead($18000000)<>expected : failed=failed+1 : EndIf
+  Next
+  fast=Micros()-t
+  ; The unpublished portion of our H2B payload ring is scratch, not firmware.
+  saved=NesRadioRead(bt_rambase+$800)
+  For i=0 To 31
+    got=$13579BDF!(i*$01010101)
+    NesRadioWrite(bt_rambase+$800,got)
+    If NesRadioRead(bt_rambase+$800)<>got : failed=failed+1 : EndIf
+    If Cyw43BpRead32(bt_rambase+$800)<>got : failed=failed+1 : EndIf
+  Next
+  NesRadioWrite(bt_rambase+$800,saved)
+  For i=0 To 15 : RadioSaved(i)=Cyw43BpRead32(bt_rambase+$800+i*4) : Next
+  For j=0 To 3
+    For i=0 To 63 : RadioScratch(i)=(i*73+j*41)&255 : Next
+    NesRadioBlock(bt_rambase+$800,@RadioScratch(0),64)
+    For i=0 To 15
+      got=RadioScratch(i*4)|(RadioScratch(i*4+1)<<8)|(RadioScratch(i*4+2)<<16)|(RadioScratch(i*4+3)<<24)
+      If NesRadioRead(bt_rambase+$800+i*4)<>got : failed=failed+1 : EndIf
+      If Cyw43BpRead32(bt_rambase+$800+i*4)<>got : failed=failed+1 : EndIf
+    Next
+  Next
+  For i=0 To 15 : NesRadioWrite(bt_rambase+$800+i*4,RadioSaved(i)) : Next
+  Print("RADIO FAST checks=224 failures=") : PrintDec(failed)
+  Print(" slow_us=") : PrintDec(slow) : Print(" fast_us=") : PrintDecN(fast)
+  If failed<>0 : NesRadioFastEnabled=0 : EndIf
+  ProcedureReturn failed
+EndProcedure

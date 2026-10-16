@@ -1,0 +1,333 @@
+XIncludeFile "RP2350/Lib/multicore_smp.pico2"
+XIncludeFile "RP2350/Lib/clocks.pico2"
+XIncludeFile "RP2350/Lib/timer.pico2"
+XIncludeFile "RP2350/Lib/uart.pico2"
+XIncludeFile "RP2350/Lib/usb_serial.pico2"
+XIncludeFile "RP2350/Lib/safety.pico2"
+XIncludeFile "RP2350/Lib/spi.pico2"
+XIncludeFile "RP2350/Lib/st7796.pico2"
+XIncludeFile "RP2350/Lib/cyw43_nvram.pico2"
+XIncludeFile "RP2350/Lib/bits.pico2"
+XIncludeFile "RP2350/Lib/wiring.pico2"
+XIncludeFile "RP2350/Lib/string_out.pico2"
+XIncludeFile "RP2350/Lib/cyw43.pico2"
+XIncludeFile "RP2350/Lib/flashid.pico2"
+XIncludeFile "RP2350/Lib/flash.pico2"
+XIncludeFile "bt_firmware.pico2"
+XIncludeFile "bt_radio.pico2"
+XIncludeFile "bt_transport.pico2"
+XIncludeFile "sbc_encoder.pico2"
+XIncludeFile "math.pico2"
+XIncludeFile "cpu2a03.pico2"
+XIncludeFile "bridge.pico2"
+XIncludeFile "ppu.pico2"
+XIncludeFile "apu.pico2"
+XIncludeFile "bt_audio.pico2"
+XIncludeFile "hud.pico2"
+XIncludeFile "display.pico2"
+XIncludeFile "worker.pico2"
+XIncludeFile "io.pico2"
+XIncludeFile "input.pico2"
+Global Dim FrameBottomStore.u(30720)
+Procedure CartPpuWriteNotice(addr.i,value.i)
+  If (addr&7)=7 And (PpuV&$3FFF)<$2000
+    CartChrDirty=1
+    If PpuMask&8 : RgbPairsDirty=1 : CartChrDirty=0 : EndIf
+  ElseIf (addr&7)=1 And (value&8)<>0 And CartChrDirty<>0
+    RgbPairsDirty=1 : CartChrDirty=0
+  EndIf
+EndProcedure
+
+Global LastApuSend.i, CpuRunUs.i, SyncUs.i, Windows.i
+ProcedureRAM NesSync()
+  Protected stalls.i
+  CompilerIf #NES_SPLIT=2
+    PpuSync(CpuCycles)
+    ; Synchronous only while a DMC sample is really fetching (its stalls and
+    ; IRQ belong inside this window); a latched $4015 bit 4 alone is not playback.
+    If CpuCycles-WorkerClock>512+BtAudioRunning*1536 Or PeekL(@DmcBytes)>0
+      NesRpc(0,0,0,CpuCycles)
+      LastApuSend=CpuCycles
+    ElseIf CpuCycles-LastApuSend>=256
+      NesPost(0,0,0,CpuCycles)
+      LastApuSend=CpuCycles
+    EndIf
+    NesFence()
+    stalls=WorkerDmcCycles-NesSeenDmc
+    If stalls>0
+      CpuCycles=CpuCycles+stalls : NesSeenDmc=NesSeenDmc+stalls
+      PpuSync(CpuCycles)
+    EndIf
+    If WorkerNmi<>NesSeenNmi
+      NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
+    ElseIf WorkerIrq<>0 And FI=0
+      CpuInterrupt($FFFE)
+    EndIf
+    ProcedureReturn
+  CompilerEndIf
+  NesRpc(0,0,0,CpuCycles)
+  stalls=WorkerDmcCycles-NesSeenDmc
+  While stalls>0
+    CpuCycles=CpuCycles+stalls : NesSeenDmc=WorkerDmcCycles
+    NesRpc(0,0,0,CpuCycles)
+    stalls=WorkerDmcCycles-NesSeenDmc
+  Wend
+  CompilerIf #NES_SPLIT=2
+    PpuSync(CpuCycles)
+  CompilerEndIf
+  If WorkerNmi<>NesSeenNmi
+    NesSeenNmi=WorkerNmi
+    CpuInterrupt($FFFA)
+  ElseIf WorkerIrq<>0 And FI=0
+    CpuInterrupt($FFFE)
+  EndIf
+EndProcedure
+Procedure LoadCartridge()
+  Protected i.i, bank.i
+  FrameBottom=@FrameBottomStore(0)
+  CartSelect(CartIndex)
+  CartChrDirty=0
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase : CartPrgSelected=0 : CartChrSelected=0 : PpuChrBank=0
+  If CartChrRam
+    Chr=@Decoded(0)+8192 : CartChr=Chr : Pattern=@Decoded(0) : ChrWritable=1
+  Else
+  ChrWritable=0
+  For bank=0 To CartChrBanks-1
+    Chr=CartChr+bank*8192 : Pattern=@Decoded(0)+bank*8192
+    For i=0 To 8191
+      If (i&8)=0
+        PpuDecode(i)
+      EndIf
+    Next
+  Next
+  Chr=CartChr : Pattern=@Decoded(0)
+  EndIf
+  For i=0 To 31
+    LengthTable(i)=PeekA(?LengthData+i)
+  Next
+  For i=0 To 15
+    NoiseTable(i)=PeekU(?NoiseData+i*2) : DmcTable(i)=PeekU(?DmcData+i*2)
+  Next
+  For i=0 To 30
+    PulseMix(i)=PeekU(?PulseData+i*2)
+  Next
+  For i=0 To 202
+    TndMix(i)=PeekU(?TndData+i*2)
+  Next
+  For i=0 To 511
+    Rgb64(i)=PeekU(?RgbData+i*2)
+  Next
+  PpuColours()
+EndProcedure
+Procedure DumpFrame()
+  Protected i.i
+  NesRpc(0,0,0,CpuCycles)
+  Say("RGB_BEGIN") : Eol()
+  For i=0 To 61439
+    If i<30720
+      UsbSerialWrite(FrameTop(i)&255) : UsbSerialWrite(FrameTop(i)>>8)
+    Else
+      UsbSerialWrite(PeekU(FrameBottom+(i-30720)*2)&255) : UsbSerialWrite(PeekU(FrameBottom+(i-30720)*2)>>8)
+    EndIf
+  Next
+  Eol() : Say("RGB_END") : Eol()
+EndProcedure
+Procedure DumpReferenceFrame()
+  Protected savedLine.i, savedDot.i, savedV.i, savedStatus.i, savedX.i, savedRow.i
+  Protected y.i, x.i, span.i
+  NesRpc(0,0,0,CpuCycles)
+  savedLine=PpuLine : savedDot=PpuDot : savedV=PpuV : savedStatus=PpuStatus
+  savedX=PpuFineX : savedRow=FrameRow
+  ; Diagnostic zero-scroll image from the raw bitplanes and current NT/OAM.
+  PpuV=0 : PpuFineX=0
+  For y=0 To 239
+    PpuLine=y : PpuDot=0 : PpuBeginLine() : PpuSpritesReference()
+    For span=0 To 31
+      PpuDot=span*8 : PpuRender8Reference()
+    Next
+    For x=0 To 255
+      PokeU(FrameRow+x*2,RgbPal(LinePixels(x)))
+    Next
+    PpuIncY() : PpuV=PpuV&$7BE0
+    SafetyPet() : UsbSerialTask()
+  Next
+  PpuLine=savedLine : PpuDot=savedDot : PpuV=savedV : PpuStatus=savedStatus
+  PpuFineX=savedX : FrameRow=savedRow : RgbLastKey= -1 : BgCacheAddr= -1
+  DumpFrame()
+EndProcedure
+Procedure DumpPcm()
+  Protected i.i, index.i
+  NesRpc(0,0,0,CpuCycles)
+  Say("PCM_BEGIN") : Eol()
+  index=ApuSamples&4095
+  For i=0 To 4095
+    UsbSerialWrite(Pcm((index+i)&4095)&255) : UsbSerialWrite((Pcm((index+i)&4095)>>8)&255)
+  Next
+  Eol() : Say("PCM_END") : Eol()
+EndProcedure
+XIncludeFile "rom_store.pico2"
+XIncludeFile "menu.pico2"
+Procedure Main()
+  Protected t.i, tick.i, report.i, start.i, cycles.i, budget.i, target.i, frames.i, samples.i
+  Protected lastPpu.i, lastApu.i, lastLcd.i, lastRender.i, lastSprites.i, lastRgb.i, lastWait.i
+  Protected display.i, busy.i, dt.i, key.i, release.i, mode.i, distance.i
+  Protected lastMisses.i, lastName.i, lastPairs.i, lastDeferred.i, lastBatched.i, lastBt.i
+  Protected capturePending.i, captureSeen.i, inputPoll.i, captureByte.i, passStart.i, ran.i, lastIdle0.i, lastIdle1.i, mark.i, mark2.i, lastRun.i, lastSync.i, lastWin.i, lastPpu0.i
+  SafetyBoot() : ClockInitKhz(150000) : TimerInit() : UsbSerialInit()
+  t=Micros()
+  While UsbSerialReady()=0 And Micros()-t<10000000
+    UsbSerialTask() : SafetyPet()
+  Wend
+  WaitUs(200000)
+  SpiPeriFromSys(ClockSysConfigKhz())
+  SpiBegin(0,2,3,-1,100000)
+  Tft796Begin(0,5,6,7) : Tft796Rotate(1) : Tft796Fill(0)
+  LoadCartridge()
+  InputBegin()
+  Say("core1 launch=") : Num(NesLaunchCore1()) : Eol()
+  While PeekL(@WorkerReady)=0 : SafetyPet() : Wend
+  CartIndex=BootMenu() : LoadCartridge()
+  NesBluetoothBegin()
+  Say("NES PureMetal RP2350 mapper=") : Num(CartMapper)
+  Say(" clk_khz=") : Num(ClockSysKhz()) : Say(" spi_hz=") : Num(SpiHz(0)) : Eol()
+  CpuReset()
+  tick=Micros() : report=tick : start=tick : cycles=CpuCycles
+  display=WorkerDisplayed : frames=WorkerFrames : samples=ApuSamples
+  target=CpuCycles
+  Repeat
+    passStart=Micros() : ran=0
+    key= -1
+    If inputPoll=0
+      InputPoll()
+      UsbSerialTask() : SafetyPet() : key=UsbSerialRead() : inputPoll=3
+    Else
+      inputPoll=inputPoll-1
+    EndIf
+    If key=115
+      InputHost=8 : release=WorkerFrames+6
+    ElseIf key=97
+      InputHost=1 : release=WorkerFrames+6
+    ElseIf key=114
+      InputHost=$80 : release=WorkerFrames+6
+    ElseIf key=82
+      InputHost=$80 : release=WorkerFrames+300
+    ElseIf key=48
+      InputHost=0 : release=0
+    ElseIf key=102
+      mode=mode!1 : tick=Micros() : target=CpuCycles
+    ElseIf key=100
+      WorkerDisplay=WorkerDisplay!1
+    ElseIf key=112
+      capturePending=1 : captureSeen=DisplayReady
+    ElseIf key=122
+      DumpReferenceFrame()
+      tick=Micros() : target=CpuCycles
+    ElseIf key=119
+      DumpPcm()
+      tick=Micros() : target=CpuCycles
+    ElseIf key=113
+      BtControlRequest=1
+    ElseIf key=107
+      BtSnapshotState=1
+    ElseIf key=106
+      Say("INPUT x=") : Num(InputX) : Say(" y=") : Num(InputY)
+      Say(" buttons=") : Num(InputButtons) : Say(" mask=") : Num(InputMask)
+      Say(" polls=") : Num(InputPolls) : Say(" errors=") : Num(InputErrors)
+      Say(" busy_us=") : Num(InputBusyUs)
+      Say(" starts=") : Num(InputStartCount) : Say(" selects=") : Num(InputSelectCount) : Eol()
+    ElseIf key=105
+      Say("APU enable=") : Num(ApuEnable) : Say(" lengths=")
+      Num(ApuLength(0)) : Say(",") : Num(ApuLength(1)) : Say(",") : Num(ApuLength(2))
+      Say(" nonzero=") : Num(ApuNonzero) : Say(" pause_ram_776=") : Num(M($776)) : Eol()
+    EndIf
+    CompilerIf #PPU_PROFILE=2
+      If key=103
+        GuardEnabled=GuardEnabled!1
+      EndIf
+    CompilerEndIf
+    If release<>0 And WorkerFrames-release>=0
+      InputHost=0 : release=0
+    EndIf
+    If BtSnapshotState=2
+      Say("SBC_BEGIN") : Eol()
+      For captureByte=0 To BtSnapshotSize-1 : UsbSerialWrite(BtSnapshot(captureByte)) : Next
+      Eol() : Say("SBC_END") : Eol() : BtSnapshotState=0
+    EndIf
+    dt=Micros()-tick
+    If dt>=176
+      dt=NesDiv(dt,176) : tick=tick+dt*176 : target=target+dt*315
+    EndIf
+    budget=target-CpuCycles
+    If mode
+      budget=256
+    EndIf
+    ; The pacer adds 315 cycles every 176 us and windows stop at 256, so without
+    ; this a ~60-cycle sliver followed every full window and paid the whole
+    ; per-window cost. Less than 128 cycles (72 us) due waits for the next tick.
+    If budget<128
+      budget=0
+    EndIf
+    If budget>0 And Stopped=0 And NesBridgeError=0 And WorkerError=0
+      If budget>256
+        budget=256
+      EndIf
+      distance=241*341+1-WorkerDot
+      If distance<0
+        distance=distance+89342
+      EndIf
+      If distance>0 And budget*3>distance+2
+        budget=NesDiv(distance+2,3)
+      EndIf
+      mark=Micros() : CpuRun(budget) : mark2=Micros() : NesSync()
+      CpuRunUs=CpuRunUs+mark2-mark : SyncUs=SyncUs+Micros()-mark2 : Windows=Windows+1 : ran=1
+    EndIf
+    If capturePending<>0 And DisplayReady<>captureSeen
+      DumpFrame() : capturePending=0
+      tick=Micros() : target=CpuCycles
+    EndIf
+    t=Micros()
+    If t-report>=1000000
+      Say("us=") : Num(t-report) : Say(" cycles=") : Num(CpuCycles-cycles)
+      Say(" frames=") : Num(WorkerFrames-frames) : Say(" lcd=") : Num(WorkerDisplayed-display)
+      Say(" samples=") : Num(ApuSamples-samples) : Say(" worker_us=") : Num(WorkerBusyUs-busy)
+      Say(" lcd_us=") : Num(WorkerDisplayUs-lastLcd)
+      Say(" render_est_us=") : Num((PpuRenderUs-lastRender)*67)
+      Say(" sprites_us=") : Num(PpuSpritesUs-lastSprites)
+      Say(" rgb_us=") : Num(PpuRgbUs-lastRgb) : Say(" buffer_wait_us=") : Num(DisplayWaitUs-lastWait)
+      Say(" misses=") : Num(RgbMisses-lastMisses)
+      Say(" ntbuild_us=") : Num(NameBuildUs-lastName) : Say(" pal_builds=") : Num(PairBuilds-lastPairs)
+      Say(" ppu_us=") : Num(WorkerPpuUs-lastPpu) : Say(" apu_us=") : Num(WorkerApuUs-lastApu)
+      CompilerIf #PPU_PROFILE=2
+        Say(" guard_checks=") : Num(GuardChecks) : Say(" guard_fails=") : Num(GuardFails)
+        Say(" guard_line=") : Num(GuardLine) : Say(" guard_dot=") : Num(GuardDot)
+        Say(" guard_got=") : Num(GuardGot) : Say(" guard_expected=") : Num(GuardExpected)
+      CompilerEndIf
+      Say(" bt_us=") : Num(BtAudioBusyUs-lastBt) : Say(" bt_live=") : Num(StreamReady) : Say(" bt_wire_errors=") : Num(BtWireErrors) : Say(" bt_overrun=") : Num(BtAudioOverruns)
+      Say(" bt_packets=") : Num(BtAudioPackets) : Say(" bt_underrun=") : Num(BtAudioUnderruns)
+      Say(" deferred=") : Num(PpuStatusDeferred-lastDeferred) : Say(" batched=") : Num(NesIdleBatched-lastBatched)
+      Say(" debt=") : Num(target-CpuCycles) : Say(" pc=") : Num(PC)
+      Say(" bank_calls=") : Num(CartBankCalls) : Say(" bank_changes=") : Num(CartBankChanges)
+      Say(" bank_us_total=") : Num(CartBankUs) : Say(" bank=") : Num(CartPrgSelected)
+      Say(" core0_idle_us=") : Num(Core0IdleUs-lastIdle0) : Say(" core1_idle_us=") : Num(Core1IdleUs-lastIdle1)
+      Say(" run_us=") : Num(CpuRunUs-lastRun) : Say(" sync_us=") : Num(SyncUs-lastSync) : Say(" windows=") : Num(Windows-lastWin)
+      lastIdle0=Core0IdleUs : lastIdle1=Core1IdleUs : lastRun=CpuRunUs : lastSync=SyncUs : lastWin=Windows
+      Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes)
+      Say(" nmi=") : Num(WorkerNmi) : Say(" err=") : Num(WorkerError+NesBridgeError)
+      Say(" stop=") : Num(Stopped) : Say(" opcode=") : Num(BadOpcode) : Eol()
+      report=t : cycles=CpuCycles : frames=WorkerFrames : samples=ApuSamples
+      display=WorkerDisplayed : busy=WorkerBusyUs : lastPpu=WorkerPpuUs : lastApu=WorkerApuUs : lastLcd=WorkerDisplayUs
+      lastBt=BtAudioBusyUs
+      lastDeferred=PpuStatusDeferred : lastBatched=NesIdleBatched
+      lastMisses=RgbMisses : lastName=NameBuildUs : lastPairs=PairBuilds
+      lastRender=PpuRenderUs : lastSprites=PpuSpritesUs : lastRgb=PpuRgbUs : lastWait=DisplayWaitUs
+    EndIf
+    ; Core 0 idle: a whole pass of the loop that ran no CPU window.
+    If ran=0 : Core0IdleUs=Core0IdleUs+Micros()-passStart : EndIf
+  ForEver
+EndProcedure
+
+Procedure.i NesLaunchCore1()
+  McCore1ReleaseHold()
+  If McLaunchCore1()=6 : ProcedureReturn 1 : EndIf
+  ProcedureReturn 0
+EndProcedure

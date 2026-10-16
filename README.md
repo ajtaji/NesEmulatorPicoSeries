@@ -15,11 +15,12 @@ you are entitled to use.
 |---|---|---|
 | Raspberry Pi Pico W | RP2040 | Runs; measured on a board (below) |
 | Raspberry Pi Pico | RP2040 | Same firmware; not yet run on a board here (no Bluetooth audio) |
-| Raspberry Pi Pico 2 / Pico 2 W | RP2350 | Planned; not ported yet |
+| Raspberry Pi Pico 2 W | RP2350 Arm | Runs; diagnostics and three-game board tests pass |
+| Raspberry Pi Pico 2 | RP2350 Arm | Same port; not yet run on a board here (no Bluetooth audio) |
 | Pimoroni Pico Plus 2 / Pico Plus 2 W | RP2350B + 8 MB PSRAM | Planned; not ported yet |
 | Pimoroni Pico 2 W with a PSRAM kit | RP2350A + PSRAM | Planned; not ported yet |
 
-Each chip family has its own folder (`rp2040/` today). A port is added only after
+Each chip family has its own folder (`rp2040/` and `rp2350/`). A port is added only after
 it has run on a board.
 
 ## Measured on a Pico W
@@ -49,10 +50,60 @@ passes 1,926,732 checks with 0 failures.
   Start is both buttons plus up; Select is both buttons plus down.
 - Python 3 with `pyserial` (`py -3 -m pip install pyserial`) to load games.
 
+## Pico 2 W
+
+The RP2350 port uses both Cortex-M33 cores with the same computed-dispatch CPU,
+PPU, APU, mapper events, and ROM-store format as the resolved RP2040 version.
+The LAFVIN pinout and controls are the same. It runs at the Pico 2 W's nominal
+150 MHz with 75 MHz LCD SPI.
+
+Build the port with:
+
+```
+tools/build.ps1 -Compiler path\to\PureMetalForge.exe -Source rp2350/demo.pico2w -Output firmware/nes-pico2-w.uf2
+tools/build.ps1 -Compiler path\to\PureMetalForge.exe -Source rp2350/Diagnostics/verify.pico2w -Output rp2350/Diagnostics/verify.uf2 -Port COM6 -Seconds 60 -VerifyNes
+```
+
+On the physical Pico 2 W (COM6), the full suite passes **1,926,732 checks with
+zero failures**. It includes the mapper/DMC ordering, renderer comparisons, CPU
+vectors, audio shutdown, byte-exact SBC vectors, and ROM-store flash operations.
+CPU-only test loops execute 2,000,202 guest cycles in 319,760 microseconds and
+2,000,030 guest cycles in 366,746 microseconds at 150 MHz. These are synthetic
+CPU measurements, not game frame rates or guest instruction rates.
+Raw output is in `rp2350/Diagnostics/verification-board.txt`; game measurements
+and the test procedure are documented in `rp2350/README.md`.
+
+Final 40-second samples with the LCD and Bluetooth stereo active:
+
+| Game | Displayed FPS | Emulated FPS | PCM samples/second | New Bluetooth underruns |
+|---|---:|---:|---:|---:|
+| Mario / Duck Hunt cartridge, Mario gameplay | 60.047 | 60.097 | 47,996 | 0 |
+| Contra | 60.022 | 60.097 | 47,997 | 0 |
+| Castlevania | 60.021 | 60.096 | 47,994 | 0 |
+
+All three had zero emulator errors, no stopped CPU, and at least 60 emulated
+frames in each sampled interval. The startup underrun counter was 1 and remained
+1 throughout each run. Contra's picture and sound were also confirmed by the
+operator. These finite tests do not establish compatibility with every game.
+The public boot menu measured 60.10 displayed FPS over ten steady intervals;
+the first initialization interval is retained separately in its raw log.
+
+`py -3 tools/port_rp2350.py` regenerates the port from the RP2040 sources. The
+changes select RP2350 libraries, use the two-M33 launch library, replace the
+absent SIO divider with M33 division, adapt SIO GPIO addresses and SPI/DMA request
+layout, and spell one assembly register list explicitly. RP2040 files are not
+modified by regeneration. Compiler and board libraries require no changes.
+
+Use the same ROM loader with `--port COM6`. The firmware and ROM-store offsets
+remain the same on both chips. The Pico 2 W radio firmware belongs at flash
+offset **$200000** (the Pico W uses $100000). Install the RP2350-specific
+`wb43439A0-7.95.49.00.combined.uf2` supplied with PureMetalForge before enabling
+Bluetooth. Published firmware has no private speaker address.
+
 ## Getting started
 
 1. Hold BOOTSEL while plugging in the Pico, then copy `firmware/nes-pico-w.uf2`
-   to the drive that appears.
+   to the drive that appears. For a Pico 2 W use `firmware/nes-pico2-w.uf2`.
 2. Load games: double-click `tools/rom_loader_ui.pyw`, add your `.nes` files
    (their order is the boot menu's order), choose the board's port, and press
    **Load onto board**. Three games take about 7 seconds.
@@ -84,7 +135,7 @@ you to choose one. Loading reboots the chosen board into its boot menu.
 | `$50000` | Directory: titles, mappers, sizes, CRC-32 of every game |
 | `$51000`–`$FEFFF` | Game data |
 | `$FF000` | Sector reserved for the board tests |
-| `$100000` | Bluetooth radio firmware |
+| `$100000` (Pico W) / `$200000` (Pico 2 W) | Bluetooth radio firmware |
 
 The loader runs inside the firmware's boot menu. The tool sends each 4 KiB with a
 CRC; the board writes it, reads it back and checks it. The directory is erased
@@ -128,10 +179,14 @@ tools/build.ps1 -Compiler path\to\PureMetalForge.exe
 This builds `rp2040/demo.picow` into `firmware/nes-pico-w.uf2`. Any image must end
 below flash offset `$50000`; the build script and `tools/upload_pack.py` refuse
 one that would overwrite the ROM store.
+Validation happens before uploading. The uploader's `--target rp2040` or
+`--target rp2350` checks the image's UF2 family before sending it to the selected
+port. Never send a firmware image for one chip to the other chip's board.
 
 To build with a Bluetooth speaker, make your own wrapper file next to
 `rp2040/demo.picow` that includes `runtime.pico` and `cartridge.pico` and then
-sets the speaker before `Main()`:
+sets the speaker before `Main()`. On Pico 2 W, copy `rp2350/demo.pico2w` to a
+private `.pico2w` wrapper and retain its `.pico2` includes:
 
 ```
 DataSection
@@ -168,6 +223,7 @@ CPU throughput benchmark. It reports `NES board checks=N failures=0 PASS`.
 ```
 firmware/   ROM-free firmware images
 rp2040/     firmware sources, generators and Diagnostics/ (board tests) for RP2040
+rp2350/     reproducible Arm Pico 2 W port and the same board tests
 tools/      ROM loader (window and command line), firmware upload, build, capture
 licenses/   third-party licences
 ```

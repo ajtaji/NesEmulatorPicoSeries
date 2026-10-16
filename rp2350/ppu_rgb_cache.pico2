@@ -1,0 +1,32 @@
+; Nametable descriptors (tile | palette<<8) for the tile-run renderer in
+; ppu_render.pico, which owns the converted-row RGB cache and its tags.
+; Palette changes invalidate all tags before the next draw.
+ProcedureRAM PpuUpdateDescriptor(addr.i)
+  Protected attr.i, palette.i
+  attr=Nt((addr&$C00)|$3C0|((addr>>4)&$38)|((addr>>2)&7))
+  palette=(attr>>(((addr>>4)&4)|(addr&2)))&3
+  NameDesc(addr)=Nt(addr)|(palette<<8)
+EndProcedure
+ProcedureRAM PpuUpdateAttribute(addr.i)
+  Protected base.i, x.i, y.i, tile.i, mirror.i
+  base=(addr&$C00)|((addr&$38)<<4)|((addr&7)<<2)
+  mirror=$400
+  If PpuMirroring=1
+    mirror=$800
+  EndIf
+  PpuUpdateDescriptor(addr) : PpuUpdateDescriptor(addr!mirror)
+  For y=0 To 3
+    For x=0 To 3
+      tile=base+y*32+x
+      PpuUpdateDescriptor(tile) : PpuUpdateDescriptor(tile!mirror)
+    Next
+  Next
+EndProcedure
+ProcedureRAM PpuBuildNameCache()
+  Protected i.i, timer.i
+  timer=Micros()
+  For i=0 To 4095
+    PpuUpdateDescriptor(i)
+  Next
+  NameDescDirty=0 : NameBuildUs=NameBuildUs+Micros()-timer
+EndProcedure

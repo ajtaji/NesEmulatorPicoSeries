@@ -20,11 +20,11 @@ if (!$Compiler) {
     $Compiler = $found.Source
 }
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$sourcePath = [IO.Path]::GetFullPath((Join-Path $projectRoot $Source))
-$outputPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $Output))
+$sourcePath = if ([IO.Path]::IsPathRooted($Source)) { [IO.Path]::GetFullPath($Source) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $Source)) }
+$outputPath = if ([IO.Path]::IsPathRooted($Output)) { [IO.Path]::GetFullPath($Output) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $Output)) }
 [IO.Directory]::CreateDirectory((Split-Path $outputPath -Parent)) | Out-Null
 $arguments = '--compile "' + $sourcePath + '" -S -o "' + $outputPath + '"'
-if ($Port) { $arguments += ' --port ' + $Port + ' --seconds ' + $Seconds }
+# Compile and validate before any upload can touch the board's ROM store.
 $stdoutPath = $outputPath + '.build.log'
 $stderrPath = $outputPath + '.stderr.log'
 $process = Start-Process -FilePath $Compiler -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
@@ -46,7 +46,17 @@ if ($outputPath.EndsWith('.uf2')) {
 }
 if ($VerifyNes) {
     if (!$Port) { throw '-VerifyNes requires -Port; compilation alone cannot pass verification.' }
-    $nesTranscript = Get-Content -Raw $stdoutPath
+}
+if ($Port) {
+    $target = if ($sourcePath.EndsWith('.pico2w')) { 'rp2350' } else { 'rp2040' }
+    & py -3 (Join-Path $PSScriptRoot 'upload_pack.py') $outputPath --compiler $Compiler --port $Port --target $target
+    if ($LASTEXITCODE -ne 0) { throw 'Validated firmware upload failed.' }
+    $capturePath = $outputPath + '.board.log'
+    & py -3 (Join-Path $PSScriptRoot 'monitor.py') --port $Port --seconds $Seconds --output $capturePath
+    if ($LASTEXITCODE -ne 0) { throw 'Serial capture failed.' }
+}
+if ($VerifyNes) {
+    $nesTranscript = Get-Content -Raw $capturePath
     if ($nesTranscript -notmatch 'NES board checks=[1-9][0-9]* failures=0 PASS' -or $nesTranscript -cmatch '\bFAIL\b') {
         throw "NES board verification did not pass: $stdoutPath"
     }

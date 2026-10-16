@@ -1,5 +1,5 @@
 """PureMetal NES ROM Loader: choose your .nes games and load them onto the
-Pico W. Double-click this file (Windows) or run: py -3 tools/rom_loader_ui.pyw
+Pico W / Pico 2 W. Double-click this file (Windows) or run: py -3 tools/rom_loader_ui.pyw
 
 The board must be running the PureMetal NES firmware and be plugged in by USB.
 The same work is done from the command line by rom_loader.py.

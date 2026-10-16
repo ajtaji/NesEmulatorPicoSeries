@@ -1,0 +1,1719 @@
+; NMOS 6502 core: the input rp2040/generate_cpu.py turns into the 2A03 core (cpu2a03.pico).
+; NMOS 6502, documented opcodes. Flat 64 KiB writable guest memory.
+; CpuRun executes whole instructions. No bus/dummy-cycle emulation.
+; CpuCycles is maintained only with #CPU_TIMING = 1.
+; Reserved registers are application-wide, including library calls.
+EnableExplicit
+Global Dim M.a(65536)
+Global Dim Dispatch.Label(256)
+Global PC.i, A.i, X.i, Y.i, S.i
+Global FN.i, FZ.i, FC.i, FV.i, FD.i, FI.i
+Global Res.i, Left.i, Budget.i, Ready.i, Stopped.i, BadOpcode.i
+Global Ea.i, Value.i, Lo.i, Hi.i, Tmp.i, Old.i, Base.i
+Global CpuCycles.i, InitIndex.i
+ReserveRegister PC = r8, A = r9, Res = r10, Left = r11, X = r4, FZ = r5
+
+; N is bit 7 of FN; Z means low byte of FZ is zero.
+; C is bit 8 of FC; V is bit 7 of FV. D and I are 0 or 1.
+Macro NZ(v)
+  FN = v
+  FZ = v
+EndMacro
+Macro Fetch(v)
+  v = M(PC)
+  PC = (PC + 1) & $FFFF
+EndMacro
+Macro Push(v)
+  M($100 + S) = v
+  S = (S - 1) & 255
+EndMacro
+Macro Pop(v)
+  S = (S + 1) & 255
+  v = M($100 + S)
+EndMacro
+Macro Charge(c)
+  CompilerIf #CPU_TIMING = 1
+    CpuCycles = CpuCycles + c
+  CompilerEndIf
+EndMacro
+Macro CrossPage()
+  CompilerIf #CPU_TIMING = 1
+    If (Base & $FF00) <> (Ea & $FF00)
+      CpuCycles = CpuCycles + 1
+    EndIf
+  CompilerEndIf
+EndMacro
+Procedure.i CpuStatus()
+  Protected p.i
+  p = $20 | (FN & $80) | ((FV & $80) >> 1) | (FD << 3) | (FI << 2) | ((FC >> 8) & 1)
+  If (FZ & 255) = 0
+    p = p | 2
+  EndIf
+  ProcedureReturn p
+EndProcedure
+Procedure CpuSetStatus(p.i)
+  FN = p
+  FV = p << 1
+  FC = (p & 1) << 8
+  FZ = (p & 2) ! 2
+  FD = (p >> 3) & 1
+  FI = (p >> 2) & 1
+EndProcedure
+Procedure CpuReset()
+  PC = M($FFFC) | (M($FFFD) << 8)
+  A = 0 : X = 0 : Y = 0 : S = $FD
+  CpuSetStatus($24)
+  Stopped = 0 : BadOpcode = 0 : CpuCycles = 7
+EndProcedure
+; Host calls this BETWEEN run windows for NMI, or IRQ when I is clear.
+; NMI vector=$FFFA, IRQ=$FFFE. Returns 1 when taken.
+Procedure.i CpuInterrupt(vector.i)
+  If Stopped
+    ProcedureReturn 0
+  EndIf
+  If vector = $FFFE
+    If FI
+      ProcedureReturn 0
+    EndIf
+  Else
+    If vector <> $FFFA
+      ProcedureReturn 0
+    EndIf
+  EndIf
+  Push(PC >> 8)
+  Push(PC & 255)
+  Tmp = CpuStatus()
+  Push(Tmp)
+  FI = 1
+  PC = M(vector) | (M(vector + 1) << 8)
+  Charge(7)
+  ProcedureReturn 1
+EndProcedure
+
+ProcedureRAM.i CpuRun(n.i)
+; Each opcode owns its tail. Assembly only implements computed dispatch;
+; operands and instruction semantics remain in checked PureMetal source.
+Macro DispatchNext()
+  CompilerIf #CPU_ASM_TAIL = 1
+    ASM Uses PC
+      mov r0, r8
+      ldr r1, =global_m
+      ldrb r2, [r1, r0]
+      adds r0, #1
+      lsls r0, r0, #16
+      lsrs r0, r0, #16
+      mov r8, r0
+      lsls r2, r2, #2
+      ldr r1, =global_dispatch
+      ldr r1, [r1, r2]
+      bx r1
+    EndASM
+  CompilerElse
+    Tmp = M(PC)
+    PC = (PC + 1) & $FFFF
+    Goto Dispatch(Tmp)
+  CompilerEndIf
+EndMacro
+Macro NextOp(c)
+  Charge(c)
+  CompilerIf #CPU_ASM_TAIL = 1
+    ASM Uses Left
+      mov r0, r11
+      subs r0, #1
+      mov r11, r0
+      beq __ul_cpurun_done
+    EndASM
+  CompilerElse
+    Left = Left - 1
+    If Left = 0
+      Goto Done
+    EndIf
+  CompilerEndIf
+  DispatchNext()
+EndMacro
+  If n <= 0
+    ProcedureReturn 0
+  EndIf
+  If Stopped
+    ProcedureReturn 0
+  EndIf
+  If Ready = 0
+    For InitIndex = 0 To 255
+      Dispatch(InitIndex) = ?Illegal
+    Next
+    Dispatch($00) = ?Op00
+    Dispatch($01) = ?Op01
+    Dispatch($05) = ?Op05
+    Dispatch($06) = ?Op06
+    Dispatch($08) = ?Op08
+    Dispatch($09) = ?Op09
+    Dispatch($0A) = ?Op0A
+    Dispatch($0D) = ?Op0D
+    Dispatch($0E) = ?Op0E
+    Dispatch($10) = ?Op10
+    Dispatch($11) = ?Op11
+    Dispatch($15) = ?Op15
+    Dispatch($16) = ?Op16
+    Dispatch($18) = ?Op18
+    Dispatch($19) = ?Op19
+    Dispatch($1D) = ?Op1D
+    Dispatch($1E) = ?Op1E
+    Dispatch($20) = ?Op20
+    Dispatch($21) = ?Op21
+    Dispatch($24) = ?Op24
+    Dispatch($25) = ?Op25
+    Dispatch($26) = ?Op26
+    Dispatch($28) = ?Op28
+    Dispatch($29) = ?Op29
+    Dispatch($2A) = ?Op2A
+    Dispatch($2C) = ?Op2C
+    Dispatch($2D) = ?Op2D
+    Dispatch($2E) = ?Op2E
+    Dispatch($30) = ?Op30
+    Dispatch($31) = ?Op31
+    Dispatch($35) = ?Op35
+    Dispatch($36) = ?Op36
+    Dispatch($38) = ?Op38
+    Dispatch($39) = ?Op39
+    Dispatch($3D) = ?Op3D
+    Dispatch($3E) = ?Op3E
+    Dispatch($40) = ?Op40
+    Dispatch($41) = ?Op41
+    Dispatch($45) = ?Op45
+    Dispatch($46) = ?Op46
+    Dispatch($48) = ?Op48
+    Dispatch($49) = ?Op49
+    Dispatch($4A) = ?Op4A
+    Dispatch($4C) = ?Op4C
+    Dispatch($4D) = ?Op4D
+    Dispatch($4E) = ?Op4E
+    Dispatch($50) = ?Op50
+    Dispatch($51) = ?Op51
+    Dispatch($55) = ?Op55
+    Dispatch($56) = ?Op56
+    Dispatch($58) = ?Op58
+    Dispatch($59) = ?Op59
+    Dispatch($5D) = ?Op5D
+    Dispatch($5E) = ?Op5E
+    Dispatch($60) = ?Op60
+    Dispatch($61) = ?Op61
+    Dispatch($65) = ?Op65
+    Dispatch($66) = ?Op66
+    Dispatch($68) = ?Op68
+    Dispatch($69) = ?Op69
+    Dispatch($6A) = ?Op6A
+    Dispatch($6C) = ?Op6C
+    Dispatch($6D) = ?Op6D
+    Dispatch($6E) = ?Op6E
+    Dispatch($70) = ?Op70
+    Dispatch($71) = ?Op71
+    Dispatch($75) = ?Op75
+    Dispatch($76) = ?Op76
+    Dispatch($78) = ?Op78
+    Dispatch($79) = ?Op79
+    Dispatch($7D) = ?Op7D
+    Dispatch($7E) = ?Op7E
+    Dispatch($81) = ?Op81
+    Dispatch($84) = ?Op84
+    Dispatch($85) = ?Op85
+    Dispatch($86) = ?Op86
+    Dispatch($88) = ?Op88
+    Dispatch($8A) = ?Op8A
+    Dispatch($8C) = ?Op8C
+    Dispatch($8D) = ?Op8D
+    Dispatch($8E) = ?Op8E
+    Dispatch($90) = ?Op90
+    Dispatch($91) = ?Op91
+    Dispatch($94) = ?Op94
+    Dispatch($95) = ?Op95
+    Dispatch($96) = ?Op96
+    Dispatch($98) = ?Op98
+    Dispatch($99) = ?Op99
+    Dispatch($9A) = ?Op9A
+    Dispatch($9D) = ?Op9D
+    Dispatch($A0) = ?OpA0
+    Dispatch($A1) = ?OpA1
+    Dispatch($A2) = ?OpA2
+    Dispatch($A4) = ?OpA4
+    Dispatch($A5) = ?OpA5
+    Dispatch($A6) = ?OpA6
+    Dispatch($A8) = ?OpA8
+    Dispatch($A9) = ?OpA9
+    Dispatch($AA) = ?OpAA
+    Dispatch($AC) = ?OpAC
+    Dispatch($AD) = ?OpAD
+    Dispatch($AE) = ?OpAE
+    Dispatch($B0) = ?OpB0
+    Dispatch($B1) = ?OpB1
+    Dispatch($B4) = ?OpB4
+    Dispatch($B5) = ?OpB5
+    Dispatch($B6) = ?OpB6
+    Dispatch($B8) = ?OpB8
+    Dispatch($B9) = ?OpB9
+    Dispatch($BA) = ?OpBA
+    Dispatch($BC) = ?OpBC
+    Dispatch($BD) = ?OpBD
+    Dispatch($BE) = ?OpBE
+    Dispatch($C0) = ?OpC0
+    Dispatch($C1) = ?OpC1
+    Dispatch($C4) = ?OpC4
+    Dispatch($C5) = ?OpC5
+    Dispatch($C6) = ?OpC6
+    Dispatch($C8) = ?OpC8
+    Dispatch($C9) = ?OpC9
+    Dispatch($CA) = ?OpCA
+    Dispatch($CC) = ?OpCC
+    Dispatch($CD) = ?OpCD
+    Dispatch($CE) = ?OpCE
+    Dispatch($D0) = ?OpD0
+    Dispatch($D1) = ?OpD1
+    Dispatch($D5) = ?OpD5
+    Dispatch($D6) = ?OpD6
+    Dispatch($D8) = ?OpD8
+    Dispatch($D9) = ?OpD9
+    Dispatch($DD) = ?OpDD
+    Dispatch($DE) = ?OpDE
+    Dispatch($E0) = ?OpE0
+    Dispatch($E1) = ?OpE1
+    Dispatch($E4) = ?OpE4
+    Dispatch($E5) = ?OpE5
+    Dispatch($E6) = ?OpE6
+    Dispatch($E8) = ?OpE8
+    Dispatch($E9) = ?OpE9
+    Dispatch($EA) = ?OpEA
+    Dispatch($EC) = ?OpEC
+    Dispatch($ED) = ?OpED
+    Dispatch($EE) = ?OpEE
+    Dispatch($F0) = ?OpF0
+    Dispatch($F1) = ?OpF1
+    Dispatch($F5) = ?OpF5
+    Dispatch($F6) = ?OpF6
+    Dispatch($F8) = ?OpF8
+    Dispatch($F9) = ?OpF9
+    Dispatch($FD) = ?OpFD
+    Dispatch($FE) = ?OpFE
+    Ready = 1
+  EndIf
+  Budget = n
+  Left = n
+  DispatchNext()
+Illegal:
+  PC = (PC - 1) & $FFFF
+  BadOpcode = M(PC)
+  Stopped = 1
+  Goto Done
+Op00: ; $00 BRK imp
+  PC = (PC + 1) & $FFFF
+  Push(PC >> 8)
+  Push(PC & 255)
+  Tmp = CpuStatus() | $10
+  Push(Tmp)
+  FI = 1
+  PC = M($FFFE) | (M($FFFF) << 8)
+  NextOp(7)
+Op01: ; $01 ORA inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(6)
+Op05: ; $05 ORA zpg
+  Fetch(Ea)
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(3)
+Op06: ; $06 ASL zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+Op08: ; $08 PHP imp
+  Tmp = CpuStatus() | $10
+  Push(Tmp)
+  NextOp(3)
+Op09: ; $09 ORA imm
+  A = A | M(PC)
+  NZ(A)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+Op0A: ; $0A ASL acc
+  Res = A << 1
+  FC = Res
+  A = Res & 255
+  NZ(A)
+  NextOp(2)
+Op0D: ; $0D ORA abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(4)
+Op0E: ; $0E ASL abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op10: ; $10 BPL rel
+  If (FN & $80) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+Op11: ; $11 ORA iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(5)
+Op15: ; $15 ORA zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(4)
+Op16: ; $16 ASL zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op18: ; $18 CLC imp
+  FC = 0
+  NextOp(2)
+Op19: ; $19 ORA aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(4)
+Op1D: ; $1D ORA abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  A = A | M(Ea)
+  NZ(A)
+  NextOp(4)
+Op1E: ; $1E ASL abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = Value << 1
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+Op20: ; $20 JSR abs
+  Fetch(Lo)
+  Push(PC >> 8)
+  Push(PC & 255)
+  PC = Lo | (M(PC) << 8)
+  NextOp(6)
+Op21: ; $21 AND inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(6)
+Op24: ; $24 BIT zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  FN = Value
+  FV = Value << 1
+  FZ = A & Value
+  NextOp(3)
+Op25: ; $25 AND zpg
+  Fetch(Ea)
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(3)
+Op26: ; $26 ROL zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+Op28: ; $28 PLP imp
+  Pop(Tmp)
+  CpuSetStatus(Tmp)
+  NextOp(4)
+Op29: ; $29 AND imm
+  A = A & M(PC)
+  NZ(A)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+Op2A: ; $2A ROL acc
+  Res = (A << 1) | ((FC >> 8) & 1)
+  FC = Res
+  A = Res & 255
+  NZ(A)
+  NextOp(2)
+Op2C: ; $2C BIT abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  FN = Value
+  FV = Value << 1
+  FZ = A & Value
+  NextOp(4)
+Op2D: ; $2D AND abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(4)
+Op2E: ; $2E ROL abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op30: ; $30 BMI rel
+  If (FN & $80) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+Op31: ; $31 AND iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(5)
+Op35: ; $35 AND zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(4)
+Op36: ; $36 ROL zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op38: ; $38 SEC imp
+  FC = $100
+  NextOp(2)
+Op39: ; $39 AND aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(4)
+Op3D: ; $3D AND abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  A = A & M(Ea)
+  NZ(A)
+  NextOp(4)
+Op3E: ; $3E ROL abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = (Value << 1) | ((FC >> 8) & 1)
+  FC = Res
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+Op40: ; $40 RTI imp
+  Pop(Tmp)
+  CpuSetStatus(Tmp)
+  Pop(Lo)
+  Pop(Hi)
+  PC = Lo | (Hi << 8)
+  NextOp(6)
+Op41: ; $41 EOR inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(6)
+Op45: ; $45 EOR zpg
+  Fetch(Ea)
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(3)
+Op46: ; $46 LSR zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+Op48: ; $48 PHA imp
+  Push(A)
+  NextOp(3)
+Op49: ; $49 EOR imm
+  A = A ! M(PC)
+  NZ(A)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+Op4A: ; $4A LSR acc
+  FC = A << 8
+  A = A >> 1
+  NZ(A)
+  NextOp(2)
+Op4C: ; $4C JMP abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  PC = Ea
+  NextOp(3)
+Op4D: ; $4D EOR abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(4)
+Op4E: ; $4E LSR abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op50: ; $50 BVC rel
+  If (FV & $80) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+Op51: ; $51 EOR iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(5)
+Op55: ; $55 EOR zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(4)
+Op56: ; $56 LSR zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op58: ; $58 CLI imp
+  FI = 0
+  NextOp(2)
+Op59: ; $59 EOR aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(4)
+Op5D: ; $5D EOR abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  A = A ! M(Ea)
+  NZ(A)
+  NextOp(4)
+Op5E: ; $5E LSR abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = Value >> 1
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+Op60: ; $60 RTS imp
+  Pop(Lo)
+  Pop(Hi)
+  PC = ((Lo | (Hi << 8)) + 1) & $FFFF
+  NextOp(6)
+Op61: ; $61 ADC inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(6)
+Op65: ; $65 ADC zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(3)
+Op66: ; $66 ROR zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+Op68: ; $68 PLA imp
+  Pop(A)
+  NZ(A)
+  NextOp(4)
+Op69: ; $69 ADC imm
+  Fetch(Value)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(2)
+Op6A: ; $6A ROR acc
+  Res = (A >> 1) | ((FC >> 1) & $80)
+  FC = A << 8
+  A = Res
+  NZ(A)
+  NextOp(2)
+Op6C: ; $6C JMP ind
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  PC = M(Ea) | (M((Ea & $FF00) | ((Ea + 1) & 255)) << 8)
+  NextOp(5)
+Op6D: ; $6D ADC abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(4)
+Op6E: ; $6E ROR abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op70: ; $70 BVS rel
+  If (FV & $80) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+Op71: ; $71 ADC iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(5)
+Op75: ; $75 ADC zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(4)
+Op76: ; $76 ROR zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+Op78: ; $78 SEI imp
+  FI = 1
+  NextOp(2)
+Op79: ; $79 ADC aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(4)
+Op7D: ; $7D ADC abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Res = A + Value + ((FC >> 8) & 1)
+  If FD
+    ; NMOS decimal: Z from binary sum, N/V from pre-high-adjust sum.
+    FZ = Res
+    Lo = (A & 15) + (Value & 15) + ((FC >> 8) & 1)
+    If Lo > 9
+      Lo = ((Lo + 6) & 15) + 16
+    EndIf
+    Hi = (A & $F0) + (Value & $F0) + Lo
+    FN = Hi
+    FV = (~(A ! Value)) & (A ! Hi)
+    If Hi > $9F
+      Hi = Hi + $60
+    EndIf
+    FC = 0
+    If Hi > 255
+      FC = $100
+    EndIf
+    A = Hi & 255
+  Else
+    FV = (~(A ! Value)) & (A ! Res)
+    FC = Res
+    A = Res & 255
+    NZ(A)
+  EndIf
+  NextOp(4)
+Op7E: ; $7E ROR abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = (Value >> 1) | ((FC >> 1) & $80)
+  FC = Value << 8
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+Op81: ; $81 STA inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  M(Ea) = A
+  NextOp(6)
+Op84: ; $84 STY zpg
+  Fetch(Ea)
+  M(Ea) = Y
+  NextOp(3)
+Op85: ; $85 STA zpg
+  Fetch(Ea)
+  M(Ea) = A
+  NextOp(3)
+Op86: ; $86 STX zpg
+  Fetch(Ea)
+  M(Ea) = X
+  NextOp(3)
+Op88: ; $88 DEY imp
+  Y = (Y - 1) & 255
+  NZ(Y)
+  NextOp(2)
+Op8A: ; $8A TXA imp
+  A = X
+  NZ(A)
+  NextOp(2)
+Op8C: ; $8C STY abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  M(Ea) = Y
+  NextOp(4)
+Op8D: ; $8D STA abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  M(Ea) = A
+  NextOp(4)
+Op8E: ; $8E STX abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  M(Ea) = X
+  NextOp(4)
+Op90: ; $90 BCC rel
+  If (FC & $100) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+Op91: ; $91 STA iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Ea = (Ea + Y) & $FFFF
+  M(Ea) = A
+  NextOp(6)
+Op94: ; $94 STY zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  M(Ea) = Y
+  NextOp(4)
+Op95: ; $95 STA zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  M(Ea) = A
+  NextOp(4)
+Op96: ; $96 STX zpy
+  Fetch(Ea)
+  Ea = (Ea + Y) & 255
+  M(Ea) = X
+  NextOp(4)
+Op98: ; $98 TYA imp
+  A = Y
+  NZ(A)
+  NextOp(2)
+Op99: ; $99 STA aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + Y) & $FFFF
+  M(Ea) = A
+  NextOp(5)
+Op9A: ; $9A TXS imp
+  S = X
+  NextOp(2)
+Op9D: ; $9D STA abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  M(Ea) = A
+  NextOp(5)
+OpA0: ; $A0 LDY imm
+  Y = M(PC)
+  NZ(Y)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpA1: ; $A1 LDA inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  A = M(Ea)
+  NZ(A)
+  NextOp(6)
+OpA2: ; $A2 LDX imm
+  X = M(PC)
+  NZ(X)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpA4: ; $A4 LDY zpg
+  Fetch(Ea)
+  Y = M(Ea)
+  NZ(Y)
+  NextOp(3)
+OpA5: ; $A5 LDA zpg
+  Fetch(Ea)
+  A = M(Ea)
+  NZ(A)
+  NextOp(3)
+OpA6: ; $A6 LDX zpg
+  Fetch(Ea)
+  X = M(Ea)
+  NZ(X)
+  NextOp(3)
+OpA8: ; $A8 TAY imp
+  Y = A
+  NZ(Y)
+  NextOp(2)
+OpA9: ; $A9 LDA imm
+  A = M(PC)
+  NZ(A)
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpAA: ; $AA TAX imp
+  X = A
+  NZ(X)
+  NextOp(2)
+OpAC: ; $AC LDY abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Y = M(Ea)
+  NZ(Y)
+  NextOp(4)
+OpAD: ; $AD LDA abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  A = M(Ea)
+  NZ(A)
+  NextOp(4)
+OpAE: ; $AE LDX abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  X = M(Ea)
+  NZ(X)
+  NextOp(4)
+OpB0: ; $B0 BCS rel
+  If (FC & $100) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+OpB1: ; $B1 LDA iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = M(Ea)
+  NZ(A)
+  NextOp(5)
+OpB4: ; $B4 LDY zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Y = M(Ea)
+  NZ(Y)
+  NextOp(4)
+OpB5: ; $B5 LDA zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  A = M(Ea)
+  NZ(A)
+  NextOp(4)
+OpB6: ; $B6 LDX zpy
+  Fetch(Ea)
+  Ea = (Ea + Y) & 255
+  X = M(Ea)
+  NZ(X)
+  NextOp(4)
+OpB8: ; $B8 CLV imp
+  FV = 0
+  NextOp(2)
+OpB9: ; $B9 LDA aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  A = M(Ea)
+  NZ(A)
+  NextOp(4)
+OpBA: ; $BA TSX imp
+  X = S
+  NZ(X)
+  NextOp(2)
+OpBC: ; $BC LDY abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  Y = M(Ea)
+  NZ(Y)
+  NextOp(4)
+OpBD: ; $BD LDA abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  A = M(Ea)
+  NZ(A)
+  NextOp(4)
+OpBE: ; $BE LDX aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  X = M(Ea)
+  NZ(X)
+  NextOp(4)
+OpC0: ; $C0 CPY imm
+  Res = Y - M(PC)
+  NZ(Res)
+  FC = ~Res
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpC1: ; $C1 CMP inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(6)
+OpC4: ; $C4 CPY zpg
+  Fetch(Ea)
+  Res = Y - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(3)
+OpC5: ; $C5 CMP zpg
+  Fetch(Ea)
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(3)
+OpC6: ; $C6 DEC zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+OpC8: ; $C8 INY imp
+  Y = (Y + 1) & 255
+  NZ(Y)
+  NextOp(2)
+OpC9: ; $C9 CMP imm
+  Res = A - M(PC)
+  NZ(Res)
+  FC = ~Res
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpCA: ; $CA DEX imp
+  X = (X - 1) & 255
+  NZ(X)
+  NextOp(2)
+OpCC: ; $CC CPY abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Res = Y - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpCD: ; $CD CMP abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpCE: ; $CE DEC abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(3)
+OpD0: ; $D0 BNE rel
+  If (FZ & 255) <> 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+OpD1: ; $D1 CMP iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(5)
+OpD5: ; $D5 CMP zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpD6: ; $D6 DEC zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+OpD8: ; $D8 CLD imp
+  FD = 0
+  NextOp(2)
+OpD9: ; $D9 CMP aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpDD: ; $DD CMP abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  Res = A - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpDE: ; $DE DEC abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = Value - 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+OpE0: ; $E0 CPX imm
+  Res = X - M(PC)
+  NZ(Res)
+  FC = ~Res
+  PC = (PC + 1) & $FFFF
+  NextOp(2)
+OpE1: ; $E1 SBC inx
+  Fetch(Tmp)
+  Tmp = (Tmp + X) & 255
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(6)
+OpE4: ; $E4 CPX zpg
+  Fetch(Ea)
+  Res = X - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(3)
+OpE5: ; $E5 SBC zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(3)
+OpE6: ; $E6 INC zpg
+  Fetch(Ea)
+  Value = M(Ea)
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(5)
+OpE8: ; $E8 INX imp
+  X = (X + 1) & 255
+  NZ(X)
+  NextOp(2)
+OpE9: ; $E9 SBC imm
+  Fetch(Value)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(2)
+OpEA: ; $EA NOP imp
+  NextOp(2)
+OpEC: ; $EC CPX abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Res = X - M(Ea)
+  NZ(Res)
+  FC = ~Res
+  NextOp(4)
+OpED: ; $ED SBC abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(4)
+OpEE: ; $EE INC abs
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Value = M(Ea)
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+OpF0: ; $F0 BEQ rel
+  If (FZ & 255) = 0
+    CompilerIf #CPU_TIMING = 1
+      Base = (PC + 1) & $FFFF
+    CompilerEndIf
+    Res = (M(PC) ! 128) - 128
+    PC = (PC + 1 + Res) & $FFFF
+    CompilerIf #CPU_TIMING = 1
+      Ea = PC
+      CrossPage()
+    CompilerEndIf
+    Charge(1)
+  Else
+    PC = (PC + 1) & $FFFF
+  EndIf
+  NextOp(2)
+OpF1: ; $F1 SBC iny
+  Fetch(Tmp)
+  Ea = M(Tmp) | (M((Tmp + 1) & 255) << 8)
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(5)
+OpF5: ; $F5 SBC zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(4)
+OpF6: ; $F6 INC zpx
+  Fetch(Ea)
+  Ea = (Ea + X) & 255
+  Value = M(Ea)
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(6)
+OpF8: ; $F8 SED imp
+  FD = 1
+  NextOp(2)
+OpF9: ; $F9 SBC aby
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + Y) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(4)
+OpFD: ; $FD SBC abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Base = Ea
+  Ea = (Ea + X) & $FFFF
+  CrossPage()
+  Value = M(Ea)
+  Tmp = ((FC >> 8) & 1) ! 1
+  Res = A - Value - Tmp
+  FV = (A ! Value) & (A ! Res)
+  FC = ~Res
+  NZ(Res)
+  If FD
+    Lo = (A & 15) - (Value & 15) - Tmp
+    Hi = (A & $F0) - (Value & $F0)
+    If Lo < 0
+      Lo = ((Lo - 6) & 15) - 16
+    EndIf
+    Hi = Hi + Lo
+    If Hi < 0
+      Hi = Hi - $60
+    EndIf
+    A = Hi & 255
+  Else
+    A = Res & 255
+  EndIf
+  NextOp(4)
+OpFE: ; $FE INC abx
+  Ea = M(PC) | (M((PC + 1) & $FFFF) << 8)
+  PC = (PC + 2) & $FFFF
+  Ea = (Ea + X) & $FFFF
+  Value = M(Ea)
+  Res = Value + 1
+  Res = Res & 255
+  NZ(Res)
+  M(Ea) = Res
+  NextOp(7)
+Done:
+  ProcedureReturn Budget - Left
+EndProcedure

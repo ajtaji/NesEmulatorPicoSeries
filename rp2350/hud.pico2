@@ -1,0 +1,53 @@
+; Host display overlay at (4,4), outside the NES viewport (112,40,256,240).
+; Never writes NES nametables, palette, OAM or the emulated framebuffer.
+Global Dim HudPixels.u(80)
+Global HudLastUs.i, HudLastLcd.i, HudLastEmu.i, HudColumn.i
+Global HudLcdTenths.i, HudEmuTenths.i
+Procedure HudGlyph(glyph.i)
+  Protected bits.i, x.i, y.i, c.i
+  bits=PeekU(?HudFont+glyph*2)
+  For y=0 To 9
+    For x=0 To 7
+      c=0
+      If x<6
+        If (bits>>((y>>1)*3+(x>>1)))&1
+          c=$FFFF
+        EndIf
+      EndIf
+      HudPixels(y*8+x)=c
+    Next
+  Next
+  Tft796BlitRect(4+HudColumn*8,4,8,10,@HudPixels(0))
+  HudColumn=HudColumn+1
+EndProcedure
+Procedure HudNumber(tenths.i)
+  If tenths>999
+    tenths=999
+  EndIf
+  HudGlyph(tenths/100) : HudGlyph((tenths/10) % 10)
+  HudGlyph(17) : HudGlyph(tenths % 10)
+EndProcedure
+Procedure HudUpdate()
+  Protected now.i, dt.i, lcd.i, emu.i
+  If WorkerDisplay=0
+    ProcedureReturn
+  EndIf
+  now=Micros() : dt=now-HudLastUs
+  If dt<1000000
+    ProcedureReturn
+  EndIf
+  lcd=WorkerDisplayed : emu=WorkerFrames
+  HudLcdTenths=NesDiv((lcd-HudLastLcd)*10000000,dt)
+  HudEmuTenths=NesDiv((emu-HudLastEmu)*10000000,dt)
+  HudLastUs=now : HudLastLcd=lcd : HudLastEmu=emu : HudColumn=0
+  HudGlyph(10) : HudGlyph(11) : HudGlyph(12) : HudGlyph(16)
+  HudNumber(HudLcdTenths) : HudGlyph(16)
+  HudGlyph(13) : HudGlyph(14) : HudGlyph(15) : HudGlyph(16)
+  HudNumber(HudEmuTenths)
+EndProcedure
+DataSection
+HudFont:
+  ; Digits 0..9, F P S E M U space dot. Each row is three LSB-first bits.
+  Data.u $7B6F,$2492,$73E7,$79E7,$49ED,$79CF,$7BCF,$4927,$7BEF,$79EF
+  Data.u $12CF,$12EF,$79CF,$73CF,$5B7D,$7B6D,0,$2000
+EndDataSection

@@ -13,3 +13,5 @@ __pycache__/
 *.nes
 !rp2040/demo.nes
 my-*.picow
+my-*.pico2w
+*.board.log
