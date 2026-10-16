@@ -5,12 +5,15 @@
 ; Every image must end below $50000 (tools/upload_pack.py and tools/build.ps1 check);
 ; $100000 up is the Bluetooth radio firmware and is never written here.
 ;
-; Directory: 'NESR', u16 version 1, u16 count, u32 CRC-32 of the entries,
+; Directory: 'NESR', u16 version 1 or 2, u16 count, u32 CRC-32 of the entries,
 ; u32 0, then count 64-byte entries: title[32] (NUL-terminated), mapper,
-; mirroring, bus conflicts, CHR RAM, u16 32 KiB PRG views, u16 8 KiB CHR
+; mirroring, conflict/submapper flags, memory flags, u16 32 KiB PRG views, u16 8 KiB CHR
 ; banks, u32 PRG offset, u32 PRG bytes, u32 CHR offset, u32 CHR bytes,
 ; u32 PRG CRC-32, u32 CHR CRC-32. The loader erases the directory first and
 ; writes it last, so an interrupted upload leaves an empty store.
+; Version 2: entry[34] bit 0 conflicts, bits 4..7 submapper; entry[35]
+; bit 0 CHR RAM, bit 1 flash CHR includes decoded data, bit 2 PRG RAM present.
+; Decoded CHR follows raw CHR, doubling entry[52]; entry[38] counts raw banks.
 #ROMSTORE_DIR = $50000
 #ROMSTORE_DATA = $51000
 #ROMSTORE_END = $FF000
@@ -48,7 +51,7 @@ Procedure.l RomCrc(addr.i, count.i)
   ProcedureReturn c!$FFFFFFFF
 EndProcedure
 Procedure.i RomInArea(offset.i, count.i)
-  If offset<#ROMSTORE_DATA Or count<0 Or offset+count>#ROMSTORE_END
+  If offset<#ROMSTORE_DATA Or offset>#ROMSTORE_END Or count<0 Or count>#ROMSTORE_END-offset
     ProcedureReturn 0
   EndIf
   ProcedureReturn 1
@@ -66,33 +69,43 @@ Procedure RomStoreScan()
     ProcedureReturn
   EndIf
   count=PeekU(dir+6)
-  If PeekU(dir+4)<>1 Or count>#ROMSTORE_MAX
+  If (PeekU(dir+4)<>1 And PeekU(dir+4)<>2) Or count>#ROMSTORE_MAX
     Say("ROMSTORE refused: directory version ") : Num(PeekU(dir+4)) : Say(" count ") : Num(count)
-    Say(" is not version 1 with at most 63 games; reload the ROMs with rom_loader.py") : Eol()
+    Say(" is not version 1/2 with at most 63 games; reload the ROMs with rom_loader.py") : Eol()
     ProcedureReturn
   EndIf
   If RomCrc(dir+16,count*64)<>PeekL(dir+8)
     Say("ROMSTORE refused: directory CRC mismatch (torn or damaged write); reload the ROMs with rom_loader.py") : Eol()
     ProcedureReturn
   EndIf
+  PicoMapVersion=PeekU(dir+4)
   For n=0 To count-1
     e=dir+16+n*64 : ok=0
     For k=0 To 31
       If PeekA(e+k)=0 : ok=1 : Break : EndIf
     Next
-    mapper=PeekA(e+32) : chrRam=PeekA(e+35)
+    mapper=PeekA(e+32) : chrRam=PeekA(e+35)&1
     prg=PeekL(e+40) : prgSize=PeekL(e+44) : chr=PeekL(e+48) : chrSize=PeekL(e+52)
     If ok=0
       Say("ROMSTORE entry ") : Num(n) : Say(" refused: title has no terminating zero") : Eol()
-    ElseIf mapper<>0 And mapper<>2 And mapper<>66
-      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: mapper ") : Num(mapper) : Say(" is not supported (0, 2, 66)") : Eol()
+    ElseIf #CART_CHR_BANKS<2 And mapper<>0 And mapper<>2 And mapper<>66
+      ok=0 : Say("ROMSTORE refused: this diagnostic build lacks a CHR window") : Eol()
+    ElseIf PicoSupported(mapper)=0
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: mapper ") : Num(mapper) : Say(" is unavailable on this board") : Eol()
+    ElseIf (PeekA(e+35)&$F8)<>0 Or ((PeekA(e+35)&2)<>0 And PicoMapVersion<>2)
+      ok=0 : Say("ROMSTORE refused: invalid cartridge flags/version") : Eol()
+    ElseIf (PeekU(e+36)&(PeekU(e+36)-1))<>0 Or (PeekU(e+38)&(PeekU(e+38)-1))<>0
+      ok=0 : Say("ROMSTORE refused: non-power-of-two banks") : Eol()
     ElseIf prgSize<>PeekU(e+36)*32768 Or prgSize=0 Or RomInArea(prg,prgSize)=0
       ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: PRG range is outside the ROM area or does not match its bank count") : Eol()
-    ElseIf (chrRam=0 And (chrSize<>PeekU(e+38)*8192 Or chrSize=0 Or chrSize>16384)) Or RomInArea(chr,chrSize)=0
-      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: CHR range is outside the ROM area, too large (16 KiB max) or does not match its bank count") : Eol()
-    ElseIf (chrRam<>0 And #CART_CHR_BANKS<2) Or (chrRam=0 And chrSize>#CART_CHR_BANKS*8192)
-      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: this firmware decodes ") : Num(#CART_CHR_BANKS*8)
-      Say(" KiB of CHR; the game needs 16 KiB (build the firmware with #CART_CHR_BANKS=2)") : Eol()
+    ElseIf chrRam=0 And ((PeekA(e+35)&2)=0 And (chrSize<>PeekU(e+38)*8192 Or chrSize=0 Or chrSize>#CART_CHR_BANKS*8192))
+      ok=0 : Say("ROMSTORE refused: invalid legacy CHR geometry") : Eol()
+    ElseIf chrRam=0 And (PeekA(e+35)&2)<>0 And (chrSize<>PeekU(e+38)*16384 Or chrSize=0)
+      ok=0 : Say("ROMSTORE refused: invalid decoded CHR geometry") : Eol()
+    ElseIf chrRam=0 And (mapper<>0 And mapper<>2 And mapper<>66) And (PeekA(e+35)&2)=0
+      ok=0 : Say("ROMSTORE refused: new mappers require a version-2 decoded pack") : Eol()
+    ElseIf RomInArea(chr,chrSize)=0
+      ok=0 : Say("ROMSTORE refused: CHR range is outside the ROM area") : Eol()
     ElseIf RomCrc(#ROMSTORE_FLASH+prg,prgSize)<>PeekL(e+56) Or RomCrc(#ROMSTORE_FLASH+chr,chrSize)<>PeekL(e+60)
       ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: data CRC mismatch; reload the ROMs with rom_loader.py") : Eol()
     EndIf
@@ -112,9 +125,13 @@ Procedure CartSelect(number.i)
   EndIf
   If number<0 Or number>=RomCount : number=0 : EndIf
   e=RomEntry(number) : CartCount=RomCount : CartTitle=e
-  CartMapper=PeekA(e+32) : PpuMirroring=PeekA(e+33) : CartConflicts=PeekA(e+34) : CartChrRam=PeekA(e+35)
+  CartMapper=PeekA(e+32) : PpuMirroring=PeekA(e+33) : CartConflicts=PeekA(e+34)&1 : CartChrRam=PeekA(e+35)&1
   CartPrgBanks=PeekU(e+36) : CartChrBanks=PeekU(e+38)
   CartPrg=#ROMSTORE_FLASH+PeekL(e+40) : CartChr=#ROMSTORE_FLASH+PeekL(e+48)
+  PicoPrgBytes=PeekL(e+44) : PicoChrBytes=CartChrBanks*8192
+  PicoSubmapper=(PeekA(e+34)>>4)&15 : PicoRamPresent=(PeekA(e+35)&4)<>0
+  PicoChrDecoded=0
+  If (PeekA(e+35)&2)<>0 : PicoChrDecoded=CartChr+PicoChrBytes : EndIf
 EndProcedure
 
 ; ---------------------------------------------------------------- loader
@@ -191,7 +208,7 @@ Procedure RomLoader()
       Core1ParkRequest=0 : ProcedureReturn
     EndIf
   Wend
-  Say("ROMLOAD READY area=") : Num(#ROMSTORE_DIR) : Say(" end=") : Num(#ROMSTORE_END) : Eol()
+  Say("ROMLOAD READY area=") : Num(#ROMSTORE_DIR) : Say(" end=") : Num(#ROMSTORE_END) : Say(" pack=2 profile=") : Num(1+#PICO_ADVANCED) : Eol()
   Repeat
     If RomReadLine()=0
       Say("ROMLOAD ended: no command for 30 s") : Eol() : Break

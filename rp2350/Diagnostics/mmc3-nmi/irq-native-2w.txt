@@ -1,0 +1,4 @@
+MAPPER tests begin
+OBSERVER mode=0 reference_us=251157 optimized_us=20455 frames=32
+OBSERVER mode=1 reference_us=1110541 optimized_us=26054 frames=32
+MAPPER checks=59923 failures=0

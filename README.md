@@ -104,8 +104,8 @@ absent SIO divider with M33 division, adapt SIO GPIO addresses and SPI/DMA reque
 layout, and spell one assembly register list explicitly. RP2040 files are not
 modified by regeneration. Compiler and board libraries require no changes.
 
-Use the same ROM loader with `--port COM6`. The firmware and ROM-store offsets
-remain the same on both chips. The Pico 2 W radio firmware belongs at flash
+Use the same ROM loader with `--target rp2350 --port COM6`. The directory
+stays at `$50000`; Pico 2 W game data can extend to `$1FEFFF`. The Pico 2 W radio firmware belongs at flash
 offset **$200000** (the Pico W uses $100000). Install the RP2350-specific
 `wb43439A0-7.95.49.00.combined.uf2` supplied with PureMetalForge before enabling
 Bluetooth. Published firmware has no private speaker address.
@@ -115,7 +115,7 @@ Bluetooth. Published firmware has no private speaker address.
 1. Hold BOOTSEL while plugging in the Pico, then copy `firmware/nes-pico-w.uf2`
    to the drive that appears. For a Pico 2 W use `firmware/nes-pico2-w.uf2`.
 2. Load games: double-click `tools/rom_loader_ui.pyw`, add your `.nes` files
-   (their order is the boot menu's order), choose the board's port, and press
+   (their order is the boot menu's order), choose the board's port and target (`rp2040` or `rp2350`), and press
    **Load onto board**. Three games take about 7 seconds.
 3. On the board, choose a game in the boot menu with the joystick and press A.
 
@@ -123,6 +123,7 @@ From a command line:
 
 ```
 py -3 tools/rom_loader.py "My Game.nes" "Another Game.nes"
+py -3 tools/rom_loader.py --target rp2350 --port COM6 "My Game.nes"
 py -3 tools/rom_loader.py --dry-run "My Game.nes"
 py -3 tools/rom_loader.py --clear
 ```
@@ -132,10 +133,18 @@ you to choose one. Loading reboots the chosen board into its boot menu.
 
 ## Supported games
 
-- Mappers 0 (NROM), 2 (UxROM with 8 KiB CHR RAM) and 66 (GxROM), NTSC.
-- CHR ROM up to 16 KiB; no cartridge work RAM, trainers or battery saves.
-- Anything else is refused by name when you add it, before the board is touched.
-- The ROM store holds 712 KiB and up to 63 games.
+- Pico W: **0, 2, 3, 7, 11, 34 (BNROM), 41, 66, 71, 79, 144, 148, 232**.
+- Pico 2 W adds **1, 4, 13, 47, 118, 119, 206**, plus NINA-001 mapper 34.
+- NTSC only. Mapper board sizes, submappers and RAM must fit the supported
+  profile. Trainers, four-screen boards and battery-save persistence are excluded.
+- Up to 63 games in **696 KiB** (Pico W) or **1720 KiB** (Pico 2 W).
+  Prebuilt PRG views and predecoded CHR count toward this space.
+- Update the firmware before using the new loader's version-2 packs. The loader
+  checks the connected board's profile and flash boundary before erasing.
+
+See [Pico cartridge support](PICO-MAPPERS.md) for hardware limits, board tests
+and performance exceptions. Supported mapper IDs do not promise every game or
+60 FPS in every workload.
 
 ## How the ROM store works
 
@@ -143,7 +152,7 @@ you to choose one. Loading reboots the chosen board into its boot menu.
 |---|---|
 | `$00000` | Firmware (must end below `$50000`) |
 | `$50000` | Directory: titles, mappers, sizes, CRC-32 of every game |
-| `$51000`–`$FEFFF` | Game data |
+| `$51000`â€“`$FEFFF` | Game data |
 | `$FF000` | Sector reserved for the board tests |
 | `$100000` (Pico W) / `$200000` (Pico 2 W) | Bluetooth radio firmware |
 
@@ -164,8 +173,8 @@ Replacing a screen or audio device does not require editing CPU/PPU/APU code.
 On Pico 2 W, the output-interface suite passes 80 checks in addition to the full
 1,926,732 emulator checks. The modular build retains approximately 60 displayed
 FPS and 48,000 PCM samples/second in the three 40-second game tests. Details are
-in `rp2350/Diagnostics/MODULAR-OUTPUT-RESULTS.md`; RP2040 is compile-tested for
-this refactor and has not had a new physical-board run.
+in `rp2350/Diagnostics/MODULAR-OUTPUT-RESULTS.md`; fresh RP2040 physical runs with these interfaces are included in the
+[Pico mapper results](PICO-MAPPERS-RESULTS.md).
 
 The bundled hardware audio backend is **Bluetooth A2DP**
 (SBC, 48 kHz stereo) on the Pico W's CYW43439 radio, which was built to verify
@@ -182,8 +191,8 @@ with its address (see *Building*).
 - **Core 1** runs the APU (fed timestamped events through a lock-free queue), the
   LCD DMA (a whole frame is completed before it is sent), and the Bluetooth SBC
   encoder and transport.
-- Bank switches are queued events, so the DMC channel on core 1 reads the right
-  bank without stopping core 0.
+- Immutable PRG-view switches remain queued events for DMC ordering. Pico 2 W
+  MMC1/MMC3 windows fence the audio worker before changing shared bank data.
 
 Accuracy limits: the PPU is not dot-exact (mid-scanline changes take effect at
 8-pixel granularity), only documented CPU opcodes are implemented, and some
@@ -255,6 +264,12 @@ MIT (see `LICENSE`). The CYW43439 Bluetooth firmware is included under its own
 licences (`licenses/CYW43439-*.txt`). The SBC prototype filter coefficients are
 cross-checked against BlueZ (`licenses/SBC-TABLES.md`, LGPL-2.1).
 
-The [Pi 4 / Anvil port](anvil/README.md) additionally supports standard MMC1
-(1), MMC3 B/C (4), CNROM (3), MMC5 (5), AxROM (7) and Color Dreams (11). Its touch MENU button returns from a game
-to the exFAT ROM selector; EXIT returns to Anvil. Pico mapper support is unchanged.
+The [Pi 4 / Anvil port](anvil/README.md) supports 30 mapper IDs, including
+MMC1/2/3/5, NINA, Codemasters, Namco 108, RAMBO, Sunsoft, TQROM and multicarts.
+Its touch MENU button returns from a game to the exFAT ROM selector; EXIT
+returns to Anvil. See the port documentation for board limits, measured
+results and remaining compatibility/performance issues. Pico profiles are
+documented separately in [PICO-MAPPERS.md](PICO-MAPPERS.md).
+
+Current Pico interrupt and MMC3 work, native verification and performance limits:
+[PICO-MMC3-NMI-RESULTS.md](PICO-MMC3-NMI-RESULTS.md).

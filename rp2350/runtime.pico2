@@ -12,8 +12,10 @@ XIncludeFile "RP2350/Lib/flash.pico2"
 XIncludeFile "outputs/state.pico2"
 XIncludeFile "math.pico2"
 XIncludeFile "cpu2a03.pico2"
+XIncludeFile "mapper_state.pico2"
 XIncludeFile "bridge.pico2"
 XIncludeFile "ppu.pico2"
+XIncludeFile "mappers.pico2"
 XIncludeFile "apu.pico2"
 XIncludeFile "outputs/audio_api.pico2"
 CompilerIf #NES_VIDEO_BACKEND=1
@@ -51,7 +53,7 @@ EndProcedure
 
 Global LastApuSend.i, CpuRunUs.i, SyncUs.i, Windows.i
 ProcedureRAM NesSync()
-  Protected stalls.i
+  Protected stalls.i,delay.i
   CompilerIf #NES_SPLIT=2
     PpuSync(CpuCycles)
     ; Synchronous only while a DMC sample is really fetching (its stalls and
@@ -69,9 +71,14 @@ ProcedureRAM NesSync()
       CpuCycles=CpuCycles+stalls : NesSeenDmc=NesSeenDmc+stalls
       PpuSync(CpuCycles)
     EndIf
+    delay=CpuIrqDelay : CpuIrqDelay=0
+    If (WorkerNmi<>NesSeenNmi And NesNmiDelay) Or ((WorkerIrq|PicoIrq)<>0 And FI=0 And delay)
+      NesNmiDelay=0 : CpuRun(1) : PpuSync(CpuCycles)
+    EndIf
+    NesNmiDelay=0
     If WorkerNmi<>NesSeenNmi
       NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
-    ElseIf WorkerIrq<>0 And FI=0
+    ElseIf (WorkerIrq|PicoIrq)<>0 And FI=0
       CpuInterrupt($FFFE)
     EndIf
     ProcedureReturn
@@ -89,17 +96,31 @@ ProcedureRAM NesSync()
   If WorkerNmi<>NesSeenNmi
     NesSeenNmi=WorkerNmi
     CpuInterrupt($FFFA)
-  ElseIf WorkerIrq<>0 And FI=0
+  ElseIf (WorkerIrq|PicoIrq)<>0 And FI=0
     CpuInterrupt($FFFE)
   EndIf
+EndProcedure
+Procedure PicoProfileReport()
+  CompilerIf #PICO_ADVANCED=1
+    Say("MAP_PROFILE prg_maps=") : Num(PicoPrgCopies) : Say(" prg_map_us=") : Num(PicoPrgCopyUs)
+    Say(" chr_copies=") : Num(PicoChrCopies) : Say(" chr_us=") : Num(PicoChrCopyUs)
+    Say(" fence_us=") : Num(PicoFenceUs) : Say(" observer_us=") : Num(PicoObserverUs) : Say(" predictions=") : Num(PicoPredictCalls) : Say(" predict_us=") : Num(PicoPredictUs) : Say(" quick_writes=") : Num(PicoQuickWrites) : Eol()
+  CompilerEndIf
 EndProcedure
 Procedure LoadCartridge()
   Protected i.i, bank.i
   FrameBottom=@FrameBottomStore(0)
-  CartSelect(CartIndex)
-  CartChrDirty=0
+  CartSelect(CartIndex) : PicoPrgFlat()
+  CartChrDirty=0 : PicoMapActive=0 : PicoIrq=0 : NesNmiDelay=0 : CpuIrqDelay=0
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase : CartPrgSelected=0 : CartChrSelected=0 : PpuChrBank=0
-  If CartChrRam
+  If CartMapper<>0 And CartMapper<>2 And CartMapper<>66
+    ChrWritable=0
+    If CartChrRam
+      Chr=(@Decoded(0)+8192) : Pattern=@Decoded(0) : ChrWritable=1
+      For i=0 To 16383 : PokeA(@Decoded(0)+i,0) : Next
+    EndIf
+    PicoMapperInit()
+  ElseIf CartChrRam
     Chr=@Decoded(0)+8192 : CartChr=Chr : Pattern=@Decoded(0) : ChrWritable=1
   Else
   ChrWritable=0
@@ -216,6 +237,14 @@ Procedure Main()
       InputHost=8 : release=WorkerFrames+6
     ElseIf key=97
       InputHost=1 : release=WorkerFrames+6
+    ElseIf key=98
+      InputHost=2 : release=WorkerFrames+6
+    ElseIf key=117
+      InputHost=$10 : release=WorkerFrames+6
+    ElseIf key=110
+      InputHost=$20 : release=WorkerFrames+6
+    ElseIf key=108
+      InputHost=$40 : release=WorkerFrames+6
     ElseIf key=114
       InputHost=$80 : release=WorkerFrames+6
     ElseIf key=82
@@ -246,6 +275,17 @@ Procedure Main()
       Say(" polls=") : Num(InputPolls) : Say(" errors=") : Num(InputErrors)
       Say(" busy_us=") : Num(InputBusyUs)
       Say(" starts=") : Num(InputStartCount) : Say(" selects=") : Num(InputSelectCount) : Eol()
+    ElseIf key=109
+      Say("MAPPER pc=") : Num(PC) : Say(" ctrl=") : Num(PpuCtrl) : Say(" mask=") : Num(PpuMask)
+      Say(" m0=") : Num(M(0)) : Say(" m7=") : Num(M(7)) : Say(" irq=") : Num(PicoIrq)
+      Say(" mirror=") : Num(PicoMirror) : Say(" selected=") : Num(PicoSelect)
+      CompilerIf #PICO_ADVANCED=1
+        Say(" clocks=") : Num(PicoIrqClocks) : Say(" count=") : Num(PicoIrqCount)
+        Say(" enabled=") : Num(PicoIrqEnable) : Say(" slots=")
+        For captureByte=0 To 3 : Num(PicoPrgSlots(captureByte)) : Say(",") : Next
+      CompilerEndIf
+      Eol()
+      PicoProfileReport()
     ElseIf key=105
       Say("APU enable=") : Num(ApuEnable) : Say(" lengths=")
       Num(ApuLength(0)) : Say(",") : Num(ApuLength(1)) : Say(",") : Num(ApuLength(2))
@@ -291,6 +331,7 @@ Procedure Main()
       If distance>0 And budget*3>distance+2
         budget=NesDiv(distance+2,3)
       EndIf
+      distance=PicoCpuBudget() : If budget>distance : budget=distance : EndIf
       mark=Micros() : CpuRun(budget) : mark2=Micros() : NesSync()
       CpuRunUs=CpuRunUs+mark2-mark : SyncUs=SyncUs+Micros()-mark2 : Windows=Windows+1 : ran=1
     EndIf

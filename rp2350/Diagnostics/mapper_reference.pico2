@@ -1,0 +1,48 @@
+ProcedureRAM PicoSpriteFetchReference(line.i)
+  Protected i.i,n.i,nextLine.i,first.i
+  PicoSpriteBits=0
+  If (PpuCtrl&32)=0
+    If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
+    ProcedureReturn
+  EndIf
+  PicoSpriteBits=255 : nextLine=line+1 : If line=261 : nextLine=0 : EndIf
+  For i=0 To 63
+    first=Oam(i*4)+1
+    If nextLine>=first And nextLine<first+16
+      If (Oam(i*4+1)&1)=0 : PicoSpriteBits=PicoSpriteBits&($FF!(1<<n)) : EndIf
+      n=n+1 : If n=8 : Break : EndIf
+    EndIf
+  Next
+EndProcedure
+; Straight fetch-edge reference for the optimized cartridge A12 observer.
+ProcedureRAM PicoMmc3TicksReference(cycles.i)
+  Protected remaining.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
+  remaining=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While remaining>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    edge=width
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      If dot<337
+        If dot=0 : edge=1 : Else : edge=((dot-1)/4+1)*4+1 : EndIf
+        If (PpuCtrl&16)=0 And PicoA12High=0
+          If dot<257 : edge=257 : ElseIf dot>=321 : edge=337 : EndIf
+        EndIf
+      EndIf
+    EndIf
+    step=edge-dot : If step>remaining : step=remaining : EndIf
+    dot=dot+step : remaining=remaining-step : PicoDots=PicoDots+step
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot=257 : PicoSpriteFetchReference(line) : EndIf
+        If (dot&7)=5
+          If dot<257 Or dot>=321 : addr=(PpuCtrl&16)<<8
+          ElseIf (PicoSpriteBits&(1<<((dot-261)/8)))<>0 : addr=$1000 : EndIf
+        EndIf
+        PicoA12(addr,PicoDots)
+      EndIf
+    EndIf
+  Wend
+EndProcedure

@@ -1,0 +1,2 @@
+MAPPER tests begin
+MAPPER checks=575 failures=0

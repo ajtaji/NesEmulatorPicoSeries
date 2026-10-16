@@ -1,15 +1,21 @@
 """Reproduce the Arm Pico 2 W port from the tested RP2040 implementation.
 
 Emulated CPU/PPU/APU behavior is shared. Substitutions below concern board
-libraries, SIO register addresses, SPI/DMA layout and the target identification.
+libraries, SIO register addresses, SPI/DMA layout, cartridge RAM profiles,
+flash boundaries and target identification.
 """
 from pathlib import Path
 import re
+from pico_prg_pages import paged_fetch,dual_cpu
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def port(text, name):
+    if name=='cpu2a03.pico':
+        text=dual_cpu(text)
+    elif name=='bridge.pico':
+        text=paged_fetch(text,name)
     # Spell the same register list explicitly for the RP2350 assembler.
     text = text.replace('{r1-r4}', '{r1,r2,r3,r4}')
     text = re.sub(r'(XIncludeFile "[^"]*)\.picow"', r'\1.pico2w"', text)
@@ -38,7 +44,14 @@ ProcedureRAM.i NesDiv(dividend.i, divisor.i)
   ProcedureReturn dividend/divisor
 EndProcedure
 '''
+    if name == 'mappers.pico':
+        # Hot bus adapters must share SRAM with the computed-dispatch CPU.
+        for proc in ('PicoMapperWrite','PicoNtRead','PicoNtWrite','PicoMirrorSet','PicoInvalidateChr','PicoChrSwitch','PicoChrFour','PicoRamRead','PicoChrWrite','PicoRegisterNotice','PicoWorkerPrgSet'):
+            text=re.sub(r'Procedure(\.i)? '+proc+r'\(',lambda m:'ProcedureRAM'+(m[1] or '')+' '+proc+'(',text)
+    if name == 'mapper_state.pico':
+        text = text.replace('#PICO_ADVANCED=0', '#PICO_ADVANCED=1')
     if name == 'rom_store.pico':
+        text = text.replace('$FF000', '$1FF000').replace('$FEFFF', '$1FEFFF')
         text = text.replace('; $100000 up is the Bluetooth radio firmware',
                             '; $200000 up is the Bluetooth radio firmware')
     if name == 'runtime.pico':

@@ -1,0 +1,342 @@
+#NES_VIDEO_BACKEND=0
+#NES_AUDIO_BACKEND=0
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+XIncludeFile "mapper_vectors.pico"
+Global Checks.i,Failures.i,Stamp.i=10000
+Procedure Check(actual.i,expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    Say("FAIL check=") : Num(Checks) : Say(" actual=") : Num(actual) : Say(" expected=") : Num(expected) : Eol()
+  EndIf
+EndProcedure
+CompilerIf #PICO_ADVANCED=1
+XIncludeFile "mapper_reference.pico"
+Global MapperTestSeed.i=12345
+Global Dim ObserverStart.i(10)
+Global Dim ObserverExpected.i(10)
+Procedure.i MapperRand()
+  MapperTestSeed=(MapperTestSeed*1664525+1013904223)&$7FFFFFFF
+  ProcedureReturn MapperTestSeed>>8
+EndProcedure
+Procedure ObserverSave(dst.i)
+  PokeL(dst,PicoIrqClocks) : PokeL(dst+4,PicoIrqAssertions) : PokeL(dst+8,PicoIrq)
+  PokeL(dst+12,PicoIrqCount) : PokeL(dst+16,PicoIrqReload) : PokeL(dst+20,PicoA12High)
+  PokeL(dst+24,PicoLowSince) : PokeL(dst+28,PicoDots) : PokeL(dst+32,PicoSpriteBits) : PokeL(dst+36,PicoIrqDot)
+EndProcedure
+Procedure ObserverRestore(src.i)
+  PicoIrqClocks=PeekL(src) : PicoIrqAssertions=PeekL(src+4) : PicoIrq=PeekL(src+8)
+  PicoIrqCount=PeekL(src+12) : PicoIrqReload=PeekL(src+16) : PicoA12High=PeekL(src+20)
+  PicoLowSince=PeekL(src+24) : PicoDots=PeekL(src+28) : PicoSpriteBits=PeekL(src+32) : PicoIrqDot=PeekL(src+36)
+EndProcedure
+Procedure BudgetPredictionTests()
+  Protected trial.i,i.i,expected.i,startDot.i
+  CartMapper=4 : FI=0
+  For trial=0 To 499
+    For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
+    OamCacheDirty=1 : PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
+    PpuLine=MapperRand()%262 : PpuDot=MapperRand()%340 : PpuOdd=MapperRand()&1
+    PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
+    PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
+    PicoIrqEnable=1 : PicoIrq=0 : PicoIrqDot=0 : PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoSpriteBits=MapperRand()&255
+    ObserverSave(@ObserverStart(0)) : startDot=PicoDots
+    PicoMmc3TicksReference(256) : expected=256
+    If PicoIrq : expected=NesDiv(PicoIrqDot-startDot+2,3) : If expected<1 : expected=1 : EndIf : EndIf
+    ObserverRestore(@ObserverStart(0))
+    Check(PicoCpuBudget(),expected) : ObserverSave(@ObserverExpected(0))
+    For i=0 To 9 : Check(ObserverStart(i),ObserverExpected(i)) : Next
+    If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
+  Next
+  FI=1 : PicoIrq=0 : PicoIrqEnable=0
+EndProcedure
+Procedure ObserverTests()
+  Protected trial.i,i.i,count.i,startTime.i,referenceUs.i,optimizedUs.i,mode.i
+  For trial=0 To 1999
+    For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
+    OamCacheDirty=1
+    PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
+    PpuLine=MapperRand()%262 : PpuDot=MapperRand()%340 : PpuOdd=MapperRand()&1
+    PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
+    PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
+    PicoIrqEnable=MapperRand()&1 : PicoIrq=MapperRand()&1
+    PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoIrqDot=0 : PicoSpriteBits=MapperRand()&255
+    count=1+(MapperRand()&1023) : ObserverSave(@ObserverStart(0))
+    PicoMmc3TicksReference(count) : ObserverSave(@ObserverExpected(0))
+    ObserverRestore(@ObserverStart(0)) : PicoMmc3Ticks(count) : ObserverSave(@ObserverStart(0))
+    For i=0 To 9 : Check(ObserverStart(i),ObserverExpected(i)) : Next
+    If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
+  Next
+  For mode=0 To 1
+    PpuMask=24 : PpuCtrl=8 : If mode=1 : PpuCtrl=16 : EndIf
+    PpuLine=0 : PpuDot=0 : PpuOdd=0 : PicoSpriteBits=255
+    startTime=Micros()
+    For i=0 To 31 : PicoMmc3TicksReference(29781) : Next
+    referenceUs=Micros()-startTime : startTime=Micros()
+    For i=0 To 31 : PicoMmc3Ticks(29781) : Next
+    optimizedUs=Micros()-startTime
+    Say("OBSERVER mode=") : Num(mode) : Say(" reference_us=") : Num(referenceUs)
+    Say(" optimized_us=") : Num(optimizedUs) : Say(" frames=32") : Eol()
+    UsbSerialTask() : SafetyPet()
+  Next
+  PpuMask=0
+EndProcedure
+CompilerEndIf
+
+Procedure InitMapper(kind.i,ram.i)
+  NesRpc(0,0,0,Stamp)
+  PpuMask=0 : CartMapper=kind : CartChrRam=ram : CartConflicts=0 : PicoSubmapper=0 : PicoRamPresent=1
+  CartPrg=?MapperPrg : CartPrgBanks=2 : PicoPrgBytes=65536
+  CartChr=?MapperChr : CartChrBanks=4 : PicoChrBytes=32768 : PicoChrDecoded=?MapperDecoded
+  CartPrgSelected=0 : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  CartChrSelected=-1 : PicoMapperInit()
+EndProcedure
+Procedure WriteMapper(addr.i,value.i)
+  Stamp=Stamp+20 : CpuCycles=Stamp : AccessPhase=0 : PicoMapperWrite(addr,value,Stamp)
+  Check(A,90) : Check(X,34) : Check(Y,56) : Check(S,201) : Check(PC,$8888)
+  Check(Res,12345) : Check(FN,128) : Check(FZ,1) : Check(FC,256) : Check(FV,128)
+  Check(FD,0) : Check(FI,1)
+EndProcedure
+Procedure SerialRegister(addr.i,value.i)
+  Protected i.i
+  For i=0 To 4 : WriteMapper(addr,(value>>i)&1) : Next
+EndProcedure
+CompilerIf #PICO_ADVANCED=1
+Procedure PagedFetchTests()
+  Protected i.i
+  PicoPrgPaged=1 : PicoMapActive=1 : PicoIrq=0 : PpuMask=0
+  For i=0 To 3
+    PicoPrgBiases(i)=@PicoChrRam((i&1)*8192)-$8000-i*8192
+  Next
+  ; LDA absolute operand straddles separately mapped 8 KiB pages.
+  PicoChrRam(8190)=$AD : PicoChrRam(8191)=$34 : PicoChrRam(8192)=$02
+  PC=$9FFE : M($234)=77 : S=$FD : CpuSetStatus($24)
+  Check(CpuRun(1),4) : Check(A,77) : Check(PC,$A001)
+  ; Opcode at the last byte of a page; immediate is in the following bank.
+  PicoChrRam(8191)=$A9 : PicoChrRam(8192)=102 : PC=$9FFF
+  Check(CpuRun(1),2) : Check(A,102) : Check(PC,$A001)
+  ; Data reads use the selected page independently of the code page.
+  PicoChrRam(0)=$AD : PicoChrRam(1)=$80 : PicoChrRam(2)=$E0
+  PicoChrRam(8192+$80)=55 : PC=$8000
+  Check(CpuRun(1),4) : Check(A,55)
+  ; Indexed data crosses into a different mapped page.
+  PicoChrRam(0)=$BD : PicoChrRam(1)=$FF : PicoChrRam(2)=$9F
+  PC=$8000 : X=1
+  Check(CpuRun(1),5) : Check(A,102)
+  ; Switching the currently executing code page continues within the same
+  ; window. The next opcode must come from the new physical bank.
+  Stamp=Stamp+1000 : NesRpc(0,0,0,Stamp)
+  CpuCycles=Stamp : PpuClock=Stamp : PpuLine=242 : PpuDot=0
+  PicoIrqEnable=0 : PicoIrq=0 : PicoSelect=6 : PicoRegs(6)=0 : PicoRegs(7)=1
+  CartMapper=4 : CartPrg=@PicoChrRam(0) : PicoPrgBytes=16384
+  PicoPrgSlots(0)=0 : PicoPrgBiases(0)=CartPrg-$8000
+  PicoChrRam(0)=$8C : PicoChrRam(1)=1 : PicoChrRam(2)=$80
+  PicoChrRam(8195)=$A9 : PicoChrRam(8196)=90
+  PC=$8000 : Y=1 : A=0 : CpuSetStatus($24)
+  Check(CpuRun(6),6) : Check(PC,$8005) : Check(A,90)
+  NesRpc(0,0,0,CpuCycles)
+  PicoPrgFlat()
+EndProcedure
+CompilerEndIf
+
+CompilerIf #PICO_ADVANCED=1
+Procedure QuickWriteTests()
+  Protected clock.i,sent.i
+  InitMapper(4,0) : clock=PpuClock : sent=QSent
+  Stamp=Stamp+20 : CpuCycles=Stamp : AccessPhase=0
+  NesWrite($8000,6) : Check(PicoSelect,6) : Check(QSent,sent) : Check(PpuClock,clock)
+  NesWrite($8001,0) : Check(PicoPrgSlots(0),0) : Check(QSent,sent) : Check(PpuClock,clock)
+  NesWrite($8000,70) : Check(PicoSelect,70) : Check(PicoPrgSlots(0),6) : Check(QSent,sent+2)
+  Check(A,90) : Check(PC,$8888) : Check(Res,12345) : Check(FI,1)
+  NesRpc(0,0,0,Stamp)
+EndProcedure
+Procedure NametablePageTests()
+  Protected phase.i,i.i,table.i,index.i,actual.i
+  InitMapper(118,0)
+  WriteMapper($8000,1) : WriteMapper($8001,128)
+  For i=0 To 1023
+    PicoNtWrite($2000+i,(i*13+7)&255)
+    PicoNtWrite($2800+i,(i*37+91)&255)
+  Next
+  For phase=0 To 3
+    If phase<2
+      WriteMapper($8000,0) : WriteMapper($8001,(phase&1)*128)
+      WriteMapper($8000,1) : WriteMapper($8001,((phase&1)!1)*128)
+    Else
+      For i=0 To 3
+        WriteMapper($8000,128+i+2) : WriteMapper($8001,((i+phase)&1)*128)
+      Next
+    EndIf
+    For table=0 To 3
+      For i=0 To 1023
+        index=table*1024+i : actual=NameDesc(index)
+        Check(Nt(index),PicoCiram(PicoNtSlots(table)*1024+i))
+        PpuUpdateDescriptor(index) : Check(NameDesc(index),actual)
+      Next
+    Next
+    Check(NameDescDirty,0) : UsbSerialTask() : SafetyPet()
+  Next
+EndProcedure
+CompilerEndIf
+Procedure InterruptPollTests()
+  Protected i.i
+  PpuMask=0 : PicoMapActive=0 : PicoIrq=0 : WorkerIrq=0 : PicoPrgFlat()
+  Stamp=Stamp+1000 : NesRpc(0,0,0,Stamp)
+  PrgBase=?MapperPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  ; A final-cycle PPUCTRL edge must allow the following STA zero page.
+  M($200)=$8D : M($201)=0 : M($202)=$20 : M($203)=$85 : M($204)=0 : M($205)=$EA
+  PC=$200 : S=$FD : A=128 : M(0)=48 : CpuSetStatus($24)
+  CpuCycles=Stamp : PpuClock=Stamp : LastApuSend=Stamp
+  PpuLine=242 : PpuDot=10 : PpuCtrl=0 : PpuStatus=128 : PpuWarmup=0
+  WorkerNmi=0 : NesSeenNmi=0 : NesNmiDelay=0 : CpuIrqDelay=0
+  Check(CpuRun(1),4) : Check(PC,$203) : Check(M(0),48) : Check(NesNmiDelay,1)
+  NesSync() : Check(M(0),128) : Check(M($1FC),5) : Check(M($1FD),2) : Check(S,$FA)
+  Check(NesSeenNmi,1) : Check(NesNmiDelay,0)
+  ; CLI and PLP poll old I: one following instruction precedes pending IRQ.
+  PpuStatus=0 : PpuCtrl=0 : WorkerNmi=1 : NesSeenNmi=1 : PicoIrq=1
+  M($200)=$58 : M($201)=$EA : M($202)=$EA
+  PC=$200 : S=$FD : CpuSetStatus($24)
+  Check(CpuRun(256),2) : Check(PC,$201) : Check(CpuIrqDelay,1)
+  NesSync() : Check(M($1FC),2) : Check(M($1FD),2) : Check(S,$FA)
+  M($200)=$28 : PC=$200 : S=$FC : M($1FD)=$20 : CpuSetStatus($24)
+  Check(CpuRun(256),4) : Check(PC,$201)
+  NesSync() : Check(M($1FC),2) : Check(S,$FA)
+  ; An already clear I flag must not acquire the CLI/PLP unmask delay.
+  M($200)=$58 : PC=$200 : S=$FD : CpuSetStatus($20)
+  Check(CpuRun(256),2) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),1)
+  M($200)=$28 : PC=$200 : S=$FC : M($1FD)=$20 : CpuSetStatus($20)
+  Check(CpuRun(256),4) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),1)
+  ; RTI polls restored I and takes an already pending IRQ immediately.
+  M($200)=$40 : PC=$200 : S=$FA : M($1FB)=$20 : M($1FC)=$20 : M($1FD)=2
+  Check(CpuRun(256),6) : Check(PC,$220) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),$20) : Check(S,$FA)
+  PicoIrq=0 : CpuIrqDelay=0 : NesRpc(0,0,0,CpuCycles)
+EndProcedure
+
+Procedure MapperTests()
+  Protected kind.i,i.i,bank.i,expected.i,start.i,byteValue.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  start=Micros()
+  While UsbSerialReady()=0 And Micros()-start<10000000 : UsbSerialTask() : SafetyPet() : Wend
+  WaitUs(200000) : RomStoreEnabled=0 : LoadCartridge() : WorkerDisplay=0
+  Check(multicore_launch(),1)
+  A=90 : X=34 : Y=56 : S=201 : PC=$8888 : Res=12345
+  FN=128 : FZ=1 : FC=256 : FV=128 : FD=0 : FI=1
+  Say("MAPPER tests begin") : Eol()
+  For kind=0 To 255
+    If PicoSupported(kind) : Check(kind<>255,1) : EndIf
+  Next
+  InitMapper(3,0)
+  For bank=0 To 15
+    WriteMapper($8000,bank)
+    Check(CartChrSelected,bank&3) : Check(PeekA(Chr),(bank&3)*8)
+    expected=0 : byteValue=(bank&3)*8
+    For i=0 To 7 : expected=expected|((((byteValue>>(7-i))&1)*3)<<(i*2)) : Next
+    Check(PeekU(Pattern),expected)
+    If bank>0 : Check(RgbPairsDirty,1) : EndIf : Check(PpuChrBank,0)
+    RgbPairsDirty=0
+  Next
+  InitMapper(7,1)
+  WriteMapper($8000,17) : Check(CartPrgSelected,1) : Check(PicoMirror,3)
+  PicoNtWrite($2000,91) : Check(PicoNtRead($2C00),91) : Check(Nt($C00),91)
+  WriteMapper($8000,0) : Check(PicoNtRead($2000),0)
+  PicoNtWrite($2400,33) : WriteMapper($8000,16) : Check(PicoNtRead($2000),91)
+  WriteMapper($8000,0) : Check(PicoNtRead($2800),33)
+  InitMapper(11,0) : WriteMapper($8000,33) : Check(CartPrgSelected,1) : Check(PeekA(Chr),16)
+  InitMapper(34,1) : WriteMapper($8000,1) : Check(CartPrgSelected,1)
+  InitMapper(41,0) : WriteMapper($6025,0) : Check(CartPrgSelected,1) : Check(PicoMirror,0)
+  WriteMapper($8000,2) : Check(CartChrSelected,2)
+  InitMapper(71,1) : WriteMapper($C000,1) : Check(CartPrgSelected,1)
+  WriteMapper($9000,0) : Check(PicoMirror,3) : WriteMapper($9000,16) : Check(PicoMirror,2)
+  InitMapper(79,0) : WriteMapper($4100,10) : Check(CartPrgSelected,1) : Check(CartChrSelected,2)
+  WriteMapper($4000,0) : Check(CartPrgSelected,1)
+  InitMapper(148,0) : WriteMapper($8000,11) : Check(CartPrgSelected,1) : Check(CartChrSelected,3)
+  InitMapper(144,0) : WriteMapper($8000,33) : Check(CartPrgSelected,1) : Check(CartChrSelected,2)
+  InitMapper(144,0) : CartConflicts=1 : WriteMapper($A000,0) : Check(CartPrgSelected,1)
+  InitMapper(148,0) : CartConflicts=1 : WriteMapper($A000,255)
+  Check(CartPrgSelected,0) : Check(CartChrSelected,1)
+  InitMapper(232,1) : WriteMapper($8000,24) : Check(PicoOuter,3)
+  WriteMapper($C000,1) : Check(PicoValue,1) : Check(CartPrgSelected,1)
+  CompilerIf #PICO_ADVANCED=1
+    InitMapper(34,0) : WriteMapper($7FFE,3) : Check(PeekA(Chr),12)
+    WriteMapper($7FFF,5) : Check(PeekA(Chr+4096),20) : Check(PicoRamRead($7FFF),5)
+    InitMapper(1,0) : Check(NesRead($C000),6) : Check(NesRead($E000),7)
+    SerialRegister($E000,1) : Check(NesRead($8000),2) : Check(NesRead($A000),3)
+    SerialRegister($8000,28) : SerialRegister($A000,3) : SerialRegister($C000,5)
+    Check(PeekA(Chr),12) : Check(PeekA(Chr+4096),20)
+    WriteMapper($6123,81) : Check(PicoRamRead($6123),81)
+    PicoRamPresent=0 : NesOpenBus=55 : WriteMapper($6123,22)
+    Check(PicoRamRead($6123),55) : Check(PicoPrgRam($123),81) : PicoRamPresent=1
+    SerialRegister($E000,17) : Check(PicoRamEnable,0)
+    InitMapper(4,0) : WriteMapper($8000,6) : WriteMapper($8001,3)
+    Check(NesRead($8000),3) : Check(NesRead($C000),6)
+    WriteMapper($8000,70) : Check(NesRead($8000),6) : Check(NesRead($C000),3)
+    ; A queued DMC fetch must finish before the shared PRG bank is changed.
+    DmcEmpty=1 : DmcBytes=0 : DmcBits=8 : DmcTimer=428
+    NesPost(0,0,0,Stamp+10000)
+    NesPost(2,$4010,0,Stamp+10001) : NesPost(2,$4012,0,Stamp+10002)
+    NesPost(2,$4013,0,Stamp+10003) : NesPost(2,$4015,16,Stamp+10004)
+    Stamp=Stamp+10000 : WriteMapper($8001,5)
+    NesRpc(0,0,0,Stamp)
+    Check(DmcBuffer,3) : Check(WorkerRead($C000),5)
+    NesRpc(2,$4015,0,Stamp)
+    WriteMapper($8000,2) : WriteMapper($8001,17) : Check(PeekA(Chr+4096),17)
+    WriteMapper($A001,128) : WriteMapper($6000,99) : Check(PicoRamRead($6000),99)
+    WriteMapper($A001,192) : WriteMapper($6000,22) : Check(PicoRamRead($6000),99)
+    WriteMapper($C000,2) : WriteMapper($C001,0) : WriteMapper($E001,0)
+    PicoA12(0,100) : PicoA12($1000,120) : Check(PicoIrqCount,2)
+    PicoA12(0,121) : PicoA12($1000,125) : Check(PicoIrqCount,2)
+    PicoA12(0,126) : PicoA12($1000,140) : Check(PicoIrqCount,1)
+    PicoA12(0,141) : PicoA12($1000,160) : Check(PicoIrq,1)
+    WriteMapper($E000,0) : Check(PicoIrq,0)
+    PicoIrqClocks=0 : PicoIrqReload=1 : PicoIrqLatch=3 : PicoIrqEnable=1 : PicoIrq=0
+    PicoDots=0 : PicoA12High=0 : PicoLowSince=0
+    PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuMask=24 : PpuCtrl=8
+    PpuClock=Stamp : FI=0 : Check(PicoCpuBudget(),256) : FI=1
+    Stamp=Stamp+455 : PpuSync(Stamp)
+    Check(PicoIrqClocks,4) : Check(PicoIrq,1) : FI=0 : Check(PicoCpuBudget(),1) : FI=1
+    Check(PicoCpuBudget(),256)
+    PpuMask=0
+    InitMapper(13,1) : PicoChrWrite($1000,85) : WriteMapper($8000,1)
+    Check(PeekA(Chr+$1000),0) : PicoChrWrite($1000,33)
+    WriteMapper($8000,0) : Check(PeekA(Chr+$1000),85)
+    WriteMapper($8000,1) : Check(PeekA(Chr+$1000),33)
+    InitMapper(119,0) : WriteMapper($8000,2) : WriteMapper($8001,64)
+    RgbPairsDirty=0 : PicoChrWrite($1000,77) : Check(PeekA(Chr+$1000),77) : Check(RgbPairsDirty,1)
+    WriteMapper($8001,5) : Check(PeekA(Chr+$1000),5)
+    WriteMapper($8001,64) : Check(PeekA(Chr+$1000),77)
+    WriteMapper($8000,3) : WriteMapper($8001,64)
+    PicoChrWrite($1000,123) : Check(PeekA(Chr+$1400),123)
+    Check(PeekU(Pattern+$1400),PeekU(Pattern+$1000))
+    InitMapper(118,0) : WriteMapper($8000,0) : WriteMapper($8001,128)
+    Check(PicoNtSlots(0),1) : Check(PicoNtSlots(1),1) : Check(PicoNtSlots(2),0)
+    InitMapper(206,0) : WriteMapper($8000,70) : WriteMapper($8001,5)
+    Check(NesRead($8000),5) : Check(NesRead($C000),6)
+    InitMapper(47,0) : WriteMapper($6000,1) : Check(PicoOuter,1)
+  CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+    QuickWriteTests() : NametablePageTests() : ObserverTests() : BudgetPredictionTests()
+  CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+    PagedFetchTests()
+  CompilerEndIf
+  InterruptPollTests()
+  Check(WorkerError,0) : Check(NesBridgeError,0)
+  Say("MAPPER checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Eol()
+  PicoMapActive=0 : PpuMask=0
+  Repeat : UsbSerialTask() : SafetyPet() : ForEver
+EndProcedure
+MapperTests()
+
+
