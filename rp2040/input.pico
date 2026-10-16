@@ -1,0 +1,83 @@
+; LAFVIN carrier: BTN1 GP15=A, BTN2 GP14=B; joystick GP26/27.
+; Core 0 samples at 1 kHz. No input work in the CPU dispatch loop.
+Global InputX.i, InputY.i, InputButtons.i, InputCandidate.i, InputDebounce.i
+Global InputDirections.i, InputMask.i, InputHost.i, InputLatch.i, InputPulse.i, InputPulseTime.i
+Global InputStartCount.i, InputSelectCount.i
+Global InputLast.i, InputPolls.i, InputErrors.i, InputBusyUs.i
+Global InputCenterX.i=2048, InputCenterY.i=2048
+Procedure InputBegin()
+  pinMode(15,#INPUT_PULLUP) : pinMode(14,#INPUT_PULLUP)
+  analogReadResolution(12)
+  InputX=analogRead(26) : InputY=analogRead(27)
+  ; Only accept plausible neutral positions; a held stick cannot become center.
+  If InputX>1400 And InputX<2700
+    InputCenterX=InputX
+  EndIf
+  If InputY>1400 And InputY<2700
+    InputCenterY=4095-InputY
+  EndIf
+  InputLast=Micros()
+EndProcedure
+Procedure InputUpdate(x.i,y.i,buttons.i,stamp.i)
+  Protected dirs.i
+  If buttons<>InputCandidate
+    InputCandidate=buttons : InputDebounce=1
+  ElseIf InputDebounce<4
+    InputDebounce=InputDebounce+1
+  EndIf
+  If InputDebounce=4
+    InputButtons=InputCandidate
+  EndIf
+  ; Engage at 750 ADC counts; release at 450 to reject center noise.
+  dirs=InputDirections
+  If x<InputCenterX-750
+    dirs=(dirs&$3F)|$40
+  ElseIf x>InputCenterX+750
+    dirs=(dirs&$3F)|$80
+  ElseIf x>InputCenterX-450 And x<InputCenterX+450
+    dirs=dirs&$3F
+  EndIf
+  If y<InputCenterY-750
+    dirs=(dirs&$CF)|$10
+  ElseIf y>InputCenterY+750
+    dirs=(dirs&$CF)|$20
+  ElseIf y>InputCenterY-450 And y<InputCenterY+450
+    dirs=dirs&$CF
+  EndIf
+  InputDirections=dirs
+  If InputButtons<>3
+    InputLatch=0
+  ElseIf InputLatch=0 And (dirs&$30)<>0
+    InputLatch=1 : InputPulseTime=stamp : InputPulse=8
+    If dirs&$20
+      InputPulse=4 : InputSelectCount=InputSelectCount+1
+    Else
+      InputStartCount=InputStartCount+1
+    EndIf
+  EndIf
+  If stamp-InputPulseTime>=100000
+    InputPulse=0
+  EndIf
+  InputMask=dirs|InputButtons
+  If InputLatch
+    InputMask=0
+  EndIf
+  InputMask=InputMask|InputPulse
+EndProcedure
+Procedure InputPoll()
+  Protected now.i, buttons.i
+  now=Micros()
+  If now-InputLast<1000
+    ProcedureReturn
+  EndIf
+  InputLast=now
+  InputX=analogReadChannel(0) : InputY=analogReadChannel(1)
+  buttons=(1-digitalRead(15))|((1-digitalRead(14))<<1)
+  If InputX<0 Or InputY<0
+    InputErrors=InputErrors+1 : InputMask=0
+  Else
+    InputUpdate(InputX,4095-InputY,buttons,now)
+  EndIf
+  NesController=InputMask|InputHost
+  InputPolls=InputPolls+1 : InputBusyUs=InputBusyUs+Micros()-now
+EndProcedure

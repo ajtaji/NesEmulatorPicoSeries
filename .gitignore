@@ -1,0 +1,15 @@
+# Build outputs (firmware/*.uf2 releases are committed on purpose)
+*.uf2
+!firmware/*.uf2
+*.build.log
+*.stderr.log
+*.asm
+*.dbg
+*.sym
+*.sym.meta
+*.cycles.txt
+__pycache__/
+# Never commit games or a wrapper carrying your speaker address
+*.nes
+!rp2040/demo.nes
+my-*.picow

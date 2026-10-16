@@ -1,0 +1,41 @@
+Procedure CartridgeViewTests()
+  Protected bank.i
+  AccessPhase=0
+  If CpuCycles<PpuClock : CpuCycles=PpuClock : EndIf
+  If CpuCycles<WorkerClock : CpuCycles=WorkerClock : EndIf
+  CartMapper=2 : CartPrg=?ViewTestData : CartPrgBanks=2
+  CartPrgSelected=0 : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : CartConflicts=1
+  WorkerPrgBase=PrgBase
+  For bank=0 To 1
+    CartUxBank(bank)
+    ; Core 1 applies the switch from its queue; drain it before reading its view.
+    NesRpc(0,0,0,CpuCycles) : Check(WorkerPrgBase,PrgBase)
+    Check(PrgBase,CartPrg+bank*32768)
+    Check(NesRead($8000),255) : Check(NesRead($C000),255)
+    Check(NesRead($C001),$77) : Check(NesRead($FFFF),$77)
+    PC=$BFFF : CpuFetchAddress()
+    Check(Ea,$FF11+bank*$66) : Check(PC,$C001)
+    PC=$BFFF : Check(CpuFetchByte(),$11+bank*$66)
+    Check(CpuFetchByte(),255) : Check(PC,$C001)
+    Check(WorkerRead($C001),$77)
+  Next
+  CartUxBank(0) : NesWrite($8002,1) : Check(CartPrgSelected,0)
+  NesWrite($8000,1) : Check(CartPrgSelected,1)
+  M(0)=$AB : PC=$FFFF : CpuFetchAddress() : Check(Ea,$AB77) : Check(PC,1)
+  NesRpc(0,0,0,CpuCycles)
+  DmcEmpty=1 : DmcBytes=0 : NesWrite($4010,0) : NesWrite($4012,0) : NesWrite($4013,0)
+  NesWrite($4015,16) : NesRpc(0,0,0,CpuCycles)
+  Check(DmcBuffer,255)
+  CartUxBank(0) : NesRpc(0,0,0,CpuCycles) : Check(WorkerRead($C001),$77)
+  NesWrite($4015,0) : NesRpc(0,0,0,CpuCycles)
+  LoadCartridge() : ChrWritable=1 : CartChrRam=1
+  Chr=@Decoded(0)+4096 : Pattern=@Decoded(0)
+  PokeA(Chr+8,0)
+  PpuMask=0 : PpuV=0 : PpuWarmup=0 : RgbPairsDirty=0 : AccessPhase=0
+  NesWrite($2007,128)
+  Check(PeekA(Chr),128) : Check(PeekU(Pattern),1) : Check(RgbPairsDirty,0)
+  Check(CartChrDirty,1) : NesWrite($2001,8)
+  Check(RgbPairsDirty,1) : Check(CartChrDirty,0)
+  PpuMask=0
+  CartChrRam=0 : ChrWritable=0 : LoadCartridge()
+EndProcedure

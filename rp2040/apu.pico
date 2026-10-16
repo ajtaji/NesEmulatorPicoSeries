@@ -1,0 +1,363 @@
+; Five-channel APU state and 48 kHz PCM producer, owned by core 1.
+; Timer/envelope/length/sweep/DMC state is separate from the DAC transport.
+; PCM mixing uses lookup tables; no floating point on the RP2040.
+Global Dim ApuReg.a(24)
+Global Dim ApuLength.i(4)
+Global Dim ApuPeriod.i(4)
+Global Dim ApuTimer.i(4)
+Global Dim ApuSeq.i(4)
+Global Dim EnvStart.i(3)
+Global Dim EnvDiv.i(3)
+Global Dim EnvDecay.i(3)
+Global Dim SweepDiv.i(2)
+Global Dim SweepReload.i(2)
+Global Dim LengthTable.a(32)
+Global Dim NoiseTable.u(16)
+Global Dim DmcTable.u(16)
+Global Dim PulseMix.u(31)
+Global Dim TndMix.u(203)
+Global Dim Pcm.w(4096)
+Global ApuEnable.i, ApuFrameClock.i, ApuFrameStep.i, ApuFive.i, ApuInhibit.i
+Global ApuFrameIrq.i, ApuResetDelay.i, ApuLinear.i, ApuLinearReload.i
+Global NoiseShift.i=1, TriDac.i, ApuSampleLeft.i=37, ApuSampleFrac.i=101
+Global ApuSamples.i, ApuCapture.i, ApuMinimum.i, ApuMaximum.i, ApuNonzero.i
+Global DmcTimer.i=428, DmcLevel.i, DmcAddress.i, DmcBytes.i, DmcShift.i
+Global DmcBits.i=8, DmcBuffer.i, DmcEmpty.i=1, DmcSilent.i=1, DmcIrq.i
+Global ApuLastX.i, ApuLastY.i, ApuOutput.i
+
+ProcedureRAM.i ApuVolume(ch.i)
+  Protected reg.i
+  reg=ch*4
+  If ch=2
+    reg=12
+  EndIf
+  If ApuReg(reg)&$10
+    ProcedureReturn ApuReg(reg)&15
+  EndIf
+  ProcedureReturn EnvDecay(ch)
+EndProcedure
+ProcedureRAM.i ApuTarget(ch.i)
+  Protected amount.i, target.i
+  amount=ApuPeriod(ch)>>(ApuReg(ch*4+1)&7)
+  target=ApuPeriod(ch)+amount
+  If ApuReg(ch*4+1)&8
+    target=ApuPeriod(ch)-amount
+    If ch=0
+      target=target-1
+    EndIf
+  EndIf
+  ProcedureReturn target
+EndProcedure
+Procedure ApuQuarter()
+  Protected c.i, r.i
+  For c=0 To 2
+    r=c*4
+    If c=2
+      r=12
+    EndIf
+    If EnvStart(c)
+      EnvStart(c)=0 : EnvDecay(c)=15 : EnvDiv(c)=ApuReg(r)&15
+    ElseIf EnvDiv(c)>0
+      EnvDiv(c)=EnvDiv(c)-1
+    Else
+      EnvDiv(c)=ApuReg(r)&15
+      If EnvDecay(c)>0
+        EnvDecay(c)=EnvDecay(c)-1
+      ElseIf ApuReg(r)&$20
+        EnvDecay(c)=15
+      EndIf
+    EndIf
+  Next
+  If ApuLinearReload
+    ApuLinear=ApuReg(8)&127
+  ElseIf ApuLinear>0
+    ApuLinear=ApuLinear-1
+  EndIf
+  If (ApuReg(8)&$80)=0
+    ApuLinearReload=0
+  EndIf
+EndProcedure
+Procedure ApuHalf()
+  Protected c.i, hold.i, r.i, target.i
+  For c=0 To 3
+    r=c*4 : hold=ApuReg(r)&$20
+    If c=2
+      hold=ApuReg(8)&$80
+    EndIf
+    If ApuLength(c)>0 And hold=0
+      ApuLength(c)=ApuLength(c)-1
+    EndIf
+  Next
+  For c=0 To 1
+    r=ApuReg(c*4+1) : target=ApuTarget(c)
+    If SweepDiv(c)=0 And (r&$80)<>0 And (r&7)<>0 And ApuPeriod(c)>=8 And target<=$7FF
+      ApuPeriod(c)=target
+    EndIf
+    If SweepDiv(c)=0 Or SweepReload(c)<>0
+      SweepDiv(c)=(r>>4)&7 : SweepReload(c)=0
+    Else
+      SweepDiv(c)=SweepDiv(c)-1
+    EndIf
+  Next
+EndProcedure
+ProcedureRAM ApuDmcFetch()
+  If DmcEmpty<>0 And DmcBytes>0
+    DmcBuffer=WorkerRead(DmcAddress) : DmcEmpty=0
+    WorkerDmcCycles=WorkerDmcCycles+4
+    DmcAddress=DmcAddress+1
+    If DmcAddress=$10000
+      DmcAddress=$8000
+    EndIf
+    DmcBytes=DmcBytes-1
+    If DmcBytes=0
+      If ApuReg(16)&$40
+        DmcAddress=$C000+ApuReg(18)*64 : DmcBytes=ApuReg(19)*16+1
+      ElseIf ApuReg(16)&$80
+        DmcIrq=1
+      EndIf
+    EndIf
+  EndIf
+EndProcedure
+ProcedureRAM ApuTick(dt.i)
+  Protected c.i, feedback.i, period.i, ticks.i
+  For c=0 To 1
+    ApuTimer(c)=ApuTimer(c)-dt
+    If ApuTimer(c)<=0
+      period=2*(ApuPeriod(c)+1) : ticks=1+NesDiv(0-ApuTimer(c),period)
+      ApuTimer(c)=ApuTimer(c)+ticks*period
+      ApuSeq(c)=(ApuSeq(c)+ticks)&7
+    EndIf
+  Next
+  ApuTimer(2)=ApuTimer(2)-dt
+  If ApuTimer(2)<=0
+    period=ApuPeriod(2)+1 : ticks=1+NesDiv(0-ApuTimer(2),period)
+    ApuTimer(2)=ApuTimer(2)+ticks*period
+    If ApuLength(2)>0 And ApuLinear>0
+      ApuSeq(2)=(ApuSeq(2)+ticks)&31
+      If ApuSeq(2)<16
+        TriDac=15-ApuSeq(2)
+      Else
+        TriDac=ApuSeq(2)-16
+      EndIf
+    EndIf
+  EndIf
+  ApuTimer(3)=ApuTimer(3)-dt
+  While ApuTimer(3)<=0
+    ApuTimer(3)=ApuTimer(3)+NoiseTable(ApuReg(14)&15)
+    If ApuReg(14)&$80
+      feedback=(NoiseShift!(NoiseShift>>6))&1
+    Else
+      feedback=(NoiseShift!(NoiseShift>>1))&1
+    EndIf
+    NoiseShift=(NoiseShift>>1)|(feedback<<14)
+  Wend
+  DmcTimer=DmcTimer-dt
+  While DmcTimer<=0
+    DmcTimer=DmcTimer+DmcTable(ApuReg(16)&15)
+    If DmcSilent=0
+      If DmcShift&1
+        If DmcLevel<=125
+          DmcLevel=DmcLevel+2
+        EndIf
+      ElseIf DmcLevel>=2
+        DmcLevel=DmcLevel-2
+      EndIf
+    EndIf
+    DmcShift=DmcShift>>1 : DmcBits=DmcBits-1
+    If DmcBits=0
+      DmcBits=8
+      If DmcEmpty
+        DmcSilent=1
+      Else
+        DmcSilent=0 : DmcShift=DmcBuffer : DmcEmpty=1
+        ApuDmcFetch()
+      EndIf
+    EndIf
+  Wend
+EndProcedure
+ProcedureRAM ApuMixSample()
+  Protected c.i, duty.i, pulse.i, noise.i, target.i, x.i
+  pulse=0 : noise=0
+  For c=0 To 1
+    If ApuLength(c)>0 And ApuPeriod(c)>=8
+      target=ApuTarget(c)
+      If target<=$7FF
+        duty=(ApuReg(c*4)>>6)&3
+        If duty=0
+          duty=$02
+        ElseIf duty=1
+          duty=$06
+        ElseIf duty=2
+          duty=$1E
+        Else
+          duty=$F9
+        EndIf
+        If (duty>>ApuSeq(c))&1
+          pulse=pulse+ApuVolume(c)
+        EndIf
+      EndIf
+    EndIf
+  Next
+  If ApuLength(3)>0 And (NoiseShift&1)=0
+    noise=ApuVolume(2)
+  EndIf
+  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)
+  ; A simple DC blocker; DAC-specific reconstruction is a separate stage.
+  ApuOutput=ApuLastY*65400
+  If ApuOutput<0
+    ApuOutput=ApuOutput+65535
+  EndIf
+  ApuOutput=x-ApuLastX+(ApuOutput>>16)
+  ApuLastX=x
+  If ApuOutput>32767
+    ApuOutput=32767
+  ElseIf ApuOutput< -32768
+    ApuOutput= -32768
+  EndIf
+  ApuLastY=ApuOutput
+  Pcm(ApuSamples&4095)=ApuOutput
+  If ApuCapture<4096
+    ApuCapture=ApuCapture+1
+  EndIf
+  If ApuOutput<ApuMinimum
+    ApuMinimum=ApuOutput
+  EndIf
+  If ApuOutput>ApuMaximum
+    ApuMaximum=ApuOutput
+  EndIf
+  If ApuOutput<>0
+    ApuNonzero=ApuNonzero+1
+  EndIf
+  ApuSamples=ApuSamples+1
+EndProcedure
+ProcedureRAM ApuAdvance(dt.i)
+  Protected step.i, event.i
+  While dt>0
+    step=dt
+    If step>ApuSampleLeft
+      step=ApuSampleLeft
+    EndIf
+    If ApuResetDelay>0 And step>ApuResetDelay
+      step=ApuResetDelay
+    EndIf
+    event=7457
+    If ApuFrameStep=1
+      event=14913
+    ElseIf ApuFrameStep=2
+      event=22371
+    ElseIf ApuFrameStep=3
+      event=29829
+      If ApuFive
+        event=37281
+      EndIf
+    EndIf
+    If step>event-ApuFrameClock
+      step=event-ApuFrameClock
+    EndIf
+    ApuTick(step)
+    ApuFrameClock=ApuFrameClock+step
+    If ApuResetDelay>0
+      ApuResetDelay=ApuResetDelay-step
+      If ApuResetDelay=0
+        ApuFrameClock=0 : ApuFrameStep=0
+        If ApuFive
+          ApuQuarter() : ApuHalf()
+        EndIf
+      EndIf
+    EndIf
+    If ApuFrameClock>=event
+      ApuQuarter()
+      If ApuFrameStep=1 Or ApuFrameStep=3
+        ApuHalf()
+      EndIf
+      ApuFrameStep=ApuFrameStep+1
+      If ApuFrameStep=4
+        If ApuFive=0 And ApuInhibit=0
+          ApuFrameIrq=1
+        EndIf
+        ApuFrameClock=ApuFrameClock-event-1 : ApuFrameStep=0
+      EndIf
+    EndIf
+    ApuSampleLeft=ApuSampleLeft-step : dt=dt-step
+    If ApuSampleLeft=0
+      ApuMixSample()
+      ApuSampleFrac=ApuSampleFrac+101
+      ApuSampleLeft=37
+      If ApuSampleFrac>=352
+        ApuSampleFrac=ApuSampleFrac-352 : ApuSampleLeft=38
+      EndIf
+    EndIf
+  Wend
+  WorkerIrq=ApuFrameIrq|DmcIrq
+EndProcedure
+ProcedureRAM ApuWrite(addr.i, value.i)
+  Protected r.i, ch.i
+  r=addr-$4000
+  If r<0 Or r>23
+    ProcedureReturn
+  EndIf
+  ApuReg(r)=value
+  If r<12
+    ch=r>>2
+    If (r&3)=1 And ch<2
+      SweepReload(ch)=1
+    ElseIf (r&3)=2
+      ApuPeriod(ch)=(ApuPeriod(ch)&$700)|value
+    ElseIf (r&3)=3
+      ApuPeriod(ch)=(ApuPeriod(ch)&255)|((value&7)<<8)
+      If (ApuEnable>>ch)&1
+        ApuLength(ch)=LengthTable(value>>3)
+      EndIf
+      If ch<2
+        EnvStart(ch)=1 : ApuSeq(ch)=0
+      Else
+        ApuLinearReload=1
+      EndIf
+    EndIf
+  ElseIf r=15
+    If ApuEnable&8
+      ApuLength(3)=LengthTable(value>>3)
+    EndIf
+    EnvStart(2)=1
+  ElseIf r=16
+    If (value&$80)=0
+      DmcIrq=0
+    EndIf
+  ElseIf r=17
+    DmcLevel=value&127
+  ElseIf r=21
+    ApuEnable=value&31 : DmcIrq=0
+    For ch=0 To 3
+      If ((value>>ch)&1)=0
+        ApuLength(ch)=0
+      EndIf
+    Next
+    If (value&16)=0
+      DmcBytes=0
+    ElseIf DmcBytes=0
+      DmcAddress=$C000+ApuReg(18)*64 : DmcBytes=ApuReg(19)*16+1
+      ApuDmcFetch()
+    EndIf
+  ElseIf r=23
+    ApuFive=(value>>7)&1 : ApuInhibit=(value>>6)&1
+    If ApuInhibit
+      ApuFrameIrq=0
+    EndIf
+    ApuResetDelay=3+(WorkerClock&1)
+  EndIf
+  WorkerIrq=ApuFrameIrq|DmcIrq
+EndProcedure
+ProcedureRAM.i ApuReadStatus()
+  Protected v.i, c.i
+  v=(ApuFrameIrq<<6)|(DmcIrq<<7)
+  For c=0 To 3
+    If ApuLength(c)>0
+      v=v|(1<<c)
+    EndIf
+  Next
+  If DmcBytes>0
+    v=v|16
+  EndIf
+  ApuFrameIrq=0 : WorkerIrq=DmcIrq
+  ProcedureReturn v
+EndProcedure

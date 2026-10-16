@@ -1,0 +1,119 @@
+; Native boot UI. The emulated CPU and APU remain stopped until selection.
+; Reuses the existing complete RGB framebuffer and baseline LCD DMA.
+Procedure MenuPixel(x.i,y.i,colour.i)
+  If y<120
+    FrameTop(y*256+x)=colour
+  Else
+    PokeU(FrameBottom+((y-120)*256+x)*2,colour)
+  EndIf
+EndProcedure
+Procedure MenuRect(x.i,y.i,w.i,h.i,colour.i)
+  Protected row.i, col.i
+  For row=y To y+h-1
+    For col=x To x+w-1 : MenuPixel(col,row,colour) : Next
+  Next
+EndProcedure
+Procedure MenuText(x.i,y.i,text.i,colour.i)
+  Protected c.i, bits.i, row.i, col.i, n.i
+  For n=0 To 29
+    c=PeekA(text+n)
+    If c=0 : Break : EndIf
+    If c>=97 And c<=122 : c=c-32 : EndIf
+    bits=0
+    If c>=48 And c<=57
+      bits=PeekU(?HudFont+(c-48)*2)
+    ElseIf c>=65 And c<=90
+      bits=PeekU(?MenuLetters+(c-65)*2)
+    ElseIf c=45
+      bits=7<<6
+    EndIf
+    For row=0 To 4
+      For col=0 To 2
+        If (bits>>(row*3+col))&1
+          MenuRect(x+n*8+col*2,y+row*2,2,2,colour)
+        EndIf
+      Next
+    Next
+  Next
+EndProcedure
+Procedure MenuDraw(selected.i,first.i)
+  Protected index.i, y.i, colour.i
+  MenuRect(0,0,256,240,$0841)
+  MenuText(12,12,?MenuHeading,$FFFF)
+  MenuText(12,32,?MenuChoose,$BDF7)
+  For index=first To first+3
+    If index>=CartCount : Break : EndIf
+    CartSelect(index) : y=58+(index-first)*34 : colour=$BDF7
+    If index=selected
+      MenuRect(6,y-7,244,30,$2188) : colour=$FFE0
+    EndIf
+    MenuText(12,y,CartTitle,colour)
+  Next
+  CartSelect(selected)
+  MenuText(12,207,?MenuPlay,$FFFF)
+  MenuText(12,225,?MenuStart,$BDF7)
+EndProcedure
+Procedure.i BootMenu()
+  Protected selected.i, first.i, dirty.i, previous.i, mask.i, key.i, launch.i
+  Protected nextFrame.i, nextRepeat.i, now.i, direction.i, report.i, displayed.i, capture.i
+  dirty=1 : nextFrame=Micros() : report=nextFrame : displayed=WorkerDisplayed
+  CartSelect(0)
+  Say("BOOT_MENU count=") : Num(CartCount) : Eol()
+  Repeat
+    UsbSerialTask() : SafetyPet() : InputPoll()
+    key=UsbSerialRead() : now=Micros() : mask=InputMask
+    direction=0
+    If mask&16 : direction= -1 : EndIf
+    If mask&32 : direction=1 : EndIf
+    If direction<>0 And (((mask!previous)&48)<>0 Or now-nextRepeat>=0)
+      selected=selected+direction
+      If selected<0 : selected=CartCount-1 : EndIf
+      If selected>=CartCount : selected=0 : EndIf
+      nextRepeat=now+180000 : dirty=1
+    EndIf
+    ; Release-to-confirm prevents the two-button Start chord launching on A.
+    If (previous&3)=1 And (mask&3)=0 : launch=1 : EndIf
+    If (mask&8)<>0 Or key=115 Or key=97 : launch=1 : EndIf
+    If key>=48 And key<=57 And key-48<CartCount
+      selected=key-48 : launch=1
+    EndIf
+    If now-report>=1000000
+      Say("BOOT_FPS us=") : Num(now-report) : Say(" lcd=") : Num(WorkerDisplayed-displayed) : Eol()
+      report=now : displayed=WorkerDisplayed
+    EndIf
+    If key=112 : capture=1 : EndIf
+    ; 'L': the ROM loader (tools/rom_loader.py); the list may change after it.
+    If key=76
+      RomLoader() : selected=0 : first=0 : dirty=1
+      Say("BOOT_MENU count=") : Num(CartCount) : Eol()
+    EndIf
+    If capture<>0 And PeekL(@DisplayDone)=DisplayReady : DumpFrame() : capture=0 : EndIf
+    If launch<>0 And PeekL(@DisplayDone)=DisplayReady : Break : EndIf
+    If PeekL(@DisplayDone)=DisplayReady
+      If dirty
+        If selected<first : first=selected : EndIf
+        If selected>=first+4 : first=selected-3 : EndIf
+        MenuDraw(selected,first) : dirty=0
+        Say("BOOT_SELECT index=") : Num(selected) : Say(" mapper=") : Num(CartMapper) : Eol()
+      EndIf
+      If now-nextFrame>=0
+        DisplayFrame() : nextFrame=now+16639
+      EndIf
+    EndIf
+    previous=mask
+  ForEver
+  CartSelect(selected)
+  Say("BOOT_PLAY index=") : Num(selected) : Say(" mapper=") : Num(CartMapper) : Eol()
+  ProcedureReturn selected
+EndProcedure
+DataSection
+MenuHeading: Data.a 80,85,82,69,77,69,84,65,76,32,78,69,83,0
+MenuChoose: Data.a 67,72,79,79,83,69,32,65,32,71,65,77,69,0
+MenuPlay: Data.a 65,32,84,79,32,80,76,65,89,0
+MenuStart: Data.a 66,79,84,72,32,65,78,68,32,85,80,32,70,79,82,32,83,84,65,82,84,0
+MenuLetters:
+  ; A..Z, row-major 3x5, LSB-left.
+  Data.u $5BEA,$3AEB,$624E,$3B6B,$72CF,$12CF,$6B4E,$5BED,$7497,$2B24
+  Data.u $5AED,$7249,$5B7D,$5B6B,$3B6E,$12EF,$6F6E,$5AEF,$798E,$2497
+  Data.u $3B6D,$2B6D,$5F6D,$5AAD,$24AD,$72A7
+EndDataSection

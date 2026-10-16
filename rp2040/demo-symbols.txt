@@ -1,0 +1,9 @@
+reset=$8000
+wait1=$800F
+wait2=$8014
+palette=$8025
+names=$803E
+hide=$804E
+idle=$8126
+nmi=$8129
+irq=$8148

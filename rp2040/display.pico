@@ -1,0 +1,110 @@
+; A DMA transfer starts only after all 240 RGB565 rows are complete.
+; There is one full RGB frame in SRAM. Next-frame writes wait until DMA
+; has consumed the destination row, so the in-flight frame stays coherent.
+Global DisplayHalf.i
+Global DisplayReady.i, DisplayDone.i, DisplayActive.i, DisplayWaitUs.i
+Global DisplayState.i, DisplayStart.i, DisplayTicket.i
+Declare DisplayPoll()
+ProcedureRAM DisplayWaitLine(line.i)
+  Protected finish.i, start.i
+  CompilerIf #NES_SPLIT<>1
+    If line<120
+      finish=@FrameTop(0)+(line+1)*512
+    Else
+      finish=FrameBottom+(line-119)*512
+    EndIf
+    start=Micros()
+    While PeekL(@DisplayDone)<>DisplayReady
+      If PeekL(@DisplayActive)=DisplayReady
+        If line<120 And PeekL(@DisplayHalf)=1
+          Break
+        EndIf
+        If ((line<120 And PeekL(@DisplayHalf)=0) Or (line>=120 And PeekL(@DisplayHalf)=1))
+        If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)<>0
+          If PeekL(#SPI_DMA_CH0_READ)>=finish
+            Break
+          EndIf
+        EndIf
+        EndIf
+      EndIf
+      If Micros()-start>2000000
+        WorkerError=12
+        ProcedureReturn
+      EndIf
+    Wend
+    DisplayWaitUs=DisplayWaitUs+Micros()-start
+  CompilerEndIf
+EndProcedure
+ProcedureRAM DisplayTransfer()
+  Protected start.i, ticket.i
+  ticket=PeekL(@DisplayReady) : start=Micros()
+  If WorkerDisplay
+    Tft796Window(112,40,367,279)
+    DisplayHalf=0 : DisplayActive=ticket : NesFence()
+    If Tft796Blit(@FrameTop(0),30720)=0
+      WorkerError=10
+    Else
+      DisplayHalf=1 : NesFence()
+      If Tft796Blit(FrameBottom,30720)=0
+        WorkerError=10
+      Else
+        WorkerDisplayed=WorkerDisplayed+1
+      EndIf
+    EndIf
+  EndIf
+  WorkerDisplayUs=WorkerDisplayUs+Micros()-start
+  NesFence() : DisplayDone=ticket
+EndProcedure
+ProcedureRAM DisplayFrame()
+  NesFence() : DisplayReady=DisplayReady+1
+  CompilerIf #NES_SPLIT=1
+    DisplayTransfer()
+  CompilerEndIf
+EndProcedure
+ProcedureRAM DisplayMain()
+  WorkerReady=1
+  Repeat
+    DisplayPoll()
+  ForEver
+EndProcedure
+ProcedureRAM DisplayDmaStart(pointer.i)
+  PokeL(#SPI_DMA_CH0_READ,pointer)
+  PokeL(#SPI_DMA_CH0_WRITE,$4003C008)
+  PokeL(#SPI_DMA_CH0_COUNT,30720)
+  PokeL(#SPI_DMA_CH0_CTRL,#SPI_DMA_EN|#SPI_DMA_SIZE_HALF|#SPI_DMA_INCR_READ|(#SPI_DMA_TREQ_SPI0_TX<<15))
+EndProcedure
+ProcedureRAM DisplayPoll()
+  If DisplayState=0
+    HudUpdate()
+    If PeekL(@DisplayReady)<>DisplayDone
+      NesFence() : DisplayTicket=PeekL(@DisplayReady)
+      If WorkerDisplay=0
+        DisplayDone=DisplayTicket
+        ProcedureReturn
+      EndIf
+      DisplayStart=Micros()
+      Tft796Window(112,40,367,279)
+      SpiDmaInit() : SpiSetBits(0,16)
+      Tft796PinSet(tft796_dc,1) : Tft796PinSet(tft796_cs,0)
+      PokeL($4003C024,PeekL($4003C024)|#SPI_SSPDMACR_TXDMAE)
+      DisplayHalf=0 : DisplayDmaStart(@FrameTop(0))
+      NesFence() : DisplayActive=DisplayTicket : DisplayState=1
+    EndIf
+  ElseIf DisplayState=1
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0
+      DisplayHalf=1 : NesFence()
+      DisplayDmaStart(FrameBottom) : DisplayState=2
+    EndIf
+  ElseIf DisplayState=2
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0 And (PeekL($4003C00C)&#SPI_SR_BSY)=0
+      SpiDmaRestore(0) : Tft796PinSet(tft796_cs,1)
+      WorkerDisplayUs=WorkerDisplayUs+Micros()-DisplayStart
+      WorkerDisplayed=WorkerDisplayed+1
+      NesFence() : DisplayDone=DisplayTicket : DisplayState=0
+    EndIf
+  EndIf
+  If DisplayState<>0 And Micros()-DisplayStart>2000000
+    WorkerError=10 : SpiDmaAbort(0) : SpiDmaRestore(0)
+    Tft796PinSet(tft796_cs,1) : DisplayState=0
+  EndIf
+EndProcedure

@@ -1,0 +1,244 @@
+; ROM store: games live in the board's flash, not in the firmware image.
+; tools/rom_loader.py sends them over USB serial to the boot menu's loader
+; ('L'), which writes them here. Layout (offsets from the start of flash):
+;   $50000  directory sector   $51000..$FEFFF  game data   $FF000  board-check sector
+; Every image must end below $50000 (tools/upload_pack.py and tools/build.ps1 check);
+; $100000 up is the Bluetooth radio firmware and is never written here.
+;
+; Directory: 'NESR', u16 version 1, u16 count, u32 CRC-32 of the entries,
+; u32 0, then count 64-byte entries: title[32] (NUL-terminated), mapper,
+; mirroring, bus conflicts, CHR RAM, u16 32 KiB PRG views, u16 8 KiB CHR
+; banks, u32 PRG offset, u32 PRG bytes, u32 CHR offset, u32 CHR bytes,
+; u32 PRG CRC-32, u32 CHR CRC-32. The loader erases the directory first and
+; writes it last, so an interrupted upload leaves an empty store.
+#ROMSTORE_DIR = $50000
+#ROMSTORE_DATA = $51000
+#ROMSTORE_END = $FF000
+#ROMSTORE_TEST = $FF000
+#ROMSTORE_FLASH = $10000000
+#ROMSTORE_MAX = 63
+Global RomCount.i, RomScanned.i, RomStoreEnabled.i=1
+Global Dim RomEntry.i(#ROMSTORE_MAX)
+Global Dim RomCrcTable.l(255)
+Global RomCrcReady.i
+Global Dim RomBuf.a(4096)
+Global Dim RomLine.a(80)
+Global RomLineLength.i, RomArg1.i, RomArg2.i, RomArg3.i
+
+Procedure RomCrcInit()
+  Protected i.i, c.l, k.i
+  For i=0 To 255
+    c=i
+    For k=0 To 7
+      If c&1 : c=((c>>1)&$7FFFFFFF)!$EDB88320 : Else : c=(c>>1)&$7FFFFFFF : EndIf
+    Next
+    RomCrcTable(i)=c
+  Next
+  RomCrcReady=1
+EndProcedure
+; CRC-32 (the zlib one) of count bytes at addr; signed 32-bit result.
+Procedure.l RomCrc(addr.i, count.i)
+  Protected c.l, i.i
+  If RomCrcReady=0 : RomCrcInit() : EndIf
+  c=$FFFFFFFF
+  For i=0 To count-1
+    c=RomCrcTable((c!PeekA(addr+i))&255)!((c>>8)&$00FFFFFF)
+    If (i&4095)=4095 : SafetyPet() : EndIf
+  Next
+  ProcedureReturn c!$FFFFFFFF
+EndProcedure
+Procedure.i RomInArea(offset.i, count.i)
+  If offset<#ROMSTORE_DATA Or count<0 Or offset+count>#ROMSTORE_END
+    ProcedureReturn 0
+  EndIf
+  ProcedureReturn 1
+EndProcedure
+; Read the directory and keep every entry that is whole and supported.
+; Every refusal is printed with its reason; the entry is left out.
+Procedure RomStoreScan()
+  Protected dir.i, count.i, n.i, e.i, ok.i, k.i, mapper.i, prg.i, prgSize.i, chr.i, chrSize.i, chrRam.i
+  RomCount=0 : RomScanned=1
+  If RomStoreEnabled=0 : ProcedureReturn : EndIf
+  dir=#ROMSTORE_FLASH+#ROMSTORE_DIR
+  If PeekL(dir)<>$5253454E
+    Say("ROMSTORE empty: no directory at flash offset $50000 (first word read ") : Num(PeekL(dir))
+    Say(", 'NESR' is ") : Num($5253454E) : Say("); built-in demo only") : Eol()
+    ProcedureReturn
+  EndIf
+  count=PeekU(dir+6)
+  If PeekU(dir+4)<>1 Or count>#ROMSTORE_MAX
+    Say("ROMSTORE refused: directory version ") : Num(PeekU(dir+4)) : Say(" count ") : Num(count)
+    Say(" is not version 1 with at most 63 games; reload the ROMs with rom_loader.py") : Eol()
+    ProcedureReturn
+  EndIf
+  If RomCrc(dir+16,count*64)<>PeekL(dir+8)
+    Say("ROMSTORE refused: directory CRC mismatch (torn or damaged write); reload the ROMs with rom_loader.py") : Eol()
+    ProcedureReturn
+  EndIf
+  For n=0 To count-1
+    e=dir+16+n*64 : ok=0
+    For k=0 To 31
+      If PeekA(e+k)=0 : ok=1 : Break : EndIf
+    Next
+    mapper=PeekA(e+32) : chrRam=PeekA(e+35)
+    prg=PeekL(e+40) : prgSize=PeekL(e+44) : chr=PeekL(e+48) : chrSize=PeekL(e+52)
+    If ok=0
+      Say("ROMSTORE entry ") : Num(n) : Say(" refused: title has no terminating zero") : Eol()
+    ElseIf mapper<>0 And mapper<>2 And mapper<>66
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: mapper ") : Num(mapper) : Say(" is not supported (0, 2, 66)") : Eol()
+    ElseIf prgSize<>PeekU(e+36)*32768 Or prgSize=0 Or RomInArea(prg,prgSize)=0
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: PRG range is outside the ROM area or does not match its bank count") : Eol()
+    ElseIf (chrRam=0 And (chrSize<>PeekU(e+38)*8192 Or chrSize=0 Or chrSize>16384)) Or RomInArea(chr,chrSize)=0
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: CHR range is outside the ROM area, too large (16 KiB max) or does not match its bank count") : Eol()
+    ElseIf (chrRam<>0 And #CART_CHR_BANKS<2) Or (chrRam=0 And chrSize>#CART_CHR_BANKS*8192)
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: this firmware decodes ") : Num(#CART_CHR_BANKS*8)
+      Say(" KiB of CHR; the game needs 16 KiB (build the firmware with #CART_CHR_BANKS=2)") : Eol()
+    ElseIf RomCrc(#ROMSTORE_FLASH+prg,prgSize)<>PeekL(e+56) Or RomCrc(#ROMSTORE_FLASH+chr,chrSize)<>PeekL(e+60)
+      ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: data CRC mismatch; reload the ROMs with rom_loader.py") : Eol()
+    EndIf
+    If ok
+      RomEntry(RomCount)=e : RomCount=RomCount+1
+    EndIf
+  Next
+  Say("ROMSTORE games=") : Num(RomCount) : Say(" of ") : Num(count) : Eol()
+EndProcedure
+; The boot menu's cartridge list: the stored games, or the built-in demo
+; when the store holds none.
+Procedure CartSelect(number.i)
+  Protected e.i
+  If RomScanned=0 : RomStoreScan() : EndIf
+  If RomCount=0
+    CartSelectBuiltin(number) : ProcedureReturn
+  EndIf
+  If number<0 Or number>=RomCount : number=0 : EndIf
+  e=RomEntry(number) : CartCount=RomCount : CartTitle=e
+  CartMapper=PeekA(e+32) : PpuMirroring=PeekA(e+33) : CartConflicts=PeekA(e+34) : CartChrRam=PeekA(e+35)
+  CartPrgBanks=PeekU(e+36) : CartChrBanks=PeekU(e+38)
+  CartPrg=#ROMSTORE_FLASH+PeekL(e+40) : CartChr=#ROMSTORE_FLASH+PeekL(e+48)
+EndProcedure
+
+; ---------------------------------------------------------------- loader
+; Commands, one line each, numbers in decimal; every reply is one line:
+;   E <offset> <count>       erase (4 KiB sectors, inside $50000..$FEFFF)
+;   W <offset> <count> <crc> then count raw bytes (256-byte pages, <=4096);
+;                            CRC-checked on arrival, read back after writing
+;   C <offset> <count>       CRC-32 of flash, as the signed 32-bit number
+;   Q                        leave the loader; the menu rescans the store
+; Replies: OK, CRC <n>, or ERR <code> <sentence>. 30 s of silence ends it.
+Procedure.i RomReadLine()
+  Protected c.i, start.i
+  RomLineLength=0 : start=Micros()
+  Repeat
+    UsbSerialTask() : SafetyPet()
+    c=UsbSerialRead()
+    If c>=0
+      start=Micros()
+      If c=10 : ProcedureReturn 1 : EndIf
+      If c<>13 And RomLineLength<79 : RomLine(RomLineLength)=c : RomLineLength=RomLineLength+1 : EndIf
+    ElseIf Micros()-start>30000000
+      ProcedureReturn 0
+    EndIf
+  ForEver
+EndProcedure
+; Up to three decimal numbers (a leading '-' allowed) after the command letter.
+Procedure RomParseArgs()
+  Protected i.i, which.i, value.i, negative.i, digits.i, c.i
+  RomArg1=0 : RomArg2=0 : RomArg3=0 : which=0 : i=1
+  While i<=RomLineLength And which<3
+    value=0 : negative=0 : digits=0
+    While i<RomLineLength And RomLine(i)=32 : i=i+1 : Wend
+    If i<RomLineLength And RomLine(i)=45 : negative=1 : i=i+1 : EndIf
+    While i<RomLineLength
+      c=RomLine(i)
+      If c<48 Or c>57 : Break : EndIf
+      value=value*10+(c-48) : digits=digits+1 : i=i+1
+    Wend
+    If digits=0 : Break : EndIf
+    If negative : value= -value : EndIf
+    If which=0 : RomArg1=value : ElseIf which=1 : RomArg2=value : Else : RomArg3=value : EndIf
+    which=which+1
+  Wend
+EndProcedure
+Procedure RomReply(code.i, text.i)
+  If code=0
+    Say("OK") : Eol()
+  Else
+    Say("ERR ") : Num(code) : Say(" ") : Say(text) : Eol()
+  EndIf
+EndProcedure
+Procedure.i RomReceive(count.i)
+  Protected got.i, c.i, start.i
+  start=Micros()
+  While got<count
+    UsbSerialTask() : SafetyPet()
+    c=UsbSerialRead()
+    If c>=0
+      RomBuf(got)=c : got=got+1 : start=Micros()
+    ElseIf Micros()-start>5000000
+      ProcedureReturn 0
+    EndIf
+  Wend
+  ProcedureReturn 1
+EndProcedure
+Procedure RomLoader()
+  Protected command.i, start.i, i.i, ok.i
+  ; Core 1 must not run from flash while it is being written (flash.pico).
+  Core1ParkRequest=1 : start=Micros()
+  While PeekL(@Core1Parked)=0
+    UsbSerialTask() : SafetyPet()
+    If Micros()-start>1000000
+      Say("ROMLOAD refused: core 1 did not park within 1 s; nothing was written") : Eol()
+      Core1ParkRequest=0 : ProcedureReturn
+    EndIf
+  Wend
+  Say("ROMLOAD READY area=") : Num(#ROMSTORE_DIR) : Say(" end=") : Num(#ROMSTORE_END) : Eol()
+  Repeat
+    If RomReadLine()=0
+      Say("ROMLOAD ended: no command for 30 s") : Eol() : Break
+    EndIf
+    ; Blank lines, and 'L' entry requests the tool repeats before it sees READY.
+    If RomLineLength=0 Or RomLine(0)=76 : Continue : EndIf
+    command=RomLine(0) : RomParseArgs()
+    If command=81
+      Say("ROMLOAD BYE") : Eol() : Break
+    ElseIf command=69
+      If RomArg1<#ROMSTORE_DIR Or RomArg2<=0 Or RomArg1+RomArg2>#ROMSTORE_END Or (RomArg1&4095)<>0 Or (RomArg2&4095)<>0
+        RomReply(1,"erase range must be whole 4 KiB sectors inside the ROM area $50000..$FEFFF")
+      ElseIf RomArg2>65536
+        RomReply(1,"erase at most 64 KiB per command, so the watchdog is fed between them")
+      ElseIf FlashRangeErase(RomArg1,RomArg2)=0
+        Say("ERR 2 flash erase refused, flash_error=") : Num(flash_error) : Eol()
+      Else
+        ok=1
+        For i=0 To RomArg2-1 Step 4
+          If PeekL(#ROMSTORE_FLASH+RomArg1+i)<> -1 : ok=0 : Break : EndIf
+        Next
+        If ok : RomReply(0,0) : Else : RomReply(3,"erased range does not read back as $FF") : EndIf
+      EndIf
+    ElseIf command=87
+      If RomArg1<#ROMSTORE_DIR Or RomArg2<=0 Or RomArg2>4096 Or RomArg1+RomArg2>#ROMSTORE_END Or (RomArg1&255)<>0 Or (RomArg2&255)<>0
+        RomReply(1,"write must be whole 256-byte pages, at most 4096 bytes, inside the ROM area")
+      ElseIf RomReceive(RomArg2)=0
+        RomReply(4,"data stopped arriving for 5 s; nothing was written")
+      ElseIf RomCrc(@RomBuf(0),RomArg2)<>RomArg3
+        RomReply(5,"data CRC mismatch on arrival; nothing was written, send it again")
+      ElseIf FlashRangeProgram(RomArg1,@RomBuf(0),RomArg2)=0
+        Say("ERR 2 flash program refused, flash_error=") : Num(flash_error) : Eol()
+      ElseIf RomCrc(#ROMSTORE_FLASH+RomArg1,RomArg2)<>RomArg3
+        RomReply(6,"written flash does not read back equal; erase the sector and write it again")
+      Else
+        RomReply(0,0)
+      EndIf
+    ElseIf command=67
+      If RomArg1<#ROMSTORE_DIR Or RomArg2<=0 Or RomArg1+RomArg2>#ROMSTORE_END
+        RomReply(1,"CRC range must lie inside the ROM area")
+      Else
+        Say("CRC ") : Num(RomCrc(#ROMSTORE_FLASH+RomArg1,RomArg2)) : Eol()
+      EndIf
+    Else
+      RomReply(7,"unknown command; use E, W, C or Q")
+    EndIf
+  ForEver
+  Core1ParkRequest=0
+  RomScanned=0 : RomStoreScan()
+EndProcedure

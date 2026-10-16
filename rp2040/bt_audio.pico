@@ -1,0 +1,302 @@
+; NES Classic A2DP source. Core 1 owns HCI, SBC encoding and media transmission.
+Global Dim BtPeer.a(6)
+Global Dim LinkPayload.a(256)
+Global LinkHandle.i= -1, SignalRemote.i, ConfigAck.i, ConfigPeer.i, AvStarted.i
+Global SignalId.i=1, SinkSeid.i, AvTransaction.i
+Global MediaRemote.i, MediaAck.i, MediaPeer.i, MediaConfigId.i, MediaConnect.i, StreamReady.i
+Global AudioSequence.i, AudioTimestamp.i
+Global BtPeerConfigured.i, BtLogEnabled.i=1, BtLastEvent.i, BtLastStatus.i
+Global BtAudioRead.i, BtAudioFrames.i, BtAudioLastPoll.i, BtAudioLastEncode.i
+Global BtAudioPackets.i, BtAudioUnderruns.i, BtAudioOverruns.i, BtAudioBusyUs.i, BtAudioWorked.i
+Global Dim BtAudioPayload.a(204)
+
+Procedure StageAddress()
+  Protected i.i
+  For i=0 To 5 : bt_tx(7+i)=BtPeer(i) : Next
+EndProcedure
+Procedure.i PeerMatches(at.i)
+  Protected i.i
+  For i=0 To 5
+    If bt_ev(at+i)<>BtPeer(i) : ProcedureReturn 0 : EndIf
+  Next
+  ProcedureReturn 1
+EndProcedure
+Procedure.i LinkSend(cid.i,n.i)
+  Protected i.i, total.i
+  If bt_credits<1 Or n>256
+ProcedureReturn 0
+  EndIf
+  bt_tx(0)=(n+8)&255 : bt_tx(1)=(n+8)>>8 : bt_tx(2)=0 : bt_tx(3)=2
+  bt_tx(4)=LinkHandle&255 : bt_tx(5)=(LinkHandle>>8)|$20
+  bt_tx(6)=(n+4)&255 : bt_tx(7)=(n+4)>>8
+  bt_tx(8)=n&255 : bt_tx(9)=n>>8 : bt_tx(10)=cid&255 : bt_tx(11)=cid>>8
+  For i=0 To n-1 : bt_tx(12+i)=LinkPayload(i) : Next
+  total=(n+15)&(~3)
+  For i=n+12 To total-1 : bt_tx(i)=0 : Next
+  If BtRingWrite(total)<>0 : ProcedureReturn 0 : EndIf
+  bt_credits=bt_credits-1
+  ProcedureReturn 1
+EndProcedure
+Procedure SignalSend(code.i,id.i,n.i)
+  LinkPayload(0)=code : LinkPayload(1)=id : LinkPayload(2)=n : LinkPayload(3)=0
+  LinkSend(1,n+4)
+EndProcedure
+Procedure SignalConnect()
+  LinkPayload(4)=$19 : LinkPayload(5)=0 : LinkPayload(6)=$40 : LinkPayload(7)=0
+  SignalSend(2,SignalId,4) : SignalId=SignalId+1
+
+EndProcedure
+Procedure AvSend(signal.i,n.i)
+  LinkPayload(0)=(AvTransaction&15)<<4 : AvTransaction=AvTransaction+1
+  LinkPayload(1)=signal : LinkSend(SignalRemote,n+2)
+EndProcedure
+Procedure SignalReceive(at.i,n.i)
+  Protected code.i, id.i, length.i, dcid.i, result.i, finish.i
+  finish=at+n
+  While at+4<=finish
+    code=bt_ev(at) : id=bt_ev(at+1) : length=bt_ev(at+2)|(bt_ev(at+3)<<8)
+    If at+4+length>finish : ProcedureReturn : EndIf
+
+    If code=3 And length>=8
+      result=bt_ev(at+8)|(bt_ev(at+9)<<8)
+
+      If result=0
+        dcid=bt_ev(at+4)|(bt_ev(at+5)<<8)
+        If bt_ev(at+6)=$41
+          MediaRemote=dcid : MediaConfigId=SignalId
+        Else
+          SignalRemote=dcid
+        EndIf
+        LinkPayload(4)=dcid&255 : LinkPayload(5)=dcid>>8
+        LinkPayload(6)=0 : LinkPayload(7)=0
+        LinkPayload(8)=1 : LinkPayload(9)=2 : LinkPayload(10)=0 : LinkPayload(11)=1
+        SignalSend(4,SignalId,8) : SignalId=SignalId+1
+      EndIf
+    ElseIf code=4 And length>=4
+      dcid=bt_ev(at+4)|(bt_ev(at+5)<<8)
+      LinkPayload(4)=dcid&255 : LinkPayload(5)=dcid>>8
+      LinkPayload(6)=0 : LinkPayload(7)=0 : LinkPayload(8)=0 : LinkPayload(9)=0
+      SignalSend(5,id,6)
+      If dcid=$41 : MediaPeer=1 : Else : ConfigPeer=1 : EndIf
+    ElseIf code=5 And length>=6
+      result=bt_ev(at+8)|(bt_ev(at+9)<<8)
+
+      If result=0
+        If id=MediaConfigId And MediaConfigId<>0 : MediaAck=1 : Else : ConfigAck=1 : EndIf
+      EndIf
+    ElseIf code=10 And length>=2
+      dcid=bt_ev(at+4)|(bt_ev(at+5)<<8)
+      LinkPayload(4)=dcid&255 : LinkPayload(5)=dcid>>8
+      LinkPayload(6)=0 : LinkPayload(7)=0
+      For result=8 To 15 : LinkPayload(result)=0 : Next
+      If dcid=2
+        SignalSend(11,id,8)
+      ElseIf dcid=3
+        LinkPayload(8)=2 : SignalSend(11,id,12)
+      Else
+        LinkPayload(6)=1 : SignalSend(11,id,4)
+      EndIf
+    ElseIf code=2 And length>=4
+      ; Only our outgoing AVDTP link is used by this instrument.
+      LinkPayload(4)=0 : LinkPayload(5)=0
+      LinkPayload(6)=bt_ev(at+6) : LinkPayload(7)=bt_ev(at+7)
+      LinkPayload(8)=2 : LinkPayload(9)=0 : LinkPayload(10)=0 : LinkPayload(11)=0
+      SignalSend(3,id,8)
+    EndIf
+    at=at+4+length
+  Wend
+  If ConfigAck<>0 And ConfigPeer<>0 And AvStarted=0
+    AvStarted=1 : AvSend(1,0)
+  EndIf
+  If MediaAck<>0 And MediaPeer<>0 And MediaConnect=1
+    MediaConnect=2 : LinkPayload(2)=SinkSeid<<2 : AvSend(7,1)
+
+  EndIf
+EndProcedure
+Procedure AvReceive(at.i,n.i)
+  Protected i.i, signal.i, seid.i
+
+
+  If n<2 Or (bt_ev(at)&3)<>2 : ProcedureReturn : EndIf
+  signal=bt_ev(at+1)&63
+  If signal=1
+    For i=at+2 To at+n-2 Step 2
+      If (bt_ev(i+1)&$F8)=8 And (bt_ev(i)&2)=0 And SinkSeid=0
+        SinkSeid=bt_ev(i)>>2
+      EndIf
+    Next
+    If SinkSeid<>0
+      LinkPayload(2)=SinkSeid<<2 : AvSend(2,1)
+
+    EndIf
+  ElseIf signal=2
+
+    LinkPayload(2)=SinkSeid<<2 : LinkPayload(3)=4
+    LinkPayload(4)=1 : LinkPayload(5)=0 : LinkPayload(6)=7 : LinkPayload(7)=6
+    LinkPayload(8)=0 : LinkPayload(9)=0 : LinkPayload(10)=$18
+    If SbcStereo : LinkPayload(10)=$12 : EndIf : LinkPayload(11)=$15
+    LinkPayload(12)=28 : LinkPayload(13)=28 : AvSend(3,12)
+  ElseIf signal=3
+    LinkPayload(2)=SinkSeid<<2 : AvSend(6,1)
+  ElseIf signal=6
+    MediaConnect=1
+    LinkPayload(4)=$19 : LinkPayload(5)=0 : LinkPayload(6)=$41 : LinkPayload(7)=0
+    SignalSend(2,SignalId,4) : SignalId=SignalId+1
+
+  ElseIf signal=7
+    StreamReady=1
+
+  EndIf
+EndProcedure
+Procedure LinkEvent(n.i)
+  Protected event.i, i.i, cid.i, length.i, handle.i
+  If bt_ev(3)=2
+    If n<12 : ProcedureReturn : EndIf
+    handle=bt_ev(4)|((bt_ev(5)&15)<<8)
+    length=bt_ev(8)|(bt_ev(9)<<8) : cid=bt_ev(10)|(bt_ev(11)<<8)
+    If handle<>LinkHandle Or 12+length>n
+ProcedureReturn
+    EndIf
+    If cid=1 : SignalReceive(12,length) : EndIf
+    If cid=$40 : AvReceive(12,length) : EndIf
+    ProcedureReturn
+  EndIf
+  If bt_ev(3)<>4 : ProcedureReturn : EndIf
+  event=bt_ev(4) : BtLastEvent=event
+  If event=$03 Or event=$0F : BtLastStatus=bt_ev(6) : EndIf
+  If event=$13
+    BtCreditEvent()
+  ElseIf event=$17 And PeerMatches(6)<>0
+    StageAddress() : BtHciCmd($040C,6)
+  ElseIf event=$16 And PeerMatches(6)<>0
+    StageAddress() : bt_tx(13)=4
+    bt_tx(14)=48 : bt_tx(15)=48 : bt_tx(16)=48 : bt_tx(17)=48
+    For i=18 To 29 : bt_tx(i)=0 : Next
+    BtHciCmd($040D,23)
+  ElseIf event=$31 And PeerMatches(6)<>0
+    StageAddress() : bt_tx(13)=3 : bt_tx(14)=0 : bt_tx(15)=0
+    BtHciCmd($042B,9)
+  ElseIf event=$33 And PeerMatches(6)<>0
+    StageAddress() : BtHciCmd($042C,6)
+  ElseIf event=$36
+
+  ElseIf event=$03
+
+    If bt_ev(6)=0 And PeerMatches(9)<>0
+      LinkHandle=bt_ev(7)|(bt_ev(8)<<8)
+
+      SignalConnect()
+    EndIf
+  ElseIf event=$05
+
+    LinkHandle= -1 : StreamReady=0
+  ElseIf event=$0F
+
+  Else
+
+  EndIf
+EndProcedure
+Procedure ConnectSpeaker()
+  StageAddress()
+  bt_tx(13)=$18 : bt_tx(14)=$CC : bt_tx(15)=1 : bt_tx(16)=0
+  bt_tx(17)=0 : bt_tx(18)=0 : bt_tx(19)=1
+  BtHciCmd($0405,13)
+EndProcedure
+
+Procedure NesBluetoothSetPeer(src.i)
+  Protected i.i
+  For i=0 To 5 : BtPeer(i)=PeekA(src+i) : Next
+  ; This speaker plays stereo correctly; mono playback left a persistent buzz.
+  SbcStereo=1 : BtPeerConfigured=1
+EndProcedure
+Procedure NesBluetoothBegin()
+  Protected t.i, rc.i, n.i, lastAttempt.i, report.i
+  If BtPeerConfigured=0 : ProcedureReturn : EndIf
+  PrintN("NES Bluetooth: initializing speaker")
+  BtLogEnabled=1 : bt_verbose=1 : BtAudioRunning=0
+  rc=BtBegin() : Print("BT BEGIN rc=") : PrintDecN(rc)
+  Print("BT ACL max=") : PrintDec(bt_aclmax) : Print(" credits=") : PrintDecN(bt_credit0)
+  If rc<>0 : ProcedureReturn : EndIf
+  For n=0 To 7 : bt_tx(7+n)=$FF : Next
+  If BtCmd($0C01,8)<>1 : ProcedureReturn : EndIf
+  bt_tx(7)=1 : If BtCmd($0C56,1)<>1 : ProcedureReturn : EndIf
+  ; Firmware was verified during upload. Streaming ring writes must not do
+  ; a full backplane readback for every outgoing audio packet.
+  cyw43_verify=0
+  NesRadioCheck()
+  ConnectSpeaker() : t=Micros() : lastAttempt=t
+  While StreamReady=0 And Micros()-t<45000000
+    n=BtRx(1) : If n>0 : LinkEvent(n) : EndIf
+    UsbSerialTask() : SafetyPet()
+    If Micros()-report>1000000
+      report=Micros() : Print("BT state handle=") : PrintDec(LinkHandle)
+      Print(" signal=") : PrintDec(SignalRemote) : Print(" seid=") : PrintDec(SinkSeid)
+      Print(" media=") : PrintDec(MediaRemote) : Print(" event=") : PrintHex(BtLastEvent,2) : Print(" status=") : PrintDecN(BtLastStatus)
+    EndIf
+    If LinkHandle<0 And Micros()-lastAttempt>15000000
+      ConnectSpeaker() : lastAttempt=Micros()
+    EndIf
+  Wend
+  If StreamReady<>0
+    BtAudioRead=ApuSamples : BtAudioLastEncode=Micros()
+    BtLogEnabled=0 : bt_verbose=0 : BtAudioRunning=1
+  Else
+    PrintN("NES Bluetooth unavailable; continuing without audio")
+  EndIf
+EndProcedure
+ProcedureRAM NesBluetoothPoll()
+  Protected t.i, start.i, n.i, i.i, index.i, value.i, work.i
+  If BtAudioRunning=0 : ProcedureReturn : EndIf
+  start=Micros() : t=start
+  If BtControlRequest<>0
+    work=1
+    LinkPayload(2)=SinkSeid<<2
+    If StreamReady
+      AvSend(9,1) : StreamReady=0
+    Else
+      AvSend(7,1)
+    EndIf
+    BtControlRequest=0
+  EndIf
+  If t-BtAudioLastPoll>=1000 Or bt_credits<1
+    BtAudioLastPoll=t : work=1
+    n=BtRx(1) : If n>0 : LinkEvent(n) : EndIf
+  EndIf
+  If StreamReady<>0
+    n=ApuSamples-BtAudioRead
+    If n>4096
+      BtAudioOverruns=BtAudioOverruns+1 : BtAudioRead=ApuSamples-128 : n=128
+    EndIf
+    If BtAudioFrames<3 And (n>=128 Or t-BtAudioLastEncode>8000)
+      work=1
+      If n>=128
+        index=BtAudioRead&4095
+        For i=0 To 127 : SbcPcm(i)=Pcm((index+i)&4095) : Next
+        BtAudioRead=BtAudioRead+128
+      Else
+        For i=0 To 127 : SbcPcm(i)=0 : Next
+        BtAudioUnderruns=BtAudioUnderruns+1
+      EndIf
+      SbcEncode()
+      index=BtAudioFrames*(64+SbcStereo*4)
+      For i=0 To 63+SbcStereo*4 : BtAudioPayload(index+i)=SbcEncoded(i) : Next
+      BtAudioFrames=BtAudioFrames+1 : BtAudioLastEncode=t
+    EndIf
+    If BtAudioFrames=3 And bt_credits>0
+      work=1 : LinkPayload(0)=$80 : LinkPayload(1)=96
+      LinkPayload(2)=(AudioSequence>>8)&255 : LinkPayload(3)=AudioSequence&255
+      LinkPayload(4)=(AudioTimestamp>>24)&255 : LinkPayload(5)=(AudioTimestamp>>16)&255
+      LinkPayload(6)=(AudioTimestamp>>8)&255 : LinkPayload(7)=AudioTimestamp&255
+      LinkPayload(8)=$50 : LinkPayload(9)=$4D : LinkPayload(10)=$4E : LinkPayload(11)=$53
+      LinkPayload(12)=3
+      For i=0 To 191+SbcStereo*12 : LinkPayload(13+i)=BtAudioPayload(i) : Next
+      If LinkSend(MediaRemote,205+SbcStereo*12)<>0
+        AudioTimestamp=AudioTimestamp+384 : AudioSequence=(AudioSequence+1)&$FFFF
+        BtAudioPackets=BtAudioPackets+1 : BtAudioFrames=0
+      EndIf
+    EndIf
+  EndIf
+  ; Only polls that did work count, so this is Bluetooth load, not idle spin.
+  If work : BtAudioBusyUs=BtAudioBusyUs+Micros()-start : EndIf
+  BtAudioWorked=work
+EndProcedure

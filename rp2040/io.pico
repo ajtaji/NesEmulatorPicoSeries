@@ -1,0 +1,36 @@
+Procedure Say(*text.i)
+  Protected p.i, c.i
+  p = *text
+  c = PeekA(p) & 255
+  While c
+    UsbSerialWrite(c)
+    p = p + 1
+    c = PeekA(p) & 255
+  Wend
+EndProcedure
+Procedure Num(v.i)
+  Protected d.i
+  If v < 0
+    UsbSerialWrite(45)
+    v = 0 - v
+  EndIf
+  d = 1
+  While v / d >= 10
+    d = d * 10
+  Wend
+  While d > 0
+    UsbSerialWrite(48 + (v / d) % 10)
+    d = d / 10
+  Wend
+EndProcedure
+Procedure Eol()
+  UsbSerialWrite(13) : UsbSerialWrite(10)
+  UsbSerialFlush() : UsbSerialTask()
+EndProcedure
+Procedure WaitUs(us.i)
+  Protected t.i
+  t = Micros()
+  While Micros() - t < us
+    UsbSerialTask() : SafetyPet()
+  Wend
+EndProcedure

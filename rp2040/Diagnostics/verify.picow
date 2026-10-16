@@ -1,0 +1,719 @@
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=1
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+XIncludeFile "zp_vectors.pico"
+XIncludeFile "sbc_vectors.pico"
+XIncludeFile "view_vectors.pico"
+Global Checks.i, Failures.i
+Global Dim ExpectedPixels.a(8)
+Global Dim ExpectedRow.u(256)
+Procedure Check(actual.i, expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    If Failures<=16
+      Say("FAIL check=") : Num(Checks) : Say(" actual=") : Num(actual)
+      Say(" expected=") : Num(expected) : Eol()
+    EndIf
+  EndIf
+EndProcedure
+XIncludeFile "view_tests.pico"
+Procedure BluetoothBufferTests()
+  ; HCI Read Buffer Size reply: ACL count starts at byte 13, before SCO count.
+  bt_ev(10)=$FD : bt_ev(11)=3 : bt_ev(12)=64
+  bt_ev(13)=8 : bt_ev(14)=0 : bt_ev(15)=3 : bt_ev(16)=0
+  Check(BtBufferResult(),0) : Check(bt_aclmax,300)
+  Check(bt_credit0,8) : Check(bt_credits,8)
+  bt_ev(13)=1 : Check(BtBufferResult(),0) : Check(bt_credit0,1)
+  bt_ev(13)=0 : Check(BtBufferResult(),1)
+EndProcedure
+Procedure CodecVectorTests()
+  Protected block.i, i.i, mode.i, expected.i
+  For mode=0 To 1
+  SbcStereo=mode : expected=?CodecVectorExpected
+  If mode : expected=?CodecVectorStereo : EndIf
+  For i=0 To 79 : SbcHistory(i)=0 : Next
+  For block=0 To 63
+    For i=0 To 127 : SbcPcm(i)=PeekW(?CodecVectorPcm+(block*128+i)*2) : Next
+    SbcEncode()
+    For i=0 To 63+mode*4 : Check(SbcEncoded(i),PeekA(expected+block*(64+mode*4)+i)) : Next
+    SafetyPet() : UsbSerialTask()
+  Next
+  Next
+  SbcStereo=0
+  ; Timing of one stereo frame (analysis alone, then the whole encode).
+  SbcStereo=1 : block=Micros()
+  For i=0 To 99 : SbcAnalyze() : Next
+  mode=Micros()-block : block=Micros()
+  For i=0 To 99 : SbcEncode() : Next
+  expected=Micros()-block
+  Say("SBC TIMING analyze_us_x100=") : Num(mode) : Say(" encode_us_x100=") : Num(expected) : Eol()
+  SbcStereo=0
+EndProcedure
+Procedure AudioStopTests()
+  Protected ch.i, i.i
+  For ch=0 To 3
+    ApuWrite($4015,0) : ApuWrite($4015,15)
+    ApuLastX=0 : ApuLastY=0 : ApuLinear=0 : TriDac=0 : DmcLevel=0
+    If ch<2
+      ApuWrite($4000+ch*4,$1F) : ApuWrite($4002+ch*4,$40) : ApuWrite($4003+ch*4,8)
+    ElseIf ch=2
+      ApuWrite($4008,$BF) : ApuWrite($400A,$40) : ApuWrite($400B,8) : ApuQuarter()
+    Else
+      ApuWrite($400C,$1F) : ApuWrite($400E,4) : ApuWrite($400F,8)
+    EndIf
+    ApuAdvance(20000)
+    ApuWrite($4015,0) : ApuAdvance(300000)
+    Check(ApuLength(ch),0) : Check(ApuOutput,0)
+    For i=0 To 127
+      Check(Pcm((ApuSamples-1-i)&4095),0)
+    Next
+  Next
+  ; Silent PCM must produce silent SBC, including a valid header/CRC.
+  For i=0 To 79 : SbcHistory(i)=0 : Next
+  For i=0 To 127 : SbcPcm(i)=0 : Next
+  SbcEncode()
+  Check(SbcEncoded(0),$9C) : Check(SbcEncoded(1),$F1)
+  Check(SbcEncoded(2),28) : Check(SbcEncoded(3),$63)
+  For i=4 To 7 : Check(SbcEncoded(i),0) : Next
+EndProcedure
+Procedure InputTests()
+  Protected i.i
+  InputCenterX=2048 : InputCenterY=2048
+  InputButtons=0 : InputCandidate=0 : InputDebounce=0
+  InputLatch=0 : InputPulse=0 : InputDirections=0
+  InputUpdate(2048,2048,0,200000) : Check(InputMask,0)
+  InputUpdate(0,2048,0,201000) : Check(InputMask,$40)
+  InputUpdate(1500,2048,0,202000) : Check(InputMask,$40)
+  InputUpdate(1700,2048,0,203000) : Check(InputMask,0)
+  InputUpdate(4095,0,0,204000) : Check(InputMask,$90)
+  InputUpdate(2048,4095,0,205000) : Check(InputMask,$20)
+  InputUpdate(2048,2048,1,206000) : Check(InputMask,0)
+  For i=1 To 3
+    InputUpdate(2048,2048,1,206000+i*1000)
+  Next
+  Check(InputMask,1)
+  For i=0 To 3
+    InputUpdate(2048,2048,2,210000+i*1000)
+  Next
+  Check(InputMask,2)
+  For i=0 To 3
+    InputUpdate(2048,2048,3,214000+i*1000)
+  Next
+  Check(InputMask,3)
+  InputUpdate(2048,0,3,218000) : Check(InputMask,8)
+  InputUpdate(2048,4095,3,219000) : Check(InputMask,8)
+  InputUpdate(2048,0,3,318000) : Check(InputMask,0)
+  InputUpdate(2048,0,3,400000) : Check(InputMask,0)
+  For i=0 To 3
+    InputUpdate(2048,2048,0,401000+i*1000)
+  Next
+  Check(InputMask,0)
+  For i=0 To 3
+    InputUpdate(2048,4095,3,405000+i*1000)
+  Next
+  Check(InputMask,4)
+  InputUpdate(2048,4095,3,508000) : Check(InputMask,0)
+  ; The actual NES serial register must expose A, B, Select, Start, U,D,L,R.
+  NesController=$A5 : NesStrobe=1 : NesLatch=NesController : NesStrobe=0
+  For i=0 To 7
+    Check(NesRead($4016)&1,($A5>>i)&1)
+  Next
+  NesController=0 : InputMask=0 : InputPulse=0 : InputLatch=0
+EndProcedure
+Procedure PackedRenderTests()
+  Protected i.i, j.i, row.i, rawRow.i, low.i, high.i, expected.i, initialV.i, expectedV.i, expectedStatus.i
+  ; Independently verify every decoded two-bit pixel against CHR bitplanes.
+  For row=0 To 8191
+    If (row&8)=0
+      low=PeekA(Chr+row) : high=PeekA(Chr+row+8)
+      rawRow=(row&$1FF0)+(row&7)*2
+      For j=0 To 7
+        expected=((low>>(7-j))&1)|(((high>>(7-j))&1)<<1)
+        Check((PeekU(Pattern+rawRow)>>(j*2))&3,expected)
+      Next
+    EndIf
+  Next
+  For i=0 To 63
+    Oam(i*4)=255
+  Next
+  For i=0 To 7
+    Oam(i*4)=i*17+9 : Oam(i*4+1)=i*13+1
+    Oam(i*4+2)=(i&3)|((i&1)<<5)|((i&2)<<5)|((i&4)<<5)
+    Oam(i*4+3)=i*29+1
+  Next
+  OamCacheDirty=1 : NameDescDirty=1 : RgbPairsDirty=1
+  For i=0 To 511
+    PpuLine=(i*17) % 240 : PpuDot=(i&31)*8 : PpuFineX=(i>>2)&7
+    PpuMask=$1E
+    If i&1
+      PpuMask=$18
+    EndIf
+    PpuCtrl=(i&2)*8
+    initialV=(i*113)&$7FFF : PpuV=initialV : PpuStatus=0
+    PpuSpritesReference() : PpuRender8Reference()
+    expectedV=PpuV : expectedStatus=PpuStatus
+    For j=0 To 7
+      ExpectedPixels(j)=LinePixels(PpuDot+j)
+    Next
+    PpuV=initialV : PpuStatus=0 : FrameRow=@FrameTop(0)
+    BgCacheAddr= -1 : RgbLastKey= -1
+    PpuRenderRaw()
+    Check(PpuV,expectedV) : Check(PpuStatus,expectedStatus)
+    For j=0 To 7
+      Check(FrameTop(PpuDot+j),RgbPal(ExpectedPixels(j)))
+    Next
+  Next
+EndProcedure
+Global TestSeed.i=12345
+Procedure.i TestRand()
+  TestSeed=(TestSeed*1103515245+12345)&$7FFFFFFF
+  ProcedureReturn TestSeed>>8
+EndProcedure
+Global Dim RefRow.u(256)
+Global Dim RefSpriteLine.a(256)
+Global Dim RefSpriteSpan.a(32)
+Global Dim RefSprRow.i(8)
+; Whole lines: assembly sprite evaluation and tile-run rendering against the
+; high-level references, random batch partitions and a mid-line scroll split.
+Procedure RenderRunTests()
+  Protected config.i, line.i, i.i, x.i, span.i, batch.i, startV.i, startFx.i
+  Protected refV.i, refStatus.i, refCount.i, splitAt.i, splitV.i, splitFx.i, mask.i
+  For config=0 To 239
+    For i=0 To 4095 : Nt(i)=TestRand()&255 : Next
+    For i=0 To 255 : Oam(i)=TestRand()&255 : Next
+    For i=0 To 63
+      If TestRand()&1 : Oam(i*4)=(config*5+(TestRand()&31))&255 : EndIf
+    Next
+    For i=0 To 31 : Pal(i)=TestRand()&63 : Next
+    PpuCtrl=TestRand()&$38
+    mask=TestRand()&255
+    If config&3 : mask=mask|$18 : EndIf
+    PpuMask=mask : PpuColours()
+    RgbPairsDirty=1 : NameDescDirty=1 : OamCacheDirty=1 : PpuChrBank=0
+    For line=0 To 11
+      PpuLine=(config*5+(TestRand()&31)+line*3)%240
+      startV=TestRand()&$7FFF : startFx=TestRand()&7
+      splitAt=32 : splitV=TestRand()&$7FFF : splitFx=TestRand()&7
+      If line&1 : splitAt=TestRand()&31 : EndIf
+      PpuStatus=0 : PpuV=startV : PpuFineX=startFx : PpuDot=0
+      PpuSpritesReference()
+      refCount=SprCount
+      For x=0 To 255 : RefSpriteLine(x)=SpriteLine(x) : Next
+      For x=0 To 31 : RefSpriteSpan(x)=SpriteSpan(x) : Next
+      For x=0 To SprCount-1 : RefSprRow(x)=SprRow(x) : Next
+      For span=0 To 31
+        If span=splitAt : PpuV=splitV : PpuFineX=splitFx : EndIf
+        PpuDot=span*8 : PpuRender8Reference()
+      Next
+      For x=0 To 255 : RefRow(x)=RgbPal(LinePixels(x)) : Next
+      refV=PpuV : refStatus=PpuStatus
+      PpuStatus=0 : PpuV=startV : PpuFineX=startFx : PpuDot=0
+      For x=0 To 255 : SpriteLine(x)=$5A : Next
+      PpuSpritesRaw()
+      Check(SprCount,refCount) : Check(PpuStatus,refStatus&$20)
+      For x=0 To 255 : Check(SpriteLine(x),RefSpriteLine(x)) : Next
+      For x=0 To 31 : Check(SpriteSpan(x),RefSpriteSpan(x)) : Next
+      For x=0 To SprCount-1 : Check(SprRow(x),RefSprRow(x)) : Next
+      FrameRow=@FrameTop(0)
+      For x=0 To 255 : FrameTop(x)=$1234 : Next
+      span=0
+      While span<32
+        If span=splitAt : PpuV=splitV : PpuFineX=splitFx : EndIf
+        batch=1+(TestRand()%32)
+        If span+batch>32 : batch=32-span : EndIf
+        If span<splitAt And span+batch>splitAt : batch=splitAt-span : EndIf
+        PpuDot=span*8 : PpuBatchLeft=batch : PpuRenderRaw()
+        Check(PpuDot,(span+batch-1)*8) : Check(PpuBatchLeft,0)
+        span=span+batch
+      Wend
+      Check(PpuV,refV) : Check(PpuStatus,refStatus)
+      For x=0 To 255 : Check(FrameTop(x),RefRow(x)) : Next
+    Next
+    SafetyPet() : UsbSerialTask()
+  Next
+  PpuMask=$1E : PpuCtrl=0 : PpuFineX=0
+  For i=0 To 31 : SpriteSpan(i)=0 : Next
+EndProcedure
+Procedure AttributeUpdateTests()
+  Protected mode.i, attr.i, y.i, x.i, addr.i, mirror.i, base.i, tile.i, expected.i, bits.i, k.i
+  For mode=0 To 1
+    PpuMirroring=mode : PpuBuildNameCache()
+    mirror=$400
+    If mode=1
+      mirror=$800
+    EndIf
+    For attr=0 To 63
+      addr=$3C0+attr : PpuWrite($2000+addr,(attr*37)&255)
+      base=((attr&$38)<<4)|((attr&7)<<2)
+      For y=0 To 3
+        For x=0 To 3
+          tile=base+y*32+x
+          For k=0 To 1
+            If k=1
+              tile=tile!mirror
+            EndIf
+            bits=Nt((tile&$C00)|$3C0|((tile>>4)&$38)|((tile>>2)&7))
+            expected=Nt(tile)|(((bits>>(((tile>>4)&4)|(tile&2)))&3)<<8)
+            Check(NameDesc(tile),expected)
+          Next
+        Next
+      Next
+    Next
+  Next
+  PpuMirroring=1
+EndProcedure
+Procedure SequentialRenderTests()
+  Protected fx.i, y.i, span.i, j.i, initialV.i, expectedV.i
+  For j=0 To 31
+    SpriteSpan(j)=0
+  Next
+  PpuMask=$1E : FrameRow=@FrameTop(0)
+  For fx=0 To 7
+    For y=0 To 7
+      PpuFineX=fx : PpuCtrl=(y&1)*16 : PpuV=(y<<12)|31
+      RgbLastKey= -1 : BgCacheAddr= -1
+      For span=0 To 31
+        PpuDot=span*8 : initialV=PpuV
+        PpuRender8Reference() : expectedV=PpuV
+        For j=0 To 7
+          ExpectedPixels(j)=LinePixels(PpuDot+j)
+        Next
+        PpuV=initialV : PpuRenderRaw()
+        Check(PpuV,expectedV)
+        For j=0 To 7
+          Check(FrameTop(PpuDot+j),RgbPal(ExpectedPixels(j)))
+        Next
+      Next
+      expectedV=PpuV
+      For j=0 To 255
+        ExpectedRow(j)=FrameTop(j)
+      Next
+      PpuV=(y<<12)|31 : PpuDot=0 : PpuBatchLeft=32
+      RgbLastKey= -1 : BgCacheAddr= -1
+      PpuRenderRaw()
+      Check(PpuDot,248) : Check(PpuV,expectedV)
+      For j=0 To 255
+        Check(FrameTop(j),ExpectedRow(j))
+      Next
+    Next
+  Next
+EndProcedure
+Procedure LocalMmioTests()
+  CpuCycles=1000 : AccessPhase=0 : PpuClock=1000 : PpuWarmup=0
+  PpuCtrl=0 : PpuMask=0 : PpuV=0 : PpuW=0 : WorkerNmi=0 : NesSeenNmi=0
+  NesWrite($2006,$20) : NesWrite($2006,0) : NesWrite($2007,$5A)
+  Check(Nt(0),$5A) : Check(Nt($800),$5A) : Check(PpuV,$2001)
+  NesWrite($2006,$20) : NesWrite($2006,0) : PpuBuffer=7
+  Check(NesRead($2007),7) : Check(NesRead($2007),$5A)
+  PpuStatus=$80 : Left=99 : NesWrite($2000,$80)
+  Check(WorkerNmi,1) : Check(Left,0)
+  Left=99 : Check(NesRead($2002)&$80,$80) : Check(PpuStatus&$80,0) : Check(Left,0)
+EndProcedure
+Global Dim StatusExpected.a(5000)
+Procedure StatusPollingTests()
+  Protected pass.i, i.i, stamp.i, value.i, expectedNmi.i, expectedV.i
+  Protected interval.i, variant.i, startDeferred.i
+  ; Compare every status read with unconditional timestamp synchronization,
+  ; over two frames, sprite-zero rows, overflow, vblank and odd frame skip.
+  For variant=0 To 2
+    interval=13+variant*4
+    For pass=0 To 1
+      PpuClock=0 : PpuStatusDeadline=0 : PpuWarmup=0
+      PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuV=0 : PpuT=0 : PpuFineX=variant
+      PpuStatus=0 : PpuBus=$1B : PpuW=1 : PpuCtrl=$80 : PpuMask=$1E
+      WorkerNmi=0 : WorkerFrames=0 : OamCacheDirty=1 : NameDescDirty=1 : RgbPairsDirty=1
+      For i=0 To 63
+        Oam(i*4)=30 : Oam(i*4+1)=1 : Oam(i*4+2)=0 : Oam(i*4+3)=i*3
+      Next
+      For i=0 To 4095
+        Nt(i)=1
+      Next
+      startDeferred=PpuStatusDeferred
+      For i=0 To 4599
+        stamp=(i+1)*interval
+        If pass=0
+          PpuSync(stamp)
+        Else
+          PpuSyncStatus(stamp)
+        EndIf
+        value=PpuRegRead(2)
+        If pass=0
+          StatusExpected(i)=value
+        Else
+          Check(value,StatusExpected(i))
+          Check(PpuW,0)
+        EndIf
+        SafetyPet()
+      Next
+      PpuSync(stamp)
+      If pass=0
+        expectedNmi=WorkerNmi : expectedV=PpuV
+      Else
+        Check(WorkerNmi,expectedNmi) : Check(PpuV,expectedV)
+        Check(PpuStatusDeferred>startDeferred,1)
+      EndIf
+    Next
+  Next
+  ; Ordinary sync (used before writes/DMA/CHR changes) discards the horizon.
+  PpuSyncStatus(stamp+1) : PpuSync(stamp+1) : Check(PpuStatusDeadline,0)
+EndProcedure
+Global Dim LoopExpected.i(18)
+Procedure PollLoopTests()
+  Protected kind.i, variant.i, budget.i, pass.i, base.i, savedBias.i, startBatched.i
+  savedBias=PrgBias
+  For kind=0 To 2
+    startBatched=NesIdleBatched
+    For variant=0 To 11
+      base=$8000
+      If variant&1
+        base=$80FC
+      EndIf
+      For budget=1 To 300
+        For pass=0 To 1
+          If kind=0
+            PrgBias=?PollAndData-base
+          ElseIf kind=1
+            PrgBias=?PollRamData-base
+          Else
+            PrgBias=?PollCountData-base
+          EndIf
+          PC=base : A=$55 : X=((variant>>1)&1)*254 : Y=$12 : S=$FD : CpuSetStatus($24)
+          CpuCycles=0 : NesInstructions=0 : Stopped=0 : BadOpcode=0 : NesStall=0
+          NesOpenBus=0 : NesIdleEnabled=pass : M($20)=0
+          PpuClock=0 : PpuStatusDeadline=0 : PpuLine=100 : PpuDot=50
+          PpuOdd=0 : PpuV=0 : PpuT=0 : PpuFineX=0 : PpuWarmup=0
+          PpuStatus=$80 : PpuBus=$1B : PpuW=1 : PpuCtrl=0 : PpuMask=0
+          If variant>=4 And variant<8
+            PpuLine=240 : PpuDot=330 : PpuCtrl=$80
+          ElseIf variant>=8
+            PpuStatus=$C0
+          EndIf
+          OamCacheDirty=0 : WorkerNmi=0 : NesSeenNmi=0
+          CpuRun(budget) : PpuSync(CpuCycles)
+          If pass=0
+          LoopExpected(0)=CpuCycles
+          LoopExpected(1)=PC
+          LoopExpected(2)=A
+          LoopExpected(3)=X
+          LoopExpected(4)=Y
+          LoopExpected(5)=S
+          LoopExpected(6)=CpuStatus()
+          LoopExpected(7)=0
+          LoopExpected(8)=NesOpenBus
+          LoopExpected(9)=PpuStatus
+          LoopExpected(10)=PpuBus
+          LoopExpected(11)=PpuW
+          LoopExpected(12)=PpuV
+          LoopExpected(13)=PpuLine
+          LoopExpected(14)=PpuDot
+          LoopExpected(15)=WorkerNmi
+          LoopExpected(16)=Stopped
+          LoopExpected(17)=BadOpcode
+          Else
+          Check(CpuCycles,LoopExpected(0))
+          Check(PC,LoopExpected(1))
+          Check(A,LoopExpected(2))
+          Check(X,LoopExpected(3))
+          Check(Y,LoopExpected(4))
+          Check(S,LoopExpected(5))
+          Check(CpuStatus(),LoopExpected(6))
+          Check(NesOpenBus,LoopExpected(8))
+          Check(PpuStatus,LoopExpected(9))
+          Check(PpuBus,LoopExpected(10))
+          Check(PpuW,LoopExpected(11))
+          Check(PpuV,LoopExpected(12))
+          Check(PpuLine,LoopExpected(13))
+          Check(PpuDot,LoopExpected(14))
+          Check(WorkerNmi,LoopExpected(15))
+          Check(Stopped,LoopExpected(16))
+          Check(BadOpcode,LoopExpected(17))
+          EndIf
+        Next
+        SafetyPet()
+      Next
+    Next
+    Check(NesIdleBatched>startBatched,1)
+  Next
+  PrgBias=savedBias : NesIdleEnabled=1 : Stopped=0 : BadOpcode=0
+EndProcedure
+DataSection
+PollAndData:
+  Data.a $AD,2,$20,$29,$40,$F0,$F9,2
+PollRamData:
+  Data.a $A5,$20,$F0,$FC,2
+PollCountData:
+  Data.a $AD,2,$20,$E8,$D0,$FA,2
+EndDataSection
+Procedure ZpVectorTests()
+  Protected n.i, p.i, i.i, op.i, target.i, ptr.i, mode.i
+  For n=0 To #ZP_VECTOR_COUNT-1
+    p=?ZpVectors+n*14
+    For i=0 To 2047
+      M(i)=(i*7+11)&255
+    Next
+    CpuReset() : PC=$400 : op=PeekA(p)
+    X=PeekA(p+2) : Y=PeekA(p+3) : A=PeekA(p+4) : CpuSetStatus(PeekA(p+5))
+    If (op&$1F)=1
+      ptr=($80+X)&255 : M(ptr)=0 : M((ptr+1)&255)=3
+    ElseIf (op&$1F)=$11
+      M($80)=0 : M($81)=3
+    EndIf
+    M($400)=op : M($401)=PeekA(p+1)
+    Check(CpuRun(1),PeekA(p+10))
+    Check(PC,$402) : Check(A,PeekA(p+6)) : Check(X,PeekA(p+7)) : Check(Y,PeekA(p+8))
+    Check(CpuStatus(),PeekA(p+9))
+    target=PeekA(p+11)|(PeekA(p+12)<<8)
+    Check(M(target),PeekA(p+13)) : SafetyPet()
+  Next
+EndProcedure
+Procedure FastFetchAndIdleTests()
+  Protected expected.i, count.i, instructions.i, start.i
+  PC=$8000 : expected=PeekA(CartPrg)
+  Check(CpuFetchByte(),expected) : Check(PC,$8001)
+  PC=$8000 : CpuFetchAddress()
+  Check(Ea,PeekA(CartPrg)|(PeekA(CartPrg+1)<<8)) : Check(PC,$8002)
+  M(0)=$AB : PC=$FFFF : CpuFetchAddress()
+  Check(Ea,PeekA(CartPrg+$7FFF)|$AB00) : Check(PC,1)
+  PC=$FFFF : Check(CpuFetchByte(),PeekA(CartPrg+$7FFF)) : Check(PC,0)
+  Check(CpuFetchByte(),$AB) : Check(PC,1)
+  M($200)=$4C : M($201)=0 : M($202)=2
+  ; Instructions are no longer counted one by one; cycles and PC carry the check.
+  CpuReset() : PC=$200 : NesIdleEnabled=0
+  count=CpuRun(256)
+  Check(count,258) : Check(PC,$200)
+  CpuReset() : PC=$200 : NesIdleEnabled=1 : start=NesIdleBatched
+  Check(CpuRun(256),count) : Check(PC,$200)
+  Check(NesIdleBatched-start,85) : Check(CpuCycles,265)
+EndProcedure
+Procedure ComparePpuAdvance()
+  Protected i.i, line.i, dot.i, odd.i, mask.i, cycles.i
+  Protected expectedLine.i, expectedDot.i, expectedOdd.i, expectedV.i, expectedStatus.i, expectedFrames.i, expectedNmi.i
+  For i=0 To 511
+    line=(i*79) % 262 : dot=(i*137) % 341 : odd=i&1 : mask=(i&2)*12
+    cycles=1+(i*53) % 1000
+    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask
+    PpuCtrl=$80 : PpuV=(i*117)&$7FFF : PpuT=(i*57)&$7FFF : PpuFineX=i&7
+    PpuStatus=0 : WorkerFrames=0 : WorkerNmi=0
+    PpuAdvanceReference(cycles)
+    expectedLine=PpuLine : expectedDot=PpuDot : expectedOdd=PpuOdd
+    expectedV=PpuV : expectedStatus=PpuStatus : expectedFrames=WorkerFrames : expectedNmi=WorkerNmi
+    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask
+    PpuV=(i*117)&$7FFF : PpuT=(i*57)&$7FFF : PpuFineX=i&7
+    PpuStatus=0 : WorkerFrames=0 : WorkerNmi=0
+    PpuAdvance(cycles)
+    Check(PpuLine,expectedLine) : Check(PpuDot,expectedDot) : Check(PpuOdd,expectedOdd)
+    Check(PpuV,expectedV) : Check(PpuStatus,expectedStatus)
+    Check(WorkerFrames,expectedFrames) : Check(WorkerNmi,expectedNmi)
+  Next
+EndProcedure
+Global Dim BenchRom.a(512)
+; CPU throughput on a typical ROM loop (operands fetched through the PRG fast
+; path): LDA zp,X / CLC / ADC # / STA abs,X / INX / BNE, then LDY/INY/STY/JMP.
+Procedure CpuBench()
+  Protected i.i, t.i, cycles.i, savedBase.i
+  For i=0 To 20 : BenchRom(i)=PeekA(?BenchProgram+i) : Next
+  BenchRom($FC)=0 : BenchRom($FD)=$80
+  savedBase=PrgBase : PrgBase=@BenchRom(0) : PrgBias=@BenchRom(0)-$8000
+  CpuReset() : PC=$8000 : NesIdleEnabled=1
+  t=Micros() : cycles=0
+  While cycles<2000000
+    cycles=cycles+CpuRun(256)
+  Wend
+  t=Micros()-t
+  Say("CPU BENCH cycles=") : Num(cycles) : Say(" us=") : Num(t)
+  Say(" host_cycles_per_guest_cycle_x100=") : Num(NesDiv(t*200,NesDiv(cycles,100))) : Eol()
+  Check(M($40)<>0,1)
+  ; Second loop: absolute reads from ROM and RAM (LDA $8100,X / ORA $0300,X /
+  ; STA $10 / INX / BNE / JMP).
+  For i=0 To 15 : BenchRom(i)=PeekA(?BenchProgram2+i) : Next
+  CpuReset() : PC=$8000
+  t=Micros() : cycles=0
+  While cycles<2000000
+    cycles=cycles+CpuRun(256)
+  Wend
+  t=Micros()-t
+  Say("CPU BENCH2 cycles=") : Num(cycles) : Say(" us=") : Num(t)
+  Say(" host_cycles_per_guest_cycle_x100=") : Num(NesDiv(t*200,NesDiv(cycles,100))) : Eol()
+  PrgBase=savedBase : PrgBias=PrgBase-$8000
+EndProcedure
+DataSection
+BenchProgram:
+  Data.a $A2,$00,$B5,$10,$18,$69,$01,$9D,$00,$03,$E8,$D0,$F5,$A4,$40,$C8,$84,$40,$4C,$00,$80
+BenchProgram2:
+  Data.a $A2,$00,$BD,$00,$81,$1D,$00,$03,$85,$10,$E8,$D0,$F5,$4C,$00,$80
+EndDataSection
+; ROM store: CRC-32 known answer, then the flash library on silicon - erase,
+; program and read back the store's board-check sector with core 1 parked.
+Procedure RomStoreTests()
+  Protected i.i, start.i
+  For i=0 To 8 : RomBuf(i)=49+i : Next
+  Check(RomCrc(@RomBuf(0),9),$CBF43926)
+  Core1ParkRequest=1 : start=Micros()
+  While PeekL(@Core1Parked)=0 And Micros()-start<1000000 : Wend
+  Check(Core1Parked,1)
+  Check(FlashRangeErase(#ROMSTORE_TEST,4096),1)
+  For i=0 To 4095 Step 4 : Check(PeekL(#ROMSTORE_FLASH+#ROMSTORE_TEST+i),-1) : Next
+  For i=0 To 4095 : RomBuf(i)=(i*7+3)&255 : Next
+  Check(FlashRangeProgram(#ROMSTORE_TEST,@RomBuf(0),4096),1)
+  For i=0 To 4095 : Check(PeekA(#ROMSTORE_FLASH+#ROMSTORE_TEST+i),(i*7+3)&255) : Next
+  Check(RomCrc(#ROMSTORE_FLASH+#ROMSTORE_TEST,4096),RomCrc(@RomBuf(0),4096))
+  Check(FlashRangeErase(#ROMSTORE_TEST,4096),1)
+  Check(PeekL(#ROMSTORE_FLASH+#ROMSTORE_TEST),-1)
+  Core1ParkRequest=0 : start=Micros()
+  While PeekL(@Core1Parked)<>0 And Micros()-start<1000000 : Wend
+  Check(Core1Parked,0)
+EndProcedure
+Procedure TestMain()
+  Protected i.i, j.i, v.i, tile.i, row.i, pixel.i, palette.i, expected.i, start.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  start=Micros()
+  While UsbSerialReady()=0 And Micros()-start<10000000
+    UsbSerialTask() : SafetyPet()
+  Wend
+  WaitUs(200000) : LoadCartridge() : WorkerDisplay=0
+  Check(multicore_launch(),1)
+  Check(NesDiv(123456789,176),701459)
+  ; The 2A03 retains D in P but always uses binary ADC/SBC.
+  CpuReset() : PC=$200
+  M($200)=$F8 : M($201)=$A9 : M($202)=$99 : M($203)=$18
+  M($204)=$69 : M($205)=1 : M($206)=$8D : M($207)=0 : M($208)=8
+  Check(CpuRun(12),12) : Check(A,$9A) : Check(FD,1) : Check(M(0),$9A)
+  Check(NesRead($1800),$9A)
+  M($200)=$BD : M($201)=$FF : M($202)=0 : M($100)=77
+  PC=$200 : X=1 : Check(CpuRun(1),5) : Check(A,77)
+  ; Independent serial controller shift registers.
+  NesController=8 : NesWrite($4016,1) : NesWrite($4016,0)
+  For i=0 To 7
+    v=0
+    If i=3
+      v=1
+    EndIf
+    Check(NesRead($4016)&1,v) : Check(NesRead($4017)&1,0)
+  Next
+  Check(NesRead($4016)&1,1) : Check(NesRead($4017)&1,1)
+  ; PPU mirroring, palette aliases, buffered reads and latch reset.
+  PpuWarmup=0
+  PpuWrite($2000,17) : Check(PpuRead($2800),17) : Check(Nt($800),17)
+  PpuWrite($2400,29) : Check(PpuRead($2C00),29)
+  PpuWrite($3F10,33) : Check(PpuRead($3F00),33)
+  PpuV=$2000 : PpuBuffer=9
+  Check(PpuRegRead(7),9) : Check(PpuRegRead(7),17)
+  PpuW=1 : PpuStatus=$E0 : v=PpuRegRead(2)
+  Check(v&$E0,$E0) : Check(PpuStatus&$80,0) : Check(PpuW,0)
+  PpuStatus=$80 : PpuCtrl=0 : WorkerNmi=0 : PpuRegWrite(0,$80)
+  Check(WorkerNmi,1)
+  ; Compare the packed assembly fetch against independent bitplane pixels.
+  For i=0 To 4095
+    Nt(i)=(i*37+(i>>3))&255
+  Next
+  For i=0 To 2047
+    WAddr=(i*117)&$7FFF : PpuCtrl=(i&1)*16
+    PpuFetchTile()
+    tile=Nt(WAddr&$FFF)
+    palette=Nt($3C0|(WAddr&$C00)|((WAddr>>4)&$38)|((WAddr>>2)&7))
+    palette=((palette>>(((WAddr>>4)&4)|(WAddr&2)))&3)*4
+    row=((PpuCtrl&16)<<8)+tile*16+((WAddr>>12)&7)
+    For j=0 To 7
+      pixel=((PeekA(Chr+row)>>(7-j))&1)|(((PeekA(Chr+row+8)>>(7-j))&1)<<1)
+      expected=palette|pixel
+      If j<4
+        Check((WLo>>(j*8))&255,expected)
+      Else
+        Check((WHi>>((j-4)*8))&255,expected)
+      EndIf
+    Next
+  Next
+  ; Exact frame geometry and NMI edges, including the odd rendered skip.
+  PpuCtrl=$80 : PpuMask=0 : PpuLine=0 : PpuDot=0 : PpuStatus=0 : WorkerNmi=0 : WorkerFrames=0
+  PpuAdvance(27393) : Check(PpuStatus&$80,0)
+  PpuAdvance(1) : Check(PpuStatus&$80,$80) : Check(WorkerNmi,1)
+  PpuAdvance(2387) : Check(WorkerFrames,1) : Check(PpuDot,1)
+  ; APU length clocks, envelope start, frame IRQ, DMC fetch and wrap/stall.
+  ApuWrite($4015,1) : ApuWrite($4000,$1F) : ApuWrite($4003,0)
+  Check(ApuLength(0),10) : ApuHalf() : Check(ApuLength(0),9)
+  ApuWrite($4000,0) : EnvStart(0)=1 : ApuQuarter() : Check(EnvDecay(0),15)
+  ApuFrameClock=0 : ApuFrameStep=0 : ApuFive=0 : ApuInhibit=0
+  ApuAdvance(29828) : Check(ApuFrameIrq,0)
+  ApuAdvance(1) : Check(ApuFrameIrq,1)
+  Check(ApuReadStatus()&$40,$40) : Check(ApuFrameIrq,0)
+  DmcAddress=$FFFF : DmcBytes=1 : DmcEmpty=1 : WorkerDmcCycles=0
+  ApuReg(16)=$80 : ApuDmcFetch()
+  Check(DmcAddress,$8000) : Check(WorkerDmcCycles,4) : Check(DmcIrq,1)
+  DmcIrq=0 : ApuWrite($4015,1) : ApuWrite($4000,$9F)
+  ApuWrite($4001,8) : ApuWrite($4002,$FD) : ApuWrite($4003,8)
+  ApuSamples=0 : ApuNonzero=0 : ApuSampleFrac=101 : ApuSampleLeft=37
+  ApuAdvance(196875)
+  Check(ApuSamples,5280)
+  Check(ApuNonzero>0,1)
+  For i=0 To 31
+    RgbPal(i)=i*2000
+  Next
+  PpuLine=0
+  For i=0 To 255
+    LinePixels(i)=i&31
+  Next
+  FrameRow=@FrameTop(0)
+  PpuRgbLine()
+  For i=0 To 255
+    Check(FrameTop(i),(i&31)*2000)
+  Next
+  PpuMirroring=0 : PpuWrite($2000,45) : PpuWrite($2800,67)
+  Check(PpuRead($2400),45) : Check(PpuRead($2C00),67)
+  Check(Nt(0),45) : Check(Nt($400),45) : Check(Nt($800),67) : Check(Nt($C00),67)
+  CpuBench()
+  Say("STEP ComparePpuAdvance checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  ComparePpuAdvance()
+  Say("STEP InputTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  InputTests()
+  Say("STEP PackedRenderTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  PackedRenderTests()
+  Say("STEP RenderRunTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  RenderRunTests()
+  Say("STEP AttributeUpdateTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  AttributeUpdateTests()
+  Say("STEP SequentialRenderTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  SequentialRenderTests()
+  Say("STEP LocalMmioTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  LocalMmioTests()
+  Say("STEP StatusPollingTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  StatusPollingTests()
+  Say("STEP ZpVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  ZpVectorTests()
+  Say("STEP FastFetchAndIdleTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  FastFetchAndIdleTests()
+  Say("STEP PollLoopTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  PollLoopTests()
+  Say("STEP AudioStopTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  AudioStopTests()
+  Say("STEP CodecVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CodecVectorTests()
+  Say("STEP BluetoothBufferTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  BluetoothBufferTests()
+  Say("STEP RomStoreTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  RomStoreTests()
+  Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CartridgeViewTests()
+  Check(WorkerError,0) : Check(NesBridgeError,0)
+  Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
+  If Failures=0
+    Say(" PASS")
+  Else
+    Say(" FAIL")
+  EndIf
+  Eol()
+  Repeat
+    UsbSerialTask() : SafetyPet()
+  ForEver
+EndProcedure
+; The checks run on the built-in cartridge, whatever the ROM store holds.
+RomStoreEnabled=0
+TestMain()

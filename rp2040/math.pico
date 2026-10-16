@@ -1,0 +1,17 @@
+; Each core has its own SIO divider. No IRQ handler in this firmware uses it.
+; Wait the documented eight cycles before reading the quotient.
+ProcedureRAM.i NesDiv(dividend.i, divisor.i)
+  PokeL($D0000060,dividend)
+  PokeL($D0000064,divisor)
+  ASM
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+  EndASM
+  ProcedureReturn PeekL($D0000070)
+EndProcedure

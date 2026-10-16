@@ -1,0 +1,1006 @@
+; Instruction-timestamped NTSC PPU, tile-run renderer.
+; Not a dot/bus-accurate 2C02: fetch races and sprite-overflow bug excluded.
+Global Chr.i, Pattern.i
+Global Dim Nt.a(4096)
+Global Dim Pal.a(32)
+Global Dim Oam.a(256)
+Global Dim Decoded.a(#CART_CHR_BANKS*8192)
+Global Dim FrameTop.u(30720)
+Global FrameRow.i, FrameBottom.i
+Global Dim LinePixels.a(256)
+Global Dim RgbPal.u(32)
+Global Dim Rgb64.u(512)
+Global Dim SprIndex.i(8)
+Global Dim SprX.i(8)
+Global Dim SprAttr.i(8)
+Global Dim SprRow.i(8)
+Global PpuCtrl.i, PpuMask.i, PpuStatus.i, PpuOamAddr.i, PpuV.i, PpuT.i
+Global PpuFineX.i, PpuW.i, PpuBuffer.i, PpuBus.i, PpuLine.i, PpuDot.i, PpuOdd.i
+Global PpuMirroring.i, ChrWritable.i, PpuWarmup.i=29658, SprCount.i
+Global OamCacheDirty.i=1
+Global Dim CachedCount.a(256)
+Global Dim CachedSprite.a(2048)
+Global Dim SpriteLine.a(256)
+Global Dim SpriteSpan.a(32)
+Global RgbLastKey.i= -1, RgbLastPtr.i, RgbLookupLight.i
+Global RgbMisses.i, NameBuildUs.i, PairBuilds.i
+Global NameDescDirty.i=1, PpuChrBank.i, RgbRowPointer.i
+Global Dim NameDesc.u(4096)
+Global Dim RgbCache.i(4096)
+Global Dim RgbTags.i(1024)
+Global BgWord.i, BgPalette.i, RgbPairsDirty.i=1
+Global Dim RgbPairs.i(64)
+Global BgCacheAddr.i= -1, BgCacheLo.i, BgCacheHi.i
+Global PpuPixels.i, PpuSpriteHits.i
+Global PpuRgbUs.i, PpuProfileCountdown.i=67
+Global PpuRenderUs.i, PpuSpritesUs.i, PpuRenderCalls.i
+Global WRow.i, WTile.i, WAttr.i, WAddr.i, WLo.i, WHi.i, WPal.i
+Global W0.i, W1.i, W2.i, W3.i, WF.i, WX.i, WI.i, WS.i, WC.i, WY.i, WOff.i
+
+CompilerIf #PPU_PROFILE=2
+Global GuardEnabled.i, GuardChecks.i, GuardFails.i, GuardLine.i, GuardDot.i, GuardGot.i, GuardExpected.i
+Global Dim GuardPixels.u(8)
+CompilerEndIf
+ProcedureRAM.i PpuNtAddr(addr.i)
+  Protected table.i
+  table=(addr>>10)&3
+  If PpuMirroring=1
+    table=table&1
+  Else
+    table=table&2
+  EndIf
+  ProcedureReturn (table<<10)|(addr&1023)
+EndProcedure
+ProcedureRAM.i PpuPalAddr(addr.i)
+  addr=addr&31
+  If (addr&$13)=$10
+    addr=addr-16
+  EndIf
+  ProcedureReturn addr
+EndProcedure
+ProcedureRAM.i PpuRead(addr.i)
+  addr=addr&$3FFF
+  If addr<$2000
+    ProcedureReturn PeekA(Chr+addr)
+  ElseIf addr<$3F00
+    ProcedureReturn Nt(PpuNtAddr(addr))
+  EndIf
+  ProcedureReturn Pal(PpuPalAddr(addr))
+EndProcedure
+ProcedureRAM PpuColours()
+  Protected i.i, c.i, e.i, changed.i, color.i
+  e=(PpuMask>>5)*64
+  For i=0 To 31
+    c=Pal(i)&63
+    If (i&3)=0
+      c=Pal(0)&63
+    EndIf
+    If PpuMask&1
+      c=c&$30
+    EndIf
+    color=Rgb64(e+c)
+    If RgbPal(i)<>color
+      changed=1
+    EndIf
+    RgbPal(i)=color
+  Next
+  If changed
+    RgbPairsDirty=1
+  EndIf
+EndProcedure
+Procedure PpuDecode(row.i)
+  Protected low.i, high.i, dest.i, i.i, bits.i
+  row=row&$1FF7
+  low=PeekA(Chr+row) : high=PeekA(Chr+row+8)
+  dest=(row&$1FF0)+(row&7)*2 : bits=0
+  For i=0 To 7
+    bits=bits|((((low>>(7-i))&1)|(((high>>(7-i))&1)<<1))<<(i*2))
+  Next
+  PokeU(Pattern+dest,bits)
+EndProcedure
+ProcedureRAM PpuBuildRgbPairs()
+  Protected palette.i, low.i, high.i, i.i
+  PairBuilds=PairBuilds+1 : RgbLastKey= -1
+  For palette=0 To 3
+    For high=0 To 3
+      For low=0 To 3
+        RgbPairs(palette*16+low+high*4)=RgbPal(palette*4+low)|(RgbPal(palette*4+high)<<16)
+      Next
+    Next
+  Next
+  For i=0 To 1023
+    PokeL(@RgbTags(0)+i*4,0)
+  Next
+  RgbPairsDirty=0
+EndProcedure
+Declare PpuUpdateDescriptor(addr.i)
+Declare PpuUpdateAttribute(addr.i)
+ProcedureRAM PpuWrite(addr.i, value.i)
+  Protected ntAddress.i
+  BgCacheAddr= -1 : RgbLastKey= -1
+  addr=addr&$3FFF
+  If addr<$2000
+    If ChrWritable
+      PokeA(Chr+addr,value) : PpuDecode(addr)
+    EndIf
+  ElseIf addr<$3F00
+    ntAddress=PpuNtAddr(addr)
+    Nt(ntAddress)=value
+    If PpuMirroring=1
+      Nt(ntAddress!$800)=value
+    Else
+      Nt(ntAddress!$400)=value
+    EndIf
+    If (ntAddress&$3FF)>=$3C0
+      If NameDescDirty=0
+        PpuUpdateAttribute(ntAddress)
+      EndIf
+    Else
+      PpuUpdateDescriptor(ntAddress)
+      If PpuMirroring=1
+        PpuUpdateDescriptor(ntAddress!$800)
+      Else
+        PpuUpdateDescriptor(ntAddress!$400)
+      EndIf
+    EndIf
+  Else
+    Pal(PpuPalAddr(addr))=value&63
+    PpuColours()
+  EndIf
+EndProcedure
+; Packed tile fetch, using duplicated nametable mirrors and predecoded CHR.
+; r4-r7 are saved locally; reserved CPU registers r8-r11 are untouched.
+Procedure PpuFetchTile()
+  Protected tile.i, attr.i, palette.i, row.i, low.i, high.i, i.i, pixel.i
+  tile=Nt(WAddr&$FFF)
+  attr=Nt($3C0|(WAddr&$C00)|((WAddr>>4)&$38)|((WAddr>>2)&7))
+  palette=((attr>>(((WAddr>>4)&4)|(WAddr&2)))&3)*4
+  row=((PpuCtrl&16)<<8)+tile*16+((WAddr>>12)&7)
+  low=PeekA(Chr+row) : high=PeekA(Chr+row+8) : WLo=0 : WHi=0
+  For i=0 To 7
+    pixel=palette|((low>>(7-i))&1)|(((high>>(7-i))&1)<<1)
+    If i<4
+      WLo=WLo|(pixel<<(i*8))
+    Else
+      WHi=WHi|(pixel<<((i-4)*8))
+    EndIf
+  Next
+EndProcedure
+ProcedureRAM.i PpuRegRead(addr.i)
+  Protected v.i, ppuAddress.i
+  addr=addr&7 : v=PpuBus
+  If addr=2
+    v=(PpuStatus&$E0)|(PpuBus&31)
+    PpuStatus=PpuStatus&$7F : PpuW=0
+  ElseIf addr=4
+    v=Oam(PpuOamAddr)
+  ElseIf addr=7
+    ppuAddress=PpuV&$3FFF
+    If ppuAddress>=$3F00
+      v=PpuRead(ppuAddress)|(PpuBus&$C0)
+      If PpuMask&1
+        v=v&$F0
+      EndIf
+      PpuBuffer=PpuRead(ppuAddress-$1000)
+    Else
+      v=PpuBuffer : PpuBuffer=PpuRead(ppuAddress)
+    EndIf
+    If PpuCtrl&4
+      PpuV=(PpuV+32)&$7FFF
+    Else
+      PpuV=(PpuV+1)&$7FFF
+    EndIf
+  EndIf
+  PpuBus=v
+  ProcedureReturn v
+EndProcedure
+ProcedureRAM PpuRegWrite(addr.i, value.i)
+  Protected previous.i
+  addr=addr&7 : PpuBus=value : BgCacheAddr= -1 : RgbLastKey= -1
+  If PpuWarmup>0
+    If addr=0 Or addr=1 Or addr=5 Or addr=6
+      ProcedureReturn
+    EndIf
+  EndIf
+  If addr=0
+    previous=PpuCtrl
+    If ((PpuCtrl!value)&$20)<>0
+      OamCacheDirty=1
+    EndIf
+    PpuCtrl=value : PpuT=(PpuT&$73FF)|((value&3)<<10)
+    If (previous&$80)=0 And (value&$80)<>0 And (PpuStatus&$80)<>0
+      WorkerNmi=WorkerNmi+1
+    EndIf
+  ElseIf addr=1
+    PpuMask=value : PpuColours()
+  ElseIf addr=3
+    PpuOamAddr=value
+  ElseIf addr=4
+    OamCacheDirty=1
+    Oam(PpuOamAddr)=value : PpuOamAddr=(PpuOamAddr+1)&255
+  ElseIf addr=5
+    If PpuW=0
+      PpuT=(PpuT&$7FE0)|(value>>3) : PpuFineX=value&7
+    Else
+      PpuT=(PpuT&$C1F)|((value&7)<<12)|((value&$F8)<<2)
+    EndIf
+    PpuW=PpuW!1
+  ElseIf addr=6
+    If PpuW=0
+      PpuT=(PpuT&255)|((value&$3F)<<8)
+    Else
+      PpuT=(PpuT&$7F00)|value : PpuV=PpuT
+    EndIf
+    PpuW=PpuW!1
+  ElseIf addr=7
+    PpuWrite(PpuV,value)
+    If PpuCtrl&4
+      PpuV=(PpuV+32)&$7FFF
+    Else
+      PpuV=(PpuV+1)&$7FFF
+    EndIf
+  EndIf
+EndProcedure
+ProcedureRAM PpuBuildSpriteCache()
+  Protected i.i, row.i, first.i, finish.i, height.i, count.i
+  For i=0 To 63
+    PokeL(@CachedCount(0)+i*4,0)
+  Next
+  height=8
+  If PpuCtrl&$20
+    height=16
+  EndIf
+  For i=0 To 63
+    first=Oam(i*4)+1 : finish=first+height-1
+    If finish>239
+      finish=239
+    EndIf
+    For row=first To finish
+      count=CachedCount(row)
+      If count<8
+        CachedSprite(row*8+count)=i
+        CachedCount(row)=count+1
+      Else
+        CachedCount(row)=9
+      EndIf
+    Next
+  Next
+  OamCacheDirty=0
+EndProcedure
+ProcedureRAM PpuClearSprites()
+  ASM
+    push {r4}
+    ldr r0, =global_spriteline
+    movs r1, #0
+    movs r2, #0
+    movs r3, #0
+    movs r4, #0
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    ldr r0, =global_spritespan
+    stmia r0!, {r1-r4}
+    stmia r0!, {r1-r4}
+    pop {r4}
+  EndASM
+EndProcedure
+; Reference sprite evaluation; the board checks compare PpuSpritesRaw to it.
+Procedure PpuSpritesReference()
+  Protected i.i, row.i, height.i, tile.i, ppuAddress.i, bank.i, j.i, sx.i, pixel.i, flags.i
+  SprCount=0 : height=8
+  If PpuCtrl&$20
+    height=16
+  EndIf
+  If OamCacheDirty
+    PpuBuildSpriteCache()
+  EndIf
+  SprCount=CachedCount(PpuLine)
+  If SprCount>8
+    SprCount=8
+    If PpuMask&$18
+      PpuStatus=PpuStatus|$20
+    EndIf
+  EndIf
+  For i=0 To SprCount-1
+    j=CachedSprite(PpuLine*8+i)
+    row=PpuLine-Oam(j*4)-1
+    ppuAddress=Oam(j*4+2) : tile=Oam(j*4+1)
+    If ppuAddress&$80
+      row=height-1-row
+    EndIf
+    bank=(PpuCtrl&8)<<9
+    If height=16
+      bank=(tile&1)<<12 : tile=(tile&$FE)+(row>>3) : row=row&7
+    EndIf
+    SprIndex(i)=j : SprX(i)=Oam(j*4+3) : SprAttr(i)=ppuAddress
+    SprRow(i)=bank+tile*16+row*2
+  Next
+  PpuClearSprites()
+  If PpuMask&$10
+    For i=SprCount-1 To 0 Step -1
+      flags=16+((SprAttr(i)&3)*4)+((SprAttr(i)&$20)*2)
+      If SprIndex(i)=0
+        flags=flags|$80
+      EndIf
+      For j=0 To 7
+        sx=SprX(i)+j
+        If sx<256
+          If sx>=8 Or (PpuMask&4)<>0
+            row=j
+            If SprAttr(i)&$40
+              row=7-j
+            EndIf
+            pixel=(PeekU(Pattern+SprRow(i))>>(row*2))&3
+            If pixel
+              SpriteLine(sx)=flags|pixel : SpriteSpan(sx>>3)=SpriteSpan(sx>>3)|1
+              If i=0 And SprIndex(i)=0
+                SpriteSpan(sx>>3)=SpriteSpan(sx>>3)|2
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+      Next
+    Next
+  EndIf
+EndProcedure
+; Per-line sprite evaluation, same results as PpuSpritesReference: up to eight
+; cached sprites, overflow, then SpriteLine/SpriteSpan in reverse OAM order so
+; the lowest OAM index owns each pixel. Horizontal flip reverses the 2-bit row.
+ProcedureRAM PpuSpritesRaw()
+  ASM
+    push {lr}
+    push {r7}
+    ldr r0, =global_oamcachedirty
+    ldr r0, [r0]
+    cmp r0, #0
+    beq __sp_cache_ready
+    bl ppubuildspritecache
+__sp_cache_ready:
+    bl ppuclearsprites
+    ldr r0, =global_ppuline
+    ldr r6, [r0]
+    ldr r1, =global_cachedcount
+    ldrb r5, [r1, r6]
+    cmp r5, #8
+    bls __sp_count_ready
+    movs r5, #8
+    ldr r0, =global_ppumask
+    ldr r0, [r0]
+    movs r1, #24
+    tst r0, r1
+    beq __sp_count_ready
+    ldr r0, =global_ppustatus
+    ldr r1, [r0]
+    movs r2, #32
+    orrs r1, r2
+    str r1, [r0]
+__sp_count_ready:
+    ldr r0, =global_sprcount
+    str r5, [r0]
+    cmp r5, #0
+    bne __sp_list_start
+    b __sp_done
+__sp_list_start:
+    ldr r0, =global_ppuctrl
+    ldr r7, [r0]
+    movs r4, #0
+__sp_list:
+    lsls r0, r6, #3
+    adds r0, r0, r4
+    ldr r1, =global_cachedsprite
+    ldrb r3, [r1, r0]
+    lsls r2, r4, #2
+    ldr r1, =global_sprindex
+    str r3, [r1, r2]
+    lsls r3, r3, #2
+    ldr r1, =global_oam
+    adds r3, r3, r1
+    ldrb r0, [r3, #3]
+    ldr r1, =global_sprx
+    str r0, [r1, r2]
+    ldrb r0, [r3, #2]
+    ldr r1, =global_sprattr
+    str r0, [r1, r2]
+    ldrb r1, [r3, #0]
+    subs r1, r6, r1
+    subs r1, #1
+    ldrb r3, [r3, #1]
+    lsls r0, r0, #25
+    bcc __sp_unflipped
+    lsls r0, r7, #26
+    bpl __sp_flip8
+    movs r0, #15
+    b __sp_flip
+__sp_flip8:
+    movs r0, #7
+__sp_flip:
+    subs r1, r0, r1
+__sp_unflipped:
+    lsls r0, r7, #26
+    bmi __sp_tall
+    movs r0, #8
+    ands r0, r7
+    lsls r0, r0, #9
+    b __sp_address
+__sp_tall:
+    movs r0, #1
+    ands r0, r3
+    lsls r0, r0, #12
+    lsrs r3, r3, #1
+    lsls r3, r3, #1
+    cmp r1, #8
+    blo __sp_tall_top
+    adds r3, #1
+__sp_tall_top:
+    lsls r1, r1, #29
+    lsrs r1, r1, #29
+__sp_address:
+    lsls r3, r3, #4
+    adds r0, r0, r3
+    lsls r1, r1, #1
+    adds r0, r0, r1
+    ldr r1, =global_sprrow
+    str r0, [r1, r2]
+    adds r4, #1
+    cmp r4, r5
+    blo __sp_list
+    ldr r0, =global_ppumask
+    ldr r7, [r0]
+    movs r0, #16
+    tst r7, r0
+    bne __sp_draw_start
+    b __sp_done
+__sp_draw_start:
+    subs r4, r5, #1
+__sp_draw:
+    lsls r2, r4, #2
+    ldr r1, =global_sprattr
+    ldr r3, [r1, r2]
+    movs r0, #3
+    ands r0, r3
+    lsls r0, r0, #2
+    adds r0, #16
+    movs r1, #32
+    ands r1, r3
+    lsls r1, r1, #1
+    orrs r0, r1
+    ldr r1, =global_sprindex
+    ldr r1, [r1, r2]
+    cmp r1, #0
+    bne __sp_flags_ready
+    movs r1, #128
+    orrs r0, r1
+__sp_flags_ready:
+    ldr r1, =global_sprrow
+    ldr r1, [r1, r2]
+    ldr r5, =global_pattern
+    ldr r5, [r5]
+    ldrh r1, [r5, r1]
+    ldr r5, =global_sprx
+    ldr r2, [r5, r2]
+    lsls r3, r3, #25
+    bpl __sp_no_hflip
+    ldr r5, =$3333
+    lsrs r3, r1, #2
+    ands r3, r5
+    ands r1, r5
+    lsls r1, r1, #2
+    orrs r1, r3
+    ldr r5, =$0f0f
+    lsrs r3, r1, #4
+    ands r3, r5
+    ands r1, r5
+    lsls r1, r1, #4
+    orrs r1, r3
+    lsrs r3, r1, #8
+    lsls r1, r1, #24
+    lsrs r1, r1, #16
+    orrs r1, r3
+__sp_no_hflip:
+    movs r5, r2
+    adds r5, #8
+    ldr r3, =256
+    cmp r5, r3
+    bls __sp_end_ready
+    movs r5, r3
+__sp_end_ready:
+    movs r3, #4
+    tst r7, r3
+    bne __sp_clip_ready
+    cmp r2, #8
+    bhs __sp_clip_ready
+    movs r3, #8
+    subs r3, r3, r2
+    lsls r3, r3, #1
+    lsrs r1, r3
+    movs r2, #8
+__sp_clip_ready:
+    cmp r1, #0
+    beq __sp_next_sprite
+    push {r0, r1, r2, r5}
+    lsrs r3, r0, #6
+    movs r5, #2
+    ands r3, r5
+    adds r3, #1
+    mov r12, r3
+    movs r3, #7
+    ands r3, r2
+    movs r5, #8
+    subs r5, r5, r3
+    lsls r5, r5, #1
+    lsrs r2, r2, #3
+    ldr r3, =global_spritespan
+    adds r3, r3, r2
+    movs r6, #32
+    subs r6, r6, r5
+    movs r0, r1
+    lsls r0, r6
+    beq __sp_mark_second
+    ldrb r0, [r3]
+    mov r6, r12
+    orrs r0, r6
+    strb r0, [r3]
+__sp_mark_second:
+    lsrs r1, r5
+    beq __sp_mark_done
+    cmp r2, #31
+    bhs __sp_mark_done
+    ldrb r0, [r3, #1]
+    mov r6, r12
+    orrs r0, r6
+    strb r0, [r3, #1]
+__sp_mark_done:
+    pop {r0, r1, r2, r5}
+    ldr r6, =global_spriteline
+__sp_pixel:
+    cmp r2, r5
+    bhs __sp_next_sprite
+    movs r3, #3
+    ands r3, r1
+    beq __sp_pixel_skip
+    orrs r3, r0
+    strb r3, [r6, r2]
+__sp_pixel_skip:
+    lsrs r1, r1, #2
+    beq __sp_next_sprite
+    adds r2, #1
+    b __sp_pixel
+__sp_next_sprite:
+    subs r4, #1
+    bmi __sp_done
+    b __sp_draw
+__sp_done:
+    pop {r7}
+    pop {r0}
+    mov lr, r0
+  EndASM
+EndProcedure
+CompilerIf #PPU_PROFILE=1
+ProcedureRAM PpuSprites()
+  Protected timer.i
+  timer=Micros() : PpuSpritesRaw() : PpuSpritesUs=PpuSpritesUs+Micros()-timer
+EndProcedure
+CompilerElse
+ProcedureNaked PpuSprites()
+  ASM
+    b ppuspritesraw
+  EndASM
+EndProcedure
+CompilerEndIf
+ProcedureRAM.i PpuIncX(v.i)
+  If (v&31)=31
+    ProcedureReturn (v&$7FE0)!$400
+  EndIf
+  ProcedureReturn v+1
+EndProcedure
+ProcedureRAM PpuIncY()
+  Protected y.i
+  If (PpuV&$7000)<>$7000
+    PpuV=PpuV+$1000
+  Else
+    PpuV=PpuV&$FFF : y=(PpuV>>5)&31
+    If y=29
+      y=0 : PpuV=PpuV!$800
+    ElseIf y=31
+      y=0
+    Else
+      y=y+1
+    EndIf
+    PpuV=(PpuV&$7C1F)|(y<<5)
+  EndIf
+EndProcedure
+; Composite only spans containing sprites. Cached OAM priority is per scanline.
+ProcedureRAM PpuOverlay8()
+  ASM
+    push {r7}
+    ldr r0, =global_woff
+    ldr r0, [r0]
+    ldr r4, =global_linepixels
+    adds r4, r4, r0
+    ldr r0, =global_ppudot
+    ldr r7, [r0]
+    ldr r5, =global_spriteline
+    adds r5, r5, r7
+    movs r6, #0
+__nes_overlay_loop:
+    ldrb r0, [r5, r6]
+    cmp r0, #0
+    beq __nes_overlay_next
+    ldrb r1, [r4, r6]
+    movs r2, #3
+    ands r1, r2
+    movs r2, #128
+    tst r0, r2
+    beq __nes_overlay_priority
+    cmp r1, #0
+    beq __nes_overlay_priority
+    adds r2, r7, r6
+    cmp r2, #255
+    beq __nes_overlay_priority
+    ldr r3, =global_ppustatus
+    ldr r2, [r3]
+    movs r3, #64
+    orrs r2, r3
+    ldr r3, =global_ppustatus
+    str r2, [r3]
+__nes_overlay_priority:
+    movs r2, #64
+    tst r0, r2
+    beq __nes_overlay_write
+    cmp r1, #0
+    bne __nes_overlay_next
+__nes_overlay_write:
+    movs r1, #31
+    ands r0, r1
+    strb r0, [r4, r6]
+__nes_overlay_next:
+    adds r6, #1
+    cmp r6, #8
+    blo __nes_overlay_loop
+    pop {r7}
+  EndASM
+EndProcedure
+; Build one eight-pixel background span with two packed word stores.
+Procedure PpuRender8Reference()
+  WOff=PpuDot
+  If PpuMask&8
+    WAddr=PpuV : WI=0
+    Repeat
+      PpuFetchTile()
+      If WI=0
+        W0=WLo : W1=WHi
+        If PpuFineX=0
+          Break
+        EndIf
+      Else
+        W2=WLo : W3=WHi : Break
+      EndIf
+      WI=1 : WAddr=PpuIncX(WAddr)
+    ForEver
+    WF=PpuFineX*8
+    If WF>0 And WF<32
+      W0=(W0>>WF)|(W1<<(32-WF)) : W1=(W1>>WF)|(W2<<(32-WF))
+    ElseIf WF=32
+      W0=W1 : W1=W2
+    ElseIf WF>32
+      WF=WF-32
+      W0=(W1>>WF)|(W2<<(32-WF)) : W1=(W2>>WF)|(W3<<(32-WF))
+    EndIf
+  Else
+    W0=0 : W1=0
+  EndIf
+  If PpuDot=0 And (PpuMask&2)=0
+    W0=0 : W1=0
+  EndIf
+  PokeL(@LinePixels(0)+WOff,W0) : PokeL(@LinePixels(0)+WOff+4,W1)
+  If SpriteSpan(PpuDot>>3)
+    PpuOverlay8()
+  EndIf
+  PpuPixels=PpuPixels+8
+  If PpuMask&$18
+    PpuV=PpuIncX(PpuV)
+  EndIf
+EndProcedure
+ProcedureRAM PpuRgbLineRaw()
+  ASM
+    push {r4}
+    ldr r0, =global_linepixels
+    ldr r1, =global_rgbpal
+    ldr r2, =global_framerow
+    ldr r2, [r2]
+    movs r3, #128
+    lsls r3, r3, #1
+__nes_rgb_loop:
+    ldrb r4, [r0]
+    lsls r4, r4, #1
+    ldrh r4, [r1, r4]
+    strh r4, [r2]
+    adds r0, #1
+    adds r2, #2
+    subs r3, #1
+    bne __nes_rgb_loop
+    pop {r4}
+  EndASM
+EndProcedure
+CompilerIf #PPU_PROFILE=1
+ProcedureRAM PpuRgbLine()
+  Protected timer.i
+  timer=Micros() : PpuRgbLineRaw() : PpuRgbUs=PpuRgbUs+Micros()-timer
+EndProcedure
+CompilerElse
+ProcedureNaked PpuRgbLine()
+  ASM
+    b ppurgblineraw
+  EndASM
+EndProcedure
+CompilerEndIf
+Declare DisplayWaitLine(line.i)
+Declare DisplayFrame()
+ProcedureRAM PpuBeginLine()
+  DisplayWaitLine(PpuLine)
+  If PpuLine<120
+    FrameRow=@FrameTop(0)+PpuLine*512
+  Else
+    FrameRow=FrameBottom+(PpuLine-120)*512
+  EndIf
+EndProcedure
+ProcedureRAM PpuSendLine()
+  If PpuLine=239
+    DisplayFrame()
+  EndIf
+EndProcedure
+Procedure PpuAdvanceReference(cycles.i)
+  Protected dots.i, edge.i, step.i, width.i, sample.i
+  If PpuWarmup>0
+    PpuWarmup=PpuWarmup-cycles
+    If PpuWarmup<0
+      PpuWarmup=0
+    EndIf
+  EndIf
+  dots=cycles*3
+  While dots>0
+    edge=341
+    If PpuLine<240
+      If PpuDot<256
+        If (PpuDot&7)=0
+          If PpuDot=0
+            PpuBeginLine()
+            sample=Micros()
+            PpuSprites()
+            PpuSpritesUs=PpuSpritesUs+Micros()-sample
+          EndIf
+          PpuRenderCalls=PpuRenderCalls+1
+          If (PpuRenderCalls&63)=0
+            sample=Micros()
+            PpuRender8Reference()
+            PpuRenderUs=PpuRenderUs+Micros()-sample
+          Else
+            PpuRender8Reference()
+          EndIf
+        EndIf
+        edge=((PpuDot>>3)+1)*8
+      ElseIf PpuDot<257
+        edge=257
+      EndIf
+    ElseIf PpuLine=241 Or PpuLine=261
+      If PpuDot=0
+        edge=1
+      ElseIf PpuLine=261
+        If PpuDot<257
+          edge=257
+        ElseIf PpuDot<280
+          edge=280
+        EndIf
+      EndIf
+    EndIf
+    width=341
+    If PpuLine=261 And PpuOdd<>0 And (PpuMask&$18)<>0
+      width=340
+      If edge>width
+        edge=width
+      EndIf
+    EndIf
+    step=edge-PpuDot
+    If step>dots
+      step=dots
+    EndIf
+    PpuDot=PpuDot+step : dots=dots-step
+    If PpuDot=edge
+      If PpuLine=241 And edge=1
+        PpuStatus=PpuStatus|$80
+        If PpuCtrl&$80
+          WorkerNmi=WorkerNmi+1
+        EndIf
+      ElseIf PpuLine=261 And edge=1
+        PpuStatus=PpuStatus&31
+      ElseIf PpuLine<240 And edge=256
+        If PpuMask&$18
+          PpuIncY()
+        EndIf
+        PpuSendLine()
+      ElseIf edge=257 And (PpuMask&$18)<>0
+        PpuV=(PpuV&$7BE0)|(PpuT&$41F)
+      ElseIf PpuLine=261 And edge=280 And (PpuMask&$18)<>0
+        PpuV=(PpuV&$41F)|(PpuT&$7BE0)
+      EndIf
+      If PpuDot=width
+        PpuDot=0 : PpuLine=PpuLine+1
+        If PpuLine=262
+          PpuLine=0 : PpuOdd=PpuOdd!1 : WorkerFrames=WorkerFrames+1
+        EndIf
+      EndIf
+    EndIf
+  Wend
+  WorkerDot=PpuLine*341+PpuDot
+EndProcedure
+
+Global PpuRemaining.i, PpuBatchLeft.i
+XIncludeFile "ppu_rgb_cache.pico"
+XIncludeFile "ppu_render.pico"
+ProcedureRAM PpuEdge()
+  Protected width.i
+  If PpuLine=241 And PpuDot=1
+    PpuStatus=PpuStatus|$80
+    If PpuCtrl&$80
+      WorkerNmi=WorkerNmi+1
+    EndIf
+  ElseIf PpuLine=261 And PpuDot=1
+    PpuStatus=PpuStatus&31
+  ElseIf PpuLine<240 And PpuDot=256
+    If PpuMask&$18
+      PpuIncY()
+    EndIf
+    PpuSendLine()
+  ElseIf PpuDot=257 And (PpuMask&$18)<>0
+    PpuV=(PpuV&$7BE0)|(PpuT&$41F)
+  ElseIf PpuLine=261 And PpuDot=280 And (PpuMask&$18)<>0
+    PpuV=(PpuV&$41F)|(PpuT&$7BE0)
+  EndIf
+  width=341
+  If PpuLine=261 And PpuOdd<>0 And (PpuMask&$18)<>0
+    width=340
+  EndIf
+  If PpuDot=width
+    PpuDot=0 : PpuLine=PpuLine+1
+    If PpuLine=262
+      PpuLine=0 : PpuOdd=PpuOdd!1 : WorkerFrames=WorkerFrames+1
+    EndIf
+  EndIf
+EndProcedure
+ProcedureRAM PpuAdvance(cycles.i)
+  If PpuWarmup>0
+    PpuWarmup=PpuWarmup-cycles
+    If PpuWarmup<0
+      PpuWarmup=0
+    EndIf
+  EndIf
+  PpuRemaining=cycles*3
+  ASM
+    push {lr}
+    push {r7}
+    ldr r0, =global_ppuremaining
+    ldr r4, [r0]
+    ldr r0, =global_ppuline
+    ldr r5, [r0]
+    ldr r0, =global_ppudot
+    ldr r6, [r0]
+__nes_advance_loop:
+    cmp r4, #0
+    ble __nes_advance_done
+    ldr r7, =341
+    cmp r5, #240
+    bhs __nes_advance_blank
+    ldr r0, =256
+    cmp r6, r0
+    bhs __nes_advance_visible_end
+    movs r0, #7
+    tst r6, r0
+    bne __nes_advance_tile_edge
+    cmp r6, #0
+    bne __nes_advance_render
+    bl ppubeginline
+    bl ppusprites
+__nes_advance_render:
+    adds r7, r4, #7
+    lsrs r7, r7, #3
+    ldr r0, =256
+    subs r0, r0, r6
+    lsrs r0, r0, #3
+    cmp r7, r0
+    bls __nes_batch_counted
+    movs r7, r0
+__nes_batch_counted:
+    ldr r0, =global_ppubatchleft
+    str r7, [r0]
+    bl ppurenderraw
+    subs r7, #1
+    lsls r7, r7, #3
+    adds r6, r6, r7
+    subs r4, r4, r7
+__nes_advance_tile_edge:
+    lsrs r7, r6, #3
+    adds r7, #1
+    lsls r7, r7, #3
+    b __nes_advance_step
+__nes_advance_visible_end:
+    ldr r0, =257
+    cmp r6, r0
+    bhs __nes_advance_step
+    movs r7, r0
+    b __nes_advance_step
+__nes_advance_blank:
+    cmp r5, #241
+    beq __nes_advance_dot1
+    ldr r0, =261
+    cmp r5, r0
+    bne __nes_advance_step
+__nes_advance_dot1:
+    cmp r6, #0
+    bne __nes_advance_prerender
+    movs r7, #1
+    b __nes_advance_step
+__nes_advance_prerender:
+    ldr r0, =261
+    cmp r5, r0
+    bne __nes_advance_step
+    ldr r7, =257
+    cmp r6, r7
+    blo __nes_advance_step
+    ldr r7, =280
+    cmp r6, r7
+    blo __nes_advance_step
+    ldr r7, =341
+    ldr r0, =global_ppuodd
+    ldr r0, [r0]
+    cmp r0, #0
+    beq __nes_advance_step
+    ldr r0, =global_ppumask
+    ldr r0, [r0]
+    movs r1, #24
+    tst r0, r1
+    beq __nes_advance_step
+    subs r7, #1
+__nes_advance_step:
+    subs r0, r7, r6
+    cmp r0, r4
+    ble __nes_advance_take
+    movs r0, r4
+__nes_advance_take:
+    adds r6, r6, r0
+    subs r4, r4, r0
+    ldr r0, =global_ppudot
+    str r6, [r0]
+    cmp r6, r7
+    bne __nes_advance_loop
+    cmp r5, #240
+    bhs __nes_advance_event
+    ldr r0, =256
+    cmp r6, r0
+    blo __nes_advance_loop
+__nes_advance_event:
+    bl ppuedge
+    ldr r0, =global_ppuline
+    ldr r5, [r0]
+    ldr r0, =global_ppudot
+    ldr r6, [r0]
+    b __nes_advance_loop
+__nes_advance_done:
+    pop {r7}
+    pop {r0}
+    mov lr, r0
+  EndASM
+  WorkerDot=PpuLine*341+PpuDot
+EndProcedure

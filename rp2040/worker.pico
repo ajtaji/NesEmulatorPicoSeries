@@ -1,0 +1,163 @@
+Global PpuClock.i, PpuStatusDeferred.i, Core1IdleUs.i, Core0IdleUs.i, Core1ParkRequest.i, Core1Parked.i
+ProcedureRAM PpuSync(stamp.i)
+  Protected dt.i, timer.i
+  PpuStatusDeadline=0
+  dt=stamp-PpuClock
+  If dt<0
+    WorkerError=21
+  ElseIf dt>0
+    timer=Micros()
+    PpuAdvance(dt)
+    WorkerPpuUs=WorkerPpuUs+Micros()-timer
+    PpuClock=stamp
+  EndIf
+EndProcedure
+; Status reads may share the last synchronized state only before an event
+; that can change a status bit. All writes and ordinary synchronization
+; invalidate this horizon. Read side effects still execute for every read.
+ProcedureRAM.i NesPollStatusDone()
+  ProcedureReturn PpuRegRead(2)
+EndProcedure
+ProcedureRAM PpuSyncStatus(stamp.i)
+  Protected edge.i, line.i, spriteY.i, height.i
+  If stamp<=PpuStatusDeadline And stamp>=PpuClock
+    PpuStatusDeferred=PpuStatusDeferred+1
+    ProcedureReturn
+  EndIf
+  PpuSync(stamp)
+  PpuStatusBits=PpuStatus
+  edge=341
+  If (PpuLine=241 Or PpuLine=261) And PpuDot=0
+    edge=1
+  ElseIf PpuLine<240
+    If PpuDot=0
+      edge=0
+    ElseIf PpuDot<256 And (PpuStatus&$40)=0 And (PpuMask&$18)=$18 And SprCount>0 And SprIndex(0)=0
+      edge=((PpuDot+7)>>3)<<3
+    EndIf
+  EndIf
+  ; With a clean OAM cache, skip lines that cannot introduce either
+  ; sprite-zero hit or overflow. Other line rendering still runs at NesSync.
+  If edge=341 And PpuLine<240 And OamCacheDirty=0
+    line=PpuLine+1 : spriteY=Oam(0)+1 : height=8
+    If PpuCtrl&$20
+      height=16
+    EndIf
+    While line<240
+      If (PpuMask&$18)<>0 And (PpuStatus&$20)=0 And CachedCount(line)>8
+        Break
+      EndIf
+      If (PpuMask&$18)=$18 And (PpuStatus&$40)=0 And line>=spriteY And line<spriteY+height
+        Break
+      EndIf
+      line=line+1
+    Wend
+    edge=(line-PpuLine)*341
+    If line=240
+      edge=edge+342
+    EndIf
+  EndIf
+  If edge>PpuDot
+    PpuStatusDeadline=stamp+NesDiv(edge-PpuDot-1,3)
+  EndIf
+EndProcedure
+ProcedureRAM.i LocalPpuCommand(command.i, addr.i, value.i, stamp.i)
+  Protected i.i
+  PpuSync(stamp)
+  If command=1
+    ProcedureReturn PpuRegRead(addr&7)
+  ElseIf command=2
+    PpuRegWrite(addr&7,value)
+  ElseIf command=3
+    OamCacheDirty=1
+    For i=0 To 255
+      Oam((PpuOamAddr+i)&255)=NesDmaRead(value*256+i)
+    Next
+  ElseIf command=4
+    BgCacheAddr= -1 : RgbLastKey= -1
+    PpuChrBank=value
+    Chr=CartChr+value*8192 : Pattern=@Decoded(0)+value*8192
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM WorkerAdvance(stamp.i)
+  Protected dt.i, timer.i
+  dt=stamp-WorkerClock
+  If dt<0
+    WorkerError=20
+    ProcedureReturn
+  EndIf
+  If dt>0
+    timer=Micros()
+    ApuAdvance(dt)
+    WorkerApuUs=WorkerApuUs+Micros()-timer
+    CompilerIf #NES_SPLIT<>2
+      timer=Micros()
+      PpuAdvance(dt)
+      WorkerPpuUs=WorkerPpuUs+Micros()-timer
+    CompilerEndIf
+    WorkerClock=stamp
+  EndIf
+EndProcedure
+ProcedureRAM WorkerCommand(command.i, addr.i, value.i, stamp.i)
+  Protected i.i
+  WorkerAdvance(stamp)
+  QResult=0
+  If command=1
+    If addr<$4000
+      QResult=PpuRegRead(addr&7)
+    ElseIf addr=$4015
+      QResult=ApuReadStatus()
+    EndIf
+  ElseIf command=2
+    If addr<$4000
+      PpuRegWrite(addr&7,value)
+    Else
+      ApuWrite(addr,value)
+    EndIf
+  ElseIf command=3
+    OamCacheDirty=1
+    For i=0 To 255
+      Oam((PpuOamAddr+i)&255)=WorkerRead(value*256+i)
+    Next
+  ElseIf command=4
+    BgCacheAddr= -1 : RgbLastKey= -1
+    PpuChrBank=value
+    Chr=CartChr+value*8192 : Pattern=@Decoded(0)+value*8192
+  ElseIf command=5
+    WorkerPrgBase=value
+  EndIf
+EndProcedure
+ProcedureRAM Core1Main()
+  Protected slot.i, command.i, addr.i, value.i, start.i, i.i, p.i
+  CompilerIf #NES_SPLIT=0
+    DisplayMain()
+  CompilerEndIf
+  WorkerReady=1
+  Repeat
+    ; Parked in SRAM while core 0 writes flash (the ROM loader).
+    If PeekL(@Core1ParkRequest)<>0
+      NesFence() : Core1Parked=1
+      While PeekL(@Core1ParkRequest)<>0 : Wend
+      Core1Parked=0
+    EndIf
+    p=Micros() : i=0
+    CompilerIf #NES_SPLIT=2
+      DisplayPoll()
+    CompilerEndIf
+    If QTail<>PeekL(@QHead)
+      i=1
+      NesFence()
+      start=Micros() : slot=QTail
+      command=QCmd(slot) : addr=QAddr(slot) : value=QData(slot)
+      WorkerCommand(command,addr,value,QTime(slot))
+      WorkerBusyUs=WorkerBusyUs+Micros()-start
+      NesFence()
+      QTail=(slot+1)&127
+      QComplete=QComplete+1
+    EndIf
+    NesBluetoothPoll()
+    ; Idle time: a pass that applied no bus event and did no Bluetooth work.
+    If i=0 And BtAudioWorked=0 : Core1IdleUs=Core1IdleUs+Micros()-p : EndIf
+  ForEver
+EndProcedure
