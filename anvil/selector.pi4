@@ -1,0 +1,221 @@
+; Cartridge loading and selector state. No guest CPU, PPU or audio changes.
+; ROMs live on partition 2 (exFAT), never on the boot partition.
+Global RomLoaded.i
+CompilerIf #NES_ROM_SELECTOR=1
+#ROM_MAX_FILES=4096
+#ROM_NAME_BYTES=256
+#ROM_RAW_PRG=$03200000
+#ROM_RAW_CHR=$03300000
+#ROM_PRG_VIEWS=$03400000
+Global *rom_up,*rom_open,*rom_size,*rom_read,*rom_close,*rom_dir,*rom_next
+Global Dim RomNames.a(#ROM_MAX_FILES*#ROM_NAME_BYTES)
+Global Dim RomName.a(#ROM_NAME_BYTES)
+Global Dim RomPath.a(288)
+Global Dim RomHeader.a(16)
+Global RomCount.i,RomPage.i,RomMore.i,RomStatus.i,RomMenuActive.i
+Global RomRevision.i
+Global RomMenuStart.i,RomMenuFrames.i,RomMenuSince.i,RomMenuBase.i,RomMenuFps.i
+Global RomMapper.i,RomPrgBytes.i,RomChrBytes.i,RomSubmapper.i
+Global RomMenuPressed.i,RomChosen.i=-1
+
+Procedure.i RomServices()
+  If Header32(8)<7 Or Header32(12)<198 : ProcedureReturn 0 : EndIf
+  *rom_up=ServiceSlot(48) : *rom_open=ServiceSlot(49)
+  *rom_size=ServiceSlot(50) : *rom_read=ServiceSlot(51) : *rom_close=ServiceSlot(52)
+  *rom_dir=ServiceSlot(196) : *rom_next=ServiceSlot(197)
+  ProcedureReturn 1
+EndProcedure
+Procedure.i RomStringCopy(dst.i,src.i,cap.i)
+  Protected i.i,c.i
+  For i=0 To cap-1
+    c=PeekA(src+i) : PokeA(dst+i,c)
+    If c=0 : ProcedureReturn i : EndIf
+  Next
+  PokeA(dst+cap-1,0) : ProcedureReturn -1
+EndProcedure
+Procedure.i RomNameLength(p.i)
+  Protected n.i
+  While n<255 And PeekA(p+n)<>0 : n=n+1 : Wend
+  ProcedureReturn n
+EndProcedure
+Procedure.i RomIsNes(p.i)
+  Protected n.i
+  n=RomNameLength(p)
+  If n<5 Or n>=255 : ProcedureReturn 0 : EndIf
+  ProcedureReturn PeekA(p+n-4)=46 And (PeekA(p+n-3)|32)=110 And (PeekA(p+n-2)|32)=101 And (PeekA(p+n-1)|32)=115
+EndProcedure
+Procedure RomScan()
+  Protected r.i,i.i,j.i,k.i,a.i,b.i
+  RomCount=0 : RomPage=0 : RomMore=0 : RomStatus=0
+  RomRevision=RomRevision+1
+  If RomServices()=0 : RomStatus="Anvil ABI 1.7 is required" : ProcedureReturn : EndIf
+  If rom_up()<=0 : RomStatus="Storage is unavailable" : ProcedureReturn : EndIf
+  If rom_dir("2:/NES")<>0 : RomStatus="Create 2:/NES on the exFAT partition" : ProcedureReturn : EndIf
+  Repeat
+    SafetyPet() : r=rom_next(@RomName(0),256)
+    If r=0 : Break : EndIf
+    If r<0 : RomStatus="Directory read failed - tap REFRESH" : RomCount=0 : Break : EndIf
+    If r=1 And RomIsNes(@RomName(0))<>0
+      If RomCount>=#ROM_MAX_FILES : RomMore=1 : Break : EndIf
+      RomStringCopy(@RomNames(RomCount*256),@RomName(0),256) : RomCount=RomCount+1
+    EndIf
+  ForEver
+  ; Sort names without opening files: the directory iterator owns one cursor.
+  For i=1 To RomCount-1
+    SafetyPet()
+    RomStringCopy(@RomName(0),@RomNames(i*256),256) : j=i
+    While j>0
+      k=0
+      Repeat
+        a=PeekA(@RomNames((j-1)*256)+k) : b=RomName(k)
+        If a>=65 And a<=90 : a=a+32 : EndIf
+        If b>=65 And b<=90 : b=b+32 : EndIf
+        If a<>b Or a=0 : Break : EndIf
+        k=k+1
+      Until k=255
+      If a<=b : Break : EndIf
+      RomStringCopy(@RomNames(j*256),@RomNames((j-1)*256),256) : j=j-1
+    Wend
+    RomStringCopy(@RomNames(j*256),@RomName(0),256)
+  Next
+  If RomCount=0 And RomStatus=0 : RomStatus="No .nes files in 2:/NES - copy games there, then REFRESH" : EndIf
+EndProcedure
+; Validate before committing cartridge metadata or reading bank data.
+Procedure.i RomValidateHeader(fileBytes.i)
+  Protected flags.i,nes2.i,banks.i
+  RomStatus=0
+  If fileBytes<16 Or RomHeader(0)<>78 Or RomHeader(1)<>69 Or RomHeader(2)<>83 Or RomHeader(3)<>26
+    RomStatus="Invalid iNES header" : ProcedureReturn 0
+  EndIf
+  flags=RomHeader(6) : nes2=(RomHeader(7)&12)=8
+  RomMapper=(flags>>4)|(RomHeader(7)&240) : RomSubmapper=0
+  If nes2 : RomMapper=RomMapper|((RomHeader(8)&15)<<8) : RomSubmapper=RomHeader(8)>>4 : EndIf
+  If RomMapper<>0 And RomMapper<>2 And RomMapper<>66
+    RomStatus="Unsupported mapper - supported: 0, 2, 66" : ProcedureReturn 0
+  EndIf
+  If flags&12 : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
+  If (nes2<>0 And (RomHeader(12)&3)<>0 And (RomHeader(12)&3)<>2) Or (nes2=0 And (RomHeader(9)&1)<>0)
+    RomStatus="PAL timing is unsupported" : ProcedureReturn 0
+  EndIf
+  If (RomHeader(7)&3)<>0 : RomStatus="VS / PlayChoice systems are unsupported" : ProcedureReturn 0 : EndIf
+  If nes2
+    If RomHeader(9)<>0 : RomStatus="Extended ROM sizes are unsupported" : ProcedureReturn 0 : EndIf
+    If RomHeader(10)<>0 Or RomHeader(11)>7
+      RomStatus="Cartridge RAM size is unsupported" : ProcedureReturn 0
+    EndIf
+  EndIf
+  RomPrgBytes=RomHeader(4)*16384 : RomChrBytes=RomHeader(5)*8192
+  If RomPrgBytes=0 Or RomPrgBytes>524288 Or RomChrBytes>16384
+    RomStatus="ROM exceeds supported PRG / CHR sizes" : ProcedureReturn 0
+  EndIf
+  banks=RomHeader(4)
+  If (banks&(banks-1))<>0 Or RomHeader(5)=3
+    RomStatus="Bank counts must be powers of two" : ProcedureReturn 0
+  EndIf
+  If RomMapper=0 And (RomPrgBytes>32768 Or RomChrBytes>8192)
+    RomStatus="Unsupported NROM geometry" : ProcedureReturn 0
+  EndIf
+  If RomMapper=2 And RomChrBytes<>0
+    RomStatus="UxROM requires CHR RAM" : ProcedureReturn 0
+  EndIf
+  If RomMapper=66 And ((RomPrgBytes&32767)<>0 Or RomPrgBytes>131072 Or RomChrBytes=0)
+    RomStatus="Unsupported GxROM geometry" : ProcedureReturn 0
+  EndIf
+  If fileBytes<16+RomPrgBytes+RomChrBytes
+    RomStatus="Truncated cartridge data" : ProcedureReturn 0
+  EndIf
+  ProcedureReturn 1
+EndProcedure
+Procedure.i RomReadExact(off.i,dst.i,n.i)
+  Protected chunk.i,got.i
+  While n>0
+    chunk=n : If chunk>16384 : chunk=16384 : EndIf
+    got=rom_read(off,dst,chunk) : SafetyPet()
+    If got<>chunk : ProcedureReturn 0 : EndIf
+    off=off+chunk : dst=dst+chunk : n=n-chunk
+  Wend
+  ProcedureReturn 1
+EndProcedure
+Procedure.i RomLoad(index.i)
+  Protected n.i,size.i,i.i,j.i,src.i,dst.i
+  If index<0 Or index>=RomCount : ProcedureReturn 0 : EndIf
+  RomLoaded=0
+  n=RomStringCopy(@RomPath(0),"2:/NES/",288)
+  If RomStringCopy(@RomPath(n),@RomNames(index*256),288-n)<0
+    RomStatus="ROM path is too long" : ProcedureReturn 0
+  EndIf
+  If rom_open(@RomPath(0))<=0 : RomStatus="Cannot open game - tap REFRESH" : ProcedureReturn 0 : EndIf
+  size=rom_size()
+  If RomReadExact(0,@RomHeader(0),16)=0
+    rom_close() : RomStatus="Cannot read iNES header" : ProcedureReturn 0
+  EndIf
+  If RomValidateHeader(size)=0 : rom_close() : ProcedureReturn 0 : EndIf
+  If RomReadExact(16,#ROM_RAW_PRG,RomPrgBytes)=0 Or RomReadExact(16+RomPrgBytes,#ROM_RAW_CHR,RomChrBytes)=0
+    rom_close() : RomStatus="ROM read failed - game was not started" : ProcedureReturn 0
+  EndIf
+  rom_close()
+  ; Existing immutable 32 KiB windows, exactly as rom_catalog.prg_views.
+  If RomMapper=2
+    For i=0 To RomHeader(4)-1
+      dst=#ROM_PRG_VIEWS+i*32768
+      For j=0 To 16383
+        PokeA(dst+j,PeekA(#ROM_RAW_PRG+i*16384+j))
+        PokeA(dst+16384+j,PeekA(#ROM_RAW_PRG+RomPrgBytes-16384+j))
+      Next
+      SafetyPet()
+    Next
+    CartPrg=#ROM_PRG_VIEWS : CartPrgBanks=RomHeader(4)
+  Else
+    CartPrg=#ROM_RAW_PRG : CartPrgBanks=RomPrgBytes/32768
+    If RomPrgBytes=16384
+      For j=0 To 16383 : PokeA(#ROM_RAW_PRG+16384+j,PeekA(#ROM_RAW_PRG+j)) : Next
+      CartPrgBanks=1
+    EndIf
+  EndIf
+  CartMapper=RomMapper : CartChr=#ROM_RAW_CHR : CartChrRam=RomChrBytes=0
+  CartChrBanks=RomChrBytes/8192 : If CartChrRam : CartChrBanks=2 : EndIf
+  CartConflicts=(RomMapper=2 Or RomMapper=66) And RomSubmapper<>1
+  PpuMirroring=RomHeader(6)&1 : CartPrgSelected=0 : CartChrSelected=0
+  CartTitle=@RomNames(index*256) : RomChosen=index : RomLoaded=1
+  ProcedureReturn 1
+EndProcedure
+; Input plugin supplies menu actions: 1..8 rows, -1 previous, -2 next,
+; -3 refresh. EXIT uses the shared ExitRequested flag.
+Procedure.i RomSelector()
+  Protected action.i,index.i,now.i,dt.i,c.i
+  RomMenuActive=1 : RomMenuStart=NesHostUs() : RomMenuSince=RomMenuStart
+  RomScan() : svc_flush()
+  While ExitRequested=0 And VideoError=0
+    SafetyPet() : action=InputMenuPoll()
+    If action=-1 And RomPage>0 : RomPage=RomPage-1 : EndIf
+    If action=-2 And (RomPage+1)*8<RomCount : RomPage=RomPage+1 : EndIf
+    If action=-3 : RomScan() : EndIf
+    If action>=100
+      For index=0 To RomCount-1
+        c=RomNames(index*256)
+        If c>=97 And c<=122 : c=c-32 : EndIf
+        If c>=65+action-100 : RomPage=index/8 : Break : EndIf
+      Next
+    ElseIf action>0
+      index=RomPage*8+action-1
+      If RomLoad(index) : Break : EndIf
+    EndIf
+    now=NesHostUs() : dt=now-RomMenuSince
+    If dt>=1000000
+      RomMenuFps=(RomMenuFrames-RomMenuBase)*10000000/dt
+      RomMenuBase=RomMenuFrames : RomMenuSince=now
+    EndIf
+    If VideoMenuDraw()=0 : VideoError=217 : Break : EndIf
+    RomMenuFrames=RomMenuFrames+1
+    If #TEST_SECONDS>0 And now-RomMenuStart>=#TEST_SECONDS*1000000 : ExitRequested=1 : EndIf
+  Wend
+  RomMenuActive=0 : svc_flush() : NesController=0
+  For index=0 To 15 : ContactBits(index)=0 : Next
+  PokeI($02F00000,$4D454E55) : PokeI($02F00008,NesHostUs()-RomMenuStart)
+  PokeI($02F00058,ExitRequested) : PokeI($02F00060,TouchEvents) : PokeI($02F00068,VideoError)
+  PokeI($02F001B0,RomMenuFrames) : PokeI($02F001B8,RomCount)
+  PokeI($02F001C0,RomChosen) : PokeI($02F001C8,RomLoaded)
+  PokeI($02F001D0,RomMenuFps)
+  ProcedureReturn RomLoaded<>0 And ExitRequested=0 And VideoError=0
+EndProcedure
+CompilerEndIf

@@ -8,6 +8,7 @@ Global NgWidth.i=800,NgHeight.i=1280,NgLogicalW.i=1280,NgLogicalH.i=800
 Global NgPitch.i=3200,NgRotation.i=90
 Global Dim NgPixels.l(61440)
 Global Dim NgClear.l(4)
+Global NgMenuReady.i
 Global NgConvertUs.i,NgUploadUs.i,NgGpuUs.i,NgPresentUs.i
 Declare VideoUi()
 Declare VideoHudDraw()
@@ -179,6 +180,12 @@ Procedure NgPresent()
     If line<previous : Break : EndIf
     previous=line : AudioPoll() : InputPoll() : SafetyPet()
   Until NesHostUs()-start>=20000
+  CompilerIf #NES_ROM_SELECTOR=1
+    If RomMenuActive
+      If DmaCopy2D(dst,3200,$07400000,3200,3200,1280)=0 : VideoError=213 : EndIf
+      ProcedureReturn
+    EndIf
+  CompilerEndIf
   If VideoFrames=0
     If DmaCopy2D(dst,3200,src,NgImagePitch,3200,1280)=0 : VideoError=213 : EndIf
   Else
@@ -190,6 +197,7 @@ Procedure NgPresent()
     If DmaCopy2D(dst+384*3200+220*4,3200,src+384*NgImagePitch+220*4,NgImagePitch,480*4,512)=0 : VideoError=213 : EndIf
   EndIf
 EndProcedure
+
 Procedure.i VideoStart(top.i,bottom.i)
   Protected i.i,c.i,src.i,t.i,rc.i
   t=NesHostUs()

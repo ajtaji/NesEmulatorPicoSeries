@@ -17,3 +17,4 @@ Global Dim AlternateTop.u(30720)
 Global Dim AlternateBottom.u(30720)
 Global FramePending.i,FrameConsumed.i,PublishTop.i,PublishBottom.i
 Global ComputeDone.i,SliceEnd.i,ParallelError.i
+XIncludeFile "selector.pi4"

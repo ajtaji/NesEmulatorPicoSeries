@@ -1,0 +1,66 @@
+CompilerIf #NES_ROM_SELECTOR=1
+Global Dim MenuLine.a(72)
+Global MenuDrawPage.i=-1,MenuDrawStatus.i,MenuDrawCount.i=-1,MenuDrawFps.i=-1
+Global MenuDrawRevision.i=-1
+Procedure.i VideoMenuDraw()
+  Protected i.i,j.i,n.i,p.i,c.i,full.i
+  full=(MenuDrawPage<>RomPage Or MenuDrawStatus<>RomStatus Or MenuDrawCount<>RomCount Or MenuDrawRevision<>RomRevision)
+  If full=0 And MenuDrawFps=RomMenuFps
+    NgPresent() : ProcedureReturn VideoError=0
+  EndIf
+  If NeonVkChromeBegin(@NgClear(0))<>0 : ProcedureReturn 0 : EndIf
+  If full
+    Neon_Box(0,0,ScreenW,ScreenH,$FF080D16)
+  Neon_Text(#NEON_FONT_SMALL,32,22,"NES - CHOOSE A GAME",$FFFFFFFF)
+  VideoButton(ScreenW-140,10,130,65,"EXIT")
+  EndIf
+  Neon_Box(0,52,1100,36,$FF080D16)
+  HudAt=0 : HudPut("2:/NES   ") : HudNumber(RomCount)
+  HudPut(" games   PAGE ") : HudNumber(RomPage+1) : HudPut("/") : HudNumber((RomCount+7)/8)
+  HudPut("   MENU ") : HudNumber(RomMenuFps/10) : HudPut(".") : HudNumber(RomMenuFps % 10) : HudPut(" FPS")
+  Neon_Text(#NEON_FONT_SMALL,32,54,@HudBuffer(0),$FFB8C8DC)
+  If full
+  For i=0 To 25
+    MenuLine(0)=65+i : MenuLine(1)=0
+    Neon_Box(32+i*44,90,40,38,$FF25364A)
+    Neon_Text(#NEON_FONT_SMALL,44+i*44,94,@MenuLine(0),$FFFFFFFF)
+  Next
+  For i=0 To 7
+    n=RomPage*8+i : If n>=RomCount : Break : EndIf
+    p=@RomNames(n*256)
+    For j=0 To 69
+      c=PeekA(p+j) : MenuLine(j)=c
+      If c=0 : Break : EndIf
+      If c<32 Or c>126 : MenuLine(j)=63 : EndIf
+    Next
+    MenuLine(70)=0
+    Neon_Box(32,140+i*62,ScreenW-64,54,$FF25364A)
+    Neon_Text(#NEON_FONT_SMALL,48,150+i*62,@MenuLine(0),$FFFFFFFF)
+  Next
+  If RomStatus
+    Neon_Text(#NEON_FONT_SMALL,32,650,RomStatus,$FFFFB060)
+  Else
+    Neon_Text(#NEON_FONT_SMALL,32,650,"Tap a game to play. Supported mappers: 0, 2, 66.",$FFB8C8DC)
+  EndIf
+  VideoButton(32,700,180,75,"PREVIOUS") : VideoButton(232,700,180,75,"NEXT")
+  VideoButton(442,700,200,75,"REFRESH")
+  If RomMore : Neon_Text(#NEON_FONT_SMALL,670,728,"First 4096 files shown",$FFFFB060) : EndIf
+  EndIf
+  If NeonVkChromeEnd()<>0 : ProcedureReturn 0 : EndIf
+  NeonVkChromePresentConsume()
+  ; Retain the complete menu outside the GPU render target. The render pass
+  ; clears its target, so a HUD-only redraw copies only its rotated strip.
+  If DmaSetBounds($07400000,4096000)=0 : ProcedureReturn 0 : EndIf
+  If full
+    If DmaCopy2D($07400000,3200,NgImageBase,NgImagePitch,3200,1280)=0 : VideoError=213 : EndIf
+  Else
+    If DmaCopy2D($07400000+712*4,3200,NgImageBase+712*4,NgImagePitch,36*4,1100)=0 : VideoError=213 : EndIf
+  EndIf
+  If DmaSetBounds($08A00000,4096000)=0 : ProcedureReturn 0 : EndIf
+  NgMenuReady=1 : MenuDrawPage=RomPage : MenuDrawStatus=RomStatus
+  MenuDrawCount=RomCount : MenuDrawFps=RomMenuFps
+  MenuDrawRevision=RomRevision
+  NgPresent()
+  ProcedureReturn VideoError=0
+EndProcedure
+CompilerEndIf

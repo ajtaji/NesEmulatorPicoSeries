@@ -1,0 +1,82 @@
+; Explicit host-built ROM bundle in the high payload window. Writes only
+; 2:/NES/<safe basename>. Each file is read back and compared byte for byte.
+; Existing identical files are skipped, so an interrupted copy can resume.
+XIncludeFile "../services.pi4"
+XIncludeFile "../platform.pi4"
+Global *cp_up,*cp_open,*cp_size,*cp_read,*cp_close,*cp_write
+Global Dim CpPath.a(288)
+Global Dim CpRead.a(16384)
+Global CpWritten.i,CpSkipped.i,CpIndex.i,CpBytes.i
+Procedure.i CpSame(src.i,n.i)
+  Protected off.i,chunk.i,j.i
+  If cp_open(@CpPath(0))<=0 : ProcedureReturn 0 : EndIf
+  If cp_size()<>n : cp_close() : ProcedureReturn 0 : EndIf
+  While off<n
+    chunk=n-off : If chunk>16384 : chunk=16384 : EndIf
+    If cp_read(off,@CpRead(0),chunk)<>chunk : cp_close() : ProcedureReturn 0 : EndIf
+    j=0
+    While j+8<=chunk
+      If PeekI(@CpRead(j))<>PeekI(src+off+j) : cp_close() : ProcedureReturn 0 : EndIf
+      j=j+8
+    Wend
+    While j<chunk
+      If CpRead(j)<>PeekA(src+off+j) : cp_close() : ProcedureReturn 0 : EndIf
+      j=j+1
+    Wend
+    off=off+chunk : SafetyPet()
+  Wend
+  cp_close() : ProcedureReturn 1
+EndProcedure
+Procedure.i CpRun()
+  Protected base.i,total.i,count.i,start.i,i.i,j.i,entry.i,off.i,n.i,c.i,len.i
+  base=$40000000
+  If PeekI(base)<>$314B43415053454E : ProcedureReturn 201 : EndIf
+  count=PeekI(base+8) : total=PeekI(base+16) : start=PeekI(base+24)
+  If count<1 Or count>4096 Or total<32 Or total>$10000000 Or start<>32+count*272 Or start>total : ProcedureReturn 202 : EndIf
+  ; Validate the entire table before any storage writes.
+  For i=0 To count-1
+    entry=base+32+i*272 : len=0
+    For j=0 To 255
+      c=PeekA(entry+j)
+      If c=0 : Break : EndIf
+      If c<32 Or c=47 Or c=92 Or c=58 : ProcedureReturn 203 : EndIf
+      len=len+1
+    Next
+    If len<5 Or len>=256 : ProcedureReturn 204 : EndIf
+    If PeekA(entry+len-4)<>46 Or (PeekA(entry+len-3)|32)<>110 Or (PeekA(entry+len-2)|32)<>101 Or (PeekA(entry+len-1)|32)<>115 : ProcedureReturn 205 : EndIf
+    off=PeekI(entry+256) : n=PeekI(entry+264)
+    If off<start Or n<1 Or n>8388608 Or off>total Or n>total-off : ProcedureReturn 206 : EndIf
+  Next
+  If cp_up()<=0 : ProcedureReturn 207 : EndIf
+  For i=0 To count-1
+    CpIndex=i : entry=base+32+i*272
+    CpPath(0)=50 : CpPath(1)=58 : CpPath(2)=47 : CpPath(3)=78
+    CpPath(4)=69 : CpPath(5)=83 : CpPath(6)=47
+    For j=0 To 255
+      c=PeekA(entry+j) : CpPath(7+j)=c : If c=0 : Break : EndIf
+    Next
+    off=PeekI(entry+256) : n=PeekI(entry+264) : SafetyPet()
+    If CpSame(base+off,n)
+      CpSkipped=CpSkipped+1
+    Else
+      If cp_write(@CpPath(0),base+off,n)<=0 : ProcedureReturn 208 : EndIf
+      If CpSame(base+off,n)=0 : ProcedureReturn 209 : EndIf
+      CpWritten=CpWritten+1
+    EndIf
+    CpBytes=CpBytes+n
+  Next
+  ProcedureReturn 0
+EndProcedure
+Procedure.i Main()
+  Protected result.i
+  CaptureServices()
+  If ServicesBegin()=0 : ProcedureReturn 100 : EndIf
+  *cp_up=ServiceSlot(48) : *cp_open=ServiceSlot(49) : *cp_size=ServiceSlot(50)
+  *cp_read=ServiceSlot(51) : *cp_close=ServiceSlot(52) : *cp_write=ServiceSlot(54)
+  If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
+  result=CpRun()
+  PokeI($02F00200,result) : PokeI($02F00208,CpWritten)
+  PokeI($02F00210,CpSkipped) : PokeI($02F00218,CpIndex)
+  PokeI($02F00220,CpBytes)
+  PlatformEnd() : ProcedureReturn result
+EndProcedure

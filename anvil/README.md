@@ -10,6 +10,12 @@ for 60 seconds at 59.97 emulated and 60.00 displayed FPS with Bluetooth audio.
 The user confirmed the touch controls and audible output. See
 [Diagnostics/board-results.json](Diagnostics/board-results.json) for measured
 results, error counters and the distinction between timed and touch exits.
+The exFAT selector was tested with 857 ROM files; all copied files were read
+back and compared byte for byte. Its 48 loader checks passed. The user selected
+and played Rygar, which measured 60.02 displayed FPS and returned via EXIT.
+The final menu presents at a steady 60 FPS; its completed image is retained
+instead of rebuilding the text list every frame. See
+[Diagnostics/selector-results.json](Diagnostics/selector-results.json).
 
 ## Build
 
@@ -19,11 +25,21 @@ for this port is commit `b79122db24f361eded4f076a6da48e4dd429d63d`.
 Use `PureMetalForge.exe --compile`; the build helper invokes that compiler.
 
 ```powershell
-python tools/build_anvil.py --compiler <PureMetalForge.exe> --anvil <Anvil-checkout> --out <work-folder>/nes.img --rom <game.nes>
+python tools/build_anvil.py --compiler <PureMetalForge.exe> --anvil <Anvil-checkout> --out <work-folder>/nes.img
 ```
 
-Omit `--rom` to build the original demonstration cartridge. `--seconds 10`
-enables a bounded test run; the default, `--seconds 0`, runs until Exit.
+The default opens the touch ROM selector on **exFAT partition 2, `2:/NES`**.
+Copy `.nes` files into that folder; no rebuild is needed when games change.
+Tap a title to play, use the letters to jump through the sorted list, or
+PREVIOUS/NEXT to page. REFRESH rereads the folder. EXIT returns to Anvil from
+both the selector and the game. Relaunch the same application to pick another
+game. The D-pad, A/B, Start and Select controls are preserved during gameplay.
+The selector remains silent; Bluetooth starts only after a game is chosen.
+
+`--no-selector` builds the original demonstration cartridge. `--rom <game.nes>`
+retains the embedded single-game diagnostic mode. `--seconds 10` enables a
+bounded test (separate menu and game limits); the default, `--seconds 0`, runs
+until Exit.
 The `.img.pmf` sidecar is the loadable application. ROM data and local
 dependency paths are confined to the output directory's generated wrapper.
 Do not commit those generated wrappers or commercial ROM payloads.
@@ -32,8 +48,25 @@ Upload/run with Anvil's `tools/board_run.py`, supplying the board's address
 with `--console-ip`. It asks the running monitor for its staging window,
 checks the transfer digest on the board and captures the returned frame.
 For production storage use a separate application filename, never
-`KERNEL8.IMG`. This initial port selects a ROM at build time; the Pico flash
-directory and USB ROM loader are not used by the Pi.
+`KERNEL8.IMG`. For example, save the application as `2:/payloads/NES.PMF`
+and launch it with `boot 2:/payloads/NES.PMF`. The Pico flash directory and
+USB ROM loader are not used by the Pi.
+
+To copy an explicitly named local ROM folder over Anvil's network console:
+
+```powershell
+python tools/copy_anvil_roms.py --directory "G:\Nes Roms\USA" --ip <Pi-IP> --compiler <PureMetalForge.exe> --anvil <Anvil-checkout> --out <private-work-folder>
+```
+
+This copies only that folder's `.nes` files (not subfolders), verifies the RAM
+transfer digest, then compares every stored file byte for byte. Identical files
+are skipped; different files with the same name in `2:/NES` are replaced. It
+does not delete extra games or change boot files/settings. Its private bundle
+must not be committed. The copy tool is bounded to 4096 files and 256 MiB per
+batch; the selector displays up to 4096 games. Filenames must fit 255 UTF-8 bytes.
+ROM loading supports at most 512 KiB PRG and 16 KiB CHR within the existing
+mapper geometry limits. Invalid/truncated files and unsupported mappers stay
+in the selector with an error message. Battery save RAM is not implemented.
 
 ## Modules and ownership
 
@@ -56,6 +89,15 @@ directory and USB ROM loader are not used by the Pi.
   bits. The host UI has D-pad, A, B, Start, Select and Exit. Multiple contact
   IDs are tracked independently. Exit signals the guest worker to stop,
   joins it and returns to Anvil.
+* `selector.pi4` scans and loads files through Anvil ABI 1.7. The immutable
+  UxROM views match `rom_catalog.prg_views`; no opcode, guest rendering or APU
+  behavior is changed. Raw PRG uses `0x03200000` (512 KiB), CHR uses
+  `0x03300000` (16 KiB), and PRG views use `0x03400000` (1 MiB). These are
+  separate from stacks, framebuffer storage and the GPU/DMA arenas.
+  The default video plugin retains its complete menu image at `0x07400000`
+  (4,096,000 bytes). List changes trigger a full GPU redraw; FPS changes draw
+  only the HUD strip. Each presentation still publishes a complete frame by
+  DMA at vertical sync. The normal game render path is unchanged.
 * `hud.pi4` and `ui.pi4` draw host controls and separate VIDEO/EMU FPS
   counters. Neither changes the emulated PPU image.
 * `audio_null.pi4` and `audio_bluetooth.pi4` are alternative audio plugins.
@@ -73,11 +115,18 @@ opcode, PPU pixel or APU sample. The video and PCM contracts are the same as
 [OUTPUTS.md](../OUTPUTS.md). Anvil lifecycle additions are:
 
 * Input: `InputPoll()` updates `NesController` and `ExitRequested`.
+  With the selector enabled, `InputMenuPoll()` returns 1..8 for visible rows,
+  -1/-2 for previous/next, -3 for refresh, or 100..125 for A..Z. EXIT updates
+  `ExitRequested`. While `RomMenuActive` is set, normal input polling must not
+  consume menu contacts.
 * Audio: `AudioStop()` releases the device; `AudioDiagnostics(address)`
   stores plugin-specific diagnostics (the Bluetooth plugin reserves 192 bytes).
 * Video: `VideoDiagnostics(address)` stores four u64 timing totals. The
   scheduler retains the frame buffers until `VideoPoll()` reports completion
   and aborts a failed or timed-out transfer.
+  Selector builds also require a synchronous `VideoMenuDraw()` that reads the
+  published menu state and reports success/failure. `video_menu_neon.pi4` is
+  the default presentation module; a replacement display supplies its own.
 
 The bundled Neon UI is a host presentation layer; a replacement screen may
 also replace that layer. The initial build helper includes the Anvil graphics
@@ -109,6 +158,9 @@ rather than assuming every audio packet was delivered without interruption.
 checks of every packed CHR tile-fetch address against the portable reference.
 `--verify-audio` in a Bluetooth build runs the existing mono/stereo SBC oracle
 vectors and returns without opening the radio or starting emulation.
+`--verify-rom` exercises malformed headers and short reads, scans exFAT, and
+compares the loaded Mario/Duck Hunt, Contra and Castlevania PRG/CHR images to
+host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
 
 `return_test.pi4` is the small, standalone one-second return proof. The
 compiler must be given `--entry-returns --wants-services`, with separate image,
@@ -116,4 +168,5 @@ BSS and stack addresses as in `build_anvil.py`.
 
 The current emulator's supported mapper set remains **0, 2 and 66**. This
 port does not add mapper compatibility or pretend that all iNES games work.
-Game parsing and PRG views use the same `rom_catalog.py` checks as the Pico.
+The Pi parser implements a bounded iNES/NES 2.0 subset for those mappers; it
+explicitly rejects extended NES 2.0 ROM-size encodings and unsupported RAM.

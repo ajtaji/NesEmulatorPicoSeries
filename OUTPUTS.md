@@ -186,3 +186,6 @@ core 0. This differs from the Pico ownership described above. Plugins must
 release their resources before Main returns to Anvil. The default video module
 uses Neon Arcade/Vulkan and complete-frame DMA; Bluetooth consumes the same
 48 kHz signed PCM ring. The initial port has build-time plugin selection.
+The Anvil touch selector adds `VideoMenuDraw()` and `InputMenuPoll()` to
+selector-enabled plugins; their contracts and exFAT ROM folder are documented
+in the Anvil README. `--no-selector` retains the smaller embedded-demo mode.

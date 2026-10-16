@@ -1,0 +1,82 @@
+; On-board parser, short-read and exFAT bank-image tests. No ROM bytes here.
+Global RomChecks.i,RomFailures.i,RomFirstFail.i
+Procedure RomCheck(actual.i,expected.i)
+  RomChecks=RomChecks+1
+  If actual<>expected
+    RomFailures=RomFailures+1 : If RomFirstFail=0 : RomFirstFail=RomChecks : EndIf
+  EndIf
+EndProcedure
+Procedure RomTestHeader()
+  Protected i.i
+  For i=0 To 15 : RomHeader(i)=0 : Next
+  RomHeader(0)=78 : RomHeader(1)=69 : RomHeader(2)=83 : RomHeader(3)=26
+  RomHeader(4)=1 : RomHeader(5)=1
+EndProcedure
+Procedure.i RomTestShort(off.i,dst.i,n.i)
+  ProcedureReturn n-1
+EndProcedure
+Procedure.i RomFnv(p.i,n.i)
+  Protected h.i,i.i
+  h=2166136261
+  For i=0 To n-1
+    h=((h!PeekA(p+i))*16777619)&$FFFFFFFF
+    If (i&16383)=0 : SafetyPet() : EndIf
+  Next
+  ProcedureReturn h
+EndProcedure
+Procedure RomTestGame(*name,mapper.i,bytes.i,prgHash.i,chrHash.i)
+  Protected i.i,j.i,match.i,index.i
+  index=-1
+  For i=0 To RomCount-1
+    j=0 : match=1
+    Repeat
+      If PeekA(*name+j)<>RomNames(i*256+j) : match=0 : Break : EndIf
+      If PeekA(*name+j)=0 : Break : EndIf
+      j=j+1
+    Until j=255
+    If match : index=i : Break : EndIf
+  Next
+  RomCheck(index>=0,1)
+  If index<0 : ProcedureReturn : EndIf
+  RomCheck(RomLoad(index),1)
+  If RomLoaded=0 : ProcedureReturn : EndIf
+  RomCheck(CartMapper,mapper) : RomCheck(CartPrgBanks*32768,bytes)
+  RomCheck(CartChrRam,mapper=2) : RomCheck(CartChrBanks,2)
+  RomCheck(RomFnv(CartPrg,bytes),prgHash)
+  RomCheck(RomFnv(#ROM_RAW_CHR,RomChrBytes),chrHash)
+EndProcedure
+Procedure.i RomLoaderTests()
+  Protected t.i,saved.i
+  t=NesHostUs()
+  RomTestHeader() : RomCheck(RomValidateHeader(24592),1)
+  RomHeader(0)=0 : RomCheck(RomValidateHeader(24592),0)
+  RomTestHeader() : RomCheck(RomValidateHeader(15),0) : RomCheck(RomValidateHeader(24591),0)
+  RomHeader(6)=64 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(6)=4 : RomCheck(RomValidateHeader(25104),0)
+  RomHeader(6)=8 : RomCheck(RomValidateHeader(24592),0)
+  RomTestHeader() : RomHeader(9)=1 : RomCheck(RomValidateHeader(24592),0)
+  RomTestHeader() : RomHeader(7)=1 : RomCheck(RomValidateHeader(24592),0)
+  RomTestHeader() : RomHeader(4)=0 : RomCheck(RomValidateHeader(24592),0)
+  RomTestHeader() : RomHeader(4)=3 : RomCheck(RomValidateHeader(100000),0)
+  RomTestHeader() : RomHeader(5)=3 : RomCheck(RomValidateHeader(100000),0)
+  RomTestHeader() : RomHeader(6)=32 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(5)=0 : RomCheck(RomValidateHeader(16400),1)
+  RomTestHeader() : RomHeader(6)=32 : RomHeader(7)=64 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(4)=2 : RomCheck(RomValidateHeader(40976),1)
+  RomHeader(4)=16 : RomCheck(RomValidateHeader(270352),0)
+  RomTestHeader() : RomHeader(7)=8 : RomCheck(RomValidateHeader(24592),1)
+  RomHeader(9)=1 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(9)=0 : RomHeader(10)=7 : RomCheck(RomValidateHeader(24592),0)
+  RomHeader(10)=0 : RomHeader(11)=8 : RomCheck(RomValidateHeader(24592),0)
+  RomCheck(RomServices(),1)
+  saved=rom_read : *rom_read=@RomTestShort
+  RomCheck(RomReadExact(0,@RomHeader(0),16),0) : *rom_read=saved
+  RomScan() : RomCheck(RomCount>0,1)
+  RomTestGame("Super Mario Bros - Duck Hunt (U).nes",66,65536,$5F6F1687,$7FC55CB8)
+  RomTestGame("Contra (U).nes",2,262144,$0CE20FFF,$811C9DC5)
+  RomTestGame("Castlevania (U) (PRG 0).nes",2,262144,$B6C16DBB,$811C9DC5)
+  PokeI($02F00280,RomChecks) : PokeI($02F00288,RomFailures)
+  PokeI($02F00290,RomFirstFail) : PokeI($02F00298,RomCount)
+  PokeI($02F002A0,NesHostUs()-t)
+  ProcedureReturn RomFailures
+EndProcedure

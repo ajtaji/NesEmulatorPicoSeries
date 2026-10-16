@@ -1,0 +1,43 @@
+; Touch ROM selector on exFAT partition 2; returning payload. PMF_ROOT must name an Anvil checkout.
+#DSP_DMA_LINKED=1
+#NES_NATIVE_TIMER=1
+#NES_VERIFY_CODEC=0
+#NES_VERIFY_CORE=0
+#NES_VERIFY_ROM=0
+#NES_ROM_SELECTOR=1
+XIncludeFile "RaspberryPi4/Lib/uart.pi4"
+XIncludeFile "RaspberryPi4/Lib/timer.pi4"
+XIncludeFile "RaspberryPi4/Lib/mailbox.pi4"
+XIncludeFile "RaspberryPi4/Lib/mmu.pi4"
+XIncludeFile "RaspberryPi4/Lib/dma.pi4"
+XIncludeFile "RaspberryPi4/Lib/display.pi4"
+XIncludeFile "RaspberryPi4/Lib/v3dqpu.pi4"
+XIncludeFile "RaspberryPi4/Lib/v3d.pi4"
+XIncludeFile "RaspberryPi4/Lib/neon.pi4"
+XIncludeFile "Anvil/Graphics/Vulkan/vk_api.pbi"
+XIncludeFile "Anvil/Graphics/Vulkan/vk_spirv_fixtures.pbi"
+XIncludeFile "Anvil/Graphics/Vulkan/vk_v3d_shader.pi4"
+XIncludeFile "RaspberryPi4/Board/vulkan_dma.pi4"
+XIncludeFile "Anvil/Graphics/Vulkan/vk_v3d_backend.pi4"
+XIncludeFile "Anvil/Graphics/Vulkan/neon_vk_chrome.pi4"
+#CPU_TIMING=1
+#CPU_ASM_TAIL=0
+#NES_SPLIT=0
+#CART_CHR_BANKS=32
+#PPU_PROFILE=0
+#TEST_SECONDS=0
+#NES_VIDEO_BACKEND=2
+#NES_AUDIO_BACKEND=0
+XIncludeFile "core.pi4"
+XIncludeFile "video_neon.pi4"
+XIncludeFile "input_touch.pi4"
+XIncludeFile "hud.pi4"
+XIncludeFile "ui.pi4"
+XIncludeFile "video_menu_neon.pi4"
+XIncludeFile "platform.pi4"
+XIncludeFile "audio_null.pi4"
+XIncludeFile "runtime.pi4"
+XIncludeFile "scheduler.pi4"
+XIncludeFile "cartridge.pi4"
+Procedure AudioConfigure()
+EndProcedure
