@@ -46,6 +46,11 @@ profile. Release builds disable detailed observer/predictor timers. Remaining
 Goal! Two scenes still run below 60 FPS; connected Bluetooth does not prove clear
 audio when emulation is slow. The PPU remains instruction-timestamped with its
 existing eight-pixel granularity, rather than a fully cycle-exact implementation.
+In the final Goal! Two title-screen sample, late intervals reached 57–58 FPS:
+PPU synchronization accounted for about 550 ms/s and CPU execution about 380
+ms/s. An earlier IRQ-enabled cup-menu sample spent about 225 ms/s waiting for
+PPU RPCs. These counters overlap synchronization totals and must not be added
+as independent frame costs. Further work remains in PPU/bus synchronization.
 
 ## Native validation
 

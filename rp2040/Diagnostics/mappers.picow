@@ -338,5 +338,3 @@ Procedure MapperTests()
   Repeat : UsbSerialTask() : SafetyPet() : ForEver
 EndProcedure
 MapperTests()
-
-
