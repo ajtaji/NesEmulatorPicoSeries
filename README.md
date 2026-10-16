@@ -11,15 +11,20 @@ original synthetic demo cartridge is bundled for checks. Load games you are
 entitled to use.
 
 **[Download firmware from Releases](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest).**
-Choose the chip and display that match your hardware. The ILI9341 and HX8357D links download
-new builds directly from this repository; the other links use the published release:
+Choose the chip and display that match your hardware. All eight builds are
+available as release assets; validation is specific to each board/display pair.
 
 | Display | Pico W / RP2040 | Pico 2 W / RP2350 |
 |---|---|---|
-| LAFVIN ST7796, board tested | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w.uf2) | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w.uf2) |
-| Pico Display Pack 2.0 ST7789, experimental | [UF2, 30 FPS output](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-display-pack2.uf2) | [UF2, 60 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-display-pack2.uf2) |
-| Standalone ILI9341 SPI1 | [UF2, bare Pico tested](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico-w-ili9341.uf2) | [UF2, compiled only](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico2-w-ili9341.uf2) |
-| Adafruit HX8357D SPI1 | [UF2, bare Pico tested](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico-w-hx8357d.uf2) | [UF2, compiled only](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico2-w-hx8357d.uf2) |
+| LAFVIN ST7796 | [UF2 — hardware tested](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w.uf2) | [UF2 — hardware tested](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w.uf2) |
+| Pico Display Pack 2.0 ST7789 | [UF2 — display untested, 30 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-display-pack2.uf2) | [UF2 — display untested, 60 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-display-pack2.uf2) |
+| Standalone ILI9341 SPI1 | [UF2 — tested on bare Pico, 30 FPS](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-ili9341.uf2) | [UF2 — compile only, 30 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-ili9341.uf2) |
+| Adafruit HX8357D SPI1 | [UF2 — tested on bare Pico, 30 FPS](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-hx8357d.uf2) | [UF2 — compile only, 30 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-hx8357d.uf2) |
+
+ST7789 board-side transport tests ran without a connected panel. The Pico 2
+ILI9341/HX8357D display combinations have not been tested on hardware. See the
+[per-build validation and source versions](firmware/BUILD-VALIDATION.md) and
+[download SHA-256 checksums](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/SHA256SUMS.txt).
 
 [ILI9341 SPI1 display support](ILI9341.md) is selectable on both chips; the
 bare Pico/module combination has been physically tested. Builds are in
