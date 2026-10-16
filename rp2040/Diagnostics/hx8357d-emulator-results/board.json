@@ -1,0 +1,80 @@
+{
+  "date": "2026-10-16",
+  "port": "COM14",
+  "usb_serial": "E6609103C3949B22",
+  "host_mhz": 200,
+  "pixel_spi_hz": 33333333,
+  "command_spi_hz": 1000000,
+  "display_backend": 5,
+  "presentation_divider": 2,
+  "native_checks": 99,
+  "native_failures": 0,
+  "native_ten_frame_us": 323867,
+  "physical_confirmation": "operator confirmed centered game picture, normal size/colors, host FPS counter in upper left",
+  "audio_scope": "existing silent output profile; APU runs, no physical audio device connected",
+  "controls": "existing USB input; physical LAFVIN inputs disabled in wrapper",
+  "test_seconds_per_game": 40,
+  "controller_inputs_common": [
+    [
+      2,
+      "s"
+    ],
+    [
+      8,
+      "R"
+    ],
+    [
+      10,
+      "a"
+    ],
+    [
+      13,
+      "0"
+    ]
+  ],
+  "controller_inputs_mario_extra": [
+    [
+      5,
+      "s"
+    ],
+    [
+      12,
+      "s"
+    ],
+    [
+      14,
+      "R"
+    ],
+    [
+      22,
+      "a"
+    ],
+    [
+      25,
+      "0"
+    ]
+  ],
+  "controller_inputs_contra_extra": [
+    [
+      12,
+      "s"
+    ],
+    [
+      14,
+      "R"
+    ],
+    [
+      22,
+      "a"
+    ],
+    [
+      25,
+      "0"
+    ]
+  ],
+  "input_note": "extra Start presses are host-side test input for long introductions, not emulator behavior changes",
+  "native_diagnostic_sha256": "3c51bb3e49047942490ff276a8e84f233932c68211b944935412c32de3a1c86c",
+  "final_state": "guest emulation stopped at four-game boot menu",
+  "final_menu_display_fps": 30.0,
+  "rp2350_scope": "build verified only; not flashed onto the Pico 2 W carrier"
+}

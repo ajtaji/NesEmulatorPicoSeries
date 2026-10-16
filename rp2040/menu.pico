@@ -98,7 +98,7 @@ Procedure.i BootMenu()
       EndIf
       If now-nextFrame>=0
         DisplayFrame()
-        CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4
+        CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4 Or #NES_VIDEO_BACKEND=5
           nextFrame=now+VideoMenuPeriodUs()
         CompilerElse
           nextFrame=now+16639

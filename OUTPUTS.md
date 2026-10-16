@@ -21,6 +21,11 @@ The driver owns SPI1, DMA channel 0, GP10/11/12/13/16/17; do not share these
 resources with an audio or input plugin. Set `InputPhysicalEnabled=0` before
 `Main()` to disable the LAFVIN physical controls independently of video/audio.
 
+Video backend **5** selects the bundled Adafruit HX8357D SPI1 plugin on either
+chip. `tools/build.ps1 -Target rp2040 -Display hx8357d` selects its independent
+silent-audio / USB-input profile. It uses the same SPI1 pins and DMA channel 0
+listed above; see [HX8357D wiring, builds and results](HX8357D.md).
+
 Both constants must be set before including `runtime`. The normal `demo` and
 verification wrappers select 1/1. Selecting 0 or 2 excludes that output's
 bundled hardware libraries and implementation, not merely its initialization.

@@ -11,7 +11,7 @@ original synthetic demo cartridge is bundled for checks. Load games you are
 entitled to use.
 
 **[Download firmware from Releases](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest).**
-Choose the chip and display that match your hardware. The ILI9341 links download
+Choose the chip and display that match your hardware. The ILI9341 and HX8357D links download
 new builds directly from this repository; the other links use the published release:
 
 | Display | Pico W / RP2040 | Pico 2 W / RP2350 |
@@ -19,13 +19,15 @@ new builds directly from this repository; the other links use the published rele
 | LAFVIN ST7796, board tested | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w.uf2) | [UF2](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w.uf2) |
 | Pico Display Pack 2.0 ST7789, experimental | [UF2, 30 FPS output](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico-w-display-pack2.uf2) | [UF2, 60 FPS target](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest/download/nes-pico2-w-display-pack2.uf2) |
 | Standalone ILI9341 SPI1 | [UF2, bare Pico tested](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico-w-ili9341.uf2) | [UF2, compiled only](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico2-w-ili9341.uf2) |
+| Adafruit HX8357D SPI1 | [UF2, bare Pico tested](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico-w-hx8357d.uf2) | [UF2, compiled only](https://github.com/ajtaji/NesEmulatorPicoSeries/raw/refs/heads/main/firmware/nes-pico2-w-hx8357d.uf2) |
 
 [ILI9341 SPI1 display support](ILI9341.md) is selectable on both chips; the
 bare Pico/module combination has been physically tested. Builds are in
 `firmware/nes-pico-w-ili9341.uf2` and `firmware/nes-pico2-w-ili9341.uf2`.
 
-A standalone [Adafruit HX8357D SPI1 diagnostic](HX8357D.md) has also been board
-tested on the bare Pico. An NES output backend for it has not been added yet.
+[Adafruit HX8357D SPI1 output](HX8357D.md) is selectable on both chips, with
+30 FPS presentation and a separate host FPS overlay. The bare Pico/module
+combination has been physically tested; the Pico 2 build is compile-checked.
 
 Display Pack physical-screen validation is pending. See [its driver notes](DISPLAY-PACK2.md)
 and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
@@ -35,7 +37,7 @@ and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 | Board | Chip | Status |
 |---|---|---|
 | Raspberry Pi Pico W | RP2040 | Runs; measured on a board (below) |
-| Raspberry Pi Pico | RP2040 | Board tested with ILI9341, USB controls and silent audio |
+| Raspberry Pi Pico | RP2040 | Board tested with ILI9341/HX8357D, USB controls and silent audio |
 | Raspberry Pi Pico 2 W | RP2350 Arm | Runs; diagnostics and three-game board tests pass |
 | Raspberry Pi Pico 2 | RP2350 Arm | Same port; not yet run on a board here (no Bluetooth audio) |
 | Raspberry Pi 4 / Anvil | BCM2711 AArch64 | [Returning application, Neon/Vulkan, touch and Bluetooth](anvil/README.md) |

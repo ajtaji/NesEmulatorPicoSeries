@@ -1,0 +1,2 @@
+HX8357D power=156 madctl=160 format=5
+HX8357D wire checks=99 failures=0 spi_hz=33333333 frames=10 us=323867 PASS
