@@ -7,7 +7,11 @@ XIncludeFile "bridge.pi4"
 Global RenderTop.i
 XIncludeFile "ppu.pi4"
 XIncludeFile "mappers.pi4"
+XIncludeFile "mapper5.pi4"
+XIncludeFile "mapper5_video.pi4"
 XIncludeFile "apu.pi4"
+XIncludeFile "mapper5_audio.pi4"
+XIncludeFile "mapper_adapters.pi4"
 XIncludeFile "audio_api.pi4"
 XIncludeFile "worker.pi4"
 Global ScreenW.i,ScreenH.i,VideoX.i,VideoY.i,VideoScale.i

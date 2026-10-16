@@ -256,5 +256,5 @@ licences (`licenses/CYW43439-*.txt`). The SBC prototype filter coefficients are
 cross-checked against BlueZ (`licenses/SBC-TABLES.md`, LGPL-2.1).
 
 The [Pi 4 / Anvil port](anvil/README.md) additionally supports standard MMC1
-(mapper 1) and MMC3 B/C (mapper 4). Its touch MENU button returns from a game
+(1), MMC3 B/C (4), CNROM (3), MMC5 (5), AxROM (7) and Color Dreams (11). Its touch MENU button returns from a game
 to the exFAT ROM selector; EXIT returns to Anvil. Pico mapper support is unchanged.

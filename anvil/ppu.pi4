@@ -94,7 +94,7 @@ XIncludeFile "ppu_bus_write.pi4"
 ; Packed tile fetch, using duplicated nametable mirrors and predecoded CHR.
 ; r4-r7 are saved locally; reserved CPU registers r8-r11 are untouched.
 Global Dim PixelSpread.l(256)
-Procedure PpuFetchTile()
+Procedure PpuFetchTileBase()
   Protected tile.i,attr.i,palette.i,row.i,bits.i,packed.i
   tile=Nt(WAddr&$FFF)
   attr=Nt($3C0|(WAddr&$C00)|((WAddr>>4)&$38)|((WAddr>>2)&7))
@@ -288,7 +288,7 @@ EndProcedure
 ; Per-line sprite evaluation, same results as PpuSpritesReference: up to eight
 ; cached sprites, overflow, then SpriteLine/SpriteSpan in reverse OAM order so
 ; the lowest OAM index owns each pixel. Horizontal flip reverses the 2-bit row.
-Procedure PpuSpritesRaw()
+Procedure PpuSpritesBase()
   PpuSpritesReference()
 EndProcedure
 CompilerIf #PPU_PROFILE=1
@@ -507,5 +507,6 @@ EndProcedure
 
 Procedure PpuAdvance(cycles.i)
   If CartMapper=4 : MapperPpuTicks(cycles) : EndIf
+  If CartMapper=5 : M5PpuTicks(cycles) : EndIf
   PpuAdvanceReference(cycles)
 EndProcedure

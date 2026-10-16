@@ -1,0 +1,15 @@
+; Entry adapters retain the original algorithms for all other cartridges.
+Procedure PpuFetchTile()
+  If CartMapper=5 : M5FetchTile() : Else : PpuFetchTileBase() : EndIf
+EndProcedure
+Procedure PpuSpritesRaw()
+  Protected saved.i
+  saved=Pattern
+  If CartMapper=5 And (M5PpuMask&24)<>0 : Pattern=#M5_SPRITE_PATTERN : EndIf
+  PpuSpritesBase()
+  Pattern=saved
+EndProcedure
+Procedure ApuMixSample()
+  ApuMixSampleBase()
+  If CartMapper=5 : M5AudioMix() : EndIf
+EndProcedure

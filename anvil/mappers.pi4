@@ -64,12 +64,23 @@ Procedure MapperUpdate()
     MapperChr(base+2,MapRegs(1)&254) : MapperChr(base+3,MapRegs(1)|1)
     base=base!4
     For i=0 To 3 : MapperChr(base+i,MapRegs(i+2)) : Next
+  ElseIf CartMapper=3 Or CartMapper=7 Or CartMapper=11
+    bank=0
+    If CartMapper=7 : bank=MapPrgReg&7 : MapperMirror(2+((MapPrgReg>>4)&1)) : EndIf
+    If CartMapper=11 : bank=MapPrgReg&3 : EndIf
+    For i=0 To 3 : MapperPrg(i,bank*4+i) : Next
+    bank=0
+    If CartMapper=3 : bank=MapChr0&3 : EndIf
+    If CartMapper=11 : bank=(MapPrgReg>>4)&15 : EndIf
+    For i=0 To 7 : MapperChr(i,bank*8+i) : Next
   EndIf
   PrgBase=#MAP_PRG : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   Chr=#MAP_CHR : Pattern=#MAP_PATTERN : ChrWritable=MapChrRam
 EndProcedure
 Procedure MapperInit()
   Protected i.i
+  MapManaged=1
+  If CartMapper=5 : M5Init() : ProcedureReturn : EndIf
   MapIrq=0 : MapSelect=0 : MapRamEnable=1 : MapRamProtect=0
   MapShift=$10 : MapControl=$0C : MapChr0=0 : MapChr1=0 : MapPrgReg=0
   MapLastWrite=-10 : MapIrqLatch=0 : MapIrqCount=0 : MapReload=0 : MapIrqEnable=0
@@ -85,6 +96,14 @@ Procedure MapperInit()
 EndProcedure
 Procedure MapperWrite(addr.i,value.i,stamp.i)
   Protected commit.i
+  If CartMapper=5 : M5Write(addr,value) : ProcedureReturn : EndIf
+  If CartMapper=3 Or CartMapper=7 Or CartMapper=11
+    If addr>=$8000
+      If CartConflicts : value=value&PeekA(PrgBase+addr-$8000) : EndIf
+      MapPrgReg=value : MapChr0=value : MapperUpdate()
+    EndIf
+    ProcedureReturn
+  EndIf
   If addr<$8000
     If MapRamEnable<>0 And MapRamProtect=0 : MapRam(addr&8191)=value : EndIf
     ProcedureReturn
@@ -195,6 +214,17 @@ Procedure MapperPpuTicks(cycles.i)
 EndProcedure
 Procedure.i MapperCpuBudget()
   Protected distance.i,budget.i
+  If CartMapper=5
+    If MapIrq<>0 : ProcedureReturn 1 : EndIf
+    If M5TimerRun<>0 And M5Timer>0 And M5Timer<128 : ProcedureReturn M5Timer : EndIf
+    If M5IrqEnable<>0 And (PpuMask&24)<>0 And (PpuLine<240 Or PpuLine=261)
+      If PpuDot<5 : ProcedureReturn 1 : EndIf
+      budget=(341-PpuDot)/3 : If budget<1 : budget=1 : EndIf
+      If budget>128 : budget=128 : EndIf
+      ProcedureReturn budget
+    EndIf
+    ProcedureReturn 128
+  EndIf
   If CartMapper<>4 Or MapIrqEnable=0 : ProcedureReturn 128 : EndIf
   If MapIrq<>0 : ProcedureReturn 1 : EndIf
   If (PpuMask&24)=0 : ProcedureReturn 128 : EndIf

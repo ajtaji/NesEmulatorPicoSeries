@@ -90,8 +90,8 @@ Procedure.i RomValidateHeader(fileBytes.i)
   flags=RomHeader(6) : nes2=(RomHeader(7)&12)=8
   RomMapper=(flags>>4)|(RomHeader(7)&240) : RomSubmapper=0
   If nes2 : RomMapper=RomMapper|((RomHeader(8)&15)<<8) : RomSubmapper=RomHeader(8)>>4 : EndIf
-  If RomMapper<>0 And RomMapper<>1 And RomMapper<>2 And RomMapper<>4 And RomMapper<>66
-    RomStatus="Unsupported mapper - supported: 0, 1, 2, 4, 66" : ProcedureReturn 0
+  If RomMapper<>0 And RomMapper<>1 And RomMapper<>2 And RomMapper<>4 And RomMapper<>5 And RomMapper<>3 And RomMapper<>7 And RomMapper<>11 And RomMapper<>66
+    RomStatus="Unsupported mapper - supported: 0, 1, 2, 3, 4, 5, 7, 11, 66" : ProcedureReturn 0
   EndIf
   If (flags&4)<>0 Or ((flags&8)<>0 And RomMapper<>4) : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
   If (nes2<>0 And (RomHeader(12)&3)<>0 And (RomHeader(12)&3)<>2) Or (nes2=0 And (RomHeader(9)&1)<>0)
@@ -102,29 +102,43 @@ Procedure.i RomValidateHeader(fileBytes.i)
     lo=RomHeader(10)&15 : hi=RomHeader(10)>>4 : ram=0
     If lo>0 : ram=64<<lo : EndIf
     If hi>0 : ram=ram+(64<<hi) : EndIf
-    If ram>8192 Or (ram>0 And RomMapper<>1 And RomMapper<>4) : RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0 : EndIf
+    If (ram>8192 And RomMapper<>5) Or (ram>131072) Or (ram>0 And RomMapper<>1 And RomMapper<>4 And RomMapper<>5) : RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0 : EndIf
     If RomHeader(9)<>0 : RomStatus="Extended ROM sizes are unsupported" : ProcedureReturn 0 : EndIf
-    If (RomHeader(10)&15)>7 Or (RomHeader(10)>>4)>7 Or RomHeader(11)>7
+    If ((RomMapper<>5) And ((RomHeader(10)&15)>7 Or (RomHeader(10)>>4)>7)) Or RomHeader(11)>7
       RomStatus="Cartridge RAM size is unsupported" : ProcedureReturn 0
     EndIf
   EndIf
   If nes2=0 And (RomMapper=1 Or RomMapper=4) And RomHeader(8)>1
     RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0
   EndIf
+  If RomMapper=5
+    If nes2=0 : ram=RomHeader(8)*8192 : EndIf
+    If ram>131072 Or (ram>0 And (ram<8192 Or (ram&(ram-1))<>0))
+      RomStatus="Unsupported MMC5 RAM geometry" : ProcedureReturn 0
+    EndIf
+  EndIf
   RomPrgBytes=RomHeader(4)*16384 : RomChrBytes=RomHeader(5)*8192
-  If RomPrgBytes=0 Or RomPrgBytes>524288 Or RomChrBytes>262144
+  If RomPrgBytes=0 Or (RomPrgBytes>524288 And RomMapper<>5) Or RomPrgBytes>1048576 Or (RomChrBytes>262144 And RomMapper<>5) Or RomChrBytes>1048576
     RomStatus="ROM exceeds supported PRG / CHR sizes" : ProcedureReturn 0
   EndIf
   banks=RomHeader(4)
   If (banks&(banks-1))<>0 Or (RomHeader(5)&(RomHeader(5)-1))<>0
     RomStatus="Bank counts must be powers of two" : ProcedureReturn 0
   EndIf
-  If (RomMapper=1 And (RomPrgBytes>262144 Or RomChrBytes>131072)) Or ((RomMapper<>1 And RomMapper<>4) And RomChrBytes>16384)
+  If (RomMapper=1 And (RomPrgBytes>262144 Or RomChrBytes>131072)) Or ((RomMapper=0 Or RomMapper=2 Or RomMapper=66) And RomChrBytes>16384)
     RomStatus="Unsupported cartridge board size" : ProcedureReturn 0
   EndIf
-  If (RomMapper=1 Or RomMapper=4) And RomSubmapper<>0
+  If (RomMapper=1 Or RomMapper=4 Or RomMapper=5) And RomSubmapper<>0
     RomStatus="Unsupported MMC board submapper" : ProcedureReturn 0
   EndIf
+  If (RomMapper=3 And (RomPrgBytes>32768 Or RomChrBytes=0 Or RomChrBytes>32768)) Or (RomMapper=7 And (RomPrgBytes>262144 Or RomChrBytes<>0)) Or (RomMapper=11 And (RomPrgBytes>131072 Or RomChrBytes=0 Or RomChrBytes>131072))
+    RomStatus="Unsupported discrete mapper geometry" : ProcedureReturn 0
+  EndIf
+  If (RomMapper=3 Or RomMapper=7 Or RomMapper=11) And RomSubmapper>2
+    RomStatus="Unsupported bus conflict submapper" : ProcedureReturn 0
+  EndIf
+  If RomMapper=5 And nes2<>0 And RomHeader(11)<>0 : RomStatus="MMC5 CHR RAM boards are unsupported" : ProcedureReturn 0 : EndIf
+  If RomMapper=5 And RomChrBytes=0 : RomStatus="MMC5 CHR RAM boards are unsupported" : ProcedureReturn 0 : EndIf
   If RomMapper=0 And (RomPrgBytes>32768 Or RomChrBytes>8192)
     RomStatus="Unsupported NROM geometry" : ProcedureReturn 0
   EndIf
@@ -150,7 +164,7 @@ Procedure.i RomReadExact(off.i,dst.i,n.i)
   ProcedureReturn 1
 EndProcedure
 Procedure.i RomLoad(index.i)
-  Protected n.i,size.i,i.i,j.i,src.i,dst.i
+  Protected n.i,size.i,i.i,j.i,src.i,dst.i,ram.i,lo.i,hi.i
   If index<0 Or index>=RomCount : ProcedureReturn 0 : EndIf
   RomLoaded=0
   n=RomStringCopy(@RomPath(0),"2:/NES/",288)
@@ -185,6 +199,17 @@ Procedure.i RomLoad(index.i)
       CartPrgBanks=1
     EndIf
   EndIf
+  MapRamBytes=8192
+  If RomMapper=5
+    lo=RomHeader(10)&15 : hi=RomHeader(10)>>4 : ram=0
+    If lo>0 : ram=64<<lo : EndIf
+    If hi>0 : ram=ram+(64<<hi) : EndIf
+    MapRamBytes=ram
+    ; Legacy iNES does not reliably describe MMC5's two RAM chips. A 64 KiB
+    ; superset avoids game-specific CRC tables; NES 2.0 uses its exact size.
+    If (RomHeader(7)&12)<>8 : MapRamBytes=RomHeader(8)*8192 : If MapRamBytes=0 : MapRamBytes=65536 : EndIf : EndIf
+    If MapRamBytes>131072 : RomStatus="MMC5 RAM exceeds 128 KiB" : ProcedureReturn 0 : EndIf
+  EndIf
   MapPrgBytes=RomPrgBytes : MapChrBytes=RomChrBytes : MapChrRam=RomChrBytes=0
   MapBattery=(RomHeader(6)&2)<>0 : MapFourScreen=(RomHeader(6)&8)<>0
   If MapChrRam
@@ -193,7 +218,7 @@ Procedure.i RomLoad(index.i)
   EndIf
   CartMapper=RomMapper : CartChr=#ROM_RAW_CHR : CartChrRam=RomChrBytes=0
   CartChrBanks=RomChrBytes/8192 : If CartChrRam : CartChrBanks=2 : EndIf
-  CartConflicts=(RomMapper=2 Or RomMapper=66) And RomSubmapper<>1
+  CartConflicts=((RomMapper=2 Or RomMapper=3 Or RomMapper=66) And RomSubmapper<>1) Or ((RomMapper=7 Or RomMapper=11) And RomSubmapper=2)
   PpuMirroring=RomHeader(6)&1 : CartPrgSelected=0 : CartChrSelected=0
   CartTitle=@RomNames(index*256) : RomChosen=index : RomLoaded=1
   ProcedureReturn 1

@@ -20,7 +20,7 @@ class Cartridge:
     trainer: bytes
     sha256: str
 
-def read_rom(path: Path) -> Cartridge:
+def read_rom(path: Path, *, ram_limit=8192) -> Cartridge:
     data = path.read_bytes()
     if len(data) < 16 or data[:4] != b'NES\x1a':
         raise ValueError(f'{path.name}: invalid iNES header')
@@ -43,11 +43,11 @@ def read_rom(path: Path) -> Cartridge:
     if nes2:
         ram = sum(64 << n for n in (h[10] & 15, h[10] >> 4) if n)
         chr_ram = sum(64 << n for n in (h[11] & 15, h[11] >> 4) if n)
-        if ram > 8192 or chr_ram > 8192:
+        if ram > ram_limit or chr_ram > 8192:
             raise ValueError(f'{path.name}: cartridge RAM exceeds the current 8 KiB banks')
     else:
         ram = (h[8] or 1) * 8192 if mapper in (1, 5) else 0
-    if ram > 8192:
+    if ram > ram_limit:
         raise ValueError(f'{path.name}: PRG RAM exceeds 8 KiB')
     offset = 16
     trainer = data[offset:offset+512] if h[6] & 4 else b''

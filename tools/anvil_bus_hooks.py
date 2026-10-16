@@ -31,6 +31,7 @@ def adapt_generated_core(out):
     s=s.replace('      QResult=PpuRegRead(addr&7)',
       '      QResult=PpuRegRead(addr&7) : MapperRegNotice(addr&7)')
     p.write_text(s)
+    extend_mappers(out)
 
 def generate_guest_reset(out):
     # BSS symbols are unordered. Reset named guest declarations, never a broad
@@ -65,8 +66,32 @@ Procedure GuestReset()
   FramePending=0 : FrameConsumed=0 : PublishTop=0 : PublishBottom=0
   RenderTop=0 : MenuRequested=0 : InputSeen=0 : EmulateUs=0 : EmulateCalls=0
   VideoFrames=0 : VideoUs=0
+  MapManaged=0
   MapIrq=0 : MapDots=0 : MapIrqClocks=0 : MapIrqAssertions=0
   AudioReadCursor=0
 EndProcedure
 '''
     (out/'guest_reset.pi4').write_text(source)
+
+
+def extend_mappers(out):
+    p=out/'bridge.pi4';s=p.read_text()
+    s=s.replace('    v=PeekA(PrgBase+addr-$8000)',      '    v=PeekA(PrgBase+addr-$8000)\n    If CartMapper=5\n      v=M5PrgRead(addr)\n      If addr=$FFFA Or addr=$FFFB : M5ScanReset() : EndIf\n      If addr<$C000 And M5PcmMode<>0\n        CpuNow() : NesRpc(0,0,0,CpuCycles) : M5PcmRead(v) : CpuEndWindow()\n      EndIf\n    EndIf',1)
+    s=s.replace('  ElseIf addr=$4016\n',      '    If CartMapper=5 : v=M5PrgRead(addr) : EndIf\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    v=M5Read(addr) : CpuEndWindow()\n  ElseIf addr=$4016\n',1)
+    s=s.replace('    If CartMapper=1 Or CartMapper=4\n      CpuNow()', '    If MapManaged\n      CpuNow()',1)
+    s=s.replace('  ElseIf addr=$4016\n    NesStrobe=',      '  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    M5Write(addr,value) : CpuEndWindow()\n  ElseIf addr=$4016\n    NesStrobe=',1)
+    s=s.replace('      ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)',      '      If CartMapper=5\n        v=M5PrgRead(addr)\n        If addr<$C000 And M5PcmMode<>0 : M5PcmRead(v) : EndIf\n        ProcedureReturn v\n      EndIf\n      ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)',1)
+    s=s.replace('Procedure.i WorkerRead(addr.i)\n', 'Procedure.i WorkerRead(addr.i)\n  Protected v.i\n',1)
+    s=s.replace('    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf',      '    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf\n    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf',1)
+    s=s.replace('Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF',      'Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF\n  If CartMapper=5 And addr>=$6000 : ProcedureReturn M5PrgRead(addr) : EndIf',1)
+    p.write_text(s)
+    p=out/'bridge.pi4';s=p.read_text().replace('  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()', '  ElseIf addr>=$5C00 And addr<$6000 And CartMapper=5\n    v=M5Read(addr)\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()',1);p.write_text(s)
+    p=out/'ppu.pi4';s=p.read_text().replace('Procedure PpuFetchTile()','Procedure PpuFetchTileBase()',1).replace('Procedure PpuSpritesRaw()','Procedure PpuSpritesBase()',1)
+    s=s.replace('  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf',      '  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf\n  If CartMapper=5 : M5PpuTicks(cycles) : EndIf',1)
+    p.write_text(s)
+    p=out/'apu.pi4';s=p.read_text().replace('Procedure ApuMixSample()','Procedure ApuMixSampleBase()',1)
+    s=s.replace('    ApuTick(step)', '    If CartMapper=5 : M5AudioAdvance(step) : EndIf\n    ApuTick(step)',1)
+    p.write_text(s)
+    p=out/'worker.pi4';s=p.read_text().replace('PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)',      'PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)\n    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf')
+    s=s.replace('  ElseIf command=3\n    OamCacheDirty=1',      '  ElseIf command=3\n    If CartMapper=5 : M5ScanReset() : EndIf\n    OamCacheDirty=1')
+    p.write_text(s)

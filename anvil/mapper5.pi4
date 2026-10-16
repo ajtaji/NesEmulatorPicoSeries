@@ -1,0 +1,201 @@
+; MMC5 cartridge registers and memory. No CPU opcode or device ownership here.
+Procedure M5IrqUpdate()
+  MapIrq=((M5Pending<>0 And M5IrqEnable<>0) Or (M5PcmPending<>0 And M5PcmEnable<>0) Or M5TimerFlag<>0)
+EndProcedure
+Procedure.i M5RamOffset(bank.i)
+  bank=bank&15
+  If MapRamBytes=0 : ProcedureReturn -1 : EndIf
+  If MapRamBytes=8192
+    If bank&4 : ProcedureReturn -1 : EndIf
+    ProcedureReturn 0
+  ElseIf MapRamBytes=16384
+    ProcedureReturn ((bank>>2)&1)*8192
+  ElseIf MapRamBytes=32768
+    If bank&4 : ProcedureReturn -1 : EndIf
+    ProcedureReturn (bank&3)*8192
+  EndIf
+  ProcedureReturn (bank&((MapRamBytes/8192)-1))*8192
+EndProcedure
+Procedure M5PrgUpdate()
+  Protected slot.i,reg.i,bank.i,group.i,offset.i,tag.i,rom.i
+  For slot=0 To 3
+    reg=slot+1 : group=1
+    If M5PrgMode=0 : reg=4 : group=4
+    ElseIf M5PrgMode=1 : reg=2+(slot/2)*2 : group=2
+    ElseIf M5PrgMode=2 And slot<2 : reg=2 : group=2 : EndIf
+    bank=(M5Prg(reg)&(127!(group-1)))+(slot&(group-1))
+    rom=(M5Prg(reg)&128)<>0 Or reg=4
+    If rom
+      M5RamSlots(slot)=-2 : MapperPrg(slot,bank)
+    Else
+      offset=M5RamOffset(bank) : M5RamSlots(slot)=offset : tag=$1000+offset
+      If MapPrgSlots(slot)<>tag
+        If offset>=0
+          MapCopy(#MAP_PRG+slot*8192,@M5Ram(offset),8192)
+        Else
+          GuestClear(#MAP_PRG+slot*8192,8192)
+        EndIf
+        MapPrgSlots(slot)=tag
+      EndIf
+    EndIf
+  Next
+EndProcedure
+Procedure.i M5ChrBank(slot.i,set.i)
+  Protected shift.i,reg.i,group.i
+  shift=3-M5ChrMode : group=1<<shift
+  reg=(slot&(~(group-1)))+group-1
+  If set
+    If M5ChrMode=0 : reg=11 : Else : reg=8+(reg&3) : EndIf
+  EndIf
+  ProcedureReturn ((M5Chr(reg)&(~(group-1)))+(slot&(group-1)))&((MapChrBytes/1024)-1)
+EndProcedure
+Procedure M5ChrUpdate()
+  Protected slot.i,bank.i,set.i
+  set=0
+  If (M5PpuControl&32)<>0 And M5LastSet<>0 : set=1 : EndIf
+  For slot=0 To 7
+    MapperChr(slot,M5ChrBank(slot,set))
+    bank=M5ChrBank(slot,0)
+    If M5SpriteSlots(slot)<>bank
+      MapCopy(#M5_SPRITE_PATTERN+slot*1024,@Decoded(bank*1024),1024)
+      M5SpriteSlots(slot)=bank
+    EndIf
+  Next
+EndProcedure
+Procedure M5NtRefresh()
+  Protected table.i,i.i,source.i,value.i
+  For table=0 To 3
+    source=(M5NtConfig>>(table*2))&3 : MapNtSlots(table)=source
+    For i=0 To 1023
+      If source<2 : value=MapCiram(source*1024+i)
+      ElseIf source=2
+        value=0 : If M5ExMode<2 : value=M5Ex(i) : EndIf
+      Else
+        value=M5FillTile : If i>=960 : value=M5FillAttr*85 : EndIf
+      EndIf
+      Nt(table*1024+i)=value
+    Next
+  Next
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+Procedure.i M5NtRead(addr.i)
+  Protected source.i,offset.i
+  source=(M5NtConfig>>(((addr>>10)&3)*2))&3 : offset=addr&1023
+  If source<2 : ProcedureReturn MapCiram(source*1024+offset) : EndIf
+  If source=2
+    If M5ExMode<2 : ProcedureReturn M5Ex(offset) : EndIf
+    ProcedureReturn 0
+  EndIf
+  If offset>=960 : ProcedureReturn M5FillAttr*85 : EndIf
+  ProcedureReturn M5FillTile
+EndProcedure
+Procedure M5NtWrite(addr.i,value.i)
+  Protected source.i,offset.i,table.i
+  source=(M5NtConfig>>(((addr>>10)&3)*2))&3 : offset=addr&1023
+  If source<2 : MapCiram(source*1024+offset)=value
+  ElseIf source=2 And M5ExMode<2 : M5Ex(offset)=value
+  Else : ProcedureReturn : EndIf
+  For table=0 To 3
+    If ((M5NtConfig>>(table*2))&3)=source : Nt(table*1024+offset)=value : EndIf
+  Next
+EndProcedure
+Procedure M5PrgWrite(addr.i,value.i)
+  Protected offset.i,slot.i,i.i
+  If M5Protect1<>2 Or M5Protect2<>1 : ProcedureReturn : EndIf
+  If addr<$8000 : offset=M5RamOffset(M5Prg(0))
+  Else : offset=M5RamSlots((addr-$8000)/8192) : EndIf
+  If offset<0 : ProcedureReturn : EndIf
+  M5Ram(offset+(addr&8191))=value
+  For i=0 To 3
+    If M5RamSlots(i)=offset : PokeA(#MAP_PRG+i*8192+(addr&8191),value) : EndIf
+  Next
+EndProcedure
+Procedure.i M5PrgRead(addr.i)
+  Protected offset.i
+  If addr<$8000
+    offset=M5RamOffset(M5Prg(0))
+    If offset<0 : ProcedureReturn NesOpenBus : EndIf
+    ProcedureReturn M5Ram(offset+(addr&8191))
+  EndIf
+  If M5RamSlots((addr-$8000)/8192)=-1 : ProcedureReturn NesOpenBus : EndIf
+  ProcedureReturn PeekA(PrgBase+addr-$8000)
+EndProcedure
+Procedure M5ScanReset()
+  M5InFrame=0 : M5Scanline=0 : M5Pending=0 : M5Matches=0 : M5LastAddr=-1
+  M5IrqUpdate()
+EndProcedure
+Procedure.i M5Read(addr.i)
+  Protected value.i
+  value=NesOpenBus
+  Select addr
+    Case $5010 : value=M5PcmPending*128 : M5PcmPending=0 : M5IrqUpdate()
+    Case $5015 : value=(M5Length(0)>0)|((M5Length(1)>0)<<1)
+    Case $5204 : value=M5Pending*128+M5InFrame*64 : M5Pending=0 : M5IrqUpdate()
+    Case $5205 : value=(M5MulA*M5MulB)&255
+    Case $5206 : value=(M5MulA*M5MulB)>>8
+    Case $5209 : value=M5TimerFlag*128 : M5TimerFlag=0 : M5IrqUpdate()
+    Default
+      If addr>=$5C00 And M5ExMode>=2 : value=M5Ex(addr&1023) : EndIf
+  EndSelect
+  ProcedureReturn value
+EndProcedure
+Procedure M5Write(addr.i,value.i)
+  Protected index.i,shift.i
+  If addr>=$6000 : M5PrgWrite(addr,value) : ProcedureReturn : EndIf
+  If addr<$5016 : M5SoundWrite(addr,value) : ProcedureReturn : EndIf
+  If addr>=$5113 And addr<=$5117 : M5Prg(addr-$5113)=value : M5PrgUpdate() : ProcedureReturn : EndIf
+  If addr>=$5120 And addr<=$512B
+    shift=3-M5ChrMode : index=addr-$5120
+    M5Chr(index)=((value|(M5ChrHigh<<8))<<shift)&1023
+    M5LastSet=index>=8 : M5ChrUpdate() : ProcedureReturn
+  EndIf
+  Select addr
+    Case $5100 : M5PrgMode=value&3 : M5PrgUpdate()
+    Case $5101 : M5ChrMode=value&3 : M5ChrUpdate()
+    Case $5102 : M5Protect1=value&3
+    Case $5103 : M5Protect2=value&3
+    Case $5104 : M5ExMode=value&3 : M5NtRefresh()
+    Case $5105 : M5NtConfig=value : M5NtRefresh()
+    Case $5106 : M5FillTile=value : M5NtRefresh()
+    Case $5107 : M5FillAttr=value&3 : M5NtRefresh()
+    Case $5130 : M5ChrHigh=value&3
+    Case $5200 : M5Split=value
+    Case $5201 : M5SplitScroll=value
+    Case $5202 : M5SplitBank=value
+    Case $5203 : M5IrqTarget=value
+    Case $5204 : M5IrqEnable=(value&128)<>0 : M5IrqUpdate()
+    Case $5205 : M5MulA=value
+    Case $5206 : M5MulB=value
+    Case $5209 : M5Timer=(M5Timer&$FF00)|value : M5TimerRun=M5Timer<>0 : M5TimerFlag=0 : M5IrqUpdate()
+    Case $520A : M5Timer=(M5Timer&255)|(value<<8)
+    Default
+      If addr>=$5C00 And addr<=$5FFF And M5ExMode<>3
+        index=addr&1023
+        If M5ExMode<2 And M5InFrame=0 : value=0 : EndIf
+        M5Ex(index)=value
+        If M5ExMode<2
+          For shift=0 To 3
+            If ((M5NtConfig>>(shift*2))&3)=2 : Nt(shift*1024+index)=value : EndIf
+          Next
+        EndIf
+      EndIf
+  EndSelect
+EndProcedure
+Procedure M5Init()
+  Protected i.i
+  MapIrq=0 : MapIrqClocks=0 : MapIrqAssertions=0
+  M5PrgMode=3 : M5ChrMode=0 : M5Protect1=1 : M5Protect2=2
+  M5ExMode=3 : M5NtConfig=0 : M5FillTile=0 : M5FillAttr=0 : M5ChrHigh=0 : M5LastSet=0
+  M5Split=0 : M5SplitScroll=0 : M5SplitBank=0 : M5MulA=0 : M5MulB=0
+  M5Pending=0 : M5IrqEnable=0 : M5IrqTarget=0 : M5Scanline=0 : M5InFrame=0
+  M5LastAddr=-1 : M5Matches=0 : M5LastRead=-100 : M5Dots=0 : M5PpuControl=0 : M5PpuMask=0
+  M5Timer=0 : M5TimerFlag=0 : M5TimerRun=0
+  For i=0 To 4 : M5Prg(i)=0 : Next : M5Prg(4)=255
+  For i=0 To 3 : MapPrgSlots(i)=-1 : M5RamSlots(i)=-2 : Next
+  For i=0 To 7 : MapChrSlots(i)=-1 : M5SpriteSlots(i)=-1 : Next
+  For i=0 To 11 : M5Chr(i)=0 : Next
+  GuestClear(@M5Ram(0),131072) : GuestClear(@M5Ex(0),1024) : GuestClear(@MapCiram(0),4096)
+  M5AudioInit() : M5NtRefresh() : M5PrgUpdate()
+  PrgBase=#MAP_PRG : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=#MAP_CHR : Pattern=#MAP_PATTERN : ChrWritable=0 : M5ChrUpdate()
+EndProcedure
