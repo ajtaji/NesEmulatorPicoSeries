@@ -123,8 +123,12 @@ in the selector with an error message. Cartridge RAM is volatile: battery-backed
   counters. Neither changes the emulated PPU image.
 * `audio_null.pi4` and `audio_bluetooth.pi4` are alternative audio plugins.
   Both consume the existing APU's signed 16-bit, mono, 48 kHz PCM.
-  The Bluetooth plugin layers the existing L2CAP/AVDTP/A2DP behavior and
-  duplicated-stereo SBC format over `bt_h4.pi4`, the Pi's UART transport.
+  The Bluetooth plugin is an adapter over ANVIL'S Bluetooth stack (since
+  2026-10-16): `RaspberryPi4/Lib/bt_uart.pi4`, `RaspberryPi4/Board/
+  hw_bt_payload.pi4`, `Anvil/Net/hci.pbi`, `l2cap.pbi`, `a2dp.pbi` and
+  `Anvil/Audio/sbc.pbi`, included from the `--anvil` checkout. This repository
+  keeps only the APU-to-encoder feed. `--bluetooth-bond` gives it a private
+  bond Anvil kept, for a headset that has already paired with the board.
   The Pico's gSPI radio driver is not used on the Pi.
 * `platform.pi4` owns CPU cache setup and teardown. Resident shared state
   retains Anvil's normal WB attributes; DMA and GPU arenas are NC. The
