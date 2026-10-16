@@ -1,0 +1,8 @@
+{
+  "target": "rp2040",
+  "firmware": "nes-pico-w-hx8357d.uf2",
+  "sha256": "74d3eaacfca76caa1917fc010657bb7e5914dd96912f18f06ebc3ef1faf282b1",
+  "code_in_sram_bytes": 48672,
+  "free_sram_bytes": 11632,
+  "physical_test": "COM14 bare Pico, Adafruit HX8357D"
+}

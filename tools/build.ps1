@@ -13,7 +13,7 @@ param(
     [int]$Seconds = 12,
     [switch]$VerifyNes,
     [ValidateSet('rp2040','rp2350')][string]$Target = 'rp2040',
-    [ValidateSet('lafvin','display-pack2','ili9341')][string]$Display = 'lafvin'
+    [ValidateSet('lafvin','display-pack2','ili9341','hx8357d')][string]$Display = 'lafvin'
 )
 $ErrorActionPreference = 'Stop'
 if (!$Compiler) {
@@ -23,7 +23,7 @@ if (!$Compiler) {
 }
 $projectRoot = Split-Path $PSScriptRoot -Parent
 if (!$Source) {
-    $wrapper = switch ($Display) { 'display-pack2' { 'display_pack2' }; 'ili9341' { 'ili9341' }; default { 'demo' } }
+    $wrapper = switch ($Display) { 'display-pack2' { 'display_pack2' }; 'ili9341' { 'ili9341' }; 'hx8357d' { 'hx8357d' }; default { 'demo' } }
     $extension = if ($Target -eq 'rp2350') { 'pico2w' } else { 'picow' }
     $Source = "$Target/$wrapper.$extension"
 } elseif ($PSBoundParameters.ContainsKey('Display')) {
@@ -35,7 +35,7 @@ if ($PSBoundParameters.ContainsKey('Target') -and $Target -ne $sourceTarget) {
 }
 if (!$Output) {
     $boardName = if ($sourceTarget -eq 'rp2350') { 'pico2-w' } else { 'pico-w' }
-    $displayName = if ($Display -eq 'display-pack2' -or $Source -match 'display_pack2\.') { '-display-pack2' } elseif ($Display -eq 'ili9341' -or $Source -match 'ili9341\.') { '-ili9341' } else { '' }
+    $displayName = if ($Display -eq 'display-pack2' -or $Source -match 'display_pack2\.') { '-display-pack2' } elseif ($Display -eq 'hx8357d' -or $Source -match 'hx8357d\.') { '-hx8357d' } elseif ($Display -eq 'ili9341' -or $Source -match 'ili9341\.') { '-ili9341' } else { '' }
     $Output = "firmware/nes-$boardName$displayName.uf2"
 }
 $sourcePath = if ([IO.Path]::IsPathRooted($Source)) { [IO.Path]::GetFullPath($Source) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $Source)) }

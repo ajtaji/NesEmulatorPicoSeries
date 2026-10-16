@@ -10,6 +10,12 @@ The standalone [ILI9341 SPI1 backend](../ILI9341.md) can also be selected with
 the bare RP2040 Pico; the RP2350 ILI9341 build is compiled only. Its default
 profile uses silent audio and USB controls, independently of the video driver.
 
+The [Adafruit HX8357D SPI1 plugin](../HX8357D.md) is selected with
+`tools/build.ps1 -Target rp2350 -Display hx8357d`. It presents a centered native
+256x240 image in 480x320 landscape at 30 FPS, with the host HUD above it.
+The RP2350 image compiles; physical HX8357D validation was performed only on
+the bare RP2040 Pico. Audio and physical input remain independently selectable.
+
 The LAFVIN LCD is rotated 90 degrees left from the RP2040 landscape layout, using the
 ST7796 controller's rotation setting. The 256x240 NES frame is centered at
 (32,120) in 320x480 portrait coordinates. DMA still sends the completed frame;

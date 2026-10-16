@@ -1,0 +1,8 @@
+{
+  "target": "rp2350",
+  "firmware": "nes-pico2-w-hx8357d.uf2",
+  "sha256": "90a3509a319dea044de38dc68f7834b0a6ab046e2d0bf25c39f711aae67681b9",
+  "code_in_sram_bytes": 91664,
+  "free_sram_bytes": 184064,
+  "physical_test": "not performed; compiled only"
+}

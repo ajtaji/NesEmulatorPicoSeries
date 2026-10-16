@@ -1,0 +1,8 @@
+CPU, PPU pixel rendering, APU, audio, mapper, bridge and input implementations match ac3829b.
+PPU source changes are limited to three existing display-presentation CompilerIf guards, adding backend 5.
+The other presentation guards in menu/outputs state likewise add backend 5.
+Anvil generation is byte-identical.
+RP2350 generation is reproducible.
+Existing ILI9341 firmware rebuild is byte-identical: 0f519658204a0cdbc7c1cc5a848ae3234514dcdd2d0411c4845be36bfbe1395c
+Full regression image rebuild is byte-identical to previously tested image: 06bcd04a55abc8ab4466dce9315c631b5d20d97ce97ee5349cccd84bf586ff74
+This task did not rerun that unchanged 1,926,732-check image. New panel validation used the 99-check fixture and four physical-board game runs.

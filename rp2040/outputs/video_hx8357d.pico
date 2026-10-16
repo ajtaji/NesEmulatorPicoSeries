@@ -1,0 +1,173 @@
+; HX8357D 480x320 landscape output on SPI1; no extra frame allocation.
+; GP10 SCK, GP11 MOSI, GP12 MISO, GP13 CS, GP16 DC, GP17 RESET.
+; Adafruit VIN=VBUS, Lite defaults on, IM2 selects SPI; see HX8357D.md.
+; Initial register sequence derived from Adafruit's BSD-licensed driver.
+Global Hx8357SpiKhz.i=40000
+Global Hx8357CommandKhz.i=1000
+Global Hx8357Power.i,Hx8357Madctl.i,Hx8357Format.i
+Global Hx8357SpiBase.i,Hx8357SlowCr0.i,Hx8357SlowCpsr.i,Hx8357SlowHz.i
+Global Hx8357FastCr0.i,Hx8357FastCpsr.i,Hx8357FastHz.i
+Global Hx8357FrameDivider.i=2,Hx8357FramePhase.i
+Global Dim Hx8357DiscardRow.u(256)
+Global VideoTop.i,VideoBottom.i,VideoHalf.i,VideoState.i
+ProcedureRAM.i VideoLineTarget(line.i)
+  ; Retain all PPU work, but store alternate frames in a disposable scanline.
+  ; This leaves the completed DMA buffers untouched during the discarded frame.
+  If line=0
+    Hx8357FramePhase=Hx8357FramePhase+1 : VideoFramePresent=0
+    If Hx8357FrameDivider<=1 Or Hx8357FramePhase>=Hx8357FrameDivider
+      Hx8357FramePhase=0 : VideoFramePresent=1
+    EndIf
+  EndIf
+  If VideoFramePresent=0 : ProcedureReturn @Hx8357DiscardRow(0) : EndIf
+  ProcedureReturn 0
+EndProcedure
+Procedure.i VideoMenuPeriodUs()
+  If Hx8357FrameDivider<=1 : ProcedureReturn 16639 : EndIf
+  ProcedureReturn 16639*Hx8357FrameDivider
+EndProcedure
+ProcedureRAM Hx8357Pin(pin.i,value.i)
+  If value<>0 : PokeL($D0000014,1<<pin)
+  Else : PokeL($D0000018,1<<pin) : EndIf
+EndProcedure
+Procedure Hx8357Command(command.i)
+  Hx8357Pin(13,0) : Hx8357Pin(16,0)
+  SpiWrite8(1,command)
+  Hx8357Pin(16,1)
+EndProcedure
+Procedure Hx8357Setting(command.i,value.i)
+  Hx8357Command(command) : SpiWrite8(1,value) : Hx8357Pin(13,1)
+EndProcedure
+Procedure Hx8357Clock(fast.i)
+  ; CS can be low after RAMWR: never emit SpiBegin's probe byte here.
+  ; Call only after the previous command/transfer has finished.
+  PokeL(Hx8357SpiBase+4,0)
+  If fast
+    PokeL(Hx8357SpiBase+16,Hx8357FastCpsr)
+    PokeL(Hx8357SpiBase,Hx8357FastCr0) : spi_hz[1]=Hx8357FastHz
+  Else
+    PokeL(Hx8357SpiBase+16,Hx8357SlowCpsr)
+    PokeL(Hx8357SpiBase,Hx8357SlowCr0) : spi_hz[1]=Hx8357SlowHz
+  EndIf
+  PokeL(Hx8357SpiBase+4,#SPI_CR1_SSE)
+EndProcedure
+Procedure Hx8357Window(x0.i,y0.i,x1.i,y1.i)
+  Hx8357Clock(0)
+  Hx8357Command($2A)
+  SpiWrite8(1,x0>>8) : SpiWrite8(1,x0) : SpiWrite8(1,x1>>8) : SpiWrite8(1,x1)
+  Hx8357Command($2B)
+  SpiWrite8(1,y0>>8) : SpiWrite8(1,y0) : SpiWrite8(1,y1>>8) : SpiWrite8(1,y1)
+  Hx8357Command($2C)
+  Hx8357Clock(1)
+EndProcedure
+Procedure.i Hx8357Read(command.i)
+  Protected value.i
+  Hx8357Clock(0) : Hx8357Command(command)
+  value=SpiWrite8(1,0)&255 : Hx8357Pin(13,1) : Hx8357Clock(1)
+  ProcedureReturn value
+EndProcedure
+Procedure VideoBegin()
+  Protected p.i,command.i,count.i,n.i
+  Hx8357Pin(13,1) : Hx8357Pin(16,1) : Hx8357Pin(17,1)
+  pinMode(13,#OUTPUT) : pinMode(16,#OUTPUT) : pinMode(17,#OUTPUT)
+  pinMode(12,#INPUT_PULLUP)
+  SpiPeriFromSys(ClockSysConfigKhz())
+  ; Resolve dividers once with CS high, then switch without clocking extra data.
+  SpiBegin(1,10,11,12,Hx8357CommandKhz)
+  Hx8357SpiBase=spi_base[1] : Hx8357SlowHz=SpiHz(1)
+  Hx8357SlowCr0=PeekL(Hx8357SpiBase) : Hx8357SlowCpsr=PeekL(Hx8357SpiBase+16)
+  SpiBegin(1,10,11,12,Hx8357SpiKhz) : Hx8357FastHz=SpiHz(1)
+  Hx8357FastCr0=PeekL(Hx8357SpiBase) : Hx8357FastCpsr=PeekL(Hx8357SpiBase+16)
+  Hx8357Clock(0)
+  Hx8357Pin(17,0) : delay(20) : Hx8357Pin(17,1) : delay(150)
+  p=?Hx8357Init
+  Repeat
+    command=PeekA(p) : p=p+1
+    If command=0 : Break : EndIf
+    count=PeekA(p) : p=p+1
+    If (count&128)<>0
+      If command<>255 : Hx8357Command(command) : Hx8357Pin(13,1) : EndIf
+      delay((count&127)*5)
+    Else
+      Hx8357Command(command)
+      If count>0
+        For n=0 To count-1 : SpiWrite8(1,PeekA(p)) : p=p+1 : Next
+      EndIf
+      Hx8357Pin(13,1)
+    EndIf
+  ForEver
+  Hx8357Setting($36,$A0)
+  Hx8357Power=Hx8357Read($0A) : Hx8357Madctl=Hx8357Read($0B) : Hx8357Format=Hx8357Read($0C)
+  Hx8357Window(0,0,479,319) : SpiDmaFill16(1,0,153600)
+  Hx8357Pin(13,1) : VideoState=0
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn SpiHz(1)
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+  ; Host overlay remains at the upper left, outside the NES image at (112,40).
+  If width<=0 Or height<=0 Or x<0 Or y<0 Or x+width>480 Or y+height>320 : ProcedureReturn : EndIf
+  If VideoState<>0 : ProcedureReturn : EndIf
+  Hx8357Window(x,y,x+width-1,y+height-1)
+  SpiDmaSend16(1,pixels,width*height) : Hx8357Pin(13,1)
+EndProcedure
+ProcedureRAM VideoDmaStart(pointer.i)
+  PokeL(#SPI_DMA_CH0_READ,pointer)
+  PokeL(#SPI_DMA_CH0_WRITE,$40040008)
+  PokeL(#SPI_DMA_CH0_COUNT,30720)
+  PokeL(#SPI_DMA_CH0_CTRL,#SPI_DMA_EN|#SPI_DMA_SIZE_HALF|#SPI_DMA_INCR_READ|(#SPI_DMA_TREQ_SPI1_TX<<15))
+EndProcedure
+ProcedureRAM.i VideoStart(top.i,bottom.i)
+  If VideoState<>0 : ProcedureReturn 0 : EndIf
+  VideoTop=top : VideoBottom=bottom
+  Hx8357Window(112,40,367,279)
+  SpiDmaInit() : SpiSetBits(1,16)
+  PokeL($40040024,PeekL($40040024)|#SPI_SSPDMACR_TXDMAE)
+  VideoHalf=0 : VideoState=1 : VideoDmaStart(VideoTop)
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  If PeekL(#SPI_DMA_CH0_CTRL)&$60000000 : ProcedureReturn -1 : EndIf
+  If VideoState=1
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0
+      VideoHalf=1 : NesFence()
+      VideoDmaStart(VideoBottom) : VideoState=2
+    EndIf
+  ElseIf VideoState=2
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0 And (PeekL($4004000C)&#SPI_SR_BSY)=0
+      SpiDmaRestore(1) : Hx8357Pin(13,1) : VideoState=0
+      ProcedureReturn 1
+    EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  Protected finish.i,half.i
+  half=PeekL(@VideoHalf)
+  If line<0 Or line>=240 Or VideoState=0 : ProcedureReturn 0 : EndIf
+  If line<120
+    If half=1 : ProcedureReturn 1 : EndIf
+    finish=VideoTop+(line+1)*512
+  Else
+    If half=0 : ProcedureReturn 0 : EndIf
+    finish=VideoBottom+(line-119)*512
+  EndIf
+  If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)<>0
+    If PeekL(#SPI_DMA_CH0_READ)>=finish : ProcedureReturn 1 : EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM VideoAbort()
+  SpiDmaAbort(1) : SpiDmaRestore(1) : Hx8357Pin(13,1) : VideoState=0
+EndProcedure
+DataSection
+Hx8357Init:
+  Data.a $01,$94,$B9,$03,$FF,$83,$57,$FF,$E4,$B3,$04,$80,$00,$06
+  Data.a $06,$B6,$01,$25,$B0,$01,$68,$CC,$01,$05,$B1,$06,$00,$15
+  Data.a $1C,$1C,$83,$AA,$C0,$06,$50,$50,$01,$3C,$1E,$08,$B4,$07
+  Data.a $02,$40,$00,$2A,$2A,$0D,$78,$E0,$22,$02,$0A,$11,$1D,$23
+  Data.a $35,$41,$4B,$4B,$42,$3A,$27,$1B,$08,$09,$03,$02,$0A,$11
+  Data.a $1D,$23,$35,$41,$4B,$4B,$42,$3A,$27,$1B,$08,$09,$03,$00
+  Data.a $01,$3A,$01,$55,$36,$01,$C0,$35,$01,$00,$44,$02,$00,$02
+  Data.a $11,$9E,$29,$8A,$00
+EndDataSection
