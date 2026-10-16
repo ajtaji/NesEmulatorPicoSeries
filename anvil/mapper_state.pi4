@@ -72,3 +72,5 @@ Declare M5SoundWrite(addr.i,value.i)
 Declare PpuFetchTile()
 Declare PpuSpritesRaw()
 Declare ApuMixSample()
+
+XIncludeFile "mapper_extra_state.pi4"

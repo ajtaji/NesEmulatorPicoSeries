@@ -257,6 +257,7 @@ Procedure ApuAdvance(dt.i)
       step=event-ApuFrameClock
     EndIf
     If CartMapper=5 : M5AudioAdvance(step) : EndIf
+    If CartMapper=69 : ExtraSoundAdvance(step) : EndIf
     ApuTick(step)
     ApuFrameClock=ApuFrameClock+step
     If ApuResetDelay>0

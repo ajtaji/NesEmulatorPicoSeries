@@ -4,8 +4,8 @@ Global RomLoaded.i,RomChosen.i=-1
 CompilerIf #NES_ROM_SELECTOR=1
 #ROM_MAX_FILES=4096
 #ROM_NAME_BYTES=256
-#ROM_RAW_PRG=$03200000
-#ROM_RAW_CHR=$03300000
+#ROM_RAW_PRG=$03800000
+#ROM_RAW_CHR=$03C00000
 #ROM_PRG_VIEWS=$03400000
 Global *rom_up,*rom_open,*rom_size,*rom_read,*rom_close,*rom_dir,*rom_next
 Global Dim RomNames.a(#ROM_MAX_FILES*#ROM_NAME_BYTES)
@@ -16,6 +16,8 @@ Global RomCount.i,RomPage.i,RomMore.i,RomStatus.i,RomMenuActive.i
 Global RomRevision.i
 Global RomMenuStart.i,RomMenuFrames.i,RomMenuSince.i,RomMenuBase.i,RomMenuFps.i
 Global RomMapper.i,RomPrgBytes.i,RomChrBytes.i,RomSubmapper.i
+Global RomMetadataCorrections.i
+XIncludeFile "rom_metadata.pi4"
 Global RomMenuPressed.i
 
 Procedure.i RomServices()
@@ -80,6 +82,41 @@ Procedure RomScan()
   Next
   If RomCount=0 And RomStatus=0 : RomStatus="No .nes files in 2:/NES - copy games there, then REFRESH" : EndIf
 EndProcedure
+Global Dim RomCrcTable.i(256)
+Procedure.i RomCrc(p.i,n.i,crc.i)
+  Protected i.i
+  For i=0 To n-1
+    crc=(crc>>8)!RomCrcTable((crc!PeekA(p+i))&255)
+    If (i&16383)=0 : SafetyPet() : EndIf
+  Next
+  ProcedureReturn crc&$FFFFFFFF
+EndProcedure
+Procedure RomResolveMetadata()
+  Protected i.i,b.i,crc.i,mapper.i,dirty.i
+  If (RomHeader(7)&12)=8 : ProcedureReturn : EndIf
+  For i=0 To 255
+    crc=i
+    For b=0 To 7
+      If crc&1 : crc=(crc>>1)!$EDB88320 : Else : crc=crc>>1 : EndIf
+    Next
+    RomCrcTable(i)=crc
+  Next
+  crc=RomCrc(#ROM_RAW_PRG,RomPrgBytes,$FFFFFFFF)
+  crc=RomCrc(#ROM_RAW_CHR,RomChrBytes,crc)!$FFFFFFFF
+  mapper=RomDatabaseMapper(crc)
+  For i=12 To 15 : dirty=dirty|RomHeader(i) : Next
+  If mapper>=0
+    If mapper<>((RomHeader(6)>>4)|(RomHeader(7)&240)) : RomMetadataCorrections=RomMetadataCorrections+1 : EndIf
+    RomHeader(6)=(RomHeader(6)&15)|((mapper&15)<<4)
+    RomHeader(7)=(mapper&240)|(RomHeader(7)&3)
+  ElseIf dirty
+    ; Legacy dumper signatures occupy the upper mapper nibble.
+    RomHeader(7)=RomHeader(7)&3
+  EndIf
+  If dirty
+    For i=8 To 15 : RomHeader(i)=0 : Next
+  EndIf
+EndProcedure
 ; Validate before committing cartridge metadata or reading bank data.
 Procedure.i RomValidateHeader(fileBytes.i)
   Protected flags.i,nes2.i,banks.i,ram.i,lo.i,hi.i
@@ -90,10 +127,10 @@ Procedure.i RomValidateHeader(fileBytes.i)
   flags=RomHeader(6) : nes2=(RomHeader(7)&12)=8
   RomMapper=(flags>>4)|(RomHeader(7)&240) : RomSubmapper=0
   If nes2 : RomMapper=RomMapper|((RomHeader(8)&15)<<8) : RomSubmapper=RomHeader(8)>>4 : EndIf
-  If RomMapper<>0 And RomMapper<>1 And RomMapper<>2 And RomMapper<>4 And RomMapper<>5 And RomMapper<>3 And RomMapper<>7 And RomMapper<>11 And RomMapper<>66
-    RomStatus="Unsupported mapper - supported: 0, 1, 2, 3, 4, 5, 7, 11, 66" : ProcedureReturn 0
+  If RomMapper<>0 And RomMapper<>1 And RomMapper<>2 And RomMapper<>4 And RomMapper<>5 And RomMapper<>3 And RomMapper<>7 And RomMapper<>11 And RomMapper<>66 And ExtraManaged(RomMapper)=0
+    RomStatus="Unsupported cartridge mapper" : ProcedureReturn 0
   EndIf
-  If (flags&4)<>0 Or ((flags&8)<>0 And RomMapper<>4) : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
+  If (flags&4)<>0 Or ((flags&8)<>0 And RomMapper<>4 And RomMapper<>206) : RomStatus="Trainer / four-screen cartridges are unsupported" : ProcedureReturn 0 : EndIf
   If (nes2<>0 And (RomHeader(12)&3)<>0 And (RomHeader(12)&3)<>2) Or (nes2=0 And (RomHeader(9)&1)<>0)
     RomStatus="PAL timing is unsupported" : ProcedureReturn 0
   EndIf
@@ -102,14 +139,17 @@ Procedure.i RomValidateHeader(fileBytes.i)
     lo=RomHeader(10)&15 : hi=RomHeader(10)>>4 : ram=0
     If lo>0 : ram=64<<lo : EndIf
     If hi>0 : ram=ram+(64<<hi) : EndIf
-    If (ram>8192 And RomMapper<>5) Or (ram>131072) Or (ram>0 And RomMapper<>1 And RomMapper<>4 And RomMapper<>5) : RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0 : EndIf
+    If (ram>8192 And RomMapper<>5 And RomMapper<>69) Or (ram>131072) Or (RomMapper=69 And ram>32768) Or (ram>0 And RomMapper<>1 And RomMapper<>4 And RomMapper<>5 And ExtraManaged(RomMapper)=0) : RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0 : EndIf
     If RomHeader(9)<>0 : RomStatus="Extended ROM sizes are unsupported" : ProcedureReturn 0 : EndIf
-    If ((RomMapper<>5) And ((RomHeader(10)&15)>7 Or (RomHeader(10)>>4)>7)) Or RomHeader(11)>7
+    If ((RomMapper<>5 And RomMapper<>69) And ((RomHeader(10)&15)>7 Or (RomHeader(10)>>4)>7)) Or ((RomHeader(11)&15)>7 And RomMapper<>6 And RomMapper<>13) Or (RomHeader(11)>>4)>0
       RomStatus="Cartridge RAM size is unsupported" : ProcedureReturn 0
     EndIf
   EndIf
   If nes2=0 And (RomMapper=1 Or RomMapper=4) And RomHeader(8)>1
     RomStatus="PRG RAM exceeds 8 KiB" : ProcedureReturn 0
+  EndIf
+  If nes2 And ((RomMapper=6 And (RomHeader(11)&15)>9) Or (RomMapper=13 And (RomHeader(11)&15)>8))
+    RomStatus="CHR RAM exceeds cartridge bank wiring" : ProcedureReturn 0
   EndIf
   If RomMapper=5
     If nes2=0 : ram=RomHeader(8)*8192 : EndIf
@@ -118,11 +158,11 @@ Procedure.i RomValidateHeader(fileBytes.i)
     EndIf
   EndIf
   RomPrgBytes=RomHeader(4)*16384 : RomChrBytes=RomHeader(5)*8192
-  If RomPrgBytes=0 Or (RomPrgBytes>524288 And RomMapper<>5) Or RomPrgBytes>1048576 Or (RomChrBytes>262144 And RomMapper<>5) Or RomChrBytes>1048576
+  If RomPrgBytes=0 Or (RomPrgBytes>524288 And RomMapper<>5 And RomMapper<>228) Or RomPrgBytes>4194304 Or (RomChrBytes>262144 And RomMapper<>5 And RomMapper<>228 And RomMapper<>234) Or RomChrBytes>1048576
     RomStatus="ROM exceeds supported PRG / CHR sizes" : ProcedureReturn 0
   EndIf
   banks=RomHeader(4)
-  If (banks&(banks-1))<>0 Or (RomHeader(5)&(RomHeader(5)-1))<>0
+  If ((banks&(banks-1))<>0 And RomMapper<>228) Or (RomHeader(5)&(RomHeader(5)-1))<>0
     RomStatus="Bank counts must be powers of two" : ProcedureReturn 0
   EndIf
   If (RomMapper=1 And (RomPrgBytes>262144 Or RomChrBytes>131072)) Or ((RomMapper=0 Or RomMapper=2 Or RomMapper=66) And RomChrBytes>16384)
@@ -137,6 +177,7 @@ Procedure.i RomValidateHeader(fileBytes.i)
   If (RomMapper=3 Or RomMapper=7 Or RomMapper=11) And RomSubmapper>2
     RomStatus="Unsupported bus conflict submapper" : ProcedureReturn 0
   EndIf
+  If RomMapper=5 And RomPrgBytes>1048576 : RomStatus="MMC5 PRG exceeds 1 MiB" : ProcedureReturn 0 : EndIf
   If RomMapper=5 And nes2<>0 And RomHeader(11)<>0 : RomStatus="MMC5 CHR RAM boards are unsupported" : ProcedureReturn 0 : EndIf
   If RomMapper=5 And RomChrBytes=0 : RomStatus="MMC5 CHR RAM boards are unsupported" : ProcedureReturn 0 : EndIf
   If RomMapper=0 And (RomPrgBytes>32768 Or RomChrBytes>8192)
@@ -147,6 +188,24 @@ Procedure.i RomValidateHeader(fileBytes.i)
   EndIf
   If RomMapper=66 And ((RomPrgBytes&32767)<>0 Or RomPrgBytes>131072 Or RomChrBytes=0)
     RomStatus="Unsupported GxROM geometry" : ProcedureReturn 0
+  EndIf
+  If ExtraManaged(RomMapper)
+    If RomSubmapper<>0 And (RomMapper<>71 Or RomSubmapper<>1) And (RomMapper<>232 Or RomSubmapper<>1) And (RomMapper<>34 Or RomSubmapper>2) And (RomMapper<>6 Or RomSubmapper>7)
+      RomStatus="Unsupported cartridge submapper" : ProcedureReturn 0
+    EndIf
+    If (RomMapper=13 And (RomPrgBytes>32768 Or RomChrBytes<>0)) Or (RomMapper=71 And RomChrBytes<>0) Or (RomMapper=232 And RomChrBytes<>0) Or (RomMapper=105 And RomChrBytes<>0)
+      RomStatus="Unsupported cartridge CHR geometry" : ProcedureReturn 0
+    EndIf
+    If RomMapper=34 And ((RomSubmapper=1 And RomChrBytes=0) Or (RomSubmapper=2 And RomChrBytes<>0))
+      RomStatus="NINA / BNROM submapper mismatch" : ProcedureReturn 0
+    EndIf
+    If ((RomMapper=9) And (RomPrgBytes>131072 Or RomChrBytes>131072)) Or ((RomMapper=79 Or RomMapper=148) And (RomPrgBytes>65536 Or RomChrBytes>65536)) Or (RomMapper=206 And (RomPrgBytes>131072 Or RomChrBytes>65536))
+      RomStatus="Cartridge exceeds physical bank lines" : ProcedureReturn 0
+    EndIf
+    If (RomMapper=68 And RomPrgBytes>131072) Or ((RomMapper=118 Or RomMapper=158) And RomChrBytes>131072) Or (RomMapper=119 And RomChrBytes>65536)
+      RomStatus="Unsupported cartridge board variant" : ProcedureReturn 0
+    EndIf
+    If RomMapper<>228 And RomPrgBytes>524288 : RomStatus="Cartridge PRG exceeds bank wiring" : ProcedureReturn 0 : EndIf
   EndIf
   If fileBytes<16+RomPrgBytes+RomChrBytes
     RomStatus="Truncated cartridge data" : ProcedureReturn 0
@@ -176,11 +235,19 @@ Procedure.i RomLoad(index.i)
   If RomReadExact(0,@RomHeader(0),16)=0
     rom_close() : RomStatus="Cannot read iNES header" : ProcedureReturn 0
   EndIf
-  If RomValidateHeader(size)=0 : rom_close() : ProcedureReturn 0 : EndIf
+  If size<16 Or RomHeader(0)<>78 Or RomHeader(1)<>69 Or RomHeader(2)<>83 Or RomHeader(3)<>26 Or RomHeader(4)=0 Or (RomHeader(6)&4)<>0 Or ((RomHeader(7)&12)=8 And RomHeader(9)<>0)
+    RomValidateHeader(size) : rom_close() : ProcedureReturn 0
+  EndIf
+  RomPrgBytes=RomHeader(4)*16384 : RomChrBytes=RomHeader(5)*8192
+  If RomPrgBytes>4194304 Or RomChrBytes>1048576 Or size<16+RomPrgBytes+RomChrBytes
+    RomStatus="Truncated / oversized cartridge" : rom_close() : ProcedureReturn 0
+  EndIf
   If RomReadExact(16,#ROM_RAW_PRG,RomPrgBytes)=0 Or RomReadExact(16+RomPrgBytes,#ROM_RAW_CHR,RomChrBytes)=0
     rom_close() : RomStatus="ROM read failed - game was not started" : ProcedureReturn 0
   EndIf
   rom_close()
+  RomResolveMetadata()
+  If RomValidateHeader(size)=0 : ProcedureReturn 0 : EndIf
   ; Existing immutable 32 KiB windows, exactly as rom_catalog.prg_views.
   If RomMapper=2
     For i=0 To RomHeader(4)-1
@@ -214,11 +281,15 @@ Procedure.i RomLoad(index.i)
   MapBattery=(RomHeader(6)&2)<>0 : MapFourScreen=(RomHeader(6)&8)<>0
   If MapChrRam
     MapChrBytes=8192
-    For i=0 To 8191 : PokeA(#ROM_RAW_CHR+i,0) : Next
+    If RomMapper=13 : MapChrBytes=16384 : EndIf
+    If RomMapper=6 : MapChrBytes=32768 : EndIf
+    For i=0 To MapChrBytes-1 : PokeA(#ROM_RAW_CHR+i,0) : Next
   EndIf
+  CartSubmapper=RomSubmapper
   CartMapper=RomMapper : CartChr=#ROM_RAW_CHR : CartChrRam=RomChrBytes=0
   CartChrBanks=RomChrBytes/8192 : If CartChrRam : CartChrBanks=2 : EndIf
   CartConflicts=((RomMapper=2 Or RomMapper=3 Or RomMapper=66) And RomSubmapper<>1) Or ((RomMapper=7 Or RomMapper=11) And RomSubmapper=2)
+  If RomMapper=34 And RomChrBytes=0 : CartConflicts=1 : EndIf
   PpuMirroring=RomHeader(6)&1 : CartPrgSelected=0 : CartChrSelected=0
   CartTitle=@RomNames(index*256) : RomChosen=index : RomLoaded=1
   ProcedureReturn 1

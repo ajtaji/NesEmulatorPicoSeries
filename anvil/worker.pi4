@@ -91,6 +91,7 @@ Procedure WorkerAdvance(stamp.i)
   EndIf
   If dt>0
     timer=NesHostUs()
+    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf
     ApuAdvance(dt)
     WorkerApuUs=WorkerApuUs+NesHostUs()-timer
     CompilerIf #NES_SPLIT<>2

@@ -32,6 +32,8 @@ def adapt_generated_core(out):
       '      QResult=PpuRegRead(addr&7) : MapperRegNotice(addr&7)')
     p.write_text(s)
     extend_mappers(out)
+    extend_extra_mappers(out)
+    add_extra_bus(out)
 
 def generate_guest_reset(out):
     # BSS symbols are unordered. Reset named guest declarations, never a broad
@@ -95,3 +97,39 @@ def extend_mappers(out):
     p=out/'worker.pi4';s=p.read_text().replace('PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)',      'PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)\n    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf')
     s=s.replace('  ElseIf command=3\n    OamCacheDirty=1',      '  ElseIf command=3\n    If CartMapper=5 : M5ScanReset() : EndIf\n    OamCacheDirty=1')
     p.write_text(s)
+
+
+def extend_extra_mappers(out):
+    p=out/'bridge.pi4';s=p.read_text()
+    s=s.replace('  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    M5Write(addr,value) : CpuEndWindow()', '  ElseIf addr>=$4020 And ExtraManaged(CartMapper)\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    MapperWrite(addr,value,CpuCycles+AccessPhase) : CpuEndWindow()\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    M5Write(addr,value) : CpuEndWindow()',1)
+    p.write_text(s)
+
+
+def add_extra_bus(out):
+    p=out/'bridge.pi4';s=p.read_text()
+    s=s.replace('    v=PeekA(PrgBase+addr-$8000)', '    v=PeekA(PrgBase+addr-$8000)\n    If CartMapper=234 And addr>=$FF80\n      CpuNow() : NesRpc(0,0,0,CpuCycles)\n      ExtraReadNotice(addr,v) : CpuEndWindow()\n    EndIf',1)
+    s=s.replace('    If CartMapper=5 : v=M5PrgRead(addr) : EndIf', '    If CartMapper=5 : v=M5PrgRead(addr) : EndIf\n    If ExtraManaged(CartMapper) : v=ExtraLowRead(addr,NesOpenBus) : EndIf',1)
+    s=s.replace('  ElseIf addr>=$5C00', '  ElseIf addr>=$4020 And ExtraManaged(CartMapper)\n    v=ExtraLowRead(addr,NesOpenBus)\n  ElseIf addr>=$5C00',1)
+    s=s.replace('      ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)', '      v=PeekA(WorkerPrgBase+addr-$8000)\n      If CartMapper=234 : ExtraReadNotice(addr,v) : EndIf\n      ProcedureReturn v',1)
+    s=s.replace('    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf', '    If ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf\n    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf',1)
+    s=s.replace('Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF', 'Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF\n  If addr>=$6000 And addr<$8000 And ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf',1)
+    p.write_text(s)
+    p=out/'ppu.pi4';s=p.read_text().replace('  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf', '  If ExtraA12(CartMapper) : MapperPpuTicks(cycles) : EndIf',1);p.write_text(s)
+    p=out/'worker.pi4';s=p.read_text().replace('    ApuAdvance(dt)','    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf\n    ApuAdvance(dt)',1);p.write_text(s)
+    p=out/'apu.pi4';s=p.read_text().replace('    If CartMapper=5 : M5AudioAdvance(step) : EndIf','    If CartMapper=5 : M5AudioAdvance(step) : EndIf\n    If CartMapper=69 : ExtraSoundAdvance(step) : EndIf',1);p.write_text(s)
+    # A cartridge-specific sprite fetch adapter retains pixel composition,
+    # priority, flipping and evaluation. Only its CHR read has a latch side effect.
+    import re
+    pp=(out/'ppu.pi4').read_text()
+    body=re.search(r'Procedure PpuSpritesReference\(\).*?EndProcedure',pp,re.S)[0]
+    body=body.replace('Procedure PpuSpritesReference()', 'Procedure ExtraLatchSprites()')
+    body=body.replace('    SprRow(i)=bank+tile*16+row*2', '    SprRow(i)=bank+tile*16+row*2\n    ExtraSpriteBits(i)=PeekU(Pattern+SprRow(i))\n    ExtraLatchRead(bank+tile*16+row+8)')
+    body=body.replace('PeekU(Pattern+SprRow(i))>>(row*2)', 'ExtraSpriteBits(i)>>(row*2)')
+    (out/'mapper9_video.pi4').write_text('; Generated cartridge CHR-read adapter; renderer algorithm retained.\n'+body+"""
+Procedure ExtraLatchTile()
+  Protected tile.i,addr.i
+  tile=Nt(WAddr&$FFF)
+  addr=((PpuCtrl&16)<<8)+tile*16+((WAddr>>12)&7)+8
+  ExtraLatchRead(addr)
+EndProcedure
+""")

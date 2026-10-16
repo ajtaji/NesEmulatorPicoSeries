@@ -1,0 +1,35 @@
+; Additional cartridge hardware. No host devices or guest opcode state.
+Global CartSubmapper.i,ExtraMode.i,ExtraOuter.i,ExtraChr.i,ExtraFlags.i
+Global ExtraIrqCount.i,ExtraIrqRun.i,ExtraIrqDivider.i,ExtraIrqMode.i
+Global ExtraLatch0.i=1,ExtraLatch1.i=1,ExtraPending.i
+Global Dim ExtraRegs.i(16)
+Declare.i ExtraMapperUpdate()
+Declare.i ExtraMapperWrite(addr.i,value.i,stamp.i)
+Declare ExtraMapperInit()
+Declare.i ExtraManaged(mapper.i)
+
+Global Dim ExtraRam.a(32768)
+Global Dim ExtraSpriteBits.i(8)
+Declare.i ExtraMmc3(mapper.i)
+Declare.i ExtraA12(mapper.i)
+Declare ExtraCpuTicks(cycles.i)
+Declare ExtraRamboClock(delay.i)
+Declare ExtraChrRamMap(slot.i,bank.i)
+Declare ExtraChrRamWrite(addr.i,value.i)
+Declare ExtraNtRefresh()
+Declare.i ExtraNtRead(addr.i)
+Declare.i ExtraLowRead(addr.i,openbus.i)
+Declare ExtraReadNotice(addr.i,value.i)
+Declare ExtraLatchRead(addr.i)
+Declare ExtraSoundInit()
+Declare ExtraSoundWrite(addr.i,value.i)
+Declare ExtraSoundAdvance(dt.i)
+Declare ExtraSoundMix()
+#EXTRA_CHR_RAM=$03510000
+#EXTRA_CHR_PATTERN=$03512000
+Declare ExtraRamboUpdate()
+Declare ExtraRamboWrite(addr.i,value.i)
+Declare ExtraNwcUpdate()
+Declare.i ExtraBudget()
+Declare MapperUpdate()
+Declare GuestClear(p.i,n.i)

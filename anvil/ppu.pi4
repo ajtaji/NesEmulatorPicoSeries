@@ -506,7 +506,7 @@ EndProcedure
 
 
 Procedure PpuAdvance(cycles.i)
-  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf
+  If ExtraA12(CartMapper) : MapperPpuTicks(cycles) : EndIf
   If CartMapper=5 : M5PpuTicks(cycles) : EndIf
   PpuAdvanceReference(cycles)
 EndProcedure

@@ -200,3 +200,11 @@ MMC5 expansion sound is part of the cartridge producer, mixed into the same
 signed 16-bit 48 kHz ring before publication. Output plugins and stereo SBC
 transport do not need mapper-specific code. Mapper-specific tile substitutions
 similarly happen before the existing frame/presentation boundary.
+
+
+Sunsoft 5B uses the same cartridge-producer boundary as MMC5. Its tone,
+noise and envelope state live in `anvil/mapper69_audio.pi4`; output plugins
+still consume the same PCM stream and require no mapper-specific behavior.
+MMC2 latch reads are likewise handled before the original frame boundary.
+The CPU interpreter, base PPU/APU algorithms and host plugin contracts remain
+unchanged by the expanded cartridge set.
