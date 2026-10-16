@@ -21,6 +21,7 @@ def main():
     p.add_argument('--no-selector',action='store_true',help='use the embedded demo instead of the exFAT ROM menu')
     p.add_argument('--seconds',type=int,default=0,help='automatic test exit in seconds; 0 plays until Exit')
     p.add_argument('--bluetooth-peer-wrapper',type=Path,help='private Pico wrapper containing one six-byte peer Data.a')
+    p.add_argument('--bluetooth-bond',type=Path,help="private 64-byte record: 'BOND' + Anvil's 22-byte bond at 0, optionally 'ADDR' + this board's controller address (MSB first) at 0x30")
     p.add_argument('--video-plugin',type=Path,default=ROOT/'anvil/video_neon.pi4')
     p.add_argument('--input-plugin',type=Path,default=ROOT/'anvil/input_touch.pi4')
     p.add_argument('--audio-plugin',type=Path,help='custom audio plugin; default silent, or Bluetooth when peer is supplied')
@@ -52,11 +53,11 @@ def main():
     source=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
     source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in includes)+'\n'
     if a.bluetooth_peer_wrapper:
-        # Keep the dependency checkout unchanged. The adapter verifies BT_ON
-        # with GET readback instead of treating a SET tag bit as the verdict.
-        shim=a.out.with_suffix('.bt_uart.pi4')
-        shim.write_text((a.anvil/'RaspberryPi4/Lib/bt_uart.pi4').read_text().replace('BtuPower(1)','NesBtPower(1)'))
-        source+=f'XIncludeFile "{shim.as_posix()}"\n'
+        # Anvil's Bluetooth stack, unchanged (2026-10-16). The BT_ON polarity
+        # readback this script used to splice in is Anvil's own now.
+        source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in (
+          'RaspberryPi4/Lib/bt_uart.pi4','RaspberryPi4/Board/hw_bt_payload.pi4',
+          'Anvil/Net/hci.pbi','Anvil/Audio/sbc.pbi','Anvil/Net/l2cap.pbi','Anvil/Net/a2dp.pbi'))+'\n'
     source+='\n'.join(['#CPU_TIMING=1','#CPU_ASM_TAIL=0','#NES_SPLIT=0',
       '#CART_CHR_BANKS=128','#PPU_PROFILE=0',f'#TEST_SECONDS={a.seconds}',
       '#NES_VIDEO_BACKEND=2',f'#NES_AUDIO_BACKEND={2 if a.bluetooth_peer_wrapper or a.audio_plugin else 0}'])+'\n'
@@ -70,13 +71,20 @@ def main():
     if a.bluetooth_peer_wrapper:
         patch=(a.anvil/'Firmware/CYW43455/BCM4345C0.hcd').read_bytes()
         source+=f'#BT_PATCH_BYTES={len(patch)}\n'
-        for name in ('sbc_encoder','bt_h4','audio_bluetooth'):
-            source+=inc(ROOT/f'anvil/{name}.pi4')
+        source+=inc(ROOT/'anvil/audio_bluetooth.pi4')
         values=re.findall(r'Data\.a\s+([^\r\n]+)',a.bluetooth_peer_wrapper.read_text())
         if len(values)!=1: raise ValueError('peer wrapper must contain exactly one Data.a line')
         peer=[int(x.strip().replace('$','0x'),0) for x in values[0].split(',')]
         if len(peer)!=6 or any(x<0 or x>255 for x in peer): raise ValueError('invalid six-byte peer')
-        source+='Procedure AudioConfigure()\n  NesBluetoothSetPeer(?PrivatePeer)\nEndProcedure\nDataSection\nPrivatePeer: Data.a '+','.join(map(str,peer))+'\nBtPatch:\n'
+        bond=a.bluetooth_bond.read_bytes() if a.bluetooth_bond else b''
+        if bond and (len(bond)<0x36 or bond[:4]!=b'BOND'): raise ValueError('bond record must start with BOND')
+        own=bond[0x34:0x3A] if bond[0x30:0x34]==b'ADDR' else b''
+        config='  NesBluetoothSetPeer(?PrivatePeer)\n'
+        if bond: config+='  NesBluetoothSetBond(?PrivateBond, '+('?PrivateOwnAddr' if own else '0')+')\n'
+        source+='Procedure AudioConfigure()\n'+config+'EndProcedure\nDataSection\nPrivatePeer: Data.a '+','.join(map(str,peer))+'\n'
+        if bond: source+='PrivateBond: Data.a '+','.join(map(str,bond[4:26]))+'\n'
+        if own: source+='PrivateOwnAddr: Data.a '+','.join(map(str,own))+'\n'
+        source+='BtPatch:\n'
         source+=''.join('  Data.a '+','.join(map(str,patch[i:i+24]))+'\n' for i in range(0,len(patch),24))
         source+='BtPatchEnd:\nEndDataSection\n'
     else:
