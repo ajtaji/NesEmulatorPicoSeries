@@ -13,6 +13,9 @@ Procedure InputPoll()
       bits=0
       If state<2
         If x>=ScreenW-140 And y<85 : ExitRequested=1 : EndIf
+        CompilerIf #NES_ROM_SELECTOR=1
+          If x>=ScreenW-290 And x<ScreenW-150 And y<85 : MenuRequested=1 : EndIf
+        CompilerEndIf
         If x<300 And y>=200 And y<600
           If x<100 : bits=bits|64 : EndIf
           If x>=200 : bits=bits|128 : EndIf

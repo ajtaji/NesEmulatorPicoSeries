@@ -40,7 +40,7 @@ Procedure.i VideoMenuDraw()
   If RomStatus
     Neon_Text(#NEON_FONT_SMALL,32,650,RomStatus,$FFFFB060)
   Else
-    Neon_Text(#NEON_FONT_SMALL,32,650,"Tap a game to play. Supported mappers: 0, 2, 66.",$FFB8C8DC)
+    Neon_Text(#NEON_FONT_SMALL,32,650,"Tap a game to play. Supported mappers: 0, 1, 2, 4, 66.",$FFB8C8DC)
   EndIf
   VideoButton(32,700,180,75,"PREVIOUS") : VideoButton(232,700,180,75,"NEXT")
   VideoButton(442,700,200,75,"REFRESH")

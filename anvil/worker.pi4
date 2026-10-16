@@ -65,9 +65,9 @@ Procedure.i LocalPpuCommand(command.i, addr.i, value.i, stamp.i)
   Protected i.i
   PpuSync(stamp)
   If command=1
-    ProcedureReturn PpuRegRead(addr&7)
+    i=PpuRegRead(addr&7) : MapperRegNotice(addr&7) : ProcedureReturn i
   ElseIf command=2
-    PpuRegWrite(addr&7,value)
+    PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)
   ElseIf command=3
     OamCacheDirty=1
     For i=0 To 255
@@ -105,13 +105,13 @@ Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)
   QResult=0
   If command=1
     If addr<$4000
-      QResult=PpuRegRead(addr&7)
+      QResult=PpuRegRead(addr&7) : MapperRegNotice(addr&7)
     ElseIf addr=$4015
       QResult=ApuReadStatus()
     EndIf
   ElseIf command=2
     If addr<$4000
-      PpuRegWrite(addr&7,value)
+      PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)
     Else
       ApuWrite(addr,value)
     EndIf

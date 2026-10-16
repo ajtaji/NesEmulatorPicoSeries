@@ -1,0 +1,250 @@
+Procedure MapCopy(dst.i,src.i,bytes.i)
+  ; Counts and bank addresses are multiples of 16. No per-byte bank copy.
+  ASM
+    cbz x2, __map_copy_end
+__map_copy_loop:
+    ldp x9, x10, [x1], #16
+    stp x9, x10, [x0], #16
+    subs x2, x2, #16
+    b.ne __map_copy_loop
+__map_copy_end:
+  EndASM
+EndProcedure
+Procedure MapperPrg(slot.i,bank.i)
+  bank=bank&((MapPrgBytes/8192)-1)
+  If MapPrgSlots(slot)<>bank
+    MapCopy(#MAP_PRG+slot*8192,CartPrg+bank*8192,8192)
+    MapPrgSlots(slot)=bank
+  EndIf
+EndProcedure
+Procedure MapperChr(slot.i,bank.i)
+  bank=bank&((MapChrBytes/1024)-1)
+  If MapChrSlots(slot)<>bank
+    MapCopy(#MAP_CHR+slot*1024,CartChr+bank*1024,1024)
+    MapCopy(#MAP_PATTERN+slot*1024,@Decoded(bank*1024),1024)
+    MapChrSlots(slot)=bank : BgCacheAddr=-1 : RgbLastKey=-1
+  EndIf
+EndProcedure
+Procedure MapperUpdate()
+  Protected bank.i,mode.i,i.i,base.i
+  If CartMapper=1
+    mode=(MapControl>>2)&3 : bank=MapPrgReg&15
+    If mode<2
+      bank=(bank&14)*2
+      For i=0 To 3 : MapperPrg(i,bank+i) : Next
+    ElseIf mode=2
+      MapperPrg(0,0) : MapperPrg(1,1)
+      MapperPrg(2,bank*2) : MapperPrg(3,bank*2+1)
+    Else
+      MapperPrg(0,bank*2) : MapperPrg(1,bank*2+1)
+      MapperPrg(2,MapPrgBytes/8192-2) : MapperPrg(3,MapPrgBytes/8192-1)
+    EndIf
+    base=(MapChr0&30)*4
+    For i=0 To 7
+      bank=base+i
+      If MapControl&16
+        If i<4 : bank=MapChr0*4+i : Else : bank=MapChr1*4+i-4 : EndIf
+      EndIf
+      MapperChr(i,bank)
+    Next
+    mode=MapControl&3
+    If mode=0 : MapperMirror(2) : ElseIf mode=1 : MapperMirror(3)
+    ElseIf mode=2 : MapperMirror(1) : Else : MapperMirror(0) : EndIf
+    MapRamEnable=(MapPrgReg&16)=0 : MapRamProtect=0
+  ElseIf CartMapper=4
+    bank=MapRegs(6)&63
+    If MapSelect&64
+      MapperPrg(0,MapPrgBytes/8192-2) : MapperPrg(2,bank)
+    Else
+      MapperPrg(0,bank) : MapperPrg(2,MapPrgBytes/8192-2)
+    EndIf
+    MapperPrg(1,MapRegs(7)&63) : MapperPrg(3,MapPrgBytes/8192-1)
+    base=0 : If MapSelect&128 : base=4 : EndIf
+    MapperChr(base,MapRegs(0)&254) : MapperChr(base+1,MapRegs(0)|1)
+    MapperChr(base+2,MapRegs(1)&254) : MapperChr(base+3,MapRegs(1)|1)
+    base=base!4
+    For i=0 To 3 : MapperChr(base+i,MapRegs(i+2)) : Next
+  EndIf
+  PrgBase=#MAP_PRG : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=#MAP_CHR : Pattern=#MAP_PATTERN : ChrWritable=MapChrRam
+EndProcedure
+Procedure MapperInit()
+  Protected i.i
+  MapIrq=0 : MapSelect=0 : MapRamEnable=1 : MapRamProtect=0
+  MapShift=$10 : MapControl=$0C : MapChr0=0 : MapChr1=0 : MapPrgReg=0
+  MapLastWrite=-10 : MapIrqLatch=0 : MapIrqCount=0 : MapReload=0 : MapIrqEnable=0
+  MapDots=0 : MapLowSince=0 : MapA12=0 : MapSpriteBits=255
+  MapIrqClocks=0 : MapIrqAssertions=0
+  For i=0 To 7 : MapRegs(i)=0 : MapChrSlots(i)=-1 : Next
+  MapRegs(1)=2 : MapRegs(2)=4 : MapRegs(3)=5 : MapRegs(4)=6 : MapRegs(5)=7 : MapRegs(7)=1
+  For i=0 To 3 : MapPrgSlots(i)=-1 : Next
+  For i=0 To 8191 : MapRam(i)=0 : Next
+  For i=0 To 4095 : MapCiram(i)=0 : Next
+  MapMirrorMode=-1 : MapperMirror(PpuMirroring)
+  MapperUpdate()
+EndProcedure
+Procedure MapperWrite(addr.i,value.i,stamp.i)
+  Protected commit.i
+  If addr<$8000
+    If MapRamEnable<>0 And MapRamProtect=0 : MapRam(addr&8191)=value : EndIf
+    ProcedureReturn
+  EndIf
+  If CartMapper=1
+    ; MMC1 ignores consecutive-cycle writes (6502 RMW second write).
+    commit=stamp-MapLastWrite : MapLastWrite=stamp
+    If commit=1 And (value&128)=0 : ProcedureReturn : EndIf
+    If value&128
+      MapShift=$10 : MapControl=MapControl|12 : MapperUpdate()
+    Else
+      commit=MapShift&1 : MapShift=(MapShift>>1)|((value&1)<<4)
+      If commit
+        If addr<$A000 : MapControl=MapShift
+        ElseIf addr<$C000 : MapChr0=MapShift
+        ElseIf addr<$E000 : MapChr1=MapShift
+        Else : MapPrgReg=MapShift : EndIf
+        MapShift=$10 : MapperUpdate()
+      EndIf
+    EndIf
+  ElseIf CartMapper=4
+    Select addr&$E001
+      Case $8000 : MapSelect=value : MapperUpdate()
+      Case $8001 : MapRegs(MapSelect&7)=value : MapperUpdate()
+      Case $A000
+        If MapFourScreen=0 : MapperMirror((value&1)!1) : EndIf
+      Case $A001 : MapRamEnable=(value&128)<>0 : MapRamProtect=(value&64)<>0
+      Case $C000 : MapIrqLatch=value
+      Case $C001 : MapReload=1
+      Case $E000 : MapIrqEnable=0 : MapIrq=0
+      Case $E001 : MapIrqEnable=1
+    EndSelect
+  EndIf
+EndProcedure
+Procedure MapperClockIrq()
+  MapIrqClocks=MapIrqClocks+1
+  If MapIrqCount=0 Or MapReload<>0 : MapIrqCount=MapIrqLatch
+  Else : MapIrqCount=MapIrqCount-1 : EndIf
+  MapReload=0
+  If MapIrqCount=0 And MapIrqEnable<>0
+    If MapIrq=0 : MapIrqAssertions=MapIrqAssertions+1 : EndIf
+    MapIrq=1
+  EndIf
+EndProcedure
+Procedure MapperA12(addr.i,dot.i)
+  Protected high.i
+  high=(addr&$1000)<>0
+  If high<>MapA12
+    If high=0
+      MapLowSince=dot
+    ElseIf dot-MapLowSince>=10
+      MapperClockIrq()
+    EndIf
+    MapA12=high
+  EndIf
+EndProcedure
+Procedure MapperSpriteFetch(line.i)
+  Protected i.i,n.i,height.i,nextLine.i,first.i
+  MapSpriteBits=0
+  If (PpuCtrl&32)=0
+    If PpuCtrl&8 : MapSpriteBits=255 : EndIf
+    ProcedureReturn
+  EndIf
+  MapSpriteBits=255 : height=16 : nextLine=line+1
+  If line=261 : nextLine=0 : EndIf
+  For i=0 To 63
+    first=Oam(i*4)+1
+    If nextLine>=first And nextLine<first+height
+      If (Oam(i*4+1)&1)=0 : MapSpriteBits=MapSpriteBits&($FF!(1<<n)) : EndIf
+      n=n+1 : If n=8 : Break : EndIf
+    EndIf
+  Next
+EndProcedure
+Procedure MapperPpuTicks(cycles.i)
+  Protected left.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
+  left=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While left>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    edge=width
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      If dot<337
+        If dot=0 : edge=1 : Else : edge=((dot-1)/4+1)*4+1 : EndIf
+        If (PpuCtrl&16)=0 And MapA12=0
+          If dot<257 : edge=257 : ElseIf dot>=321 : edge=337 : EndIf
+        EndIf
+      EndIf
+    EndIf
+    step=edge-dot : If step>left : step=left : EndIf
+    dot=dot+step : left=left-step : MapDots=MapDots+step
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1
+        If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot=257 : MapperSpriteFetch(line) : EndIf
+        If (dot&7)=5
+          If dot<257 Or dot>=321
+            addr=(PpuCtrl&16)<<8
+          ElseIf (MapSpriteBits&(1<<((dot-261)/8)))<>0
+            addr=$1000
+          EndIf
+        EndIf
+        MapperA12(addr,MapDots)
+      EndIf
+    EndIf
+  Wend
+EndProcedure
+Procedure.i MapperCpuBudget()
+  Protected distance.i,budget.i
+  If CartMapper<>4 Or MapIrqEnable=0 : ProcedureReturn 128 : EndIf
+  If MapIrq<>0 : ProcedureReturn 1 : EndIf
+  If (PpuMask&24)=0 : ProcedureReturn 128 : EndIf
+  ; Stop before any possible rendering-driven IRQ edge. A whole instruction
+  ; may cross that boundary; the normal between-instruction IRQ poll follows.
+  ; CPU bus/register accesses already terminate the run window themselves.
+  If PpuLine>=240 And PpuLine<261
+    distance=(261-PpuLine)*341-PpuDot
+  ElseIf (PpuCtrl&16)=0 And PpuDot<257
+    distance=257-PpuDot
+  Else
+    ProcedureReturn 1
+  EndIf
+  budget=distance/3 : If budget<1 : budget=1 : EndIf
+  If budget>128 : budget=128 : EndIf
+  ProcedureReturn budget
+EndProcedure
+Procedure MapperChrWrite(addr.i,value.i)
+  Protected physical.i,slot.i,other.i,row.i,decodedOffset.i,bits.i
+  physical=MapChrSlots(addr>>10)*1024+(addr&1023)
+  PokeA(CartChr+physical,value)
+  PokeA(Chr+addr,value) : PpuDecode(addr)
+  row=addr&$1FF7 : decodedOffset=(row&$1FF0)+(row&7)*2
+  bits=PeekU(Pattern+decodedOffset)
+  PokeU(@Decoded(MapChrSlots(addr>>10)*1024)+(decodedOffset&1023),bits)
+  For slot=0 To 7
+    If MapChrSlots(slot)=MapChrSlots(addr>>10)
+      other=slot*1024+(addr&1023) : PokeA(Chr+other,value)
+      PokeU(Pattern+slot*1024+(decodedOffset&1023),bits)
+    EndIf
+  Next
+EndProcedure
+Procedure MapperRegNotice(reg.i)
+  If CartMapper=4 And (reg=6 Or reg=7)
+    MapperA12(PpuV&$3FFF,MapDots)
+  EndIf
+EndProcedure
+Procedure MapperMirror(mode.i)
+  Protected table.i,physical.i,i.i
+  If MapFourScreen : mode=4 : EndIf
+  If mode=MapMirrorMode : ProcedureReturn : EndIf
+  MapMirrorMode=mode
+  For table=0 To 3
+    physical=0
+    If mode=0 : physical=table>>1
+    ElseIf mode=1 : physical=table&1
+    ElseIf mode=3 : physical=1
+    ElseIf mode=4 : physical=table : EndIf
+    MapNtSlots(table)=physical
+    For i=0 To 1023 : Nt(table*1024+i)=MapCiram(physical*1024+i) : Next
+  Next
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure

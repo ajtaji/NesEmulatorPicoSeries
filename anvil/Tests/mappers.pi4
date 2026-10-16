@@ -1,0 +1,103 @@
+; Hardware-facing register tests on the board. Synthetic PRG/CHR banks.
+Global MapperChecks.i,MapperFailures.i,MapperFirstFail.i,MapperGot.i,MapperExpected.i
+Procedure MapCheck(got.i,expected.i)
+  MapperChecks=MapperChecks+1
+  If got<>expected
+    MapperFailures=MapperFailures+1
+    If MapperFirstFail=0 : MapperFirstFail=MapperChecks : MapperGot=got : MapperExpected=expected : EndIf
+  EndIf
+EndProcedure
+Procedure MapSerial(addr.i,value.i,stamp.i)
+  Protected i.i
+  For i=0 To 4 : MapperWrite(addr,(value>>i)&1,stamp+i*3) : Next
+EndProcedure
+Procedure MapFixture(mapper.i)
+  Protected i.i
+  CartMapper=mapper : CartPrg=$03200000 : CartChr=$03300000
+  MapPrgBytes=262144 : MapChrBytes=32768 : MapChrRam=0 : MapFourScreen=0
+  For i=0 To 262143 : PokeA(CartPrg+i,i/8192) : Next
+  For i=0 To 32767 : PokeA(CartChr+i,i/1024) : PokeA(@Decoded(i),i/1024) : Next
+  PpuMirroring=1 : MapperInit()
+EndProcedure
+Procedure.i MapperTests()
+  Protected i.i,t.i,session.i
+  t=NesHostUs() : GuestReset()
+  MapFixture(1)
+  MapCheck(NesRead($8000),0) : MapCheck(NesRead($A000),1)
+  MapCheck(NesRead($C000),30) : MapCheck(NesRead($E000),31)
+  MapSerial($E000,3,20) : MapCheck(NesRead($8000),6) : MapCheck(NesRead($C000),30)
+  MapSerial($8000,8,50) : MapCheck(NesRead($8000),0) : MapCheck(NesRead($C000),6)
+  MapSerial($8000,0,80) : MapCheck(NesRead($8000),4) : MapCheck(NesRead($E000),7)
+  MapSerial($8000,28,110) : MapSerial($A000,3,140) : MapSerial($C000,6,170)
+  MapCheck(PeekA(Chr),12) : MapCheck(PeekA(Chr+4096),24)
+  MapSerial($8000,12,200) : MapCheck(PeekA(Chr),8) : MapCheck(PeekA(Chr+4096),12)
+  MapShift=$10 : MapperWrite($8000,1,300) : MapperWrite($8000,0,301)
+  MapCheck(MapShift,$18) : MapperWrite($8000,128,304) : MapCheck(MapShift,$10)
+  MapperWrite($8000,1,307) : MapperWrite($8000,128,308) : MapCheck(MapShift,$10)
+  MapCheck(MapControl&12,12)
+  MapperMirror(1) : PpuWrite($2000,$11) : PpuWrite($2400,$22)
+  MapCheck(PpuRead($2800),$11) : MapCheck(PpuRead($2C00),$22)
+  MapperMirror(2) : MapCheck(PpuRead($2C00),$11)
+  MapperMirror(3) : MapCheck(PpuRead($2000),$22) : PpuWrite($2800,$33)
+  MapperMirror(0) : MapCheck(PpuRead($2400),$11) : MapCheck(PpuRead($2800),$33)
+  MapCheck(Nt(1024),$11) : MapCheck(Nt(3072),$33)
+  MapperWrite($6000,$72,400) : MapCheck(NesRead($6000),$72) : MapCheck(NesDmaRead($6000),$72)
+  MapSerial($E000,16,410) : NesOpenBus=$51 : MapCheck(NesRead($6000),$51)
+  MapSerial($E000,0,440) : MapCheck(NesRead($6000),$72)
+  ; CHR RAM aliasing and decoded row coherence across 4 KiB switches.
+  MapChrRam=1 : MapChrBytes=8192
+  GuestClear(CartChr,8192) : GuestClear(@Decoded(0),8192)
+  MapperInit() : MapControl=28 : MapperUpdate()
+  PpuWrite(0,$80) : MapCheck(PeekA(Chr+4096),$80)
+  MapCheck(PeekU(Pattern),1) : MapCheck(PeekU(Pattern+4096),1)
+  MapChr0=1 : MapperUpdate() : PpuWrite(0,$40)
+  MapCheck(PeekA(CartChr+4096),$40) : MapCheck(PeekU(Pattern),4)
+  MapCheck(PeekU(Pattern+4096),1)
+  MapFixture(4)
+  MapCheck(NesRead($8000),0) : MapCheck(NesRead($A000),1)
+  MapCheck(NesRead($C000),30) : MapCheck(NesRead($E000),31)
+  MapperWrite($8000,6,0) : MapperWrite($8001,9,0)
+  MapCheck(NesRead($8000),9)
+  MapperWrite($8000,70,0) : MapCheck(NesRead($8000),30) : MapCheck(NesRead($C000),9)
+  MapperWrite($8000,0,0) : MapperWrite($8001,7,0)
+  MapCheck(PeekA(Chr),6) : MapCheck(PeekA(Chr+1024),7)
+  MapperWrite($8000,128,0)
+  MapCheck(PeekA(Chr+4096),6) : MapCheck(PeekA(Chr),4)
+  MapCheck(PeekA(Pattern+4096),6)
+  MapperWrite($A001,128,0) : MapperWrite($6001,$61,0) : MapCheck(NesRead($6001),$61)
+  MapperWrite($A001,192,0) : MapperWrite($6001,$22,0) : MapCheck(NesRead($6001),$61)
+  MapperWrite($A001,0,0) : NesOpenBus=$77 : MapCheck(NesRead($6001),$77)
+  MapperWrite($C000,3,0) : MapperWrite($C001,0,0) : MapperWrite($E001,0,0)
+  MapA12=0 : MapLowSince=0 : MapperA12($1000,9) : MapCheck(MapIrqClocks,0)
+  MapperA12(0,10) : MapperA12($1000,20) : MapCheck(MapIrqCount,3)
+  For i=0 To 2 : MapperA12(0,30+i*20) : MapperA12($1000,40+i*20) : Next
+  MapCheck(MapIrqCount,0) : MapCheck(MapIrq,1)
+  MapperWrite($E000,0,0) : MapCheck(MapIrq,0)
+  MapperClockIrq() : MapCheck(MapIrqCount,3) : MapCheck(MapIrq,0)
+  MapperWrite($C000,0,0) : MapperWrite($C001,0,0) : MapperWrite($E001,0,0)
+  MapCheck(MapIrq,0) : MapperClockIrq() : MapCheck(MapIrq,1)
+  ; Actual fetch schedules, including pre-render, enable mask and A12 filter.
+  MapperInit() : PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuMask=24 : PpuCtrl=8
+  MapperPpuTicks(29780) : MapCheck(MapIrqClocks,241)
+  ; Reverse pattern tables add the first pre-render rise after vblank's
+  ; long low interval, in addition to each line's dot-325 rise.
+  MapperInit() : PpuCtrl=16 : MapperPpuTicks(29780) : MapCheck(MapIrqClocks,242)
+  MapperInit() : PpuMask=0 : MapperPpuTicks(29780) : MapCheck(MapIrqClocks,0)
+  MapIrq=0 : MapIrqEnable=0 : MapCheck(MapperCpuBudget(),128)
+  MapIrqEnable=1 : PpuMask=24 : PpuCtrl=8 : PpuLine=0 : PpuDot=0
+  MapCheck(MapperCpuBudget(),85)
+  PpuDot=256 : MapCheck(MapperCpuBudget(),1)
+  PpuLine=240 : PpuDot=0 : MapCheck(MapperCpuBudget(),128)
+  MapIrq=1 : MapCheck(MapperCpuBudget(),1)
+  ; Reset restores guest defaults while preserving host/session ownership.
+  session=AudioSessionStarted : AudioSessionStarted=123
+  M(12)=99 : ApuLength(0)=88 : PpuMask=31 : MapIrq=1
+  GuestReset() : MapCheck(M(12),0) : MapCheck(ApuLength(0),0)
+  MapCheck(PpuMask,0) : MapCheck(DmcEmpty,1) : MapCheck(ApuSampleLeft,37)
+  MapCheck(PpuWarmup,29658) : MapCheck(MapIrq,0) : MapCheck(AudioSessionStarted,123)
+  AudioSessionStarted=session
+  PokeI($02F00400,MapperChecks) : PokeI($02F00408,MapperFailures)
+  PokeI($02F00410,MapperFirstFail) : PokeI($02F00418,MapperGot) : PokeI($02F00420,MapperExpected)
+  PokeI($02F00428,NesHostUs()-t)
+  ProcedureReturn MapperFailures
+EndProcedure

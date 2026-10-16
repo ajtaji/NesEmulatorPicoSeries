@@ -1,0 +1,36 @@
+; Host lifecycle adapter. The APU and SBC/A2DP implementation are unchanged.
+; Retain the Bluetooth connection while suspending the media stream in menus.
+Global AudioSessionStarted.i
+Procedure AudioSessionPause()
+  Protected pauseDeadline.i
+  CompilerIf #NES_BT_SESSION=1
+    pauseDeadline=NesHostUs()+100000
+    While AudioRunning<>0 And NesHostUs()<pauseDeadline
+      AudioPoll() : SafetyPet()
+      If AudioLive<>0 : BtControlRequest=1 : AudioPoll() : EndIf
+    Wend
+    BtAudioFrames=0
+  CompilerElse
+    If AudioSessionStarted : AudioStop() : AudioSessionStarted=0 : EndIf
+  CompilerEndIf
+EndProcedure
+Procedure AudioSessionMenuPoll()
+  AudioPoll()
+  CompilerIf #NES_BT_SESSION=1
+    If AudioLive<>0 : BtControlRequest=1 : AudioPoll() : BtAudioFrames=0 : EndIf
+  CompilerEndIf
+EndProcedure
+Procedure AudioSessionBegin()
+  Protected i.i
+  AudioReadCursor=0
+  CompilerIf #NES_BT_SESSION=1
+    If AudioSessionStarted<>0 And AudioRunning<>0
+      BtAudioRead=0 : BtAudioFrames=0 : BtAudioLastEncode=NesHostUs()
+      For i=0 To 79 : SbcHistory(i)=0 : Next
+      If AudioLive=0 : BtControlRequest=1 : AudioPoll() : EndIf
+      ProcedureReturn
+    EndIf
+  CompilerEndIf
+  AudioBegin() : AudioSessionStarted=1
+EndProcedure
+

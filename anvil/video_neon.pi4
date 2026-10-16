@@ -178,7 +178,13 @@ Procedure NgPresent()
   Repeat
     line=PeekL($FE400048)&$FFF
     If line<previous : Break : EndIf
-    previous=line : AudioPoll() : InputPoll() : SafetyPet()
+    previous=line
+    CompilerIf #NES_ROM_SELECTOR=1
+      If RomMenuActive : AudioSessionMenuPoll() : Else : AudioPoll() : EndIf
+    CompilerElse
+      AudioPoll()
+    CompilerEndIf
+    InputPoll() : SafetyPet()
   Until NesHostUs()-start>=20000
   CompilerIf #NES_ROM_SELECTOR=1
     If RomMenuActive
@@ -200,6 +206,7 @@ EndProcedure
 
 Procedure.i VideoStart(top.i,bottom.i)
   Protected i.i,c.i,src.i,t.i,rc.i
+  If VideoFrames=0 : NgConvertUs=0 : NgUploadUs=0 : NgGpuUs=0 : NgPresentUs=0 : EndIf
   t=NesHostUs()
   For i=0 To 61439
     If i<30720 : src=top+i*2 : Else : src=bottom+(i-30720)*2 : EndIf

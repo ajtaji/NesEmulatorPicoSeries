@@ -4,6 +4,8 @@
 #NES_VERIFY_CODEC=0
 #NES_VERIFY_CORE=0
 #NES_VERIFY_ROM=0
+#NES_BT_SESSION=0
+#NES_VERIFY_MAPPERS=0
 #NES_ROM_SELECTOR=0
 XIncludeFile "RaspberryPi4/Lib/uart.pi4"
 XIncludeFile "RaspberryPi4/Lib/timer.pi4"
@@ -35,7 +37,9 @@ XIncludeFile "hud.pi4"
 XIncludeFile "ui.pi4"
 XIncludeFile "platform.pi4"
 XIncludeFile "audio_null.pi4"
+XIncludeFile "audio_session.pi4"
 XIncludeFile "runtime.pi4"
+XIncludeFile "guest_reset.pi4"
 XIncludeFile "scheduler.pi4"
 XIncludeFile "cartridge.pi4"
 Procedure AudioConfigure()

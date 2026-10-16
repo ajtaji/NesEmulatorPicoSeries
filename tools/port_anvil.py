@@ -142,3 +142,6 @@ print('Generated Anvil AArch64 core; Pico sources unchanged')
 verify=(ROOT/'rp2350/Diagnostics/verify.pico2w').read_text()
 zp=re.search(r'Procedure ZpVectorTests\(\).*?EndProcedure',verify,re.S)[0]
 (OUT/'Tests/zp.pi4').write_text('XIncludeFile "zp_vectors.pi4"\n'+zp+'\n')
+from anvil_bus_hooks import adapt_generated_core, generate_guest_reset
+adapt_generated_core(OUT)
+generate_guest_reset(OUT)

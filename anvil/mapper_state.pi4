@@ -1,0 +1,22 @@
+; MMC1B and standard MMC3B/C cartridge hardware. Guest interpreter and
+; tile/sprite renderer retain their flat windows. All calls run on core 1,
+; except cartridge initialization before the worker starts.
+#MAP_PRG=$03500000
+#MAP_CHR=$03508000
+#MAP_PATTERN=$0350A000
+Global MapPrgBytes.i,MapChrBytes.i,MapChrRam.i,MapBattery.i,MapFourScreen.i
+Global MapIrq.i,MapSelect.i,MapRamEnable.i,MapRamProtect.i
+Global MapShift.i=$10,MapControl.i=$0C,MapChr0.i,MapChr1.i,MapPrgReg.i
+Global MapLastWrite.i=-10,MapIrqLatch.i,MapIrqCount.i,MapReload.i,MapIrqEnable.i
+Global MapDots.i,MapLowSince.i,MapA12.i,MapSpriteBits.i
+Global MapIrqClocks.i,MapIrqAssertions.i
+Global Dim MapRegs.i(8)
+Global Dim MapPrgSlots.i(4)
+Global Dim MapChrSlots.i(8)
+Global Dim MapRam.a(8192)
+Global Dim MapCiram.a(4096)
+Global Dim MapNtSlots.i(4)
+Global MapMirrorMode.i=-1
+Declare PpuDecode(row.i)
+Declare MapperMirror(mode.i)
+
