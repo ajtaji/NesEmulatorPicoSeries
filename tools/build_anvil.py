@@ -103,10 +103,10 @@ def main():
         source+=inc(ROOT/'anvil/Tests/mappers.pi4')
     cart=(ROOT/'anvil/cartridge.pi4').read_text()
     if a.rom:
-        from rom_catalog import read_rom,validate,prg_views
-        c=read_rom(a.rom,ram_limit=131072)
+        from rom_catalog import validate,prg_views
+        from anvil_cartridge import read_anvil_rom,EXTRA
+        c,header=read_anvil_rom(a.rom)
         if c.mapper in (1,3,4,5,7,11):
-            header=a.rom.read_bytes()[:16]
             if c.mapper in (1,4) and (header[7]&12)!=8 and header[8]>1:
                 raise ValueError('unsupported Anvil MMC PRG RAM size')
             if c.mapper!=5 and c.ram_size>(8192 if c.mapper in (1,4) else 0):
@@ -121,19 +121,21 @@ def main():
                 raise ValueError('unsupported Anvil mapper geometry')
             if c.mapper in (3,5,11) and not c.chr:
                 raise ValueError('mapper requires CHR ROM')
-        else:
+        elif c.mapper not in EXTRA:
             validate(c)
+        chr_ram_bytes={6:32768,13:16384}.get(c.mapper,8192)
         prg=prg_views(c)
         cart=cart[:cart.index('CartridgeData:')]
         def data(name,blob):
             return name+':\n'+''.join('  Data.a '+','.join(map(str,blob[i:i+24]))+'\n' for i in range(0,len(blob),24))
-        cart+=data('CartridgeData',prg)+data('ChrData',c.chr or bytes(8192))+'EndDataSection\n'
+        cart+=data('CartridgeData',prg)+data('ChrData',c.chr or bytes(chr_ram_bytes))+'EndDataSection\n'
         cart+=f'''Procedure CartSelectBuiltin(number.i)
+  CartSubmapper={c.submapper}
   CartMapper={c.mapper} : CartPrgBanks={len(prg)//32768} : CartChrBanks={len(c.chr)//8192 or 2}
   CartPrg=?CartridgeData : CartChr=?ChrData : CartChrRam={int(not c.chr)}
-  CartConflicts={int(c.submapper==2 if c.mapper in (7,11) else c.conflicts)} : PpuMirroring={c.mirror}
-  MapPrgBytes={len(c.prg)} : MapChrBytes={len(c.chr) or 8192} : MapChrRam={int(not c.chr)}
-  MapBattery={int(c.battery)} : MapFourScreen=0 : MapRamBytes={65536 if c.mapper==5 and (header[7]&12)!=8 and header[8]==0 else c.ram_size}
+  CartConflicts={int(c.conflicts)} : PpuMirroring={c.mirror}
+  MapPrgBytes={len(c.prg)} : MapChrBytes={len(c.chr) or chr_ram_bytes} : MapChrRam={int(not c.chr)}
+  MapBattery={int(c.battery)} : MapFourScreen={int(bool(header[6]&8))} : MapRamBytes={65536 if c.mapper==5 and (header[7]&12)!=8 and header[8]==0 else c.ram_size}
 EndProcedure
 '''
     private=a.out.with_suffix('.cartridge.pi4'); private.write_text(cart)

@@ -1,0 +1,211 @@
+; Shared cartridge bus helpers. Existing MMC3 still uses its own IRQ logic.
+Procedure.i ExtraMmc3(mapper.i)
+  ProcedureReturn mapper=4 Or mapper=47 Or mapper=118 Or mapper=119
+EndProcedure
+Procedure.i ExtraA12(mapper.i)
+  ProcedureReturn ExtraMmc3(mapper)<>0 Or mapper=64 Or mapper=158
+EndProcedure
+Procedure ExtraChrRamMap(slot.i,bank.i)
+  bank=256+(bank&7)
+  If MapChrSlots(slot)<>bank
+    MapCopy(#MAP_CHR+slot*1024,#EXTRA_CHR_RAM+(bank&7)*1024,1024)
+    MapCopy(#MAP_PATTERN+slot*1024,#EXTRA_CHR_PATTERN+(bank&7)*1024,1024)
+    MapChrSlots(slot)=bank : BgCacheAddr=-1 : RgbLastKey=-1
+  EndIf
+EndProcedure
+Procedure ExtraChrRamWrite(addr.i,value.i)
+  Protected bank.i,slot.i,physical.i,row.i,bits.i
+  bank=MapChrSlots(addr>>10)
+  If bank<256 : ProcedureReturn : EndIf
+  physical=(bank&7)*1024+(addr&1023)
+  PokeA(#EXTRA_CHR_RAM+physical,value) : PokeA(Chr+addr,value) : PpuDecode(addr)
+  row=(addr&$1FF0)+(addr&7)*2 : bits=PeekU(Pattern+row)
+  PokeU(#EXTRA_CHR_PATTERN+(bank&7)*1024+(row&1023),bits)
+  For slot=0 To 7
+    If MapChrSlots(slot)=bank
+      PokeA(Chr+slot*1024+(addr&1023),value)
+      PokeU(Pattern+slot*1024+(row&1023),bits)
+    EndIf
+  Next
+EndProcedure
+Procedure ExtraNtRefresh()
+  Protected table.i,bank.i,i.i,physical.i
+  For table=0 To 3
+    If CartMapper=118 Or CartMapper=158
+      If MapSelect&128 : physical=(ExtraRegs(table+2)>>7)&1
+      Else : physical=(ExtraRegs(table/2)>>7)&1 : EndIf
+      If CartMapper=118
+        If MapSelect&128 : physical=(MapRegs(table+2)>>7)&1
+        Else : physical=(MapRegs(table/2)>>7)&1 : EndIf
+      EndIf
+      MapNtSlots(table)=physical
+      For i=0 To 1023 : Nt(table*1024+i)=MapCiram(physical*1024+i) : Next
+    ElseIf CartMapper=68
+      If ExtraFlags
+        physical=MapNtSlots(table)&1 : bank=ExtraRegs(4+physical)&(MapChrBytes/1024-1)
+        MapCopy(@Nt(table*1024),CartChr+bank*1024,1024)
+      Else
+        For i=0 To 1023 : Nt(table*1024+i)=MapCiram(MapNtSlots(table)*1024+i) : Next
+      EndIf
+    EndIf
+  Next
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+Procedure.i ExtraNtRead(addr.i)
+  Protected physical.i,bank.i
+  physical=MapNtSlots((addr>>10)&3)&1
+  bank=ExtraRegs(4+physical)&(MapChrBytes/1024-1)
+  ProcedureReturn PeekA(CartChr+bank*1024+(addr&1023))
+EndProcedure
+Procedure.i ExtraLowRead(addr.i,openbus.i)
+  If CartMapper=6 And addr>=$5000 And addr<$6000 : ProcedureReturn ExtraRam(addr&4095) : EndIf
+  If CartMapper=228 And addr>=$4020 And addr<$6000
+    ProcedureReturn (openbus&240)|ExtraRegs(addr&3)
+  EndIf
+  If addr>=$6000 And addr<$8000
+    If CartMapper=69
+      If (ExtraRegs(8)&64)=0
+        ProcedureReturn PeekA(CartPrg+((ExtraRegs(8)&63)&(MapPrgBytes/8192-1))*8192+(addr&8191))
+      ElseIf ExtraRegs(8)&128
+        ProcedureReturn ExtraRam((ExtraRegs(8)&3)*8192+(addr&8191))
+      EndIf
+    ElseIf MapRamEnable
+      ProcedureReturn MapRam(addr&8191)
+    EndIf
+  EndIf
+  ProcedureReturn openbus
+EndProcedure
+Procedure ExtraReadNotice(addr.i,value.i)
+  If CartMapper=234
+    If addr>=$FF80 And addr<=$FF9F
+      If (ExtraRegs(0)&63)=0 : ExtraRegs(0)=value : MapperUpdate() : EndIf
+    ElseIf addr>=$FFE8 And addr<=$FFF8
+      ExtraRegs(1)=value&$71 : MapperUpdate()
+    EndIf
+  EndIf
+EndProcedure
+Procedure ExtraLatchRead(addr.i)
+  Protected old0.i,old1.i
+  old0=ExtraLatch0 : old1=ExtraLatch1
+  If addr=$0FD8 : ExtraLatch0=0 : EndIf
+  If addr=$0FE8 : ExtraLatch0=1 : EndIf
+  If addr>=$1FD8 And addr<=$1FDF : ExtraLatch1=0 : EndIf
+  If addr>=$1FE8 And addr<=$1FEF : ExtraLatch1=1 : EndIf
+  ; The triggering fetch uses the old bank; the following fetch sees this one.
+  If old0<>ExtraLatch0 Or old1<>ExtraLatch1 : MapperUpdate() : EndIf
+EndProcedure
+Procedure ExtraRamboUpdate()
+  Protected i.i,base.i
+  If MapSelect&64
+    MapperPrg(0,ExtraRegs(15)) : MapperPrg(1,ExtraRegs(6)) : MapperPrg(2,ExtraRegs(7))
+  Else
+    MapperPrg(0,ExtraRegs(6)) : MapperPrg(1,ExtraRegs(7)) : MapperPrg(2,ExtraRegs(15))
+  EndIf
+  MapperPrg(3,MapPrgBytes/8192-1)
+  base=(MapSelect>>5)&4
+  MapperChr(base,ExtraRegs(0)) : MapperChr(base!2,ExtraRegs(1))
+  For i=0 To 3 : MapperChr((i+4)!base,ExtraRegs(i+2)) : Next
+  If MapSelect&32
+    MapperChr(base!1,ExtraRegs(8)) : MapperChr(base!3,ExtraRegs(9))
+  Else
+    MapperChr(base!1,ExtraRegs(0)+1) : MapperChr(base!3,ExtraRegs(1)+1)
+  EndIf
+  If CartMapper=158 : ExtraNtRefresh() : EndIf
+EndProcedure
+Procedure ExtraRamboWrite(addr.i,value.i)
+  If addr<$8000 : ProcedureReturn : EndIf
+  Select addr&$E001
+    Case $8000 : MapSelect=value : MapperUpdate()
+    Case $8001 : ExtraRegs(MapSelect&15)=value : MapperUpdate()
+    Case $A000 : If CartMapper<>158 : MapperMirror((value&1)!1) : EndIf
+    Case $C000 : MapIrqLatch=value
+    Case $C001
+      If ExtraIrqMode And (value&1)=0 : ExtraFlags=1 : EndIf
+      ExtraIrqMode=value&1
+      If ExtraIrqMode : ExtraIrqDivider=0 : EndIf
+      MapReload=1
+    Case $E000 : MapIrqEnable=0 : MapIrq=0 : ExtraPending=0
+    Case $E001 : MapIrqEnable=1
+  EndSelect
+EndProcedure
+Procedure ExtraRamboClock(delay.i)
+  MapIrqClocks=MapIrqClocks+1
+  If MapReload
+    MapIrqCount=MapIrqLatch+1
+    If MapIrqLatch>1 : MapIrqCount=MapIrqLatch+2 : EndIf
+    MapReload=0
+  ElseIf MapIrqCount=0
+    MapIrqCount=MapIrqLatch+1
+  EndIf
+  MapIrqCount=(MapIrqCount-1)&255
+  If MapIrqCount=0 And MapIrqEnable : ExtraPending=delay : EndIf
+EndProcedure
+Procedure ExtraNwcUpdate()
+  Protected i.i,mode.i,bank.i,mirror.i
+  If ExtraMode=0 And (MapChr0&16)=0 : ExtraMode=1
+  ElseIf ExtraMode=1 And (MapChr0&16)<>0 : ExtraMode=2 : EndIf
+  If MapChr0&16 : ExtraIrqRun=0 : ExtraIrqCount=0 : MapIrq=0
+  Else : ExtraIrqRun=1 : EndIf
+  MapRamEnable=(MapPrgReg&16)=0 : mirror=MapControl&3
+  If mirror<2 : mirror=mirror+2 : Else : mirror=(mirror&1)!1 : EndIf
+  MapperMirror(mirror)
+  bank=0
+  If ExtraMode=2
+    If MapChr0&8
+      bank=((MapPrgReg&7)|8)*2 : mode=(MapControl>>2)&3
+      If mode<2
+        For i=0 To 3 : MapperPrg(i,(bank&60)+i) : Next
+      ElseIf mode=2
+        MapperPrg(0,16) : MapperPrg(1,17) : MapperPrg(2,bank) : MapperPrg(3,bank+1)
+      Else
+        MapperPrg(0,bank) : MapperPrg(1,bank+1) : MapperPrg(2,30) : MapperPrg(3,31)
+      EndIf
+    Else
+      For i=0 To 3 : MapperPrg(i,(MapChr0&6)*2+i) : Next
+    EndIf
+  Else
+    For i=0 To 3 : MapperPrg(i,i) : Next
+  EndIf
+  For i=0 To 7 : MapperChr(i,i) : Next
+EndProcedure
+Procedure ExtraCpuTicks(cycles.i)
+  Protected i.i,distance.i
+  If CartMapper=6 And ExtraIrqRun
+    distance=65536-ExtraIrqCount
+    ExtraIrqCount=(ExtraIrqCount+cycles)&65535
+    If cycles>=distance : ExtraIrqRun=0 : MapIrq=1 : MapIrqAssertions=MapIrqAssertions+1 : EndIf
+  ElseIf CartMapper=69 And ExtraIrqRun
+    distance=ExtraIrqCount+1 : ExtraIrqCount=(ExtraIrqCount-cycles)&65535
+    If cycles>=distance And MapIrqEnable : MapIrq=1 : MapIrqAssertions=MapIrqAssertions+1 : EndIf
+  ElseIf CartMapper=105 And ExtraIrqRun
+    ExtraIrqCount=ExtraIrqCount+cycles
+    ; DIP switches default to zero, matching the factory competition timer.
+    If ExtraIrqCount>=$20000000 : ExtraIrqRun=0 : MapIrq=1 : MapIrqAssertions=MapIrqAssertions+1 : EndIf
+  ElseIf CartMapper=64 Or CartMapper=158
+    For i=1 To cycles
+      If ExtraPending>0
+        ExtraPending=ExtraPending-1
+        If ExtraPending=0 : MapIrq=1 : MapIrqAssertions=MapIrqAssertions+1 : EndIf
+      EndIf
+      If ExtraIrqMode Or ExtraFlags
+        ExtraIrqDivider=(ExtraIrqDivider+1)&3
+        If ExtraIrqDivider=0 : ExtraRamboClock(1) : ExtraFlags=0 : EndIf
+      EndIf
+    Next
+  EndIf
+EndProcedure
+Procedure.i ExtraBudget()
+  Protected n.i
+  n=128
+  If CartMapper=64 Or CartMapper=158
+    If ExtraPending>0 : ProcedureReturn ExtraPending : EndIf
+    If ExtraIrqMode Or ExtraFlags : ProcedureReturn 4-ExtraIrqDivider : EndIf
+  ElseIf ExtraIrqRun
+    If CartMapper=6 : n=65536-ExtraIrqCount : EndIf
+    If CartMapper=69 : n=ExtraIrqCount+1 : EndIf
+    If CartMapper=105 : n=$20000000-ExtraIrqCount : EndIf
+  EndIf
+  If n<1 : n=1 : EndIf
+  If n>128 : n=128 : EndIf
+  ProcedureReturn n
+EndProcedure

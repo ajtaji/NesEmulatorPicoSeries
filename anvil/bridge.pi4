@@ -99,6 +99,10 @@ Procedure.i NesReadSlow(addr.i)
   addr=addr&$FFFF
   If addr>=$8000
     v=PeekA(PrgBase+addr-$8000)
+    If CartMapper=234 And addr>=$FF80
+      CpuNow() : NesRpc(0,0,0,CpuCycles)
+      ExtraReadNotice(addr,v) : CpuEndWindow()
+    EndIf
     If CartMapper=5
       v=M5PrgRead(addr)
       If addr=$FFFA Or addr=$FFFB : M5ScanReset() : EndIf
@@ -112,6 +116,9 @@ Procedure.i NesReadSlow(addr.i)
     v=NesOpenBus
     If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : v=MapRam(addr&8191) : EndIf
     If CartMapper=5 : v=M5PrgRead(addr) : EndIf
+    If ExtraManaged(CartMapper) : v=ExtraLowRead(addr,NesOpenBus) : EndIf
+  ElseIf addr>=$4020 And ExtraManaged(CartMapper)
+    v=ExtraLowRead(addr,NesOpenBus)
   ElseIf addr>=$5C00 And addr<$6000 And CartMapper=5
     v=M5Read(addr)
   ElseIf addr>=$5000 And CartMapper=5
@@ -171,6 +178,9 @@ Procedure NesWrite(addr.i, value.i)
       If CartConflicts : value=value&PeekA(PrgBase+addr-$8000) : EndIf
       CartBank(value)
     EndIf
+  ElseIf addr>=$4020 And ExtraManaged(CartMapper)
+    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
+    MapperWrite(addr,value,CpuCycles+AccessPhase) : CpuEndWindow()
   ElseIf addr>=$5000 And CartMapper=5
     CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
     M5Write(addr,value) : CpuEndWindow()
@@ -262,8 +272,11 @@ Procedure.i WorkerRead(addr.i)
         If addr<$C000 And M5PcmMode<>0 : M5PcmRead(v) : EndIf
         ProcedureReturn v
       EndIf
-      ProcedureReturn PeekA(WorkerPrgBase+addr-$8000)
+      v=PeekA(WorkerPrgBase+addr-$8000)
+      If CartMapper=234 : ExtraReadNotice(addr,v) : EndIf
+      ProcedureReturn v
     EndIf
+    If ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf
     If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf
     If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
     ProcedureReturn 0
@@ -273,6 +286,7 @@ EndProcedure
 ; The same bus read for OAM DMA executed on core 0, with core 0's bank view.
 Procedure.i NesDmaRead(addr.i)
   addr=addr&$FFFF
+  If addr>=$6000 And addr<$8000 And ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf
   If CartMapper=5 And addr>=$6000 : ProcedureReturn M5PrgRead(addr) : EndIf
   If addr>=$6000 And addr<$8000 And (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf
   If addr<$2000

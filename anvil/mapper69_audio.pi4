@@ -1,0 +1,101 @@
+; AY-compatible Sunsoft 5B cartridge sound, separate from the base 2A03 APU.
+; CPU clock / 2; tone periods occupy 32 CPU cycles, noise 32, envelope 512.
+Global Dim ExtraSoundReg.i(16)
+Global Dim ExtraSoundTimer.i(3)
+Global Dim ExtraSoundHigh.i(3)
+Global Dim ExtraSoundVolume.i(16)
+Global ExtraSoundSelect.i,ExtraNoiseTimer.i,ExtraNoise.i=1,ExtraEnvelopeTimer.i
+Global ExtraEnvelope.i,ExtraEnvelopeDirection.i,ExtraEnvelopeHold.i
+Global ExtraSoundArea.i,ExtraSoundCycles.i,ExtraSoundLastX.i,ExtraSoundLastY.i
+Procedure ExtraSoundInit()
+  Protected i.i
+  For i=0 To 15 : ExtraSoundReg(i)=0 : ExtraSoundVolume(i)=PeekU(?ExtraSoundLevels+i*2) : Next
+  For i=0 To 2 : ExtraSoundTimer(i)=16 : ExtraSoundHigh(i)=0 : Next
+  ExtraSoundSelect=0 : ExtraNoiseTimer=32 : ExtraNoise=1 : ExtraEnvelopeTimer=512
+  ExtraEnvelope=0 : ExtraEnvelopeDirection=-1 : ExtraEnvelopeHold=1
+  ExtraSoundArea=0 : ExtraSoundCycles=0 : ExtraSoundLastX=0 : ExtraSoundLastY=0
+EndProcedure
+Procedure ExtraSoundWrite(addr.i,value.i)
+  Protected shape.i
+  If addr<$E000
+    ExtraSoundSelect=value
+  ElseIf ExtraSoundSelect<16
+    If ExtraSoundSelect=1 Or ExtraSoundSelect=3 Or ExtraSoundSelect=5 : value=value&15 : EndIf
+    If ExtraSoundSelect=6 : value=value&31 : EndIf
+    If ExtraSoundSelect>=8 And ExtraSoundSelect<=10 : value=value&31 : EndIf
+    ExtraSoundReg(ExtraSoundSelect)=value
+    If ExtraSoundSelect=13
+      shape=value&15 : ExtraEnvelopeDirection=-1 : ExtraEnvelope=15
+      If shape&4 : ExtraEnvelopeDirection=1 : ExtraEnvelope=0 : EndIf
+      ExtraEnvelopeHold=0
+      ExtraEnvelopeTimer=(ExtraSoundReg(11)|(ExtraSoundReg(12)<<8))*512
+      If ExtraEnvelopeTimer=0 : ExtraEnvelopeTimer=512 : EndIf
+    EndIf
+  EndIf
+EndProcedure
+Procedure ExtraSoundAdvance(dt.i)
+  Protected step.i,c.i,period.i,volume.i,level.i,feedback.i,shape.i
+  While dt>0
+    step=dt
+    For c=0 To 2 : If ExtraSoundTimer(c)<step : step=ExtraSoundTimer(c) : EndIf : Next
+    If ExtraNoiseTimer<step : step=ExtraNoiseTimer : EndIf
+    If ExtraEnvelopeTimer<step : step=ExtraEnvelopeTimer : EndIf
+    level=0
+    For c=0 To 2
+      If (ExtraSoundHigh(c) Or ((ExtraSoundReg(7)>>c)&1)) And ((ExtraNoise&1) Or ((ExtraSoundReg(7)>>(c+3))&1))
+        volume=ExtraSoundReg(8+c)&15
+        If ExtraSoundReg(8+c)&16 : volume=ExtraEnvelope : EndIf
+        level=level+ExtraSoundVolume(volume)
+      EndIf
+    Next
+    ExtraSoundArea=ExtraSoundArea+level*step : ExtraSoundCycles=ExtraSoundCycles+step
+    dt=dt-step
+    For c=0 To 2
+      ExtraSoundTimer(c)=ExtraSoundTimer(c)-step
+      If ExtraSoundTimer(c)=0
+        period=ExtraSoundReg(c*2)|(ExtraSoundReg(c*2+1)<<8) : If period=0 : period=1 : EndIf
+        ExtraSoundTimer(c)=period*16 : ExtraSoundHigh(c)=ExtraSoundHigh(c)!1
+      EndIf
+    Next
+    ExtraNoiseTimer=ExtraNoiseTimer-step
+    If ExtraNoiseTimer=0
+      period=ExtraSoundReg(6)&31 : If period=0 : period=1 : EndIf
+      ExtraNoiseTimer=period*32 : feedback=(ExtraNoise!(ExtraNoise>>3))&1
+      ExtraNoise=(ExtraNoise>>1)|(feedback<<16)
+    EndIf
+    ExtraEnvelopeTimer=ExtraEnvelopeTimer-step
+    If ExtraEnvelopeTimer=0
+      period=ExtraSoundReg(11)|(ExtraSoundReg(12)<<8) : If period=0 : period=1 : EndIf
+      ExtraEnvelopeTimer=period*512
+      If ExtraEnvelopeHold=0
+        ExtraEnvelope=ExtraEnvelope+ExtraEnvelopeDirection
+        If ExtraEnvelope<0 Or ExtraEnvelope>15
+          shape=ExtraSoundReg(13)&15
+          If (shape&8)=0
+            ExtraEnvelope=0 : ExtraEnvelopeHold=1
+          ElseIf shape&1
+            If shape&2 : ExtraEnvelopeDirection=-ExtraEnvelopeDirection : EndIf
+            ExtraEnvelope=0 : If ExtraEnvelopeDirection>0 : ExtraEnvelope=15 : EndIf
+            ExtraEnvelopeHold=1
+          Else
+            If shape&2 : ExtraEnvelopeDirection=-ExtraEnvelopeDirection : EndIf
+            ExtraEnvelope=0 : If ExtraEnvelopeDirection<0 : ExtraEnvelope=15 : EndIf
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Wend
+EndProcedure
+Procedure ExtraSoundMix()
+  Protected x.i,y.i,value.i
+  x=0 : If ExtraSoundCycles>0 : x=-ExtraSoundArea*80/ExtraSoundCycles : EndIf
+  ExtraSoundArea=0 : ExtraSoundCycles=0
+  y=ExtraSoundLastY*65400 : If y<0 : y=y+65535 : EndIf
+  y=x-ExtraSoundLastX+(y>>16) : ExtraSoundLastX=x : ExtraSoundLastY=y
+  value=Pcm((ApuProduced-1)&4095)+y
+  If value>32767 : value=32767 : ElseIf value< -32768 : value=-32768 : EndIf
+  Pcm((ApuProduced-1)&4095)=value
+EndProcedure
+DataSection
+ExtraSoundLevels: Data.u 0,1,2,3,4,6,8,12,17,24,34,49,69,98,139,197
+EndDataSection

@@ -2,8 +2,9 @@ Procedure PpuWrite(addr.i, value.i)
   Protected ntAddress.i,table.i,offset.i
   BgCacheAddr= -1 : RgbLastKey= -1
   addr=addr&$3FFF
-  If CartMapper=4 And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
+  If ExtraA12(CartMapper) And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
   If addr<$2000
+    If CartMapper=119 : ExtraChrRamWrite(addr,value) : ProcedureReturn : EndIf
     If ChrWritable
       If MapManaged
         MapperChrWrite(addr,value)
@@ -12,6 +13,7 @@ Procedure PpuWrite(addr.i, value.i)
       EndIf
     EndIf
   ElseIf addr<$3F00
+    If CartMapper=68 And ExtraFlags : ProcedureReturn : EndIf
     If CartMapper=5 : M5NtWrite(addr,value) : ProcedureReturn : EndIf
     ntAddress=PpuNtAddr(addr)
     If MapManaged

@@ -12,6 +12,7 @@ OUT = ROOT / 'anvil'
 OUT.mkdir(exist_ok=True)
 
 def portable(s):
+    s = re.sub(r'^[ \t]*CompilerIf #NES_PICO_MAPPERS=1\n.*?^[ \t]*CompilerEndIf\n', '', s, flags=re.M | re.S)
     s = s.replace('ProcedureRAM', 'Procedure')
     s = s.replace('Micros()', 'NesHostUs()')
     return re.sub(r'^ReserveRegister .*\n', '', s, flags=re.M)
@@ -33,7 +34,7 @@ cpu = re.sub(r'  CompilerIf #CPU_ASM_TAIL = 1\n.*?  CompilerElse\n(.*?)  Compile
 assert 'ASM' not in cpu
 (OUT/'cpu2a03.pi4').write_text(cpu)
 
-bridge = (ROOT/'rp2350/bridge.pico2').read_text()
+bridge = portable((ROOT/'rp2350/bridge.pico2').read_text())
 bridge = replace_proc(bridge, 'NesFence', 'Procedure NesFence()\nEndProcedure')
 bridge = replace_proc(bridge, 'NesRead', '''Procedure.i NesRead(addr.i)
   ProcedureReturn NesReadSlow(addr)
@@ -50,7 +51,7 @@ EndProcedure''')
 assert 'ASM' not in bridge
 (OUT/'bridge.pi4').write_text(portable(bridge))
 
-ppu = (ROOT/'rp2350/ppu.pico2').read_text()
+ppu = portable((ROOT/'rp2350/ppu.pico2').read_text())
 # The optimized Thumb path is replaced by the already tested portable path.
 ppu = ppu[:ppu.index('Global PpuRemaining.i')]
 ppu = replace_proc(ppu, 'PpuClearSprites', '''Procedure PpuClearSprites()

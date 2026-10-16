@@ -96,8 +96,8 @@ in the selector with an error message. Cartridge RAM is volatile: battery-backed
   joins it and returns to Anvil.
 * `selector.pi4` scans and loads files through Anvil ABI 1.7. The immutable
   UxROM views match `rom_catalog.prg_views`; no opcode, guest rendering or APU
-  behavior is changed. Raw PRG uses `0x03200000` (up to 1 MiB), CHR uses
-  `0x03300000` (up to 1 MiB), and PRG views use `0x03400000` (1 MiB). These are
+  behavior is changed. Raw PRG uses `0x03800000` (up to 4 MiB), CHR uses
+  `0x03C00000` (up to 1 MiB), and PRG views use `0x03400000` (1 MiB). These are
   separate from stacks, framebuffer storage and the GPU/DMA arenas.
   Managed mappers copy changed banks into a 32 KiB CPU window at `0x03500000`,
   an 8 KiB CHR window at `0x03508000`, and its decoded shadow at `0x0350A000`.
@@ -195,7 +195,7 @@ host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
 compiler must be given `--entry-returns --wants-services`, with separate image,
 BSS and stack addresses as in `build_anvil.py`.
 
-The Anvil mapper set is **0, 1, 2, 3, 4, 5, 7, 11 and 66**. Mapper 1 implements standard
+The Anvil mapper set is **0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 34, 41, 47, 64, 66, 68, 69, 71, 79, 105, 118, 119, 144, 148, 158, 206, 228, 232 and 234**. Mapper 1 implements standard
 MMC1 serial registers, PRG/CHR modes, one-screen/H/V mirroring and 8 KiB RAM.
 Outer-bank and extra-RAM boards (SUROM/SXROM etc.) are unsupported. Mapper 4
 implements MMC3 B/C banks, RAM protection, mirroring/four-screen RAM and the
@@ -232,7 +232,7 @@ is approximate. Battery RAM remains volatile.
 NES 2.0 gives an explicit PRG RAM size (0/8/16/32/64/128 KiB supported). Legacy
 iNES size zero uses a 64 KiB superset without per-game CRC tables. This avoids
 pretending that incomplete old headers identify an exact MMC5 board. MMC5 CHR
-RAM boards and nonzero MMC5 submappers are rejected. Raw ROM windows fit before
+RAM boards and nonzero MMC5 submappers are rejected. Raw ROM windows are separate from
 the existing PRG views; the decoded pool is 1 MiB. Stack, GPU, DMA and Anvil
 ownership are unchanged.
 
@@ -243,3 +243,72 @@ repository: [CHR bank test](https://github.com/christopherpow/nes-test-roms/tree
 [executable ExRAM test](https://github.com/christopherpow/nes-test-roms/tree/master/exram).
 Hardware references: [MMC5](https://www.nesdev.org/wiki/MMC5),
 [CNROM](https://www.nesdev.org/wiki/CNROM), [Color Dreams](https://www.nesdev.org/wiki/INES_Mapper_011).
+
+
+## Expanded cartridge set
+
+The additional handlers are 79 (NINA-03/06), 71 (Codemasters) and 206
+(Namco 108/DxROM), followed by 6, 9, 13, 34, 41, 47, 64, 68, 69, 105,
+118, 119, 144, 148, 158, 228, 232 and 234. Both BNROM and NINA-001 mapper
+34 boards are selected by CHR geometry or their NES 2.0 submapper.
+`mapper_extra.pi4`, `mapper_extra_bus.pi4` and `mapper_extra_state.pi4` own
+register decoding, bank wiring, RAM and IRQ state. CHR RAM aliases and the
+TQROM ROM/RAM selector retain decoded-window coherence. RAMBO has CPU/4 and
+filtered-A12 IRQ clocks; NWC has its serial initialization and competition
+counter. The original mapper-4 scheduler remains unchanged. The new-board
+budget skips interior BG-$1000 rises only after A12 is already high, so a
+freshly enabled rendering interval cannot hide its first IRQ edge.
+
+MMC2 uses `mapper9_video.pi4`, generated from the existing sprite algorithm
+with a cartridge CHR-read substitution. Its triggering read returns the old
+bank; following fetches see the new latch. Background composition, priority,
+RGB conversion and the CPU interpreter are retained. Sunsoft 5B cartridge
+sound has a separate producer module, `mapper69_audio.pi4`, with tone, noise
+and envelope clocks. It mixes before publication into the original PCM ring;
+base APU, SBC and Bluetooth transport code are retained.
+
+Cartridge raw data moved to the separate addresses listed above so Action
+52's three PRG chips fit. Action 52 accepts its non-power-of-two PRG size;
+ordinary mapper bank masks still require power-of-two sizes. CPROM has
+16 KiB of CHR RAM; standard FFE latch boards have up to 32 KiB here. MMC2
+supports 128 KiB PRG/CHR, NINA-03/06 and Sachen 148 64 KiB PRG/CHR, and
+Namco 108 128 KiB PRG/64 KiB CHR. Sunsoft 4 supports the 128 KiB After Burner
+board; external DCS cartridge licensing is excluded. TxSROM/RAMBO-158 have
+up to 128 KiB CHR, TQROM 64 KiB ROM plus 8 KiB RAM. Maxi 15 supports
+512 KiB PRG/CHR. Other accepted new boards have at most 512 KiB PRG and
+256 KiB CHR, subject to their hardware address lines. Quattro, NWC and
+Codemasters use CHR RAM. Submappers are bounded to those decoded by the
+loader; unsupported geometry produces a menu error.
+
+FFE supports its eight latch modes, mirroring, scratch RAM and M2 overflow
+IRQ. Copier trainers, BIOS/FDS behavior and the full SMC peripheral/1 KiB
+CHR/2M/4M modes are excluded. NWC uses the zero DIP-switch timer setting.
+Battery-backed storage remains volatile. Expansion sound gain is approximate.
+
+Many old dumps have damaged mapper headers. `rom_metadata.csv` contains
+CRC-to-mapper corrections from [Mesen's cartridge database](https://github.com/SourMesen/Mesen2/blob/master/UI/Dependencies/MesenNesDB.txt).
+`Tools/generate_metadata.py` regenerates the lookup. Identification runs once
+at load, never per instruction or frame; no game-specific CPU, PPU or audio
+settings exist. Legacy dumper padding is normalized in RAM. Files on disk
+are not edited. Explicit NES 2.0 mapper/submapper headers take precedence.
+The embedded diagnostic builder uses the same correction metadata through
+`tools/anvil_cartridge.py`, without changing Pico loaders.
+
+The final Pi run passed **347,784 native checks**: 206,477 mapper/bus/sound,
+132,612 CPU/CHR, 247 loader and 8,448 SBC. All 62 CRC-identified files from the
+missing-mapper audit loaded with their intended mapper. Four bounded game
+sequences covered every added mapper and Mario, Contra, Castlevania, Metroid,
+Kirby and Castlevania III; recorded engine/display/wire errors were zero.
+These are smoke tests, not exhaustive playthroughs or listening verification.
+Most sessions displayed around 60 FPS. Super Spike/Nintendo World Cup's menu
+remains around 49-51 FPS with a pending mapper IRQ. The alternate FFE Puzzle
+dump has visually suspect graphics and is not certified. No CPU or IRQ
+precision relaxation was used to conceal either limitation.
+
+The initial Maxi 15 read-trigger timestamp bug was fixed and regression-tested.
+One incomplete synthetic opcode fixture triggered the watchdog; the corrected
+final suite returned normally. See [Diagnostics/expanded-mappers-results.json](Diagnostics/expanded-mappers-results.json)
+for measurements, test hashes, known limitations and installed readback.
+The application is installed as `2:/payloads/NES.PMF`; its previous version is
+preserved as `2:/payloads/NES-PRE-ALLMAP.PMF`. Tests finished at the Anvil
+prompt with emulation/audio stopped and all resource leases zero.

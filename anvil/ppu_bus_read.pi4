@@ -19,15 +19,19 @@ Procedure.i PpuPalAddr(addr.i)
   ProcedureReturn addr
 EndProcedure
 Procedure.i PpuRead(addr.i)
+  Protected value.i
   addr=addr&$3FFF
   If CartMapper=5
     If addr<$3F00 : M5PpuRead(addr,M5Dots) : EndIf
     If addr>=$2000 And addr<$3F00 : ProcedureReturn M5NtRead(addr) : EndIf
   EndIf
-  If CartMapper=4 And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
+  If ExtraA12(CartMapper) And addr<$3F00 : MapperA12(addr,MapDots) : EndIf
   If addr<$2000
-    ProcedureReturn PeekA(Chr+addr)
+    value=PeekA(Chr+addr)
+    If CartMapper=9 : ExtraLatchRead(addr) : EndIf
+    ProcedureReturn value
   ElseIf addr<$3F00
+    If CartMapper=68 And ExtraFlags : ProcedureReturn ExtraNtRead(addr) : EndIf
     If MapManaged : ProcedureReturn MapCiram(PpuNtAddr(addr)) : EndIf
     ProcedureReturn Nt(PpuNtAddr(addr))
   EndIf

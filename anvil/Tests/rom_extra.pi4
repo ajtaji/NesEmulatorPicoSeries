@@ -1,0 +1,82 @@
+; All CRC-identified files needing these new mappers must load as that hardware.
+Procedure RomExtraGame(*name,mapper.i)
+  Protected i.i,k.i,index.i,match.i
+  index=-1
+  For i=0 To RomCount-1
+    k=0 : match=1
+    Repeat
+      If PeekA(*name+k)<>RomNames(i*256+k) : match=0 : Break : EndIf
+      If PeekA(*name+k)=0 : Break : EndIf
+      k=k+1
+    Until k=255
+    If match : index=i : Break : EndIf
+  Next
+  RomCheck(index>=0,1)
+  If index<0 : ProcedureReturn : EndIf
+  RomCheck(RomLoad(index),1)
+  If RomLoaded : RomCheck(CartMapper,mapper) : EndIf
+EndProcedure
+Procedure RomExtraTests()
+  RomExtraGame("Deathbots (U) [a1].nes",79)
+  RomExtraGame("Deathbots (U).nes",79)
+  RomExtraGame("Double Strike (U) (V1.0).nes",79)
+  RomExtraGame("Double Strike (U) (V1.1).nes",79)
+  RomExtraGame("Dudes With Attitude (U).nes",79)
+  RomExtraGame("Krazy Kreatures (U) [a1].nes",79)
+  RomExtraGame("Krazy Kreatures (U).nes",79)
+  RomExtraGame("Mermaids of Atlantis (U).nes",79)
+  RomExtraGame("Rad Racket - Deluxe Tennis 2 (U) [!].nes",79)
+  RomExtraGame("Tiles of Fate (U).nes",79)
+  RomExtraGame("Trolls on Treasure Island (U).nes",79)
+  RomExtraGame("Ultimate League Soccer (U).nes",79)
+  RomExtraGame("Venice Beach Volleyball (U).nes",79)
+  RomExtraGame("Bee 52 (U).nes",71)
+  RomExtraGame("Big Nose Freaks Out (Aladdin) (U).nes",71)
+  RomExtraGame("Big Nose Freaks Out (U).nes",71)
+  RomExtraGame("Big Nose the Caveman (U).nes",71)
+  RomExtraGame("Dizzy The Adventurer (Aladdin) (U).nes",71)
+  RomExtraGame("Fantastic Adventures of Dizzy, The (U).nes",71)
+  RomExtraGame("Fire Hawk (U).nes",71)
+  RomExtraGame("Linus Spacehead's Cosmic Crusade (Aladdin) (U).nes",71)
+  RomExtraGame("Mig-29 Soviet Fighter (U).nes",71)
+  RomExtraGame("Stunt Kids (U).nes",71)
+  RomExtraGame("Ultimate Stuntman (U).nes",71)
+  RomExtraGame("Fantasy Zone (U).nes",206)
+  RomExtraGame("Indiana Jones and the Temple of Doom (Tengen) (U).nes",206)
+  RomExtraGame("Pacmania (U).nes",206)
+  RomExtraGame("RBI Baseball (U).nes",206)
+  RomExtraGame("RBI Baseball 2 (U).nes",206)
+  RomExtraGame("Ring King (U).nes",206)
+  RomExtraGame("Toobin (U).nes",206)
+  RomExtraGame("Vindicators (U).nes",206)
+  RomExtraGame("Klax (U).nes",64)
+  RomExtraGame("Road Runner (U).nes",64)
+  RomExtraGame("Rolling Thunder (U).nes",64)
+  RomExtraGame("Shinobi (U).nes",64)
+  RomExtraGame("Skull & Crossbones (U).nes",64)
+  RomExtraGame("Quattro Adventure (U).nes",232)
+  RomExtraGame("Quattro Arcade (U).nes",232)
+  RomExtraGame("Quattro Sports (U).nes",232)
+  RomExtraGame("Quattro Sports (V3 Plug-Thru Cart) (U).nes",232)
+  RomExtraGame("Goal! Two (U).nes",118)
+  RomExtraGame("NES Play Action Football (U).nes",118)
+  RomExtraGame("Pro Sport Hockey (U).nes",118)
+  RomExtraGame("Mike Tyson's Punch-Out!! (U) (PRG 0).nes",9)
+  RomExtraGame("Mike Tyson's Punch-Out!! (U) (PRG 1).nes",9)
+  RomExtraGame("Deadly Towers (U).nes",34)
+  RomExtraGame("Impossible Mission 2 (U).nes",34)
+  RomExtraGame("Action 52 (U) [!].nes",228)
+  RomExtraGame("Cheetahmen 2 (U).nes",228)
+  RomExtraGame("Puzzle (U) [a1].nes",6)
+  RomExtraGame("Videomation (U).nes",13)
+  RomExtraGame("Caltron 6-in-1 (U).nes",41)
+  RomExtraGame("Super Spike V'Ball - Nintendo World Cup (U) [!].nes",47)
+  RomExtraGame("After Burner (U).nes",68)
+  RomExtraGame("Batman - Return of the Joker (U).nes",69)
+  RomExtraGame("Nintendo World Championships 1990 (U) [!].nes",105)
+  RomExtraGame("Pinbot (U).nes",119)
+  RomExtraGame("Death Race (U).nes",144)
+  RomExtraGame("Pyramid (U) (Sachen-Hacker).nes",148)
+  RomExtraGame("Alien Syndrome (U).nes",158)
+  RomExtraGame("Maxi 15 (U).nes",234)
+EndProcedure

@@ -54,6 +54,7 @@ Procedure M5TestRestore(p.i)
   M5TimerRun=PeekI(p+96)
   M5IrqEnable=PeekI(p+104)
 EndProcedure
+XIncludeFile "mapper_extra.pi4"
 Procedure.i MapperTests()
   Protected i.i,t.i,session.i,k.i,seed.i,cycles.i,dots.i,width.i,step.i
   t=NesHostUs() : GuestReset()
@@ -257,6 +258,23 @@ Procedure.i MapperTests()
     Wend
     If (i&255)=0 : SafetyPet() : EndIf
   Next
+  ; NINA register decoding, Codemasters fixed bank, Namco fixed wiring.
+  MapFixture(79)
+  MapperWrite($4100,$0B,0) : MapCheck(NesRead($8000),4) : MapCheck(PeekA(Chr),24)
+  MapperWrite($4200,0,0) : MapCheck(PeekA(Chr),24)
+  MapperWrite($5100,2,0) : MapCheck(NesRead($8000),0) : MapCheck(PeekA(Chr),16)
+  MapFixture(71)
+  MapperWrite($C000,3,0) : MapCheck(NesRead($8000),6) : MapCheck(NesRead($E000),31)
+  MapperWrite($9000,16,0) : MapCheck(MapMirrorMode,2)
+  MapperWrite($9000,0,0) : MapCheck(MapMirrorMode,3)
+  MapFixture(206)
+  MapperWrite($A000,$C6,0) : MapperWrite($A001,3,0)
+  MapCheck(NesRead($8000),3) : MapCheck(NesRead($C000),30)
+  MapperWrite($C000,0,0) : MapperWrite($C001,7,0)
+  MapCheck(PeekA(Chr),6) : MapCheck(PeekA(Chr+1024),7)
+  MapperWrite($E000,1,0) : MapperWrite($E001,9,0)
+  MapCheck(PeekA(Chr+2048),8) : MapCheck(MapIrqEnable,0)
+  ExtraMapperTests()
   ; Reset restores guest defaults while preserving host/session ownership.
   session=AudioSessionStarted : AudioSessionStarted=123
   M(12)=99 : ApuLength(0)=88 : PpuMask=31 : MapIrq=1

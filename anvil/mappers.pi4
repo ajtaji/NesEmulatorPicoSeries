@@ -11,13 +11,17 @@ __map_copy_end:
   EndASM
 EndProcedure
 Procedure MapperPrg(slot.i,bank.i)
-  bank=bank&((MapPrgBytes/8192)-1)
+  If CartMapper=47 : bank=(bank&15)|(ExtraOuter<<4) : EndIf
+  If CartMapper=228 : bank=bank % (MapPrgBytes/8192)
+  Else : bank=bank&((MapPrgBytes/8192)-1) : EndIf
   If MapPrgSlots(slot)<>bank
     MapCopy(#MAP_PRG+slot*8192,CartPrg+bank*8192,8192)
     MapPrgSlots(slot)=bank
   EndIf
 EndProcedure
 Procedure MapperChr(slot.i,bank.i)
+  If CartMapper=47 : bank=(bank&127)|(ExtraOuter<<7) : EndIf
+  If CartMapper=119 And (bank&64)<>0 : ExtraChrRamMap(slot,bank) : ProcedureReturn : EndIf
   bank=bank&((MapChrBytes/1024)-1)
   If MapChrSlots(slot)<>bank
     MapCopy(#MAP_CHR+slot*1024,CartChr+bank*1024,1024)
@@ -27,7 +31,9 @@ Procedure MapperChr(slot.i,bank.i)
 EndProcedure
 Procedure MapperUpdate()
   Protected bank.i,mode.i,i.i,base.i
-  If CartMapper=1
+  If ExtraMapperUpdate()
+    ; Cartridge supplied its complete bank mapping.
+  ElseIf CartMapper=1
     mode=(MapControl>>2)&3 : bank=MapPrgReg&15
     If mode<2
       bank=(bank&14)*2
@@ -51,7 +57,7 @@ Procedure MapperUpdate()
     If mode=0 : MapperMirror(2) : ElseIf mode=1 : MapperMirror(3)
     ElseIf mode=2 : MapperMirror(1) : Else : MapperMirror(0) : EndIf
     MapRamEnable=(MapPrgReg&16)=0 : MapRamProtect=0
-  ElseIf CartMapper=4
+  ElseIf ExtraMmc3(CartMapper)
     bank=MapRegs(6)&63
     If MapSelect&64
       MapperPrg(0,MapPrgBytes/8192-2) : MapperPrg(2,bank)
@@ -74,8 +80,10 @@ Procedure MapperUpdate()
     If CartMapper=11 : bank=(MapPrgReg>>4)&15 : EndIf
     For i=0 To 7 : MapperChr(i,bank*8+i) : Next
   EndIf
+  If CartMapper=118 : ExtraNtRefresh() : EndIf
   PrgBase=#MAP_PRG : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
-  Chr=#MAP_CHR : Pattern=#MAP_PATTERN : ChrWritable=MapChrRam
+  Chr=#MAP_CHR : Pattern=#MAP_PATTERN : ChrWritable=MapChrRam<>0 Or CartMapper=119
+  If CartMapper=6 : ChrWritable=ExtraMode<4 : EndIf
 EndProcedure
 Procedure MapperInit()
   Protected i.i
@@ -92,10 +100,11 @@ Procedure MapperInit()
   For i=0 To 8191 : MapRam(i)=0 : Next
   For i=0 To 4095 : MapCiram(i)=0 : Next
   MapMirrorMode=-1 : MapperMirror(PpuMirroring)
-  MapperUpdate()
+  ExtraMapperInit() : MapperUpdate()
 EndProcedure
 Procedure MapperWrite(addr.i,value.i,stamp.i)
   Protected commit.i
+  If ExtraMapperWrite(addr,value,stamp) : ProcedureReturn : EndIf
   If CartMapper=5 : M5Write(addr,value) : ProcedureReturn : EndIf
   If CartMapper=3 Or CartMapper=7 Or CartMapper=11
     If addr>=$8000
@@ -124,7 +133,7 @@ Procedure MapperWrite(addr.i,value.i,stamp.i)
         MapShift=$10 : MapperUpdate()
       EndIf
     EndIf
-  ElseIf CartMapper=4
+  ElseIf ExtraMmc3(CartMapper)
     Select addr&$E001
       Case $8000 : MapSelect=value : MapperUpdate()
       Case $8001 : MapRegs(MapSelect&7)=value : MapperUpdate()
@@ -139,6 +148,10 @@ Procedure MapperWrite(addr.i,value.i,stamp.i)
   EndIf
 EndProcedure
 Procedure MapperClockIrq()
+  If CartMapper=64 Or CartMapper=158
+    If ExtraIrqMode=0 : ExtraRamboClock(2) : EndIf
+    ProcedureReturn
+  EndIf
   MapIrqClocks=MapIrqClocks+1
   If MapIrqCount=0 Or MapReload<>0 : MapIrqCount=MapIrqLatch
   Else : MapIrqCount=MapIrqCount-1 : EndIf
@@ -154,7 +167,7 @@ Procedure MapperA12(addr.i,dot.i)
   If high<>MapA12
     If high=0
       MapLowSince=dot
-    ElseIf dot-MapLowSince>=10
+    ElseIf (dot-MapLowSince>=10 And CartMapper<>64 And CartMapper<>158) Or dot-MapLowSince>=30
       MapperClockIrq()
     EndIf
     MapA12=high
@@ -225,9 +238,21 @@ Procedure.i MapperCpuBudget()
     EndIf
     ProcedureReturn 128
   EndIf
-  If CartMapper<>4 Or MapIrqEnable=0 : ProcedureReturn 128 : EndIf
+  If CartMapper=6 Or CartMapper=69 Or CartMapper=105 : ProcedureReturn ExtraBudget() : EndIf
+  If CartMapper=64 Or CartMapper=158
+    If ExtraIrqMode Or ExtraFlags Or ExtraPending : ProcedureReturn ExtraBudget() : EndIf
+  EndIf
+  If ExtraA12(CartMapper)=0 Or MapIrqEnable=0 : ProcedureReturn 128 : EndIf
   If MapIrq<>0 : ProcedureReturn 1 : EndIf
   If (PpuMask&24)=0 : ProcedureReturn 128 : EndIf
+  ; New MMC3/RAMBO boards: interior BG-$1000 fetches have only four
+  ; low dots between A12 rises, so none can clock the filtered counter.
+  ; The original mapper-4 scheduling path remains unchanged.
+  If CartMapper<>4 And MapA12<>0 And (PpuCtrl&16)<>0 And PpuLine<240 And PpuDot>=5 And PpuDot<257
+    budget=(257-PpuDot)/3 : If budget<1 : budget=1 : EndIf
+    If budget>128 : budget=128 : EndIf
+    ProcedureReturn budget
+  EndIf
   ; Stop before any possible rendering-driven IRQ edge. A whole instruction
   ; may cross that boundary; the normal between-instruction IRQ poll follows.
   ; CPU bus/register accesses already terminate the run window themselves.
@@ -258,7 +283,7 @@ Procedure MapperChrWrite(addr.i,value.i)
   Next
 EndProcedure
 Procedure MapperRegNotice(reg.i)
-  If CartMapper=4 And (reg=6 Or reg=7)
+  If ExtraA12(CartMapper) And (reg=6 Or reg=7)
     MapperA12(PpuV&$3FFF,MapDots)
   EndIf
 EndProcedure
