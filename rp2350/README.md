@@ -3,6 +3,17 @@
 Regenerate with `py -3 tools/port_rp2350.py` from the repository root. The
 RP2040 tree is the semantic source; this folder contains the generated port.
 Use the root README for wiring, builds, ROM loading, and supported mappers.
+The LCD is rotated 90 degrees left from the RP2040 landscape layout, using the
+ST7796 controller's rotation setting. The 256x240 NES frame is centered at
+(32,120) in 320x480 portrait coordinates. DMA still sends the completed frame;
+the emulated framebuffer and PPU rendering are unchanged. The host FPS overlay
+stays at (4,4), outside the NES image.
+The operator confirmed this orientation on the physical board on 2026-10-16.
+Both public and speaker-enabled builds booted successfully; their DMA menu
+measurements are in `Diagnostics/rotation-menu-board.txt` and
+`Diagnostics/rotation-private-menu-board.txt`. Emulation remains stopped at the
+boot menu after this display check. The 40-second game measurements below were
+recorded for the original port before this display-only rotation.
 
 The port retains the CPU's per-opcode computed dispatch, the renderer, APU,
 queued bank changes, SBC stereo output, controls, and ROM-store protocol.

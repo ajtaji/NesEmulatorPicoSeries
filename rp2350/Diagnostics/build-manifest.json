@@ -6,10 +6,29 @@
   "spi_hz": 75000000,
   "compiler_sha256": "297a34050a009c1b866f692b2b7284c03dbc0f5385345a7cd8e2297c05be1e06",
   "artifacts": {
-    "firmware/nes-pico2-w.uf2": "67d5576a4fee10157fe53ee45879925547ca2cef79978e2a72ed3e466c3e0504",
+    "firmware/nes-pico2-w.uf2": "16fdae3dce4a44fdea156059c3a6443ed82e9bae78ea96cd845e68826aa4f1eb",
     "rp2350/Diagnostics/verify.uf2": "1b3b0046974c643ed7a6c511fe749e0ccbb1acf702ee860ac1b2120ae8958365"
   },
   "checks": 1926732,
   "failures": 0,
-  "game_samples_seconds": 40
+  "game_samples_seconds": 40,
+  "diagnostic_source_commit": "bde60af365a05cc96ed1a699958701dd3adbb302",
+  "display": {
+    "rotation": 0,
+    "width": 320,
+    "height": 480,
+    "viewport": [
+      32,
+      120,
+      256,
+      240
+    ],
+    "hud": [
+      4,
+      4
+    ],
+    "operator_confirmed_orientation": true,
+    "rotation_check_date": "2026-10-16",
+    "menu_log": "rp2350/Diagnostics/rotation-menu-board.txt"
+  }
 }

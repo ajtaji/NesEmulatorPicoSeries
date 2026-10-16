@@ -1,4 +1,4 @@
-; Host display overlay at (4,4), outside the NES viewport (112,40,256,240).
+; Host display overlay at (4,4), outside the NES viewport (32,120,256,240).
 ; Never writes NES nametables, palette, OAM or the emulated framebuffer.
 Global Dim HudPixels.u(80)
 Global HudLastUs.i, HudLastLcd.i, HudLastEmu.i, HudColumn.i

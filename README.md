@@ -56,6 +56,9 @@ The RP2350 port uses both Cortex-M33 cores with the same computed-dispatch CPU,
 PPU, APU, mapper events, and ROM-store format as the resolved RP2040 version.
 The LAFVIN pinout and controls are the same. It runs at the Pico 2 W's nominal
 150 MHz with 75 MHz LCD SPI.
+Its screen is rotated 90 degrees left from the Pico W landscape orientation.
+The unchanged 256x240 NES frame is centered at (32,120) on the 320x480 display;
+the host FPS counter remains in the upper left, outside the emulated PPU.
 
 Build the port with:
 

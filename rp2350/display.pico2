@@ -39,7 +39,7 @@ ProcedureRAM DisplayTransfer()
   Protected start.i, ticket.i
   ticket=PeekL(@DisplayReady) : start=Micros()
   If WorkerDisplay
-    Tft796Window(112,40,367,279)
+    Tft796Window(32,120,287,359)
     DisplayHalf=0 : DisplayActive=ticket : NesFence()
     If Tft796Blit(@FrameTop(0),30720)=0
       WorkerError=10
@@ -83,7 +83,7 @@ ProcedureRAM DisplayPoll()
         ProcedureReturn
       EndIf
       DisplayStart=Micros()
-      Tft796Window(112,40,367,279)
+      Tft796Window(32,120,287,359)
       SpiDmaInit() : SpiSetBits(0,16)
       Tft796PinSet(tft796_dc,1) : Tft796PinSet(tft796_cs,0)
       PokeL($40080024,PeekL($40080024)|#SPI_SSPDMACR_TXDMAE)
