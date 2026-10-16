@@ -1,0 +1,141 @@
+; Pimoroni Pico Display Pack 2.0: ST7789, 320x240, SPI0 DMA.
+; GP18 SCK, GP19 MOSI, GP17 CS, GP16 DC, GP20 backlight; no reset GPIO.
+; Complete NES frames occupy (32,0)..(287,239). Host HUD uses the left margin.
+; Controller setup follows Pimoroni's 320x240 settings; see DISPLAY-PACK2.md.
+Global St7789SpiKhz.i=75000
+Global St7789FrameDivider.i=1,St7789FramePhase.i
+Global Dim St7789DiscardRow.u(256)
+Global VideoTop.i,VideoBottom.i,VideoHalf.i,VideoState.i
+ProcedureRAM.i VideoLineTarget(line.i)
+  ; Retain all PPU work, but store alternate frames in a disposable scanline.
+  ; This leaves the completed DMA buffers untouched during the discarded frame.
+  If line=0
+    St7789FramePhase=St7789FramePhase+1 : VideoFramePresent=0
+    If St7789FrameDivider<=1 Or St7789FramePhase>=St7789FrameDivider
+      St7789FramePhase=0 : VideoFramePresent=1
+    EndIf
+  EndIf
+  If VideoFramePresent=0 : ProcedureReturn @St7789DiscardRow(0) : EndIf
+  ProcedureReturn 0
+EndProcedure
+Procedure.i VideoMenuPeriodUs()
+  If St7789FrameDivider<=1 : ProcedureReturn 16639 : EndIf
+  ProcedureReturn 16639*St7789FrameDivider
+EndProcedure
+ProcedureRAM St7789Pin(pin.i,value.i)
+  If value<>0 : PokeL($D0000018,1<<pin)
+  Else : PokeL($D0000020,1<<pin) : EndIf
+EndProcedure
+Procedure St7789Command(command.i)
+  St7789Pin(17,0) : St7789Pin(16,0)
+  SpiWrite8(0,command)
+  St7789Pin(16,1)
+EndProcedure
+Procedure St7789Setting(command.i,value.i)
+  St7789Command(command) : SpiWrite8(0,value) : St7789Pin(17,1)
+EndProcedure
+Procedure St7789Window(x0.i,y0.i,x1.i,y1.i)
+  St7789Command($2A)
+  SpiWrite8(0,x0>>8) : SpiWrite8(0,x0) : SpiWrite8(0,x1>>8) : SpiWrite8(0,x1)
+  St7789Command($2B)
+  SpiWrite8(0,y0>>8) : SpiWrite8(0,y0) : SpiWrite8(0,y1>>8) : SpiWrite8(0,y1)
+  St7789Command($2C)
+EndProcedure
+Procedure VideoBegin()
+  Protected p.i,command.i,count.i,n.i
+  pinMode(17,#OUTPUT) : pinMode(16,#OUTPUT) : pinMode(20,#OUTPUT)
+  St7789Pin(17,1) : St7789Pin(20,0)
+  SpiPeriFromSys(ClockSysConfigKhz())
+  SpiBegin(0,18,19,-1,St7789SpiKhz)
+  St7789Command($01) : St7789Pin(17,1) : delay(150)
+  p=?St7789Init
+  Repeat
+    command=PeekA(p) : p=p+1
+    If command=0 : Break : EndIf
+    count=PeekA(p) : p=p+1 : St7789Command(command)
+    For n=0 To count-1 : SpiWrite8(0,PeekA(p)) : p=p+1 : Next
+    St7789Pin(17,1)
+  ForEver
+  St7789Command($11) : St7789Pin(17,1) : delay(120)
+  St7789Setting($36,$70)
+  St7789Command($29) : St7789Pin(17,1) : delay(20)
+  St7789Window(0,0,319,239) : SpiDmaFill16(0,0,76800)
+  St7789Pin(17,1) : St7789Pin(20,1) : VideoState=0
+EndProcedure
+Procedure.i VideoClockHz()
+  ProcedureReturn SpiHz(0)
+EndProcedure
+Procedure VideoHudRect(x.i,y.i,width.i,height.i,pixels.i)
+  Protected column.i
+  ; HUD's 17 glyphs become FPS/value and EMU/value in a 32-pixel margin.
+  ; This translation never touches a pixel of either NES framebuffer.
+  If width=8 And height=10 And y=4 And x>=4 And x<=132 And ((x-4)&7)=0
+    column=(x-4)>>3
+    If column=8 : ProcedureReturn : EndIf
+    If column<8 : y=4+(column>>2)*12
+    Else : column=column-9 : y=32+(column>>2)*12 : EndIf
+    x=(column&3)*8
+  EndIf
+  If width<=0 Or height<=0 Or x<0 Or y<0 Or x+width>320 Or y+height>240 : ProcedureReturn : EndIf
+  If VideoState<>0 : ProcedureReturn : EndIf
+  St7789Window(x,y,x+width-1,y+height-1)
+  SpiDmaSend16(0,pixels,width*height) : St7789Pin(17,1)
+EndProcedure
+ProcedureRAM VideoDmaStart(pointer.i)
+  PokeL(#SPI_DMA_CH0_READ,pointer)
+  PokeL(#SPI_DMA_CH0_WRITE,$40080008)
+  PokeL(#SPI_DMA_CH0_COUNT,30720)
+  PokeL(#SPI_DMA_CH0_CTRL,#SPI_DMA_EN|#SPI_DMA_SIZE_HALF|#SPI_DMA_INCR_READ|(#SPI_DMA_TREQ_SPI0_TX<<#SPI_DMA_TREQ_SHIFT))
+EndProcedure
+ProcedureRAM.i VideoStart(top.i,bottom.i)
+  If VideoState<>0 : ProcedureReturn 0 : EndIf
+  VideoTop=top : VideoBottom=bottom
+  St7789Window(32,0,287,239)
+  SpiDmaInit() : SpiSetBits(0,16)
+  PokeL($40080024,PeekL($40080024)|#SPI_SSPDMACR_TXDMAE)
+  VideoHalf=0 : VideoState=1 : VideoDmaStart(VideoTop)
+  ProcedureReturn 1
+EndProcedure
+ProcedureRAM.i VideoPoll()
+  If PeekL(#SPI_DMA_CH0_CTRL)&$60000000 : ProcedureReturn -1 : EndIf
+  If VideoState=1
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0
+      VideoHalf=1 : NesFence()
+      VideoDmaStart(VideoBottom) : VideoState=2
+    EndIf
+  ElseIf VideoState=2
+    If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)=0 And (PeekL($4008000C)&#SPI_SR_BSY)=0
+      SpiDmaRestore(0) : St7789Pin(17,1) : VideoState=0
+      ProcedureReturn 1
+    EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM.i VideoCanWriteLine(line.i)
+  Protected finish.i,half.i
+  half=PeekL(@VideoHalf)
+  If line<0 Or line>=240 Or VideoState=0 : ProcedureReturn 0 : EndIf
+  If line<120
+    If half=1 : ProcedureReturn 1 : EndIf
+    finish=VideoTop+(line+1)*512
+  Else
+    If half=0 : ProcedureReturn 0 : EndIf
+    finish=VideoBottom+(line-119)*512
+  EndIf
+  If (PeekL(#SPI_DMA_CH0_CTRL)&#SPI_DMA_BUSY)<>0
+    If PeekL(#SPI_DMA_CH0_READ)>=finish : ProcedureReturn 1 : EndIf
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+ProcedureRAM VideoAbort()
+  SpiDmaAbort(0) : SpiDmaRestore(0) : St7789Pin(17,1) : VideoState=0
+EndProcedure
+DataSection
+St7789Init:
+  Data.a $3A,1,$05,$B2,5,$0C,$0C,$00,$33,$33,$C0,1,$2C
+  Data.a $C2,1,$01,$C3,1,$12,$C4,1,$20,$D0,2,$A4,$A1
+  Data.a $C6,1,$0F,$B0,2,$00,$C0,$B7,1,$35,$BB,1,$1F
+  Data.a $E0,14,$D0,$08,$11,$08,$0C,$15,$39,$33,$50,$36,$13,$14,$29,$2D
+  Data.a $E1,14,$D0,$08,$10,$08,$06,$06,$39,$44,$51,$0B,$16,$14,$2F,$31
+  Data.a $21,0,0
+EndDataSection

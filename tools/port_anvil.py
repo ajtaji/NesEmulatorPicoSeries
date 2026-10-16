@@ -12,7 +12,7 @@ OUT = ROOT / 'anvil'
 OUT.mkdir(exist_ok=True)
 
 def portable(s):
-    s = re.sub(r'^[ \t]*CompilerIf #NES_PICO_MAPPERS=1\n.*?^[ \t]*CompilerEndIf\n', '', s, flags=re.M | re.S)
+    s = re.sub(r'^[ \t]*CompilerIf #(?:NES_PICO_MAPPERS=1|NES_VIDEO_BACKEND=3)\n.*?^[ \t]*CompilerEndIf\n', '', s, flags=re.M | re.S)
     s = s.replace('ProcedureRAM', 'Procedure')
     s = s.replace('Micros()', 'NesHostUs()')
     return re.sub(r'^ReserveRegister .*\n', '', s, flags=re.M)

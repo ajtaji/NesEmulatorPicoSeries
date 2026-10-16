@@ -1,0 +1,4 @@
+4fc8a1ec7e16be819a8e681af1517b16e945dee199181fa91e648f437e757b34  nes-pico-w-display-pack2.uf2
+01935e3c4ed3194b456ec762f79fda4574f9fcd7aba92aee1155019808f0ff3a  nes-pico-w.uf2
+8c115b00a83dd0b54bad6a31f73aff826c83ec4ff2bb2a8bc28ce977bb7d0c5d  nes-pico2-w-display-pack2.uf2
+951f5e53840a24ad7e0ca5aa0d0ce1fe6e398e3e094e334675ae19ef369685f6  nes-pico2-w.uf2

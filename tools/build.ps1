@@ -7,11 +7,13 @@
 # variable, else PureMetalForge.exe on PATH.
 param(
     [string]$Compiler = $env:PUREMETALFORGE,
-    [string]$Source = 'rp2040/demo.picow',
-    [string]$Output = 'firmware/nes-pico-w.uf2',
+    [string]$Source = '',
+    [string]$Output = '',
     [string]$Port = '',
     [int]$Seconds = 12,
-    [switch]$VerifyNes
+    [switch]$VerifyNes,
+    [ValidateSet('rp2040','rp2350')][string]$Target = 'rp2040',
+    [ValidateSet('lafvin','display-pack2')][string]$Display = 'lafvin'
 )
 $ErrorActionPreference = 'Stop'
 if (!$Compiler) {
@@ -20,6 +22,22 @@ if (!$Compiler) {
     $Compiler = $found.Source
 }
 $projectRoot = Split-Path $PSScriptRoot -Parent
+if (!$Source) {
+    $wrapper = if ($Display -eq 'display-pack2') { 'display_pack2' } else { 'demo' }
+    $extension = if ($Target -eq 'rp2350') { 'pico2w' } else { 'picow' }
+    $Source = "$Target/$wrapper.$extension"
+} elseif ($PSBoundParameters.ContainsKey('Display')) {
+    throw '-Display selects the standard wrapper; use -Source alone for custom wrappers.'
+}
+$sourceTarget = if ($Source.EndsWith('.pico2w')) { 'rp2350' } else { 'rp2040' }
+if ($PSBoundParameters.ContainsKey('Target') -and $Target -ne $sourceTarget) {
+    throw '-Target does not match the source wrapper extension.'
+}
+if (!$Output) {
+    $boardName = if ($sourceTarget -eq 'rp2350') { 'pico2-w' } else { 'pico-w' }
+    $displayName = if ($Display -eq 'display-pack2' -or $Source -match 'display_pack2\.') { '-display-pack2' } else { '' }
+    $Output = "firmware/nes-$boardName$displayName.uf2"
+}
 $sourcePath = if ([IO.Path]::IsPathRooted($Source)) { [IO.Path]::GetFullPath($Source) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $Source)) }
 $outputPath = if ([IO.Path]::IsPathRooted($Output)) { [IO.Path]::GetFullPath($Output) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $Output)) }
 [IO.Directory]::CreateDirectory((Split-Path $outputPath -Parent)) | Out-Null
@@ -27,7 +45,15 @@ $arguments = '--compile "' + $sourcePath + '" -S -o "' + $outputPath + '"'
 # Compile and validate before any upload can touch the board's ROM store.
 $stdoutPath = $outputPath + '.build.log'
 $stderrPath = $outputPath + '.stderr.log'
-$process = Start-Process -FilePath $Compiler -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+$compilerPath = (Resolve-Path -LiteralPath $Compiler).Path
+$compilerRoot = Split-Path $compilerPath -Parent
+$previousPmfRoot = $env:PMF_ROOT
+try {
+    $env:PMF_ROOT = $compilerRoot
+    $process = Start-Process -FilePath $compilerPath -ArgumentList $arguments -WorkingDirectory $compilerRoot -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+} finally {
+    $env:PMF_ROOT = $previousPmfRoot
+}
 Get-Content $stdoutPath
 Get-Content $stderrPath
 if ($process.ExitCode -ne 0) { throw "Compiler exit $($process.ExitCode): $stdoutPath" }

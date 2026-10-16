@@ -1,0 +1,21 @@
+{
+  "rp2040": {
+    "public_uf2_sha256": "4fc8a1ec7e16be819a8e681af1517b16e945dee199181fa91e648f437e757b34",
+    "display_frame_divider": 2,
+    "guest_timing": "NTSC; presentation decimation only",
+    "panel_validation": "Experimental; no ST7789 display available",
+    "native_spi_dma_checks": 90,
+    "native_failures": 0,
+    "bus_hz": 50000000,
+    "private_board_test_sha256": "1c052db15159ed909b41659909dbb06abfebd9650778ebffdca1fc120c93e5cc"
+  },
+  "rp2350": {
+    "public_uf2_sha256": "8c115b00a83dd0b54bad6a31f73aff826c83ec4ff2bb2a8bc28ce977bb7d0c5d",
+    "display_frame_divider": 1,
+    "guest_timing": "NTSC; presentation decimation only",
+    "panel_validation": "Experimental; no ST7789 display available",
+    "native_spi_dma_checks": 90,
+    "native_failures": 0,
+    "bus_hz": 75000000
+  }
+}

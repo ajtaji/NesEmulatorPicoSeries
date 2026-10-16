@@ -36,6 +36,14 @@ def port(text, name):
         text = text.replace('#SPI_DMA_TREQ_SPI0_TX<<15', '#SPI_DMA_TREQ_SPI0_TX<<#SPI_DMA_TREQ_SHIFT')
         text = text.replace('SpiPeriFromSys(200000)', 'SpiPeriFromSys(ClockSysConfigKhz())')
         text = text.replace('Tft796Rotate(1)', 'Tft796Rotate(0)')
+    if name == 'video_st7789.pico':
+        text = text.replace('$D0000014', '__ST7789_SET__').replace('$D0000018', '$D0000020').replace('__ST7789_SET__', '$D0000018')
+        text = text.replace('$4003C008', '$40080008').replace('$4003C024', '$40080024').replace('$4003C00C', '$4008000C')
+        text = text.replace('#SPI_DMA_TREQ_SPI0_TX<<15', '#SPI_DMA_TREQ_SPI0_TX<<#SPI_DMA_TREQ_SHIFT')
+        text = text.replace('St7789SpiKhz.i=62500', 'St7789SpiKhz.i=75000')
+        text = text.replace('St7789FrameDivider.i=2', 'St7789FrameDivider.i=1')
+    if name == 'st7789.picow':
+        text = text.replace('$4003C024', '$40080024').replace('$4003C000', '$40080000')
     if name == 'math.pico':
         # All NES call sites divide nonnegative bounded timing/count values.
         # The RP2040 SIO divider does not exist on RP2350; M33 has native divide.
