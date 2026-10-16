@@ -1,0 +1,11 @@
+ROMSTORE games=4 of 4
+core1 launch=1
+BOOT_MENU count=4
+BOOT_SELECT index=0 mapper=66
+BOOT_FPS us=1000004 lcd=29
+BOOT_FPS us=1000001 lcd=30
+BOOT_FPS us=1000003 lcd=30
+BOOT_FPS us=1000004 lcd=30
+BOOT_FPS us=1000001 lcd=30
+BOOT_FPS us=1000001 lcd=30
+BOOT_FPS us=1000001 lcd=30

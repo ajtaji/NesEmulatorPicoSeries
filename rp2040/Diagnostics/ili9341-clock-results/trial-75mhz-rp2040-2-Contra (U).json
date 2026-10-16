@@ -1,0 +1,20 @@
+{
+  "cycles": 1769664.1456874066,
+  "frames": 59.42018993562471,
+  "lcd": 59.245204100728046,
+  "samples": 47460.708055682895,
+  "firmware_sha256": "d875917be051a25fafad2597af69e959fc04e6660c47ce5d5126f60b0aae79e1",
+  "title": "Contra (U).nes",
+  "mapper": 2,
+  "target": "rp2040",
+  "seconds": 40.003238,
+  "errors": 0,
+  "stopped": 0,
+  "debt_first": -2,
+  "debt_last": 804054,
+  "bt_live": 0,
+  "colours": 13,
+  "audio_underrun_first": 0,
+  "audio_underrun_last": 0,
+  "audio_underrun_steady_delta": 0
+}
