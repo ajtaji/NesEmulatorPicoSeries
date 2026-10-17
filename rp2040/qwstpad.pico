@@ -1,0 +1,128 @@
+; Pimoroni Qw/ST Pad (I2C game controller, TI TCA9555 16-bit I/O expander).
+; Up to two pads: the first found is player 1 ($4016), the second player 2
+; ($4017). Addresses 0x21 (default), 0x23, 0x25, 0x27 (cut traces).
+; References: TCA9555 datasheet (TI SCPS200), Pimoroni's schematic and
+; qwstpad-micropython (register setup and pin map below are theirs).
+;
+; Wiring: Qw/ST SDA -> GP8, SCL -> GP9 (I2C0), 3V3, GND. These pins are free
+; with every bundled display output. A wrapper may set QwstSda/QwstScl/
+; QwstUnit before Main(), or QwstEnabled=0 to leave the pins alone.
+;
+; Core 0 configures the pads before core 1 starts; afterwards only core 1
+; touches the bus (QwstPoll, every 4 ms) and publishes one NES button byte
+; per player in QwstMask(). An unplugged pad reads as no buttons and is
+; looked for again once a second.
+#QWST_REG_INPUT = 0
+#QWST_REG_OUTPUT = 2
+#QWST_REG_POLARITY = 4
+#QWST_REG_CONFIG = 6
+#QWST_POLL_US = 4000
+Global QwstEnabled.i=1, QwstUnit.i=0, QwstSda.i=8, QwstScl.i=9
+Global QwstPads.i, QwstReads.i, QwstErrors.i, QwstBusyUs.i, QwstLast.i, QwstScanLast.i, QwstReady.i
+Global Dim QwstAddr.i(2)
+Global Dim QwstMask.i(2)
+Global Dim QwstRaw.i(2)
+Global Dim QwstCandidate.i(2)
+Global Dim QwstBuf.a(3)
+
+Procedure.i QwstWrite16(addr.i, reg.i, value.i)
+  QwstBuf(0)=reg : QwstBuf(1)=value&255 : QwstBuf(2)=(value>>8)&255
+  ProcedureReturn Bool(I2cWrite(addr,@QwstBuf(0),3,1)=3)
+EndProcedure
+; The 16 input bits (port 0 low byte), or -1 when the pad did not answer.
+Procedure.i QwstRead16(addr.i)
+  QwstBuf(0)=#QWST_REG_INPUT
+  If I2cWrite(addr,@QwstBuf(0),1,0)<>1 : ProcedureReturn -1 : EndIf
+  If I2cRead(addr,@QwstBuf(0),2,1)<>2 : ProcedureReturn -1 : EndIf
+  ProcedureReturn QwstBuf(0)|(QwstBuf(1)<<8)
+EndProcedure
+; Pimoroni's setup: buttons are inputs read inverted (pressed = 1); the four
+; LEDs (pins 6, 7, 9, 10, active low) are outputs. leds = bits 0..3, 1 = lit.
+Procedure.i QwstSetup(addr.i, leds.i)
+  Protected output.i, k.i
+  output=$06C0
+  For k=0 To 3
+    If (leds>>k)&1
+      If k=0 : output=output&~$0040 : EndIf
+      If k=1 : output=output&~$0080 : EndIf
+      If k=2 : output=output&~$0200 : EndIf
+      If k=3 : output=output&~$0400 : EndIf
+    EndIf
+  Next
+  If QwstWrite16(addr,#QWST_REG_CONFIG,$F93F)=0 : ProcedureReturn 0 : EndIf
+  If QwstWrite16(addr,#QWST_REG_POLARITY,$F83F)=0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn QwstWrite16(addr,#QWST_REG_OUTPUT,output)
+EndProcedure
+; Pad pins (Pimoroni's map) to the NES byte: A B Select Start Up Down Left Right.
+Procedure.i QwstNesButtons(bits.i)
+  Protected nes.i
+  If (bits>>14)&1 : nes=nes|1 : EndIf      ; A
+  If (bits>>12)&1 : nes=nes|2 : EndIf      ; B
+  If (bits>>5)&1 : nes=nes|4 : EndIf       ; - : Select
+  If (bits>>11)&1 : nes=nes|8 : EndIf      ; + : Start
+  If (bits>>1)&1 : nes=nes|$10 : EndIf     ; Up
+  If (bits>>4)&1 : nes=nes|$20 : EndIf     ; Down
+  If (bits>>2)&1 : nes=nes|$40 : EndIf     ; Left
+  If (bits>>3)&1 : nes=nes|$80 : EndIf     ; Right
+  ProcedureReturn nes
+EndProcedure
+; Find answering pads, in address order, and light each one's player number.
+Procedure QwstScan()
+  Protected n.i, addr.i, found.i
+  For n=0 To 3
+    If found<2
+      addr=$21+n*2
+      If I2cPresent(addr)
+        If QwstSetup(addr,1<<found)
+          QwstAddr(found)=addr : QwstRaw(found)=0 : QwstCandidate(found)= -1
+          found=found+1
+        EndIf
+      EndIf
+    EndIf
+  Next
+  QwstPads=found
+EndProcedure
+Procedure QwstBegin()
+  If QwstEnabled=0 : ProcedureReturn : EndIf
+  If I2cBegin(QwstUnit,QwstSda,QwstScl,400)=0
+    Say("QWSTPAD refused: I2C") : Num(QwstUnit) : Say(" on GP") : Num(QwstSda) : Say("/GP") : Num(QwstScl)
+    Say(" did not start; the pad stays off") : Eol()
+    QwstEnabled=0 : ProcedureReturn
+  EndIf
+  QwstScan() : QwstScanLast=Micros() : QwstReady=1
+  Say("QWSTPAD pads=") : Num(QwstPads)
+  If QwstPads>0 : Say(" player1_address=") : Num(QwstAddr(0)) : EndIf
+  If QwstPads>1 : Say(" player2_address=") : Num(QwstAddr(1)) : EndIf
+  Say(" sda=GP") : Num(QwstSda) : Say(" scl=GP") : Num(QwstScl) : Eol()
+EndProcedure
+; Core 1. Returns 1 when it used the bus.
+Procedure.i QwstPoll()
+  Protected now.i, n.i, bits.i
+  If QwstReady=0 : ProcedureReturn 0 : EndIf
+  now=Micros()
+  If now-QwstLast<#QWST_POLL_US : ProcedureReturn 0 : EndIf
+  QwstLast=now
+  If QwstPads<2 And now-QwstScanLast>=1000000
+    QwstScanLast=now : QwstScan()
+  EndIf
+  For n=0 To 1
+    If n<QwstPads
+      bits=QwstRead16(QwstAddr(n))
+      If bits<0
+        ; Gone: release its buttons and find it again on the next scan.
+        QwstErrors=QwstErrors+1 : QwstMask(n)=0 : QwstPads=n
+      Else
+        QwstReads=QwstReads+1
+        ; A state counts once two reads 4 ms apart agree (contact bounce).
+        If bits=QwstCandidate(n) : QwstRaw(n)=bits : EndIf
+        QwstCandidate(n)=bits
+        QwstMask(n)=QwstNesButtons(QwstRaw(n))
+      EndIf
+    Else
+      QwstMask(n)=0
+    EndIf
+  Next
+  NesFence()
+  QwstBusyUs=QwstBusyUs+Micros()-now
+  ProcedureReturn 1
+EndProcedure

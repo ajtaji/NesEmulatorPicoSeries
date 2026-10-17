@@ -48,6 +48,8 @@ XIncludeFile "hud.pico"
 XIncludeFile "display.pico"
 XIncludeFile "worker.pico"
 XIncludeFile "io.pico"
+XIncludeFile "RP2040/Lib/i2c.pico"
+XIncludeFile "qwstpad.pico"
 XIncludeFile "input.pico"
 Global Dim FrameBottomStore.u(30720)
 Procedure CartPpuWriteNotice(addr.i,value.i)
@@ -221,7 +223,7 @@ Procedure Main()
   WaitUs(200000)
   VideoBegin()
   LoadCartridge()
-  InputBegin()
+  InputBegin() : QwstBegin()
   Say("core1 launch=") : Num(multicore_launch()) : Eol()
   While PeekL(@WorkerReady)=0 : SafetyPet() : Wend
   CartIndex=BootMenu() : LoadCartridge()
@@ -282,7 +284,9 @@ Procedure Main()
       Say(" buttons=") : Num(InputButtons) : Say(" mask=") : Num(InputMask)
       Say(" polls=") : Num(InputPolls) : Say(" errors=") : Num(InputErrors)
       Say(" busy_us=") : Num(InputBusyUs)
-      Say(" starts=") : Num(InputStartCount) : Say(" selects=") : Num(InputSelectCount) : Eol()
+      Say(" starts=") : Num(InputStartCount) : Say(" selects=") : Num(InputSelectCount)
+      Say(" pads=") : Num(QwstPads) : Say(" pad1=") : Num(QwstMask(0)) : Say(" pad2=") : Num(QwstMask(1))
+      Say(" pad_reads=") : Num(QwstReads) : Say(" pad_errors=") : Num(QwstErrors) : Say(" pad_busy_us=") : Num(QwstBusyUs) : Eol()
     ElseIf key=109
       Say("MAPPER pc=") : Num(PC) : Say(" ctrl=") : Num(PpuCtrl) : Say(" mask=") : Num(PpuMask)
       Say(" m0=") : Num(M(0)) : Say(" m7=") : Num(M(7)) : Say(" irq=") : Num(PicoIrq)

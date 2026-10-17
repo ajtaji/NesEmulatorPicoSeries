@@ -1,5 +1,6 @@
 ; LAFVIN carrier: BTN1 GP15=A, BTN2 GP14=B; joystick GP26/27.
 ; Core 0 samples at 1 kHz. No input work in the CPU dispatch loop.
+; Qw/ST Pads (qwstpad.pico) are read by core 1 and merged here.
 Global InputPhysicalEnabled.i=1
 Global InputX.i, InputY.i, InputButtons.i, InputCandidate.i, InputDebounce.i
 Global InputDirections.i, InputMask.i, InputHost.i, InputLatch.i, InputPulse.i, InputPulseTime.i
@@ -69,7 +70,8 @@ EndProcedure
 Procedure InputPoll()
   Protected now.i, buttons.i
   If InputPhysicalEnabled=0
-    InputMask=0 : NesController=InputHost : ProcedureReturn
+    InputMask=QwstMask(0) : NesController=InputMask|InputHost : NesController2=QwstMask(1)
+    ProcedureReturn
   EndIf
   now=Micros()
   If now-InputLast<1000
@@ -83,6 +85,8 @@ Procedure InputPoll()
   Else
     InputUpdate(InputX,4095-InputY,buttons,now)
   EndIf
-  NesController=InputMask|InputHost
+  ; A Qw/ST Pad adds to the carrier controls; a second pad is player 2.
+  InputMask=InputMask|QwstMask(0)
+  NesController=InputMask|InputHost : NesController2=QwstMask(1)
   InputPolls=InputPolls+1 : InputBusyUs=InputBusyUs+Micros()-now
 EndProcedure

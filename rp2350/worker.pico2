@@ -135,6 +135,7 @@ ProcedureRAM WorkerCommand(command.i, addr.i, value.i, stamp.i)
   CompilerEndIf
   EndIf
 EndProcedure
+Declare.i QwstPoll()
 ProcedureRAM Core1Main()
   Protected slot.i, command.i, addr.i, value.i, start.i, i.i, p.i
   CompilerIf #NES_SPLIT=0
@@ -164,6 +165,8 @@ ProcedureRAM Core1Main()
       QComplete=QComplete+1
     EndIf
     AudioPoll()
+    ; Qw/ST Pad controllers: the I2C reads belong to this core.
+    If QwstPoll() : i=1 : EndIf
     ; Idle time: a pass that applied no bus event and did no audio output work.
     If i=0 And AudioWorked=0 : Core1IdleUs=Core1IdleUs+Micros()-p : EndIf
   ForEver
