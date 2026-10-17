@@ -34,6 +34,9 @@ bare Pico/module combination has been physically tested. Builds are in
 30 FPS presentation and a separate host FPS overlay. The bare Pico/module
 combination has been physically tested; the Pico 2 build is compile-checked.
 
+[Pimoroni Qw/ST Pad](QWSTPAD.md) I2C controllers are supported on both chips: one or two
+pads on GP8/GP9 give players 1 and 2. Not yet run with a pad.
+
 Display Pack physical-screen validation is pending. See [its driver notes](DISPLAY-PACK2.md)
 and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 
@@ -83,6 +86,7 @@ passes 1,926,732 checks with 0 failures.
   | Joystick X / Y | GP26 / GP27 (ADC) |
 
   Start is both buttons plus up; Select is both buttons plus down.
+- Optional: one or two [Qw/ST Pad](QWSTPAD.md) controllers on GP8/GP9.
 - Python 3 with `pyserial` (`py -3 -m pip install pyserial`) to load games.
 
 ## Pico 2 W
