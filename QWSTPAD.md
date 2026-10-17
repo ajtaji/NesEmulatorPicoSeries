@@ -65,4 +65,5 @@ error and busy-time counters.
 - With no pad attached, the Pico 2 W passes the board test suite (1,928,288
   checks, 0 failures). It also ran a stored game at 60 FPS in every second, with
   core 0 headroom unchanged. Looking for a pad costs core 1 about 1 ms per second.
-- The Pico W build compiles; it has not been run on a board since this change.
+- With no pad attached, the Pico W passes the board test suite (1,926,732 checks,
+  0 failures) and ran a stored game at 60 FPS in every second.
