@@ -214,6 +214,12 @@ that the emulated audio is correct. The published firmware has no speaker
 configured and is therefore silent. To use a speaker, build your own firmware
 with its address (see *Building*).
 
+Since 2026-10-18 the Bluetooth stack and the SBC encoder are PureMetal Forge's
+own libraries - `RP2040/Lib/bluetooth.pico` (or `RP2350/Lib/bluetooth.pico2`),
+`Shared/Bluetooth/sbc.pmi` and `Shared/Bluetooth/bt_audio.pmi` - and
+`rp2040/bt_audio.pico` here connects them to the APU. Building therefore needs a
+PureMetal Forge release that includes them (the first one after 2026-10-17).
+
 ## How it works
 
 - **Core 0** runs the 2A03 CPU (computed-dispatch interpreter) and the PPU. The
@@ -265,8 +271,10 @@ published.
 Generated sources are produced by scripts in `rp2040/` and reproduce
 byte-for-byte: `generate_cpu.py` (the 2A03 core, from `nmos6502.pico`; needs
 `py65`), `generate_ppu.py` (the renderer), `make_demo.py` (the built-in demo
-cartridge), `make_sbc_vectors.py` and `Diagnostics/generate_zp_vectors.py`
-(test vectors).
+cartridge) and `Diagnostics/generate_zp_vectors.py` (test vectors). The SBC
+test vectors moved to PureMetal Forge with the encoder
+(`Shared/Bluetooth/Diagnostics/sbc_vectors.pmi`, made by its
+`tools/make_sbc_vectors.py`).
 
 ## Testing on a board
 
