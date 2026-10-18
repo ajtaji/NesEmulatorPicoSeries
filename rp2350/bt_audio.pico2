@@ -1,11 +1,11 @@
 ; NES Bluetooth speaker output: PureMetal's Shared/Bluetooth/bt_audio.pmi (A2DP + SBC), fed from the APU's PCM ring.
 ; Core 0 connects (AudioBegin, from Main); core 1 streams (AudioPoll, from Core1Main). The library paces the
-; stream by the clock at exactly 48 kHz; the APU produces at 48 kHz too, so the queue between them stays level.
+; stream by the clock at exactly 48 kHz and reads the APU's PCM ring directly (BtAudioSource).
 ; Until 2026-10-18 this file and bt_transport / bt_radio / bt_firmware / sbc_encoder were the NES's own Bluetooth
 ; stack; they became the compiler's libraries (the board's Lib/bluetooth library, Shared/Bluetooth/sbc.pmi
 ; and bt_audio.pmi), and what is left here is the NES's side of it.
 Global Dim NesBtPeer.a(6)
-Global NesBtPeerSet.i, NesBtRead.i, NesBtLastPackets.i
+Global NesBtPeerSet.i, NesBtLastPackets.i, NesBtLastPoll.i, NesBtLastRead.i, NesBtGap.i=700
 ; USB key 'k': a copy of the next media packet as it went to the radio (ACL header, L2CAP, RTP, SBC), printed by
 ; runtime.pico between SBC_BEGIN and SBC_END. USB key 'q': AVDTP Suspend / Start.
 Global Dim BtSnapshot.a(232)               ; the largest media packet: (13 + 3 * 68 + 15) & ~3
@@ -31,39 +31,43 @@ Procedure AudioBegin()
     Print("NES Bluetooth unavailable (HCI status ") : PrintDec(BtAudioStatus()) : PrintN("); continuing without audio")
     ProcedureReturn
   EndIf
-  NesBtRead=ApuSamples : NesBtLastPackets=0
+  NesBtLastPackets=0
+  ; The library reads the APU's ring itself: no copy, and all 4096 samples (85 ms) are the cushion
+  ; for a frame the emulator finishes late.
+  BtAudioSource(@Pcm(0),4096,@ApuSamples)
   ; From here core 1 drives the radio: no USB pumping and no printing from the library.
   BtAudioPumps(0)
   AudioQueueSlack=1536 : AudioLive=1 : AudioRunning=1
 EndProcedure
 
-Procedure AudioPoll()
-  Protected start.i, n.i, room.i, index.i, chunk.i, moved.i, i.i, packets.i, sent.i
+ProcedureRAM AudioPoll()
+  Protected start.i, i.i, packets.i, sent.i
   If AudioRunning=0 : AudioWorked=0 : ProcedureReturn : EndIf
   start=Micros()
+  ; Core1Main calls this once per pass, and a pass is one bus event from core 0 - tens of thousands a
+  ; second. The library wants a call about every 0.15 ms while a frame is part-way encoded (three short
+  ; steps) and otherwise every 0.7 ms is plenty; the passes in between return here at once, so core 0's
+  ; requests are not kept waiting behind empty polls.
+  If start-NesBtLastPoll<NesBtGap And BtControlRequest=0
+    AudioWorked=0 : ProcedureReturn
+  EndIf
+  NesBtLastPoll=start
   If BtControlRequest<>0
     If BtAudioLive() : BtAudioPause(1) : Else : BtAudioPause(0) : EndIf
     BtControlRequest=0
   EndIf
-  ; The APU's ring -> the library's queue, as much as fits.
-  n=ApuSamples-NesBtRead
-  If n>4096
-    AudioOverruns=AudioOverruns+1 : NesBtRead=ApuSamples-128 : n=128
-  EndIf
-  room=BtAudioFree()
-  If n>room : n=room : EndIf
-  moved=n
-  While n>0
-    index=NesBtRead&4095
-    chunk=4096-index : If chunk>n : chunk=n : EndIf
-    BtAudioWrite(@Pcm(index),chunk)
-    NesBtRead=NesBtRead+chunk : n=n-chunk
-  Wend
   BtAudioPoll()
-  AudioLive=BtAudioLive()
+  If BtAudioBusy() : NesBtGap=150 : Else : NesBtGap=700 : EndIf
   packets=BtAudioPackets()
   sent=Bool(packets<>NesBtLastPackets)
-  AudioUnderruns=BtAudioUnderruns()
+  If sent Or start-NesBtLastRead>100000
+    ; The counters change at most once a packet (125 a second): read them then, and every 0.1 s so a
+    ; dropped link still shows.
+    AudioLive=BtAudioLive()
+    AudioUnderruns=BtAudioUnderruns()
+    AudioOverruns=BtAudioOverruns()
+    NesBtLastRead=start
+  EndIf
   If sent
     If BtSnapshotState=1
       ; bt_tx still holds the media packet just sent.
@@ -74,10 +78,5 @@ Procedure AudioPoll()
     NesBtLastPackets=packets
   EndIf
   AudioPackets=packets
-  ; Only polls that did work count, so this is Bluetooth load, not idle spin.
-  If moved>0 Or sent
-    AudioWorked=1 : AudioBusyUs=AudioBusyUs+Micros()-start
-  Else
-    AudioWorked=0
-  EndIf
+  AudioWorked=1 : AudioBusyUs=AudioBusyUs+Micros()-start
 EndProcedure
