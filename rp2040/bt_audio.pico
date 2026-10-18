@@ -20,24 +20,32 @@ Procedure NesBluetoothSetPeer(src.i)
   BtAudioStereo(1) : NesBtPeerSet=1
 EndProcedure
 
+Declare.i RomBtKeyAddr()
+Declare.i RomSaveBtKey()
 Procedure AudioBegin()
-  Protected rc.i
+  Protected rc.i, key.i
   AudioRunning=0 : AudioLive=0
   If NesBtPeerSet=0 : ProcedureReturn : EndIf
   PrintN("NES Bluetooth: initializing speaker")
+  ; The link key saved after the first pairing (rom_store.pico): the speaker pairs once, not at every start.
+  key=RomBtKeyAddr()
+  If key : BtAudioSetKey(key) : EndIf
   rc=BtAudioBegin(@NesBtPeer(0))
   Print("BT AUDIO rc=") : PrintDecN(rc)
   If rc<>0
     Print("NES Bluetooth unavailable (HCI status ") : PrintDec(BtAudioStatus()) : PrintN("); continuing without audio")
     ProcedureReturn
   EndIf
+  If BtAudioKeyNew()
+    If RomSaveBtKey() : PrintN("NES Bluetooth: link key saved") : Else : PrintN("NES Bluetooth: link key NOT saved (flash)") : EndIf
+  EndIf
   NesBtLastPackets=0
-  ; The library reads the APU's ring itself: no copy, and all 4096 samples (85 ms) are the cushion
-  ; for a frame the emulator finishes late.
-  BtAudioSource(@Pcm(0),4096,@ApuSamples)
-  ; Start sending 65 ms behind the APU: in a busy scene the emulator runs a frame or three late, and
-  ; the ring then still holds the sound the speaker is due.
-  BtAudioLead(65000)                                   ; the ring is 85 ms; a catch-up adds up to 17
+  ; The library reads the APU's ring itself: no copy, and the whole ring (85 ms on the Pico W, 170 on the
+  ; Pico 2 W) is the cushion for a frame the emulator finishes late.
+  BtAudioSource(@Pcm(0),#NES_AUDIO_RING_SAMPLES,@ApuSamples)
+  ; Start sending #NES_BT_LEAD_US behind the APU: in a busy scene the emulator runs a few frames late,
+  ; and the ring then still holds the sound the speaker is due.
+  BtAudioLead(#NES_BT_LEAD_US)
   ; From here core 1 drives the radio: no USB pumping and no printing from the library.
   BtAudioPumps(0)
   AudioQueueSlack=1536 : AudioLive=1 : AudioRunning=1

@@ -6,7 +6,8 @@
 #NES_VIDEO_HEIGHT=240
 #NES_VIDEO_HALF_ROWS=120
 #NES_AUDIO_RATE=48000
-#NES_AUDIO_RING_SAMPLES=4096
+#NES_AUDIO_RING_SAMPLES=4096        ; the APU's PCM ring, a power of two (8192 on the Pico 2 W: room to spare)
+#NES_BT_LEAD_US=65000               ; Bluetooth starts this far behind the APU: under the ring, with ~17 ms spare
 CompilerIf #NES_VIDEO_BACKEND=3 Or #NES_VIDEO_BACKEND=4 Or #NES_VIDEO_BACKEND=5
   Global VideoFramePresent.i=1
 CompilerEndIf

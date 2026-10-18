@@ -58,10 +58,17 @@ EndProcedure
         # Hot bus adapters must share SRAM with the computed-dispatch CPU.
         for proc in ('PicoMapperWrite','PicoNtRead','PicoNtWrite','PicoMirrorSet','PicoInvalidateChr','PicoChrSwitch','PicoChrFour','PicoRamRead','PicoChrWrite','PicoRegisterNotice','PicoWorkerPrgSet'):
             text=re.sub(r'Procedure(\.i)? '+proc+r'\(',lambda m:'ProcedureRAM'+(m[1] or '')+' '+proc+'(',text)
+    if name == 'state.pico':
+        # The Pico 2 W has 520 KB of SRAM: a 170 ms PCM ring and a 130 ms Bluetooth lead, so a
+        # busy scene the emulator runs a few frames late never reaches the speaker as silence.
+        text = text.replace('#NES_AUDIO_RING_SAMPLES=4096 ', '#NES_AUDIO_RING_SAMPLES=8192 ')
+        text = text.replace('#NES_BT_LEAD_US=65000 ', '#NES_BT_LEAD_US=130000')
     if name == 'mapper_state.pico':
         text = text.replace('#PICO_ADVANCED=0', '#PICO_ADVANCED=1')
     if name == 'rom_store.pico':
         text = text.replace('$FF000', '$1FF000').replace('$FEFFF', '$1FEFFF')
+        # The Pico 2 W's flash is 4 MB: the link key sits in its last sector.
+        text = text.replace('#ROMSTORE_BTKEY = $1FF000', '#ROMSTORE_BTKEY = $3FF000')
         text = text.replace('; $100000 up is the Bluetooth radio firmware',
                             '; $200000 up is the Bluetooth radio firmware')
     if name == 'runtime.pico':

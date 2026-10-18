@@ -19,6 +19,7 @@
 #ROMSTORE_END = $1FF000
 #ROMSTORE_TEST = $1FF000
 #ROMSTORE_FLASH = $10000000
+#ROMSTORE_BTKEY = $3FF000          ; the Bluetooth speaker's link key: the chip's last sector
 #ROMSTORE_MAX = 63
 Global RomCount.i, RomScanned.i, RomStoreEnabled.i=1
 Global Dim RomEntry.i(#ROMSTORE_MAX)
@@ -260,3 +261,35 @@ Procedure RomLoader()
   Core1ParkRequest=0
   RomScanned=0 : RomStoreScan()
 EndProcedure
+CompilerIf #NES_AUDIO_BACKEND=1
+; The Bluetooth speaker's link key (PureMetal Forge's BtAudioKey record, 22 bytes) behind the magic "BTK1",
+; in the flash chip's last sector, so the speaker pairs once instead of at every start. RomBtKeyAddr gives
+; the record's address, or 0 when none is stored; RomSaveBtKey writes the library's current record,
+; with core 1 parked as for the ROM loader, and reads it back. 1 = saved.
+Procedure.i RomBtKeyAddr()
+  Protected keyAddr.i
+  keyAddr=#ROMSTORE_FLASH+#ROMSTORE_BTKEY
+  If PeekA(keyAddr)=66 And PeekA(keyAddr+1)=84 And PeekA(keyAddr+2)=75 And PeekA(keyAddr+3)=49 : ProcedureReturn keyAddr+4 : EndIf
+  ProcedureReturn 0
+EndProcedure
+Procedure.i RomSaveBtKey()
+  Protected i.i, start.i, ok.i
+  For i=0 To 255 : RomBuf(i)=255 : Next
+  RomBuf(0)=66 : RomBuf(1)=84 : RomBuf(2)=75 : RomBuf(3)=49
+  If BtAudioKey(@RomBuf(4))=0 : ProcedureReturn 0 : EndIf
+  Core1ParkRequest=1 : start=Micros()
+  While PeekL(@Core1Parked)=0
+    UsbSerialTask() : SafetyPet()
+    If Micros()-start>1000000 : Core1ParkRequest=0 : ProcedureReturn 0 : EndIf
+  Wend
+  ok=FlashRangeErase(#ROMSTORE_BTKEY,4096)
+  If ok : ok=FlashRangeProgram(#ROMSTORE_BTKEY,@RomBuf(0),256) : EndIf
+  Core1ParkRequest=0
+  If ok
+    For i=0 To 25
+      If PeekA(#ROMSTORE_FLASH+#ROMSTORE_BTKEY+i)<>RomBuf(i) : ok=0 : EndIf
+    Next
+  EndIf
+  ProcedureReturn ok
+EndProcedure
+CompilerEndIf
