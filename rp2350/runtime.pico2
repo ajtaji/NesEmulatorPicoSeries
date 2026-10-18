@@ -202,9 +202,9 @@ Procedure DumpPcm()
   Protected i.i, index.i
   NesRpc(0,0,0,CpuCycles)
   Say("PCM_BEGIN") : Eol()
-  index=ApuSamples&4095
+  index=ApuSamples-4096
   For i=0 To 4095
-    UsbSerialWrite(Pcm((index+i)&4095)&255) : UsbSerialWrite((Pcm((index+i)&4095)>>8)&255)
+    UsbSerialWrite(Pcm((index+i)&(#NES_AUDIO_RING_SAMPLES-1))&255) : UsbSerialWrite((Pcm((index+i)&(#NES_AUDIO_RING_SAMPLES-1))>>8)&255)
   Next
   Eol() : Say("PCM_END") : Eol()
 EndProcedure

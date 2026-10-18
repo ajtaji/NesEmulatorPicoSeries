@@ -67,7 +67,7 @@ Procedure AudioStopTests()
     ApuWrite($4015,0) : ApuAdvance(300000)
     Check(ApuLength(ch),0) : Check(ApuOutput,0)
     For i=0 To 127
-      Check(Pcm((ApuSamples-1-i)&4095),0)
+      Check(Pcm((ApuSamples-1-i)&(#NES_AUDIO_RING_SAMPLES-1)),0)
     Next
   Next
   ; Silent PCM must produce silent SBC, including a valid header/CRC.

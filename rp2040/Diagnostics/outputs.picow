@@ -14,7 +14,7 @@ XIncludeFile "../cartridge.pico"
 XIncludeFile "output_mock.pico"
 XIncludeFile "../examples/pcm_capture.pico"
 Global Checks.i, Failures.i
-Global Dim OutputSamples.w(4096)
+Global Dim OutputSamples.w(#NES_AUDIO_RING_SAMPLES)
 Procedure Check(actual.i, expected.i)
   Checks=Checks+1
   If actual<>expected
@@ -56,23 +56,23 @@ Procedure OutputMain()
   ; Sample order, signed PCM, wraparound, overrun policy and invalid requests.
   ApuSamples=0 : AudioReset()
   Check(AudioRead(@OutputSamples(0),256),0)
-  For i=0 To 4095 : Pcm(i)=i-2048 : Next
+  For i=0 To #NES_AUDIO_RING_SAMPLES-1 : Pcm(i)=(i&4095)-2048 : Next
   ApuSamples=10 : Check(AudioRead(@OutputSamples(0),4),4)
   For i=0 To 3 : Check(OutputSamples(i),i-2048) : Next
   Check(AudioReadCursor,4) : Check(AudioRead(@OutputSamples(0),256),6)
   For i=0 To 5 : Check(OutputSamples(i),i+4-2048) : Next
   Check(AudioRead(0,128),0) : Check(AudioRead(@OutputSamples(0),0),0)
   Check(AudioRead(@OutputSamples(0),-1),0) : Check(AudioReadCursor,10)
-  AudioReadCursor=4094 : ApuSamples=4100
+  AudioReadCursor=#NES_AUDIO_RING_SAMPLES-2 : ApuSamples=#NES_AUDIO_RING_SAMPLES+4
   Check(AudioRead(@OutputSamples(0),8),6)
-  For i=0 To 5 : Check(OutputSamples(i),((4094+i)&4095)-2048) : Next
-  AudioReadCursor=0 : ApuSamples=4100
-  Check(AudioRead(@OutputSamples(0),5000),4096) : Check(AudioOverruns,1)
-  Check(OutputSamples(0),-2044) : Check(OutputSamples(4095),-2045)
-  Check(AudioReadCursor,4100)
+  For i=0 To 5 : Check(OutputSamples(i),(((#NES_AUDIO_RING_SAMPLES-2+i)&(#NES_AUDIO_RING_SAMPLES-1))&4095)-2048) : Next
+  AudioReadCursor=0 : ApuSamples=#NES_AUDIO_RING_SAMPLES+4
+  Check(AudioRead(@OutputSamples(0),#NES_AUDIO_RING_SAMPLES+904),#NES_AUDIO_RING_SAMPLES) : Check(AudioOverruns,1)
+  Check(OutputSamples(0),-2044) : Check(OutputSamples(#NES_AUDIO_RING_SAMPLES-1),-2045)
+  Check(AudioReadCursor,#NES_AUDIO_RING_SAMPLES+4)
   AudioReadCursor=$7FFFFFFE : ApuSamples=$80000004
   Check(AudioRead(@OutputSamples(0),8),6) : Check(AudioReadCursor,$80000004)
-  For i=0 To 5 : Check(OutputSamples(i),((4094+i)&4095)-2048) : Next
+  For i=0 To 5 : Check(OutputSamples(i),(((#NES_AUDIO_RING_SAMPLES-2+i)&(#NES_AUDIO_RING_SAMPLES-1))&4095)-2048) : Next
   AudioReadCursor=110 : ApuSamples=100
   Check(AudioRead(@OutputSamples(0),8),0) : Check(AudioReadCursor,100)
   AudioBegin() : Check(AudioRunning,1) : Check(AudioQueueSlack,0)

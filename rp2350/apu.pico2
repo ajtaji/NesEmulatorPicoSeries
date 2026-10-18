@@ -16,7 +16,7 @@ Global Dim NoiseTable.u(16)
 Global Dim DmcTable.u(16)
 Global Dim PulseMix.u(31)
 Global Dim TndMix.u(203)
-Global Dim Pcm.w(4096)
+Global Dim Pcm.w(#NES_AUDIO_RING_SAMPLES)
 Global ApuEnable.i, ApuFrameClock.i, ApuFrameStep.i, ApuFive.i, ApuInhibit.i
 Global ApuFrameIrq.i, ApuResetDelay.i, ApuLinear.i, ApuLinearReload.i
 Global NoiseShift.i=1, TriDac.i, ApuSampleLeft.i=37, ApuSampleFrac.i=101
@@ -215,7 +215,7 @@ ProcedureRAM ApuMixSample()
     ApuOutput= -32768
   EndIf
   ApuLastY=ApuOutput
-  Pcm(ApuSamples&4095)=ApuOutput
+  Pcm(ApuSamples&(#NES_AUDIO_RING_SAMPLES-1))=ApuOutput
   If ApuCapture<4096
     ApuCapture=ApuCapture+1
   EndIf
