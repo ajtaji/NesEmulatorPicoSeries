@@ -258,31 +258,66 @@ ProcedureRAM PpuRegWrite(addr.i, value.i)
     EndIf
   EndIf
 EndProcedure
+; Which sprites each line holds: CachedSprite(row*8+n) the first eight in OAM order, CachedCount(row)
+; how many (9 = more than eight: overflow). Thumb-1 (both chips): r4 = Oam, r5 = sprite, r6 = height-1.
+; The plain form is PpuBuildSpriteCacheReference in Diagnostics/asm_reference.picow.
 ProcedureRAM PpuBuildSpriteCache()
-  Protected i.i, row.i, first.i, finish.i, height.i, count.i
-  For i=0 To 63
-    PokeL(@CachedCount(0)+i*4,0)
-  Next
-  height=8
-  If PpuCtrl&$20
-    height=16
-  EndIf
-  For i=0 To 63
-    first=Oam(i*4)+1 : finish=first+height-1
-    If finish>239
-      finish=239
-    EndIf
-    For row=first To finish
-      count=CachedCount(row)
-      If count<8
-        CachedSprite(row*8+count)=i
-        CachedCount(row)=count+1
-      Else
-        CachedCount(row)=9
-      EndIf
-    Next
-  Next
-  OamCacheDirty=0
+  ASM
+    ldr r0, =global_cachedcount
+    movs r1, #0
+    movs r2, #64
+__pbsc_clear:
+    str r1, [r0]
+    adds r0, #4
+    subs r2, #1
+    bne __pbsc_clear
+    movs r6, #7
+    ldr r0, =global_ppuctrl
+    ldr r0, [r0]
+    movs r1, #32
+    tst r0, r1
+    beq __pbsc_height
+    movs r6, #15
+__pbsc_height:
+    ldr r4, =global_oam
+    movs r5, #0
+__pbsc_sprite:
+    lsls r0, r5, #2
+    ldrb r0, [r4, r0]
+    adds r0, #1
+    adds r1, r0, r6
+    cmp r1, #239
+    ble __pbsc_row
+    movs r1, #239
+__pbsc_row:
+    cmp r0, r1
+    bgt __pbsc_next
+    ldr r2, =global_cachedcount
+    ldrb r3, [r2, r0]
+    cmp r3, #8
+    bhs __pbsc_full
+    adds r3, #1
+    strb r3, [r2, r0]
+    subs r3, #1
+    lsls r2, r0, #3
+    adds r2, r2, r3
+    ldr r3, =global_cachedsprite
+    strb r5, [r3, r2]
+    adds r0, #1
+    b __pbsc_row
+__pbsc_full:
+    movs r3, #9
+    strb r3, [r2, r0]
+    adds r0, #1
+    b __pbsc_row
+__pbsc_next:
+    adds r5, #1
+    cmp r5, #64
+    blo __pbsc_sprite
+    ldr r0, =global_oamcachedirty
+    movs r1, #0
+    str r1, [r0]
+  EndASM
 EndProcedure
 ProcedureRAM PpuClearSprites()
   ASM
@@ -623,21 +658,49 @@ ProcedureRAM.i PpuIncX(v.i)
   EndIf
   ProcedureReturn v+1
 EndProcedure
+; Coarse/fine Y increment at dot 256: fine Y up, else fine Y to 0 and coarse Y up, wrapping at 29 into
+; the other vertical nametable (31 wraps without switching). Thumb-1 (both chips); the plain form is
+; PpuIncYReference in Diagnostics/asm_reference.picow.
 ProcedureRAM PpuIncY()
-  Protected y.i
-  If (PpuV&$7000)<>$7000
-    PpuV=PpuV+$1000
-  Else
-    PpuV=PpuV&$FFF : y=(PpuV>>5)&31
-    If y=29
-      y=0 : PpuV=PpuV!$800
-    ElseIf y=31
-      y=0
-    Else
-      y=y+1
-    EndIf
-    PpuV=(PpuV&$7C1F)|(y<<5)
-  EndIf
+  ASM
+    ldr r3, =global_ppuv
+    ldr r0, [r3]
+    ldr r1, =$7000
+    movs r2, r0
+    ands r2, r1
+    cmp r2, r1
+    beq __piy_wrap
+    ldr r1, =$1000
+    adds r0, r0, r1
+    str r0, [r3]
+    b __piy_done
+__piy_wrap:
+    ldr r1, =$FFF
+    ands r0, r1
+    lsrs r2, r0, #5
+    movs r1, #31
+    ands r2, r1
+    cmp r2, #29
+    bne __piy_not29
+    movs r2, #0
+    ldr r1, =$800
+    eors r0, r1
+    b __piy_set
+__piy_not29:
+    cmp r2, #31
+    bne __piy_inc
+    movs r2, #0
+    b __piy_set
+__piy_inc:
+    adds r2, #1
+__piy_set:
+    ldr r1, =$7C1F
+    ands r0, r1
+    lsls r2, r2, #5
+    orrs r0, r2
+    str r0, [r3]
+__piy_done:
+  EndASM
 EndProcedure
 ; Composite only spans containing sprites. Cached OAM priority is per scanline.
 ProcedureRAM PpuOverlay8()
@@ -877,35 +940,142 @@ EndProcedure
 Global PpuRemaining.i, PpuBatchLeft.i
 XIncludeFile "ppu_rgb_cache.pico2"
 XIncludeFile "ppu_render.pico2"
+; The dot events PpuAdvance stops at: vblank set (241,1), clear (261,1), the end of a visible line
+; (dot 256: coarse Y, then the line goes out), the horizontal copy (257), the vertical copy (261,280),
+; and the wrap at the line's width (340 on an odd rendered pre-render line, else 341). Thumb-1, so the
+; RP2040 and RP2350 share it; r4-r6 hold line, dot and PpuMask&$18. PpuAdvanceReference is the plain
+; form, and the verify suite's ComparePpuAdvance holds the two to the same state.
 ProcedureRAM PpuEdge()
-  Protected width.i
-  If PpuLine=241 And PpuDot=1
-    PpuStatus=PpuStatus|$80
-    If PpuCtrl&$80
-      WorkerNmi=WorkerNmi+1
-    EndIf
-  ElseIf PpuLine=261 And PpuDot=1
-    PpuStatus=PpuStatus&31
-  ElseIf PpuLine<240 And PpuDot=256
-    If PpuMask&$18
-      PpuIncY()
-    EndIf
-    PpuSendLine()
-  ElseIf PpuDot=257 And (PpuMask&$18)<>0
-    PpuV=(PpuV&$7BE0)|(PpuT&$41F)
-  ElseIf PpuLine=261 And PpuDot=280 And (PpuMask&$18)<>0
-    PpuV=(PpuV&$41F)|(PpuT&$7BE0)
-  EndIf
-  width=341
-  If PpuLine=261 And PpuOdd<>0 And (PpuMask&$18)<>0
-    width=340
-  EndIf
-  If PpuDot=width
-    PpuDot=0 : PpuLine=PpuLine+1
-    If PpuLine=262
-      PpuLine=0 : PpuOdd=PpuOdd!1 : WorkerFrames=WorkerFrames+1
-    EndIf
-  EndIf
+  ASM
+    ldr r0, =global_ppuline
+    ldr r4, [r0]
+    ldr r0, =global_ppudot
+    ldr r5, [r0]
+    ldr r0, =global_ppumask
+    ldr r6, [r0]
+    movs r0, #24
+    ands r6, r0
+    cmp r5, #1
+    bne __pe_not_dot1
+    cmp r4, #241
+    bne __pe_dot1_261
+    ldr r0, =global_ppustatus
+    ldr r1, [r0]
+    movs r2, #128
+    orrs r1, r2
+    str r1, [r0]
+    ldr r0, =global_ppuctrl
+    ldr r1, [r0]
+    tst r1, r2
+    beq __pe_wrap
+    ldr r0, =global_workernmi
+    ldr r1, [r0]
+    adds r1, #1
+    str r1, [r0]
+    b __pe_wrap
+__pe_dot1_261:
+    ldr r0, =261
+    cmp r4, r0
+    bne __pe_wrap
+    ldr r0, =global_ppustatus
+    ldr r1, [r0]
+    movs r2, #31
+    ands r1, r2
+    str r1, [r0]
+    b __pe_wrap
+__pe_not_dot1:
+    ldr r0, =256
+    cmp r5, r0
+    bne __pe_not_256
+    cmp r4, #240
+    bge __pe_wrap
+    cmp r6, #0
+    beq __pe_send
+    bl ppuincy
+__pe_send:
+    bl ppusendline
+    ldr r0, =global_ppuline
+    ldr r4, [r0]
+    ldr r0, =global_ppudot
+    ldr r5, [r0]
+    ldr r0, =global_ppumask
+    ldr r6, [r0]
+    movs r0, #24
+    ands r6, r0
+    b __pe_wrap
+__pe_not_256:
+    ldr r0, =257
+    cmp r5, r0
+    bne __pe_not_257
+    cmp r6, #0
+    beq __pe_wrap
+    ldr r0, =global_ppuv
+    ldr r1, [r0]
+    ldr r2, =$7BE0
+    ands r1, r2
+    ldr r2, =global_pput
+    ldr r2, [r2]
+    ldr r3, =$41F
+    ands r2, r3
+    orrs r1, r2
+    str r1, [r0]
+    b __pe_wrap
+__pe_not_257:
+    ldr r0, =280
+    cmp r5, r0
+    bne __pe_wrap
+    ldr r0, =261
+    cmp r4, r0
+    bne __pe_wrap
+    cmp r6, #0
+    beq __pe_wrap
+    ldr r0, =global_ppuv
+    ldr r1, [r0]
+    ldr r2, =$41F
+    ands r1, r2
+    ldr r2, =global_pput
+    ldr r2, [r2]
+    ldr r3, =$7BE0
+    ands r2, r3
+    orrs r1, r2
+    str r1, [r0]
+__pe_wrap:
+    ldr r1, =341
+    ldr r0, =261
+    cmp r4, r0
+    bne __pe_width
+    cmp r6, #0
+    beq __pe_width
+    ldr r0, =global_ppuodd
+    ldr r0, [r0]
+    cmp r0, #0
+    beq __pe_width
+    subs r1, #1
+__pe_width:
+    cmp r5, r1
+    bne __pe_done
+    ldr r0, =global_ppudot
+    movs r1, #0
+    str r1, [r0]
+    adds r4, #1
+    ldr r0, =global_ppuline
+    ldr r1, =262
+    cmp r4, r1
+    bne __pe_store_line
+    movs r4, #0
+    ldr r1, =global_ppuodd
+    ldr r2, [r1]
+    movs r3, #1
+    eors r2, r3
+    str r2, [r1]
+    ldr r1, =global_workerframes
+    ldr r2, [r1]
+    adds r2, #1
+    str r2, [r1]
+__pe_store_line:
+    str r4, [r0]
+__pe_done:
+  EndASM
 EndProcedure
 ProcedureRAM PpuAdvance(cycles.i)
   If PpuWarmup>0

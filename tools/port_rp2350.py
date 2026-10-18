@@ -87,7 +87,31 @@ EndProcedure
         text = '#CLOCK_KHZ=150000\n' + text
         text = text.replace('ClockInitKhz(200000)', 'ClockInitKhz(150000)')
         text = text.replace('NesDiv(t*200,', 'NesDiv(t*150,')
+    text = splice_m33(text, name)
     return '\n'.join(line.rstrip() for line in text.split('\n'))
+
+
+def splice_m33(text, name):
+    """Hand-written Thumb-1 that has a faster Cortex-M33 form: the RP2040 source marks the span with
+    '; M33 tools/m33/<file>' ... '; END M33' inside its ASM block, and the RP2350 copy gets the file's
+    Thumb-2 in its place. A marker without its end, or a file that is missing, stops the port."""
+    out, lines, i = [], text.split('\n'), 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith('; M33 tools/m33/'):
+            snippet = ROOT / stripped.split()[2]
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == '; END M33'), None)
+            if end is None:
+                raise SystemExit(f'{name}: "{stripped}" has no "; END M33" after it')
+            if not snippet.is_file():
+                raise SystemExit(f'{name}: {snippet} named by an M33 marker does not exist')
+            out.append('    ; Cortex-M33 form from ' + stripped.split()[2] + ' (the RP2040 source holds the Thumb-1 form)')
+            out += snippet.read_text(encoding='utf-8').rstrip('\n').split('\n')
+            i = end + 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return '\n'.join(out)
 
 
 def main():
