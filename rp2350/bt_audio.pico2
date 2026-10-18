@@ -35,6 +35,9 @@ Procedure AudioBegin()
   ; The library reads the APU's ring itself: no copy, and all 4096 samples (85 ms) are the cushion
   ; for a frame the emulator finishes late.
   BtAudioSource(@Pcm(0),4096,@ApuSamples)
+  ; Start sending 65 ms behind the APU: in a busy scene the emulator runs a frame or three late, and
+  ; the ring then still holds the sound the speaker is due.
+  BtAudioLead(65000)                                   ; the ring is 85 ms; a catch-up adds up to 17
   ; From here core 1 drives the radio: no USB pumping and no printing from the library.
   BtAudioPumps(0)
   AudioQueueSlack=1536 : AudioLive=1 : AudioRunning=1
