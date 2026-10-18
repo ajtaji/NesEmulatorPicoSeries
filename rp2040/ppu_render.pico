@@ -200,6 +200,8 @@ __r_background:
     adds r7, #1
 __r_tiles_counted:
     ldr r5, =global_ppulinebuf
+    ; M33 tools/m33/ppu_render_tile.s - on the RP2350, port_rp2350.py puts the Cortex-M33 form of this
+    ; loop (Thumb-2: bitfield extracts and indexed loads in place of masks and literals) here, to END M33
 __r_tile:
     ldr r0, =$0fff
     ands r0, r4
@@ -283,6 +285,7 @@ __r_miss:
     str r2, [r1, #12]
     pop {r1, r4, r5}
     b __r_copy_tile
+    ; END M33
 __r_place:
     ldr r0, =global_ppufinex
     ldr r0, [r0]

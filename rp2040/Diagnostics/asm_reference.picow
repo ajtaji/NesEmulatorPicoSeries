@@ -1,0 +1,251 @@
+; The NES's hand-written assembly held to the plain PureBasic it replaced. Each Compare* runs the
+; reference (the routine as it was before it became assembly) and the assembly from the same state and
+; checks they leave the same state behind. Kept apart from verify.picow so that image stays below the
+; ROM store at $50000 (tools/build.ps1 refuses one that reaches it). Build and run it through
+; tools/build.ps1 -VerifyNes, like verify: it ends with "NES board checks=... PASS".
+#NES_VIDEO_BACKEND=1
+#NES_AUDIO_BACKEND=1
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=1
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+Global Checks.i, Failures.i
+Procedure Check(actual.i, expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    If Failures<=16
+      Say("FAIL check=") : Num(Checks) : Say(" actual=") : Num(actual)
+      Say(" expected=") : Num(expected) : Eol()
+    EndIf
+  EndIf
+EndProcedure
+Global VerifySeed.i=12345
+Procedure.i VerifyRand(range.i)
+  VerifySeed=(VerifySeed*1103515245+12345)&$7FFFFFFF
+  ProcedureReturn (VerifySeed>>8)%range
+EndProcedure
+
+; worker.pico's PpuSyncStatus in its plain form, before it became assembly.
+Procedure PpuSyncStatusReference(stamp.i)
+  Protected edge.i, line.i, spriteY.i, height.i
+  If stamp<=PpuStatusDeadline And stamp>=PpuClock
+    PpuStatusDeferred=PpuStatusDeferred+1
+    ProcedureReturn
+  EndIf
+  PpuSync(stamp)
+  PpuStatusBits=PpuStatus
+  edge=341
+  If (PpuLine=241 Or PpuLine=261) And PpuDot=0
+    edge=1
+  ElseIf PpuLine<240
+    If PpuDot=0
+      edge=0
+    ElseIf PpuDot<256 And (PpuStatus&$40)=0 And (PpuMask&$18)=$18 And SprCount>0 And SprIndex(0)=0
+      edge=((PpuDot+7)>>3)<<3
+    EndIf
+  EndIf
+  If edge=341 And PpuLine<240 And OamCacheDirty=0
+    line=PpuLine+1 : spriteY=Oam(0)+1 : height=8
+    If PpuCtrl&$20
+      height=16
+    EndIf
+    While line<240
+      If (PpuMask&$18)<>0 And (PpuStatus&$20)=0 And CachedCount(line)>8
+        Break
+      EndIf
+      If (PpuMask&$18)=$18 And (PpuStatus&$40)=0 And line>=spriteY And line<spriteY+height
+        Break
+      EndIf
+      line=line+1
+    Wend
+    edge=(line-PpuLine)*341
+    If line=240
+      edge=edge+342
+    EndIf
+  EndIf
+  If edge>PpuDot
+    PpuStatusDeadline=stamp+NesDiv(edge-PpuDot-1,3)
+  EndIf
+EndProcedure
+Global Dim SavedCachedCount.a(256)
+; Random PPU states, each run through the reference and the assembly from the same start: the
+; deferral, the status bits and the next horizon must agree. stamp=PpuClock, so PpuSync moves nothing.
+Procedure ComparePpuSyncStatus()
+  Protected i.i, j.i, line.i, dot.i, status.i, mask.i, ctrl.i, oam0.i, count.i, index0.i, dirty.i
+  Protected clock.i, deadline.i, expDeadline.i, expBits.i, expDeferred.i, sOam0.i, sIndex0.i, sCount.i, sDirty.i
+  For j=0 To 255 : SavedCachedCount(j)=CachedCount(j) : Next
+  sOam0=Oam(0) : sIndex0=SprIndex(0) : sCount=SprCount : sDirty=OamCacheDirty
+  For i=0 To 19999
+    If (i&63)=0
+      For j=0 To 255
+        CachedCount(j)=VerifyRand(9)
+        If VerifyRand(40)=0 : CachedCount(j)=9+VerifyRand(4) : EndIf
+      Next
+    EndIf
+    line=VerifyRand(262) : dot=VerifyRand(341)
+    If VerifyRand(4)=0 : dot=0 : EndIf
+    If VerifyRand(8)=0 : line=241+VerifyRand(2)*20 : EndIf
+    status=(VerifyRand(4)<<5)|(VerifyRand(2)<<7) : mask=VerifyRand(4)<<3 : ctrl=VerifyRand(2)<<5
+    oam0=VerifyRand(256) : count=VerifyRand(3) : index0=VerifyRand(2) : dirty=0
+    If VerifyRand(4)=0 : dirty=1 : EndIf
+    clock=1000+VerifyRand(100000) : deadline=clock-2+VerifyRand(5)
+    Oam(0)=oam0 : SprCount=count : SprIndex(0)=index0 : OamCacheDirty=dirty
+    PpuLine=line : PpuDot=dot : PpuStatus=status : PpuMask=mask : PpuCtrl=ctrl
+    PpuClock=clock : PpuStatusDeadline=deadline : PpuStatusBits=-1 : PpuStatusDeferred=0
+    PpuSyncStatusReference(clock)
+    expDeadline=PpuStatusDeadline : expBits=PpuStatusBits : expDeferred=PpuStatusDeferred
+    PpuLine=line : PpuDot=dot : PpuStatus=status : PpuMask=mask : PpuCtrl=ctrl
+    PpuClock=clock : PpuStatusDeadline=deadline : PpuStatusBits=-1 : PpuStatusDeferred=0
+    PpuSyncStatus(clock)
+    Check(PpuStatusDeadline,expDeadline) : Check(PpuStatusBits,expBits) : Check(PpuStatusDeferred,expDeferred)
+    If (i&1023)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  For j=0 To 255 : CachedCount(j)=SavedCachedCount(j) : Next
+  Oam(0)=sOam0 : SprIndex(0)=sIndex0 : SprCount=sCount : OamCacheDirty=sDirty
+  PpuClock=0 : PpuStatusDeadline=0 : PpuStatusDeferred=0 : PpuLine=0 : PpuDot=0 : PpuStatus=0
+EndProcedure
+
+; ppu.pico's PpuIncY in its plain form.
+Procedure PpuIncYReference()
+  Protected y.i
+  If (PpuV&$7000)<>$7000
+    PpuV=PpuV+$1000
+  Else
+    PpuV=PpuV&$FFF : y=(PpuV>>5)&31
+    If y=29
+      y=0 : PpuV=PpuV!$800
+    ElseIf y=31
+      y=0
+    Else
+      y=y+1
+    EndIf
+    PpuV=(PpuV&$7C1F)|(y<<5)
+  EndIf
+EndProcedure
+; Every 15-bit VRAM address.
+Procedure ComparePpuIncY()
+  Protected v.i, expected.i
+  For v=0 To $7FFF
+    PpuV=v : PpuIncYReference() : expected=PpuV
+    PpuV=v : PpuIncY()
+    Check(PpuV,expected)
+    If (v&4095)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  PpuV=0
+EndProcedure
+
+; ppu.pico's PpuBuildSpriteCache in its plain form.
+Procedure PpuBuildSpriteCacheReference()
+  Protected i.i, row.i, first.i, finish.i, height.i, count.i
+  For i=0 To 63
+    PokeL(@CachedCount(0)+i*4,0)
+  Next
+  height=8
+  If PpuCtrl&$20
+    height=16
+  EndIf
+  For i=0 To 63
+    first=Oam(i*4)+1 : finish=first+height-1
+    If finish>239
+      finish=239
+    EndIf
+    For row=first To finish
+      count=CachedCount(row)
+      If count<8
+        CachedSprite(row*8+count)=i
+        CachedCount(row)=count+1
+      Else
+        CachedCount(row)=9
+      EndIf
+    Next
+  Next
+  OamCacheDirty=0
+EndProcedure
+Global Dim ExpectedCount.a(256)
+Global Dim ExpectedSprite.a(2048)
+; Random OAM (Y bunched so lines overflow), both sprite heights: every count and every slot.
+Procedure ComparePpuBuildSpriteCache()
+  Protected pass.i, i.i, base.i
+  For pass=0 To 299
+    base=VerifyRand(240) : PpuCtrl=VerifyRand(2)<<5
+    For i=0 To 63
+      Oam(i*4)=(base+VerifyRand(24))&255
+      If VerifyRand(6)=0 : Oam(i*4)=VerifyRand(256) : EndIf
+    Next
+    For i=0 To 2047 : CachedSprite(i)=255 : Next
+    OamCacheDirty=1 : PpuBuildSpriteCacheReference() : Check(OamCacheDirty,0)
+    For i=0 To 255 : ExpectedCount(i)=CachedCount(i) : Next
+    For i=0 To 2047 : ExpectedSprite(i)=CachedSprite(i) : CachedSprite(i)=255 : Next
+    For i=0 To 255 : CachedCount(i)=77 : Next
+    OamCacheDirty=1 : PpuBuildSpriteCache() : Check(OamCacheDirty,0)
+    For i=0 To 255 : Check(CachedCount(i),ExpectedCount(i)) : Next
+    For i=0 To 2047 : Check(CachedSprite(i),ExpectedSprite(i)) : Next
+    If (pass&15)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  For i=0 To 255 : Oam(i)=0 : Next
+  PpuCtrl=0 : OamCacheDirty=1
+EndProcedure
+
+Global Dim ExpectedOam.a(256)
+; worker.pico's OAM DMA ($4014): the RAM-page copy against the NesDmaRead loop it replaced, every
+; RAM page (and its mirrors) from random OAM start addresses.
+Procedure CompareOamDma()
+  Protected value.i, i.i, pass.i, start.i
+  For i=0 To 2047 : M(i)=VerifyRand(256) : Next
+  For pass=0 To 3
+    For value=0 To $1F
+      start=VerifyRand(256)
+      For i=0 To 255 : Oam(i)=VerifyRand(256) : ExpectedOam(i)=Oam(i) : Next
+      For i=0 To 255 : ExpectedOam((start+i)&255)=NesDmaRead(value*256+i) : Next
+      PpuOamAddr=start : PpuClock=0 : OamCacheDirty=0
+      LocalPpuCommand(3,$4014,value,0)
+      Check(OamCacheDirty,1)
+      For i=0 To 255 : Check(Oam(i),ExpectedOam(i)) : Next
+    Next
+    SafetyPet() : UsbSerialTask()
+  Next
+  For i=0 To 2047 : M(i)=0 : Next
+  For i=0 To 255 : Oam(i)=0 : Next
+  PpuOamAddr=0
+EndProcedure
+
+Procedure TestMain()
+  Protected start.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  start=Micros()
+  While UsbSerialReady()=0 And Micros()-start<10000000
+    UsbSerialTask() : SafetyPet()
+  Wend
+  WaitUs(200000) : LoadCartridge() : WorkerDisplay=0
+  Check(multicore_launch(),1)
+  Say("STEP ComparePpuSyncStatus checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  ComparePpuSyncStatus()
+  Say("STEP ComparePpuIncY checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  ComparePpuIncY()
+  Say("STEP ComparePpuBuildSpriteCache checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  ComparePpuBuildSpriteCache()
+  Say("STEP CompareOamDma checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CompareOamDma()
+  Check(WorkerError,0) : Check(NesBridgeError,0)
+  Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
+  If Failures=0
+    Say(" PASS")
+  Else
+    Say(" FAIL")
+  EndIf
+  Eol()
+  Repeat
+    UsbSerialTask() : SafetyPet()
+  ForEver
+EndProcedure
+; The checks run on the built-in cartridge, whatever the ROM store holds.
+RomStoreEnabled=0
+TestMain()
