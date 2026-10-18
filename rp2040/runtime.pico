@@ -36,10 +36,10 @@ CompilerEndIf
 CompilerIf #NES_AUDIO_BACKEND=1
   XIncludeFile "RP2040/Lib/cyw43_nvram.pico"
   XIncludeFile "RP2040/Lib/cyw43.pico"
-  XIncludeFile "bt_firmware.pico"
-  XIncludeFile "bt_radio.pico"
-  XIncludeFile "bt_transport.pico"
-  XIncludeFile "sbc_encoder.pico"
+  XIncludeFile "RP2040/Lib/cyw43_btfw.pico"
+  XIncludeFile "RP2040/Lib/bluetooth.pico"
+  XIncludeFile "Shared/Bluetooth/sbc.pmi"
+  XIncludeFile "Shared/Bluetooth/bt_audio.pmi"
   XIncludeFile "bt_audio.pico"
 CompilerElseIf #NES_AUDIO_BACKEND=0
   XIncludeFile "outputs/audio_null.pico"

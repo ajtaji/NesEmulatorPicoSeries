@@ -37,10 +37,10 @@ CompilerEndIf
 CompilerIf #NES_AUDIO_BACKEND=1
   XIncludeFile "RP2350/Lib/cyw43_nvram.pico2"
   XIncludeFile "RP2350/Lib/cyw43.pico2"
-  XIncludeFile "bt_firmware.pico2"
-  XIncludeFile "bt_radio.pico2"
-  XIncludeFile "bt_transport.pico2"
-  XIncludeFile "sbc_encoder.pico2"
+  XIncludeFile "RP2350/Lib/cyw43_btfw.pico2"
+  XIncludeFile "RP2350/Lib/bluetooth.pico2"
+  XIncludeFile "Shared/Bluetooth/sbc.pmi"
+  XIncludeFile "Shared/Bluetooth/bt_audio.pmi"
   XIncludeFile "bt_audio.pico2"
 CompilerElseIf #NES_AUDIO_BACKEND=0
   XIncludeFile "outputs/audio_null.pico2"

@@ -138,7 +138,14 @@ for name in ('apu','cartridge'):
     (OUT/(name+'.pi4')).write_text(content)
 print('Generated Anvil AArch64 core; Pico sources unchanged')
 (OUT/'Tests').mkdir(exist_ok=True)
-(OUT/'Tests/sbc_vectors.pi4').write_text((ROOT/'rp2350/Diagnostics/sbc_vectors.pico2').read_text())
+# The SBC test vectors live with the encoder in the compiler since 2026-10-18
+# (Shared/Bluetooth/Diagnostics/sbc_vectors.pmi, made by its tools/make_sbc_vectors.py).
+import os
+COMPILER = Path(os.environ.get('PMF_REPO') or (ROOT.parent / 'PureBasicCode' / 'OpenGl Work' / 'ArduinoBasic'))
+SBC_VECTORS = COMPILER / 'Shared' / 'Bluetooth' / 'Diagnostics' / 'sbc_vectors.pmi'
+if not SBC_VECTORS.is_file():
+    raise SystemExit(f'port_anvil: {SBC_VECTORS} not found - set PMF_REPO to the compiler tree (OpenGl Work/ArduinoBasic)')
+(OUT/'Tests/sbc_vectors.pi4').write_text(SBC_VECTORS.read_text())
 (OUT/'Tests/zp_vectors.pi4').write_text((ROOT/'rp2350/Diagnostics/zp_vectors.pico2').read_text())
 verify=(ROOT/'rp2350/Diagnostics/verify.pico2w').read_text()
 zp=re.search(r'Procedure ZpVectorTests\(\).*?EndProcedure',verify,re.S)[0]

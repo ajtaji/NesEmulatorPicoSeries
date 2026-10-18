@@ -22,12 +22,6 @@ def port(text, name):
     text = re.sub(r'(XIncludeFile "[^"]*)\.pico"', r'\1.pico2"', text)
     text = text.replace('RP2040/Lib/', 'RP2350/Lib/')
     text = text.replace('multicore_launch()', 'NesLaunchCore1()')
-    if name == 'bt_radio.pico':
-        # RP2350 SIO has interleaved high-GPIO registers: SET/CLR/OE moved.
-        addresses = {'$D0000014': '$D0000018', '$D0000018': '$D0000020',
-                     '$D0000024': '$D0000038', '$D0000028': '$D0000040'}
-        text = re.sub(r'\$D00000(?:14|18|24|28)', lambda m: addresses[m[0]], text)
-        text = text.replace('; RP2040 CYW43439', '; RP2350 CYW43439')
     if name == 'video_st7796.pico':
         # One quarter-turn left from landscape: center the unchanged NES frame
         # in the controller's 320x480 portrait coordinate space.
