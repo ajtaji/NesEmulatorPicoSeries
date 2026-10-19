@@ -24,6 +24,8 @@ Global ApuSamples.i, ApuCapture.i, ApuMinimum.i, ApuMaximum.i, ApuNonzero.i
 Global DmcTimer.i=428, DmcLevel.i, DmcAddress.i, DmcBytes.i, DmcShift.i
 Global DmcBits.i=8, DmcBuffer.i, DmcEmpty.i=1, DmcSilent.i=1, DmcIrq.i
 Global ApuLastX.i, ApuLastY.i, ApuOutput.i
+Global ApuRingMask.i=#NES_AUDIO_RING_SAMPLES-1   ; the PCM ring's index mask, for the assembly
+Global ApuTickDt.i                               ; ApuTick's dt, for the assembly
 
 ProcedureRAM.i ApuVolume(ch.i)
   Protected reg.i
@@ -118,39 +120,125 @@ ProcedureRAM ApuDmcFetch()
     EndIf
   EndIf
 EndProcedure
+; The channel timers for dt CPU cycles. Pulse, triangle and noise are Thumb-1 (both chips): a timer
+; that runs out is wound forward a period at a time, counting the steps - the same ticks and the same
+; remainder as 1+NesDiv(-timer, period), without the divide (dt is at most a sample's 38 cycles, so
+; one or two steps). The DMC stays plain: it fetches through the bus. The plain form of all of it is
+; ApuTickReference in Diagnostics/asm_reference.picow.
 ProcedureRAM ApuTick(dt.i)
-  Protected c.i, feedback.i, period.i, ticks.i
-  For c=0 To 1
-    ApuTimer(c)=ApuTimer(c)-dt
-    If ApuTimer(c)<=0
-      period=2*(ApuPeriod(c)+1) : ticks=1+NesDiv(0-ApuTimer(c),period)
-      ApuTimer(c)=ApuTimer(c)+ticks*period
-      ApuSeq(c)=(ApuSeq(c)+ticks)&7
-    EndIf
-  Next
-  ApuTimer(2)=ApuTimer(2)-dt
-  If ApuTimer(2)<=0
-    period=ApuPeriod(2)+1 : ticks=1+NesDiv(0-ApuTimer(2),period)
-    ApuTimer(2)=ApuTimer(2)+ticks*period
-    If ApuLength(2)>0 And ApuLinear>0
-      ApuSeq(2)=(ApuSeq(2)+ticks)&31
-      If ApuSeq(2)<16
-        TriDac=15-ApuSeq(2)
-      Else
-        TriDac=ApuSeq(2)-16
-      EndIf
-    EndIf
-  EndIf
-  ApuTimer(3)=ApuTimer(3)-dt
-  While ApuTimer(3)<=0
-    ApuTimer(3)=ApuTimer(3)+NoiseTable(ApuReg(14)&15)
-    If ApuReg(14)&$80
-      feedback=(NoiseShift!(NoiseShift>>6))&1
-    Else
-      feedback=(NoiseShift!(NoiseShift>>1))&1
-    EndIf
-    NoiseShift=(NoiseShift>>1)|(feedback<<14)
-  Wend
+  ApuTickDt=dt
+  ASM
+    ldr r0, =global_aputickdt
+    ldr r4, [r0]
+    movs r5, #0
+__at_pulse:
+    lsls r6, r5, #2
+    ldr r0, =global_aputimer
+    ldr r1, [r0, r6]
+    subs r1, r1, r4
+    cmp r1, #0
+    bgt __at_pulse_store
+    ldr r2, =global_apuperiod
+    ldr r2, [r2, r6]
+    adds r2, #1
+    lsls r2, r2, #1
+    movs r3, #0
+__at_pulse_wind:
+    adds r1, r1, r2
+    adds r3, #1
+    cmp r1, #0
+    ble __at_pulse_wind
+    ldr r2, =global_apuseq
+    ldr r0, [r2, r6]
+    adds r0, r0, r3
+    movs r3, #7
+    ands r0, r3
+    str r0, [r2, r6]
+    ldr r0, =global_aputimer
+__at_pulse_store:
+    str r1, [r0, r6]
+    adds r5, #1
+    cmp r5, #2
+    blo __at_pulse
+    ldr r0, =global_aputimer
+    ldr r1, [r0, #8]
+    subs r1, r1, r4
+    cmp r1, #0
+    bgt __at_tri_store
+    ldr r2, =global_apuperiod
+    ldr r2, [r2, #8]
+    adds r2, #1
+    movs r3, #0
+__at_tri_wind:
+    adds r1, r1, r2
+    adds r3, #1
+    cmp r1, #0
+    ble __at_tri_wind
+    str r1, [r0, #8]
+    ldr r0, =global_apulength
+    ldr r0, [r0, #8]
+    cmp r0, #0
+    ble __at_noise
+    ldr r0, =global_apulinear
+    ldr r0, [r0]
+    cmp r0, #0
+    ble __at_noise
+    ldr r2, =global_apuseq
+    ldr r0, [r2, #8]
+    adds r0, r0, r3
+    movs r3, #31
+    ands r0, r3
+    str r0, [r2, #8]
+    cmp r0, #16
+    bge __at_tri_up
+    movs r1, #15
+    subs r1, r1, r0
+    b __at_tri_dac
+__at_tri_up:
+    movs r1, r0
+    subs r1, #16
+__at_tri_dac:
+    ldr r2, =global_tridac
+    str r1, [r2]
+    b __at_noise
+__at_tri_store:
+    str r1, [r0, #8]
+__at_noise:
+    ldr r0, =global_aputimer
+    ldr r1, [r0, #12]
+    subs r1, r1, r4
+    cmp r1, #0
+    bgt __at_noise_store
+    ldr r2, =global_apureg
+    ldrb r5, [r2, #14]
+    movs r2, #15
+    ands r2, r5
+    lsls r2, r2, #1
+    ldr r3, =global_noisetable
+    ldrh r2, [r3, r2]
+    ldr r3, =global_noiseshift
+    ldr r6, [r3]
+__at_noise_step:
+    adds r1, r1, r2
+    lsrs r0, r6, #1
+    movs r4, #128
+    tst r5, r4
+    beq __at_noise_short
+    lsrs r0, r6, #6
+__at_noise_short:
+    eors r0, r6
+    movs r4, #1
+    ands r0, r4
+    lsls r0, r0, #14
+    lsrs r6, r6, #1
+    orrs r6, r0
+    cmp r1, #0
+    ble __at_noise_step
+    str r6, [r3]
+    ldr r0, =global_aputimer
+__at_noise_store:
+    str r1, [r0, #12]
+  EndASM
   DmcTimer=DmcTimer-dt
   While DmcTimer<=0
     DmcTimer=DmcTimer+DmcTable(ApuReg(16)&15)
@@ -175,60 +263,183 @@ ProcedureRAM ApuTick(dt.i)
     EndIf
   Wend
 EndProcedure
+; One 48 kHz output sample: the two pulses (sweep target and duty, ApuTarget and ApuVolume inlined),
+; noise, triangle and DMC through the mixing tables, a DC blocker, the clamp, the PCM ring and its
+; statistics; ApuSamples moves last, after the sample is in the ring (core 0 and the Bluetooth
+; library read it). Thumb-1 (both chips); r4 = pulse sum then the mix, r5 = channel then noise. The
+; duty patterns $02/$06/$1E/$F9 are the bytes of $F91E0602. The plain form is ApuMixSampleReference
+; in Diagnostics/asm_reference.picow.
 ProcedureRAM ApuMixSample()
-  Protected c.i, duty.i, pulse.i, noise.i, target.i, x.i
-  pulse=0 : noise=0
-  For c=0 To 1
-    If ApuLength(c)>0 And ApuPeriod(c)>=8
-      target=ApuTarget(c)
-      If target<=$7FF
-        duty=(ApuReg(c*4)>>6)&3
-        If duty=0
-          duty=$02
-        ElseIf duty=1
-          duty=$06
-        ElseIf duty=2
-          duty=$1E
-        Else
-          duty=$F9
-        EndIf
-        If (duty>>ApuSeq(c))&1
-          pulse=pulse+ApuVolume(c)
-        EndIf
-      EndIf
-    EndIf
-  Next
-  If ApuLength(3)>0 And (NoiseShift&1)=0
-    noise=ApuVolume(2)
-  EndIf
-  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)
-  ; A simple DC blocker; DAC-specific reconstruction is a separate stage.
-  ApuOutput=ApuLastY*65400
-  If ApuOutput<0
-    ApuOutput=ApuOutput+65535
-  EndIf
-  ApuOutput=x-ApuLastX+(ApuOutput>>16)
-  ApuLastX=x
-  If ApuOutput>32767
-    ApuOutput=32767
-  ElseIf ApuOutput< -32768
-    ApuOutput= -32768
-  EndIf
-  ApuLastY=ApuOutput
-  Pcm(ApuSamples&(#NES_AUDIO_RING_SAMPLES-1))=ApuOutput
-  If ApuCapture<4096
-    ApuCapture=ApuCapture+1
-  EndIf
-  If ApuOutput<ApuMinimum
-    ApuMinimum=ApuOutput
-  EndIf
-  If ApuOutput>ApuMaximum
-    ApuMaximum=ApuOutput
-  EndIf
-  If ApuOutput<>0
-    ApuNonzero=ApuNonzero+1
-  EndIf
-  ApuSamples=ApuSamples+1
+  ASM
+    movs r4, #0
+    movs r5, #0
+__ams_ch:
+    lsls r6, r5, #2
+    ldr r0, =global_apulength
+    ldr r0, [r0, r6]
+    cmp r0, #0
+    ble __ams_next
+    ldr r0, =global_apuperiod
+    ldr r1, [r0, r6]
+    cmp r1, #8
+    blt __ams_next
+    ldr r0, =global_apureg
+    adds r0, r0, r6
+    ldrb r2, [r0, #1]
+    movs r3, #7
+    ands r3, r2
+    movs r0, r1
+    asrs r0, r3
+    movs r3, #8
+    tst r2, r3
+    bne __ams_down
+    adds r0, r1, r0
+    b __ams_target
+__ams_down:
+    subs r0, r1, r0
+    cmp r5, #0
+    bne __ams_target
+    subs r0, #1
+__ams_target:
+    ldr r3, =$7FF
+    cmp r0, r3
+    bgt __ams_next
+    ldr r0, =global_apureg
+    ldrb r2, [r0, r6]
+    lsrs r1, r2, #6
+    lsls r1, r1, #3
+    ldr r3, =$F91E0602
+    lsrs r3, r1
+    movs r1, #255
+    ands r3, r1
+    ldr r0, =global_apuseq
+    ldr r0, [r0, r6]
+    lsrs r3, r0
+    movs r0, #1
+    tst r3, r0
+    beq __ams_next
+    movs r3, #16
+    tst r2, r3
+    beq __ams_envelope
+    movs r3, #15
+    ands r2, r3
+    adds r4, r4, r2
+    b __ams_next
+__ams_envelope:
+    ldr r0, =global_envdecay
+    ldr r0, [r0, r6]
+    adds r4, r4, r0
+__ams_next:
+    adds r5, #1
+    cmp r5, #2
+    blo __ams_ch
+    movs r5, #0
+    ldr r0, =global_apulength
+    ldr r0, [r0, #12]
+    cmp r0, #0
+    ble __ams_mix
+    ldr r0, =global_noiseshift
+    ldr r0, [r0]
+    movs r1, #1
+    tst r0, r1
+    bne __ams_mix
+    ldr r0, =global_apureg
+    ldrb r2, [r0, #12]
+    movs r3, #16
+    tst r2, r3
+    beq __ams_noise_envelope
+    movs r3, #15
+    ands r2, r3
+    movs r5, r2
+    b __ams_mix
+__ams_noise_envelope:
+    ldr r0, =global_envdecay
+    ldr r5, [r0, #8]
+__ams_mix:
+    ldr r0, =global_pulsemix
+    lsls r1, r4, #1
+    ldrh r4, [r0, r1]
+    ldr r0, =global_tridac
+    ldr r0, [r0]
+    lsls r1, r0, #1
+    adds r1, r1, r0
+    lsls r5, r5, #1
+    adds r1, r1, r5
+    ldr r0, =global_dmclevel
+    ldr r0, [r0]
+    adds r1, r1, r0
+    lsls r1, r1, #1
+    ldr r0, =global_tndmix
+    ldrh r0, [r0, r1]
+    adds r4, r4, r0
+    ldr r0, =global_apulasty
+    ldr r0, [r0]
+    ldr r1, =65400
+    muls r0, r1
+    cmp r0, #0
+    bge __ams_blocked
+    ldr r1, =65535
+    adds r0, r0, r1
+__ams_blocked:
+    asrs r0, r0, #16
+    ldr r1, =global_apulastx
+    ldr r2, [r1]
+    str r4, [r1]
+    subs r2, r4, r2
+    adds r0, r0, r2
+    ldr r1, =32767
+    cmp r0, r1
+    ble __ams_low
+    movs r0, r1
+    b __ams_clamped
+__ams_low:
+    ldr r1, =$FFFF8000
+    cmp r0, r1
+    bge __ams_clamped
+    movs r0, r1
+__ams_clamped:
+    ldr r1, =global_apuoutput
+    str r0, [r1]
+    ldr r1, =global_apulasty
+    str r0, [r1]
+    ldr r1, =global_apusamples
+    ldr r2, [r1]
+    ldr r3, =global_apuringmask
+    ldr r3, [r3]
+    ands r3, r2
+    lsls r3, r3, #1
+    ldr r4, =global_pcm
+    strh r0, [r4, r3]
+    ldr r3, =global_apucapture
+    ldr r4, [r3]
+    ldr r5, =4096
+    cmp r4, r5
+    bge __ams_captured
+    adds r4, #1
+    str r4, [r3]
+__ams_captured:
+    ldr r3, =global_apuminimum
+    ldr r4, [r3]
+    cmp r0, r4
+    bge __ams_min
+    str r0, [r3]
+__ams_min:
+    ldr r3, =global_apumaximum
+    ldr r4, [r3]
+    cmp r0, r4
+    ble __ams_max
+    str r0, [r3]
+__ams_max:
+    cmp r0, #0
+    beq __ams_zero
+    ldr r3, =global_apunonzero
+    ldr r4, [r3]
+    adds r4, #1
+    str r4, [r3]
+__ams_zero:
+    adds r2, #1
+    str r2, [r1]
+  EndASM
 EndProcedure
 ProcedureRAM ApuAdvance(dt.i)
   Protected step.i, event.i
