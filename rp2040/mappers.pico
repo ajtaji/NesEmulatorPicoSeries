@@ -140,7 +140,7 @@ Procedure PicoNtWrite(addr.i,value.i)
 EndProcedure
 Procedure PicoMapperInit()
   CompilerIf #PICO_ADVANCED=1
-    PicoPrgPaged=0
+    PicoPrgPaged=0 : PicoPredictValid=0
   CompilerEndIf
   Protected i.i
   PicoMapActive=CartMapper<>0 And CartMapper<>2 And CartMapper<>66
@@ -183,6 +183,7 @@ EndProcedure
 Procedure PicoMapperWrite(addr.i,value.i,stamp.i)
   Protected bank.i,chrBank.i,rom.i
   CompilerIf #PICO_ADVANCED=1
+    If addr>=$C000 : PicoPredictValid=0 : EndIf
     If CartMapper=5 : M5Write(addr,value,stamp) : ProcedureReturn : EndIf
     If CartMapper=24 Or CartMapper=26 : VrcWrite(addr,value,stamp) : ProcedureReturn : EndIf
     If CartMapper=19 : N1Write(addr,value,stamp) : ProcedureReturn : EndIf
@@ -260,7 +261,7 @@ Procedure PicoChrWrite(addr.i,value.i)
 EndProcedure
 ProcedureRAM PicoPpuNotice(addr.i)
   CompilerIf #PICO_ADVANCED=1
-    If PicoMmc3(CartMapper) : PicoA12(addr,PicoDots) : EndIf
+    If PicoMmc3(CartMapper) : PicoA12(addr,PicoDots) : PicoPredictValid=0 : EndIf
   CompilerEndIf
 EndProcedure
 ProcedureRAM PicoPpuTicks(cycles.i)
@@ -281,9 +282,47 @@ ProcedureRAM PicoPpuTicks(cycles.i)
     EndIf
   CompilerEndIf
 EndProcedure
+; The MMC3 IRQ's window budget. A prediction runs the observer ahead from the PPU's present state
+; (PicoPredict, saving and restoring every IRQ field) and keeps the absolute dot of the IRQ it finds
+; (PicoPredictIrqDot, -1 for none) and how far it looked (PicoPredictEnd). The observer is
+; deterministic, so the answer holds as the PPU advances, until something it read changes: a PPU
+; register write that changes the pattern tables, sprite size or rendering (PicoCpuPpuChanged,
+; against the PicoPredictCtrl/Mask it read), a PPU data access that moves A12 (PicoPpuNotice), an
+; IRQ register write ($C000 up), OAM in 8x16 mode (OamCacheDirty) - each clears PicoPredictValid.
+; (Pinbot writes PPU registers ~9600 times a second; clearing on every write kept nothing.) Until then a window's budget is read
+; from it: the cycles to the IRQ, at most 256 - what a fresh 256-cycle look gives. It looks 1024
+; cycles ahead and looks again when less than a window of that is left. Every 64th reuse is checked
+; against a fresh look (predict_drift on the stats line, 0 when they agree).
+ProcedureRAM PicoPredict(cycles.i)
+  CompilerIf #PICO_ADVANCED=1
+    Protected clocks.i,assertions.i,irq.i,count.i,reload.i,high.i,low.i,dots.i,bits.i,irqDot.i
+    clocks=PicoIrqClocks : assertions=PicoIrqAssertions : irq=PicoIrq
+    count=PicoIrqCount : reload=PicoIrqReload : high=PicoA12High
+    low=PicoLowSince : dots=PicoDots : bits=PicoSpriteBits : irqDot=PicoIrqDot
+    PicoMmc3Ticks(cycles)
+    PicoPredictIrqDot=-1 : If PicoIrq : PicoPredictIrqDot=PicoIrqDot : EndIf
+    PicoPredictEnd=PicoDots : PicoPredictCtrl=PpuCtrl&$38 : PicoPredictMask=PpuMask&$18
+    PicoIrqClocks=clocks : PicoIrqAssertions=assertions : PicoIrq=irq
+    PicoIrqCount=count : PicoIrqReload=reload : PicoA12High=high
+    PicoLowSince=low : PicoDots=dots : PicoSpriteBits=bits : PicoIrqDot=irqDot
+    PicoPredictCalls=PicoPredictCalls+1
+  CompilerEndIf
+EndProcedure
+ProcedureRAM.i PicoPredictBudget()
+  Protected budget.i
+  budget=256
+  CompilerIf #PICO_ADVANCED=1
+    If PicoPredictIrqDot>=0
+      budget=PpuCyclesFor(PicoPredictIrqDot-PicoDots)
+      If budget>256 : budget=256 : EndIf
+      If budget<1 : budget=1 : EndIf
+    EndIf
+  CompilerEndIf
+  ProcedureReturn budget
+EndProcedure
 ProcedureRAM.i PicoCpuBudget()
   CompilerIf #PICO_ADVANCED=1
-    Protected clocks.i,assertions.i,irq.i,count.i,reload.i,high.i,low.i,dots.i,bits.i,irqDot.i,budget.i,started.i
+    Protected budget.i,started.i,irqDot.i,endDot.i
     If CartMapper=5 : ProcedureReturn M5Budget() : EndIf
     If CartMapper=24 Or CartMapper=26 : ProcedureReturn VrcBudget() : EndIf
     If CartMapper=19 : ProcedureReturn N1Budget() : EndIf
@@ -293,21 +332,29 @@ ProcedureRAM.i PicoCpuBudget()
       CompilerIf #PPU_PROFILE=1
         started=Micros()
       CompilerEndIf
-      clocks=PicoIrqClocks : assertions=PicoIrqAssertions : irq=PicoIrq
-      count=PicoIrqCount : reload=PicoIrqReload : high=PicoA12High
-      low=PicoLowSince : dots=PicoDots : bits=PicoSpriteBits : irqDot=PicoIrqDot
-      ; Predict with the same electrical model, then restore every IRQ field.
-      ; PPU register/OAM writes end the CPU window and invalidate this horizon.
-      PicoMmc3Ticks(256) : budget=256
-      If PicoIrq : budget=PpuCyclesFor(PicoIrqDot-dots) : EndIf
-      PicoIrqClocks=clocks : PicoIrqAssertions=assertions : PicoIrq=irq
-      PicoIrqCount=count : PicoIrqReload=reload : PicoA12High=high
-      PicoLowSince=low : PicoDots=dots : PicoSpriteBits=bits : PicoIrqDot=irqDot
-      PicoPredictCalls=PicoPredictCalls+1
+      If OamCacheDirty<>0 And (PpuCtrl&32)<>0 : PicoPredictValid=0 : EndIf
+      If PicoPredictValid
+        If PicoPredictIrqDot>=0
+          If PicoPredictIrqDot-PicoDots<=0 : PicoPredictValid=0 : EndIf
+        ElseIf PicoPredictEnd-PicoDots<PpuDotsFor(256)
+          PicoPredictValid=0
+        EndIf
+      EndIf
+      If PicoPredictValid
+        budget=PicoPredictBudget() : PicoPredictReuse=PicoPredictReuse+1
+        If (PicoPredictReuse&63)=0
+          ; the check: a fresh 256-cycle look must give the same budget
+          irqDot=PicoPredictIrqDot : endDot=PicoPredictEnd
+          PicoPredict(256)
+          If PicoPredictBudget()<>budget : PicoPredictDrift=PicoPredictDrift+1 : EndIf
+          PicoPredictIrqDot=irqDot : PicoPredictEnd=endDot
+        EndIf
+      Else
+        PicoPredict(1024) : PicoPredictValid=1 : budget=PicoPredictBudget()
+      EndIf
       CompilerIf #PPU_PROFILE=1
         PicoPredictUs=PicoPredictUs+Micros()-started
       CompilerEndIf
-      If budget<1 : budget=1 : EndIf
       ProcedureReturn budget
     EndIf
   CompilerEndIf
@@ -374,8 +421,13 @@ CompilerEndIf
 
 ProcedureRAM PicoCpuPpuChanged()
   CompilerIf #PICO_ADVANCED=1
+    ; the prediction read the pattern tables, sprite size, rendering bits and (8x16) OAM: a change
+    ; ends it, and the window it budgeted. Any other PPU write leaves both standing (the window's
+    ; budget is still what a fresh look gives) - Pinbot makes ~9600 of those a second.
+    If (PpuCtrl&$38)<>PicoPredictCtrl Or (PpuMask&$18)<>PicoPredictMask : PicoPredictValid=0 : EndIf
+    If OamCacheDirty<>0 And (PpuCtrl&32)<>0 : PicoPredictValid=0 : EndIf
     If CartMapper=5 : M5PpuWatch() : ProcedureReturn : EndIf
-    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0 : CpuEndWindow() : EndIf
+    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0 And PicoPredictValid=0 : CpuEndWindow() : EndIf
   CompilerEndIf
 EndProcedure
 
