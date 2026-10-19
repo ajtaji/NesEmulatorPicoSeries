@@ -77,7 +77,7 @@ ProcedureRAM NesSync()
       LastApuSend=CpuCycles
     EndIf
     NesFence()
-    SdAdvance(CpuCycles)
+    If SdEmpty=0 : SdAdvance(CpuCycles) : EndIf
     stalls=SdFetches*4-NesSeenDmc
     If stalls>0
       CpuCycles=CpuCycles+stalls : NesSeenDmc=NesSeenDmc+stalls
@@ -120,6 +120,27 @@ Procedure PicoProfileReport()
     Say(" fence_us=") : Num(PicoFenceUs) : Say(" observer_us=") : Num(PicoObserverUs) : Say(" predictions=") : Num(PicoPredictCalls) : Say(" predict_us=") : Num(PicoPredictUs) : Say(" quick_writes=") : Num(PicoQuickWrites) : Eol()
   CompilerEndIf
 EndProcedure
+; The TV system's timing (bridge.pico): pal 0 NTSC, 1 PAL. The APU's noise and DMC rates, the frame
+; sequencer and the sample step, the PPU's lines and dots, and the pacing.
+Procedure NesTiming(pal.i)
+  Protected i.i
+  CartPal=pal
+  For i=0 To 15
+    NoiseTable(i)=PeekU(?NoiseData+i*2) : DmcTable(i)=PeekU(?DmcData+i*2)
+    If pal : NoiseTable(i)=PeekU(?NoisePalData+i*2) : DmcTable(i)=PeekU(?DmcPalData+i*2) : EndIf
+  Next
+  If pal
+    PpuPreLine=311 : PpuLineCount=312 : PpuFrameDots=106392 : PpuOddToggle=0 : PpuWarmup=33132
+    PaceUs=246 : PaceCycles=409 : ApuSampleBase=34 : ApuFracStep=30607 : ApuFracDen=48000
+    ApuStep1=8313 : ApuStep2=16627 : ApuStep3=24939 : ApuStep4=33253 : ApuStep5=41565
+  Else
+    PpuPreLine=261 : PpuLineCount=262 : PpuFrameDots=89342 : PpuOddToggle=1 : PpuWarmup=29658
+    PaceUs=176 : PaceCycles=315 : ApuSampleBase=37 : ApuFracStep=101 : ApuFracDen=352
+    ApuStep1=7457 : ApuStep2=14913 : ApuStep3=22371 : ApuStep4=29829 : ApuStep5=37281
+  EndIf
+  PpuOdd=0 : PpuDotFrac=0 : ApuSampleLeft=ApuSampleBase : ApuSampleFrac=ApuFracStep
+  DmcTimer=DmcTable(0) : SdTimer=DmcTable(0)
+EndProcedure
 Procedure LoadCartridge()
   Protected i.i, bank.i
   FrameBottom=@FrameBottomStore(0)
@@ -150,9 +171,7 @@ Procedure LoadCartridge()
   For i=0 To 31
     LengthTable(i)=PeekA(?LengthData+i)
   Next
-  For i=0 To 15
-    NoiseTable(i)=PeekU(?NoiseData+i*2) : DmcTable(i)=PeekU(?DmcData+i*2)
-  Next
+  NesTiming(CartPal)
   For i=0 To 30
     PulseMix(i)=PeekU(?PulseData+i*2)
   Next
@@ -231,7 +250,7 @@ Procedure Main()
   While PeekL(@WorkerReady)=0 : SafetyPet() : Wend
   CartIndex=BootMenu() : LoadCartridge()
   AudioBegin()
-  Say("NES PureMetal RP2040 mapper=") : Num(CartMapper)
+  Say("NES PureMetal RP2040 mapper=") : Num(CartMapper) : Say(" pal=") : Num(CartPal)
   Say(" clk_khz=") : Num(ClockSysKhz()) : Say(" spi_hz=") : Num(VideoClockHz()) : Eol()
   CpuReset()
   tick=Micros() : report=tick : start=tick : cycles=CpuCycles
@@ -322,8 +341,8 @@ Procedure Main()
     EndIf
     CompilerEndIf
     dt=Micros()-tick
-    If dt>=176
-      dt=NesDiv(dt,176) : tick=tick+dt*176 : target=target+dt*315
+    If dt>=PaceUs
+      dt=NesDiv(dt,PaceUs) : tick=tick+dt*PaceUs : target=target+dt*PaceCycles
     EndIf
     budget=target-CpuCycles
     If mode
@@ -341,14 +360,14 @@ Procedure Main()
       EndIf
       distance=241*341+1-WorkerDot
       If distance<0
-        distance=distance+89342
+        distance=distance+PpuFrameDots
       EndIf
-      If distance>0 And budget*3>distance+2
-        budget=NesDiv(distance+2,3)
+      If distance>0
+        distance=PpuCyclesFor(distance) : If budget>distance : budget=distance : EndIf
       EndIf
       distance=PicoCpuBudget() : If budget>distance : budget=distance : EndIf
       CompilerIf #NES_SPLIT=2
-        distance=SdBudget() : If budget>distance : budget=distance : EndIf
+        If SdBytes=1 : distance=SdBudget() : If budget>distance : budget=distance : EndIf : EndIf
       CompilerEndIf
       mark=Micros() : CpuRun(budget) : mark2=Micros() : NesSync()
       CpuRunUs=CpuRunUs+mark2-mark : SyncUs=SyncUs+Micros()-mark2 : Windows=Windows+1 : ran=1

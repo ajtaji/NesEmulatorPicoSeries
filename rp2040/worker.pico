@@ -60,7 +60,8 @@ __pss_sync:
     ldr r0, =341
     cmp r6, #241
     beq __pss_vb
-    ldr r1, =261
+    ldr r1, =global_ppupreline
+    ldr r1, [r1]
     cmp r6, r1
     bne __pss_notvb
 __pss_vb:
@@ -178,10 +179,25 @@ __pss_final:
     cmp r0, r1
     ble __pss_done
     subs r0, r0, r1
+    ldr r2, =global_cartpal
+    ldr r2, [r2]
+    cmp r2, #0
+    beq __pss_ntsc
+    ; PAL: the most cycles that stay short of d dots is (5d-1-PpuDotFrac)/16.
+    lsls r2, r0, #2
+    adds r0, r0, r2
+    subs r0, #1
+    ldr r2, =global_ppudotfrac
+    ldr r2, [r2]
+    subs r0, r0, r2
+    asrs r0, r0, #4
+    b __pss_cycles
+__pss_ntsc:
     subs r0, #1
     ldr r1, =43691
     muls r0, r1
     lsrs r0, r0, #17
+__pss_cycles:
     adds r0, r0, r4
     ldr r1, =global_ppustatusdeadline
     str r0, [r1]

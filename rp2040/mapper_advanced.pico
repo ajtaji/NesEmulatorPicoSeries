@@ -203,7 +203,7 @@ ProcedureRAM PicoAdvancedWrite(addr.i,value.i,stamp.i)
     CpuEndWindow()
   EndIf
 EndProcedure
-Procedure PicoAdvancedChrWrite(addr.i,value.i)
+ProcedureRAM PicoAdvancedChrWrite(addr.i,value.i)
   Protected tag.i,offset.i,row.i,bits.i,slot.i
   tag=PicoChrSlots(addr>>10)
   If tag<256 : ProcedureReturn : EndIf
@@ -244,7 +244,7 @@ ProcedureRAM PicoSpriteFetch(line.i)
     If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
     ProcedureReturn
   EndIf
-  PicoSpriteBits=255 : nextLine=line+1 : If line=261 : nextLine=0 : EndIf
+  PicoSpriteBits=255 : nextLine=line+1 : If line=PpuPreLine : nextLine=0 : EndIf
   If nextLine<240
     ; Reuse the renderer's physical OAM evaluation. A second 64-sprite scan
     ; on every line dominated the mapper observer in 8x16-sprite games.
@@ -268,13 +268,14 @@ EndProcedure
 ProcedureRAM PicoMmc3Ticks(cycles.i)
   Protected remaining.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
   Protected region.i,high.i,targetDot.i,lastLow.i,firstHigh.i,firstLow.i,endDot.i
-  remaining=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  remaining=cycles*3 : If CartPal : remaining=PpuDotsFor(cycles) : EndIf
+  line=PpuLine : dot=PpuDot : odd=PpuOdd
   While remaining>0
-    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    width=341 : If line=PpuPreLine And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
     ; With 8x8 sprites both pattern-table selections are fixed. Across a
     ; complete rendered scanline, only the first high fetch after a long
     ; low gap can clock MMC3; all intervening low pulses are four dots.
-    If dot=0 And remaining>=width And (PpuCtrl&32)=0 And (PpuMask&24)<>0 And (line<240 Or line=261)
+    If dot=0 And remaining>=width And (PpuCtrl&32)=0 And (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
       PicoA12(0,PicoDots+1)
       If PpuCtrl&16
         PicoA12($1000,PicoDots+5)
@@ -287,11 +288,11 @@ ProcedureRAM PicoMmc3Ticks(cycles.i)
       EndIf
       PicoSpriteBits=0 : If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
       PicoDots=PicoDots+width : remaining=remaining-width
-      line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      line=line+1 : If line=PpuLineCount : line=0 : odd=odd!PpuOddToggle : EndIf
       Continue
     EndIf
     region=0 : high=0
-    If (PpuMask&24)<>0 And (line<240 Or line=261)
+    If (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
       If dot<257 : region=1 : high=(PpuCtrl&16)<>0
       ElseIf dot<321 : region=2 : high=PicoSpriteBits=255
       ElseIf dot<337 : region=3 : high=(PpuCtrl&16)<>0 : EndIf
@@ -318,7 +319,7 @@ ProcedureRAM PicoMmc3Ticks(cycles.i)
       EndIf
     EndIf
     edge=width
-    If (PpuMask&24)<>0 And (line<240 Or line=261)
+    If (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
       If dot<337
         If dot=0 : edge=1 : Else : edge=((dot-1)&$FFFFFFFC)+5 : EndIf
         If (PpuCtrl&16)=0 And PicoA12High=0
@@ -332,7 +333,7 @@ ProcedureRAM PicoMmc3Ticks(cycles.i)
     dot=dot+step : remaining=remaining-step : PicoDots=PicoDots+step
     If dot=edge
       If dot=width
-        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+        dot=0 : line=line+1 : If line=PpuLineCount : line=0 : odd=odd!PpuOddToggle : EndIf
       Else
         addr=0
         If dot=257 : PicoSpriteFetch(line) : EndIf

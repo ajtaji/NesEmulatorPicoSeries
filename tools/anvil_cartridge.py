@@ -17,8 +17,9 @@ def corrections():
     with (ROOT/'anvil/rom_metadata.csv').open(newline='') as f:
         return {int(r['crc32'],16):int(r['mapper']) for r in csv.DictReader(f)}
 
-def read_anvil_rom(path, extra=frozenset()):
-    """extra: mappers a caller runs beyond Anvil's own (the Pico profile's VRC6), checked like the rest."""
+def read_anvil_rom(path, extra=frozenset(), pal_ok=False):
+    """extra: mappers a caller runs beyond Anvil's own (the Pico profile's VRC6), checked like the rest.
+    pal_ok: the caller runs PAL timing (the Pico profile); Anvil itself is NTSC-only."""
     data=path.read_bytes()
     if len(data)<16 or data[:4]!=b'NES\x1a':
         raise ValueError('invalid iNES header')
@@ -39,7 +40,9 @@ def read_anvil_rom(path, extra=frozenset()):
         raise ValueError(f'unsupported Anvil mapper {mapper}')
     if (h[7]&3) or ((h[6]&8) and mapper not in (4,206)):
         raise ValueError('unsupported console or four-screen board')
-    if (nes2 and (h[12]&3) in (1,3)) or (not nes2 and h[9]&1):
+    if nes2 and (h[12]&3)==3:
+        raise ValueError('Dendy timing is unsupported')
+    if not pal_ok and ((nes2 and (h[12]&3)==1) or (not nes2 and h[9]&1)):
         raise ValueError('PAL timing is unsupported')
     if (p&(p-1) and mapper!=228) or (c and c&(c-1)):
         raise ValueError('non-power-of-two cartridge banks')

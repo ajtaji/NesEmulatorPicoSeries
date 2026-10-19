@@ -869,6 +869,25 @@ ProcedureRAM PpuSendLine()
     DisplayFrame()
   EndIf
 EndProcedure
+; CPU cycles to PPU dots: 3 each (NTSC), or 16 per 5 (PAL) with the remainder carried in PpuDotFrac.
+; PpuTakeDots spends the cycles; PpuDotsFor only looks ahead (the mapper observers, run before
+; PpuAdvance on the same cycles, see the same dots). PpuCyclesFor(dots) is the fewest cycles that
+; carry the PPU at least dots ahead - the inverse the window budgets use.
+ProcedureRAM.i PpuTakeDots(cycles.i)
+  Protected total.i,dots.i
+  If CartPal=0 : ProcedureReturn cycles*3 : EndIf
+  total=cycles*16+PpuDotFrac : dots=NesDiv(total,5) : PpuDotFrac=total-dots*5
+  ProcedureReturn dots
+EndProcedure
+ProcedureRAM.i PpuDotsFor(cycles.i)
+  If CartPal=0 : ProcedureReturn cycles*3 : EndIf
+  ProcedureReturn NesDiv(cycles*16+PpuDotFrac,5)
+EndProcedure
+ProcedureRAM.i PpuCyclesFor(dots.i)
+  If CartPal=0 : ProcedureReturn NesDiv(dots+2,3) : EndIf
+  If dots<=0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn (dots*5-PpuDotFrac+15)>>4
+EndProcedure
 Procedure PpuAdvanceReference(cycles.i)
   Protected dots.i, edge.i, step.i, width.i, sample.i
   If PpuWarmup>0
@@ -877,7 +896,7 @@ Procedure PpuAdvanceReference(cycles.i)
       PpuWarmup=0
     EndIf
   EndIf
-  dots=cycles*3
+  dots=PpuTakeDots(cycles)
   While dots>0
     edge=341
     If PpuLine<240
@@ -902,10 +921,10 @@ Procedure PpuAdvanceReference(cycles.i)
       ElseIf PpuDot<257
         edge=257
       EndIf
-    ElseIf PpuLine=241 Or PpuLine=261
+    ElseIf PpuLine=241 Or PpuLine=PpuPreLine
       If PpuDot=0
         edge=1
-      ElseIf PpuLine=261
+      ElseIf PpuLine=PpuPreLine
         If PpuDot<257
           edge=257
         ElseIf PpuDot<280
@@ -914,7 +933,7 @@ Procedure PpuAdvanceReference(cycles.i)
       EndIf
     EndIf
     width=341
-    If PpuLine=261 And PpuOdd<>0 And (PpuMask&$18)<>0
+    If PpuLine=PpuPreLine And PpuOdd<>0 And (PpuMask&$18)<>0
       width=340
       If edge>width
         edge=width
@@ -931,7 +950,7 @@ Procedure PpuAdvanceReference(cycles.i)
         If PpuCtrl&$80
           WorkerNmi=WorkerNmi+1
         EndIf
-      ElseIf PpuLine=261 And edge=1
+      ElseIf PpuLine=PpuPreLine And edge=1
         PpuStatus=PpuStatus&31
       ElseIf PpuLine<240 And edge=256
         If PpuMask&$18
@@ -940,13 +959,13 @@ Procedure PpuAdvanceReference(cycles.i)
         PpuSendLine()
       ElseIf edge=257 And (PpuMask&$18)<>0
         PpuV=(PpuV&$7BE0)|(PpuT&$41F)
-      ElseIf PpuLine=261 And edge=280 And (PpuMask&$18)<>0
+      ElseIf PpuLine=PpuPreLine And edge=280 And (PpuMask&$18)<>0
         PpuV=(PpuV&$41F)|(PpuT&$7BE0)
       EndIf
       If PpuDot=width
         PpuDot=0 : PpuLine=PpuLine+1
-        If PpuLine=262
-          PpuLine=0 : PpuOdd=PpuOdd!1 : WorkerFrames=WorkerFrames+1
+        If PpuLine=PpuLineCount
+          PpuLine=0 : PpuOdd=PpuOdd!PpuOddToggle : WorkerFrames=WorkerFrames+1
         EndIf
       EndIf
     EndIf
@@ -991,7 +1010,8 @@ ProcedureRAM PpuEdge()
     str r1, [r0]
     b __pe_wrap
 __pe_dot1_261:
-    ldr r0, =261
+    ldr r0, =global_ppupreline
+    ldr r0, [r0]
     cmp r4, r0
     bne __pe_wrap
     ldr r0, =global_ppustatus
@@ -1041,7 +1061,8 @@ __pe_not_257:
     ldr r0, =280
     cmp r5, r0
     bne __pe_wrap
-    ldr r0, =261
+    ldr r0, =global_ppupreline
+    ldr r0, [r0]
     cmp r4, r0
     bne __pe_wrap
     cmp r6, #0
@@ -1058,7 +1079,8 @@ __pe_not_257:
     str r1, [r0]
 __pe_wrap:
     ldr r1, =341
-    ldr r0, =261
+    ldr r0, =global_ppupreline
+    ldr r0, [r0]
     cmp r4, r0
     bne __pe_width
     cmp r6, #0
@@ -1076,13 +1098,15 @@ __pe_width:
     str r1, [r0]
     adds r4, #1
     ldr r0, =global_ppuline
-    ldr r1, =262
+    ldr r1, =global_ppulinecount
+    ldr r1, [r1]
     cmp r4, r1
     bne __pe_store_line
     movs r4, #0
     ldr r1, =global_ppuodd
     ldr r2, [r1]
-    movs r3, #1
+    ldr r3, =global_ppuoddtoggle
+    ldr r3, [r3]
     eors r2, r3
     str r2, [r1]
     ldr r1, =global_workerframes
@@ -1101,7 +1125,7 @@ ProcedureRAM PpuAdvance(cycles.i)
       PpuWarmup=0
     EndIf
   EndIf
-  PpuRemaining=cycles*3
+  PpuRemaining=cycles*3 : If CartPal : PpuRemaining=PpuTakeDots(cycles) : EndIf
   ASM
     push {lr}
     push {r7}
@@ -1158,7 +1182,8 @@ __nes_advance_visible_end:
 __nes_advance_blank:
     cmp r5, #241
     beq __nes_advance_dot1
-    ldr r0, =261
+    ldr r0, =global_ppupreline
+    ldr r0, [r0]
     cmp r5, r0
     bne __nes_advance_step
 __nes_advance_dot1:
@@ -1167,7 +1192,8 @@ __nes_advance_dot1:
     movs r7, #1
     b __nes_advance_step
 __nes_advance_prerender:
-    ldr r0, =261
+    ldr r0, =global_ppupreline
+    ldr r0, [r0]
     cmp r5, r0
     bne __nes_advance_step
     ldr r7, =257

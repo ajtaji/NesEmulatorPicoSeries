@@ -187,7 +187,7 @@ ProcedureRAM.i M5Read(addr.i)
 EndProcedure
 
 ; Every CPU write the board decodes: $5000-$5FFF registers and ExRAM, $6000-$DFFF PRG-RAM.
-Procedure M5Write(addr.i,value.i,stamp.i)
+ProcedureRAM M5Write(addr.i,value.i,stamp.i)
   Protected index.i,shift.i
   If addr>=$6000 : M5PrgWrite(addr,value) : ProcedureReturn : EndIf
   If addr<$5100 : ProcedureReturn : EndIf
@@ -260,6 +260,7 @@ ProcedureRAM M5Ticks(cycles.i)
   Protected line.i,dot.i,dotsLeft.i,step.i,odd.i,width.i
   If (PpuMask&24)=0 : M5InFrame=0 : ProcedureReturn : EndIf
   line=PpuLine : dot=PpuDot : dotsLeft=cycles*3 : odd=PpuOdd
+  If CartPal : dotsLeft=PpuDotsFor(cycles) : EndIf
   While dotsLeft>0
     If line<240 And dot<3
       step=3-dot
@@ -271,11 +272,11 @@ ProcedureRAM M5Ticks(cycles.i)
       dotsLeft=dotsLeft-step : dot=8 : M5InFrame=0
     EndIf
     ; With rendering on, an odd frame's pre-render line is one dot short (340).
-    width=341 : If line=261 And odd<>0 : width=340 : EndIf
+    width=341 : If line=PpuPreLine And odd<>0 : width=340 : EndIf
     step=width-dot
     If step>dotsLeft : ProcedureReturn : EndIf
     dotsLeft=dotsLeft-step : dot=0 : line=line+1
-    If line=262 : line=0 : odd=odd!1 : EndIf
+    If line=PpuLineCount : line=0 : odd=odd!PpuOddToggle : EndIf
   Wend
 EndProcedure
 
@@ -295,9 +296,9 @@ ProcedureRAM.i M5Budget()
   dots=eventLine*341+3-(PpuLine*341+PpuDot)
   If dots<0
     ; across the pre-render line: one dot short on an odd frame
-    dots=dots+262*341 : If PpuOdd : dots=dots-1 : EndIf
+    dots=dots+PpuFrameDots : If PpuOdd : dots=dots-1 : EndIf
   EndIf
-  dots=NesDiv(dots,3)+1
+  dots=PpuCyclesFor(dots+1)
   If dots>256 : dots=256 : EndIf
   ProcedureReturn dots
 EndProcedure

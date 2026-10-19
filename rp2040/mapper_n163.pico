@@ -71,7 +71,7 @@ ProcedureRAM N1Nametable(table.i,value.i)
   EndIf
 EndProcedure
 
-Procedure N1Write(addr.i,value.i,stamp.i)
+ProcedureRAM N1Write(addr.i,value.i,stamp.i)
   If addr<$8000
     If addr>=$6000
       PicoPrgRam(addr&8191)=value

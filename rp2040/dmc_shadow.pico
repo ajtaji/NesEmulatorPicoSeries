@@ -24,12 +24,18 @@ Procedure SdFetch()
   EndIf
 EndProcedure
 
-; The shadow up to CPU time stamp.
+; The shadow up to CPU time stamp. With the buffer empty no fetch can come before a register write
+; (a byte boundary only fetches after emptying a full buffer), so NesSync leaves the shadow alone
+; then, and the next advance winds the timer and bit count on in one step.
 Procedure SdAdvance(stamp.i)
-  Protected dt.i
+  Protected dt.i,period.i,ticks.i
   dt=stamp-SdClock
   If dt<=0 : ProcedureReturn : EndIf
   SdClock=stamp : SdTimer=SdTimer-dt
+  If SdEmpty<>0 And SdTimer<=0
+    period=DmcTable(SdReg16&15) : ticks=NesDiv(-SdTimer,period)+1
+    SdTimer=SdTimer+ticks*period : SdBits=((SdBits-1-(ticks&7))&7)+1
+  EndIf
   While SdTimer<=0
     SdTimer=SdTimer+DmcTable(SdReg16&15)
     SdBits=SdBits-1

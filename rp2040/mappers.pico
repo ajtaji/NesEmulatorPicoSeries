@@ -299,7 +299,7 @@ ProcedureRAM.i PicoCpuBudget()
       ; Predict with the same electrical model, then restore every IRQ field.
       ; PPU register/OAM writes end the CPU window and invalidate this horizon.
       PicoMmc3Ticks(256) : budget=256
-      If PicoIrq : budget=NesDiv(PicoIrqDot-dots+2,3) : EndIf
+      If PicoIrq : budget=PpuCyclesFor(PicoIrqDot-dots) : EndIf
       PicoIrqClocks=clocks : PicoIrqAssertions=assertions : PicoIrq=irq
       PicoIrqCount=count : PicoIrqReload=reload : PicoA12High=high
       PicoLowSince=low : PicoDots=dots : PicoSpriteBits=bits : PicoIrqDot=irqDot

@@ -43,7 +43,7 @@ ProcedureRAM.i F7RamRead(addr.i)
   ProcedureReturn NesOpenBus
 EndProcedure
 
-Procedure F7Write(addr.i,value.i,stamp.i)
+ProcedureRAM F7Write(addr.i,value.i,stamp.i)
   Protected reg.i,mirror.i
   If addr<$8000
     If addr>=$6000 And (F7Regs(8)&$C0)=$C0 : PicoPrgRam(addr&8191)=value : EndIf
