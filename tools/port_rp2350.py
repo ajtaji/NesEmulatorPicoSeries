@@ -58,6 +58,10 @@ EndProcedure
         # Hot bus adapters must share SRAM with the computed-dispatch CPU.
         for proc in ('PicoMapperWrite','PicoNtRead','PicoNtWrite','PicoMirrorSet','PicoInvalidateChr','PicoChrSwitch','PicoChrFour','PicoRamRead','PicoChrWrite','PicoRegisterNotice','PicoWorkerPrgSet'):
             text=re.sub(r'Procedure(\.i)? '+proc+r'\(',lambda m:'ProcedureRAM'+(m[1] or '')+' '+proc+'(',text)
+    if name == 'dmc_shadow.pico':
+        # Core 0 runs it at every sync while a sample plays; the RP2040 keeps it in flash for SRAM.
+        for proc in ('SdFetch','SdAdvance','SdWrite','SdBudget'):
+            text=re.sub(r'Procedure(\.i)? '+proc+r'\(',lambda m:'ProcedureRAM'+(m[1] or '')+' '+proc+'(',text)
     if name == 'state.pico':
         # The Pico 2 W has 520 KB of SRAM: a 170 ms PCM ring and a 130 ms Bluetooth lead, so a
         # busy scene the emulator runs a few frames late never reaches the speaker as silence.

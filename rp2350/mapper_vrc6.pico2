@@ -58,7 +58,7 @@ ProcedureRAM.i VrcBudget()
   ProcedureReturn cycles
 EndProcedure
 
-Procedure VrcWrite(addr.i,value.i,stamp.i)
+ProcedureRAM VrcWrite(addr.i,value.i,stamp.i)
   Protected reg.i
   If addr<$8000
     If addr>=$6000 And PicoRamEnable : PicoPrgRam(addr&8191)=value : EndIf

@@ -19,7 +19,7 @@ the NES firmware; by default the tool reboots it into the boot menu first.
 """
 import argparse, struct, sys, time, zlib
 from pathlib import Path
-from pico_cartridge import read_pico_rom, pico_prg, stored_chr, ENDS
+from pico_cartridge import read_pico_rom, pico_pal, pico_prg, stored_chr, ENDS
 
 DIRECTORY = 0x50000
 DATA = 0x51000
@@ -62,7 +62,7 @@ def layout(paths, target="rp2040"):
         blobs += [(prg_at, prg)] + ([(chr_at, chr_data)] if chr_data else [])
         entries += struct.pack('<32sBBBBHHIIIIII', title, cart.mapper, cart.mirror, int(cart.conflicts)|(cart.submapper<<4),
                                int(not chr_data)|(4 if cart.ram_size else 0)|(2 if cart.chr and cart.mapper not in (0,2,66) else 0)|
-                               (ram_code(cart) << 3), len(prg) // 32768,
+                               (ram_code(cart) << 3)|(64 if pico_pal(path) else 0), len(prg) // 32768,
                                len(cart.chr) // 8192 if cart.chr else 2,
                                prg_at, len(prg), chr_at, len(chr_data),
                                zlib.crc32(prg), zlib.crc32(chr_data))

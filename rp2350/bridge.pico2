@@ -19,6 +19,12 @@ Global NesSeenNmi.i, NesSeenDmc.i, NesRpcCalls.i, NesRpcWaitUs.i
 Global CartMapper.i, CartPrgBanks.i=1, CartChrBanks.i=1, CartPrg.i, CartChr.i
 Global CartPrgSelected.i, CartChrSelected.i
 Global CartCount.i=1, CartIndex.i, CartTitle.i, CartChrRam.i, CartConflicts.i=1, CartChrDirty.i
+; The TV system (LoadCartridge sets them from CartPal, the ROM store's flag bit 6). NTSC: 262 lines,
+; 3 dots a CPU cycle, an odd frame's pre-render line one dot short, 1.789773 MHz. PAL: 312 lines,
+; 3.2 dots a cycle (16 per 5: PpuDotFrac carries the fifths), no short line, 1.662607 MHz.
+Global CartPal.i, PpuPreLine.i=261, PpuLineCount.i=262, PpuFrameDots.i=89342, PpuOddToggle.i=1, PpuDotFrac.i
+Global PaceUs.i=176, PaceCycles.i=315, ApuSampleBase.i=37, ApuFracStep.i=101, ApuFracDen.i=352
+Global ApuStep1.i=7457, ApuStep2.i=14913, ApuStep3.i=22371, ApuStep4.i=29829, ApuStep5.i=37281
 Global CartBankCalls.i, CartBankChanges.i, CartBankUs.i, WorkerPrgBase.i
 Declare CartSelect(number.i)
 Declare CartPpuWriteNotice(addr.i,value.i)

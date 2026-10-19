@@ -1,6 +1,7 @@
 """Bounded Pico cartridge layouts. No guest CPU/video/audio adaptations."""
 from dataclasses import replace
 from pathlib import Path
+import re
 from anvil_cartridge import read_anvil_rom
 from rom_catalog import prg_views
 
@@ -11,7 +12,7 @@ ENDS={'rp2040':0xFF000,'rp2350':0x1FF000}
 
 def _read_pico_rom(path,target='rp2040'):
     if target not in ENDS: raise ValueError('choose rp2040 or rp2350')
-    cart,header=read_anvil_rom(path, extra=PICO_ONLY)
+    cart,header=read_anvil_rom(path, extra=PICO_ONLY, pal_ok=True)
     allowed=COMMON | (ADVANCED if target=='rp2350' else set())
     if cart.mapper not in allowed:
         raise ValueError(f'{path.name}: mapper {cart.mapper} is unavailable on {target}; supported: {sorted(allowed)}')
@@ -60,6 +61,26 @@ def decode_chr(raw):
 
 def stored_chr(cart):
     return cart.chr+(decode_chr(cart.chr) if cart.mapper not in (0,2,66) else b'')
+
+
+# GoodNES / No-Intro region tags. A PAL tag alone means a PAL release; one shared with an NTSC region
+# ("(UE)", "(USA, Europe)") is a cartridge that runs on both, kept NTSC.
+PAL_TAGS={'E','A','G','F','S','Sw','I','Nl','Uk','UK','EU','PAL','Europe','Australia','Germany','France',
+          'Spain','Sweden','Italy','Netherlands'}
+NTSC_TAGS={'U','J','K','USA','Japan','Korea','NTSC'}
+
+def pico_pal(path):
+    """PAL timing: the header's TV-system flag, else a PAL region tag in the file name."""
+    path=Path(path)
+    h=path.read_bytes()[:16]
+    nes2=(h[7]&12)==8
+    if nes2:
+        if (h[12]&3)==1: return True
+    elif not any(h[12:16]) and h[9]&1:
+        return True
+    tokens={t.strip() for group in re.findall(r'\(([^)]*)\)',path.stem) for t in group.split(',')}
+    ntsc=any(t in NTSC_TAGS or (re.fullmatch(r'[JUEAGFSK]{2,}',t) and ('U' in t or 'J' in t)) for t in tokens)
+    return not ntsc and any(t in PAL_TAGS for t in tokens)
 
 
 def read_pico_rom(path,target='rp2040'):

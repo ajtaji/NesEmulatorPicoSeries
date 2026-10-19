@@ -2,7 +2,7 @@
 import struct, tempfile, unittest, zlib
 from pathlib import Path
 from unittest.mock import patch
-from pico_cartridge import read_pico_rom, pico_prg, decode_chr, ENDS
+from pico_cartridge import read_pico_rom, pico_pal, pico_prg, decode_chr, ENDS
 from dataclasses import replace
 from rom_loader import layout, load_store, DATA
 
@@ -34,6 +34,20 @@ class CartridgeTests(unittest.TestCase):
         self.assertTrue(d[51]&2)
         self.assertEqual(len(blobs[1][1]),65536)
         self.assertTrue(all(DATA<=a and a+len(b)<=ENDS['rp2040'] for a,b in blobs))
+    def test_pal(self):
+        # The NES 2.0 TV-system field or a PAL-only region tag marks PAL (flag bit 6); shared tags stay NTSC;
+        # Dendy is refused.
+        p=self.rom(2,chr=0); self.assertFalse(pico_pal(p))
+        h=bytearray(p.read_bytes()); h[12]=1; p.write_bytes(h); self.assertTrue(pico_pal(p))
+        self.assertEqual(layout([p],'rp2350')[1][16+35]&64,64)
+        h[12]=3; p.write_bytes(h)
+        with self.assertRaisesRegex(ValueError,'Dendy'): read_pico_rom(p,'rp2350')
+        h[12]=0; data=bytes(h)
+        for name,pal in (('Game (E).nes',True),('Game (Europe).nes',True),('Game (E) [!].nes',True),('Game (A).nes',True),
+                         ('Game (U).nes',False),('Game (UE).nes',False),('Game (USA, Europe).nes',False),('Game (J).nes',False)):
+            q=Path(self.temp.name)/name; q.write_bytes(data)
+            self.assertEqual(pico_pal(q),pal,name)
+            self.assertEqual(layout([q],'rp2350')[1][16+35]>>6&1,int(pal),name)
     def test_prg_views(self):
         c=read_pico_rom(self.rom(71,prg=16,chr=0))
         c=replace(c,prg=b''.join(bytes([n])*16384 for n in range(16)))

@@ -454,15 +454,15 @@ ProcedureRAM ApuAdvance(dt.i)
     If ApuResetDelay>0 And step>ApuResetDelay
       step=ApuResetDelay
     EndIf
-    event=7457
+    event=ApuStep1
     If ApuFrameStep=1
-      event=14913
+      event=ApuStep2
     ElseIf ApuFrameStep=2
-      event=22371
+      event=ApuStep3
     ElseIf ApuFrameStep=3
-      event=29829
+      event=ApuStep4
       If ApuFive
-        event=37281
+        event=ApuStep5
       EndIf
     EndIf
     If step>event-ApuFrameClock
@@ -501,10 +501,10 @@ ProcedureRAM ApuAdvance(dt.i)
         If ExpChip : ExpMix() : EndIf
       CompilerEndIf
       ApuMixSample()
-      ApuSampleFrac=ApuSampleFrac+101
-      ApuSampleLeft=37
-      If ApuSampleFrac>=352
-        ApuSampleFrac=ApuSampleFrac-352 : ApuSampleLeft=38
+      ApuSampleFrac=ApuSampleFrac+ApuFracStep
+      ApuSampleLeft=ApuSampleBase
+      If ApuSampleFrac>=ApuFracDen
+        ApuSampleFrac=ApuSampleFrac-ApuFracDen : ApuSampleLeft=ApuSampleBase+1
       EndIf
     EndIf
   Wend

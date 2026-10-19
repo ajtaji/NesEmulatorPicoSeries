@@ -296,7 +296,7 @@ Procedure StatusPollingTests()
   For variant=0 To 2
     interval=13+variant*4
     For pass=0 To 1
-      PpuClock=0 : PpuStatusDeadline=0 : PpuWarmup=0
+      PpuClock=0 : PpuStatusDeadline=0 : PpuWarmup=0 : PpuDotFrac=0
       PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuV=0 : PpuT=0 : PpuFineX=variant
       PpuStatus=0 : PpuBus=$1B : PpuW=1 : PpuCtrl=$80 : PpuMask=$1E
       WorkerNmi=0 : WorkerFrames=0 : OamCacheDirty=1 : NameDescDirty=1 : RgbPairsDirty=1
@@ -464,25 +464,68 @@ Procedure FastFetchAndIdleTests()
   Check(NesIdleBatched-start,85) : Check(CpuCycles,265)
 EndProcedure
 Procedure ComparePpuAdvance()
-  Protected i.i, line.i, dot.i, odd.i, mask.i, cycles.i
-  Protected expectedLine.i, expectedDot.i, expectedOdd.i, expectedV.i, expectedStatus.i, expectedFrames.i, expectedNmi.i
+  Protected i.i, line.i, dot.i, odd.i, mask.i, cycles.i, frac.i
+  Protected expectedLine.i, expectedDot.i, expectedOdd.i, expectedV.i, expectedStatus.i, expectedFrames.i, expectedNmi.i, expectedFrac.i
   For i=0 To 511
-    line=(i*79) % 262 : dot=(i*137) % 341 : odd=i&1 : mask=(i&2)*12
-    cycles=1+(i*53) % 1000
-    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask
+    line=(i*79) % PpuLineCount : dot=(i*137) % 341 : odd=(i&1)&PpuOddToggle : mask=(i&2)*12
+    cycles=1+(i*53) % 1000 : frac=0 : If CartPal : frac=(i*3) % 5 : EndIf
+    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask : PpuDotFrac=frac
     PpuCtrl=$80 : PpuV=(i*117)&$7FFF : PpuT=(i*57)&$7FFF : PpuFineX=i&7
     PpuStatus=0 : WorkerFrames=0 : WorkerNmi=0
     PpuAdvanceReference(cycles)
-    expectedLine=PpuLine : expectedDot=PpuDot : expectedOdd=PpuOdd
+    expectedLine=PpuLine : expectedDot=PpuDot : expectedOdd=PpuOdd : expectedFrac=PpuDotFrac
     expectedV=PpuV : expectedStatus=PpuStatus : expectedFrames=WorkerFrames : expectedNmi=WorkerNmi
-    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask
+    PpuLine=line : PpuDot=dot : PpuOdd=odd : PpuMask=mask : PpuDotFrac=frac
     PpuV=(i*117)&$7FFF : PpuT=(i*57)&$7FFF : PpuFineX=i&7
     PpuStatus=0 : WorkerFrames=0 : WorkerNmi=0
     PpuAdvance(cycles)
     Check(PpuLine,expectedLine) : Check(PpuDot,expectedDot) : Check(PpuOdd,expectedOdd)
     Check(PpuV,expectedV) : Check(PpuStatus,expectedStatus)
-    Check(WorkerFrames,expectedFrames) : Check(WorkerNmi,expectedNmi)
+    Check(WorkerFrames,expectedFrames) : Check(WorkerNmi,expectedNmi) : Check(PpuDotFrac,expectedFrac)
   Next
+EndProcedure
+; PAL timing (NesTiming(1)): the PPU comparison and the $2002 horizon again, on 312 lines at 3.2 dots
+; a cycle; the frame's exact length (33247.5 cycles, no short line) and its vblank dot; PpuCyclesFor
+; as PpuDotsFor's inverse in both systems; the APU's frame IRQ, rates and 48 kHz sample step.
+Procedure PalTimingTests()
+  Protected pal.i, frac.i, d.i, c.i, warmup.i, i.i, stamp.i, edge.i
+  warmup=PpuWarmup
+  For pal=0 To 1
+    NesTiming(pal)
+    For frac=0 To 4*pal
+      PpuDotFrac=frac
+      For d=1 To 700
+        c=PpuCyclesFor(d) : Check(PpuDotsFor(c)>=d,1) : Check(PpuDotsFor(c-1)<d,1)
+      Next
+    Next
+    ; The $2002 horizon in vblank: the last cycle still short of the next edge (vblank set or clear at
+    ; dot 1, else the line's end).
+    For i=0 To 999
+      PpuClock=0 : PpuStatusDeadline=0 : PpuWarmup=0 : PpuMask=0 : PpuCtrl=0 : PpuStatus=0
+      PpuLine=240+(i*7)%(PpuPreLine-240) : PpuDot=(i*13)%341 : PpuDotFrac=((i*3)%5)*pal
+      stamp=1+(i*11)%40
+      PpuSyncStatus(stamp)
+      edge=341 : If (PpuLine=241 Or PpuLine=PpuPreLine) And PpuDot=0 : edge=1 : EndIf
+      Check(PpuStatusDeadline-stamp,PpuCyclesFor(edge-PpuDot)-1)
+    Next
+  Next
+  ComparePpuAdvance() : StatusPollingTests()
+  PpuClock=0 : PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuDotFrac=0 : PpuMask=$18 : PpuCtrl=$80
+  WorkerFrames=0 : WorkerNmi=0 : PpuStatus=0 : PpuWarmup=0
+  PpuAdvance(25681) : Check(PpuStatus&$80,0)
+  PpuAdvance(1) : Check(PpuStatus&$80,$80) : Check(WorkerNmi,1)
+  PpuAdvance(33247-25682) : Check(WorkerFrames,0)
+  PpuAdvance(1) : Check(WorkerFrames,1) : Check(PpuLine,0) : Check(PpuDot,1)
+  PpuAdvance(33247) : Check(WorkerFrames,2) : Check(PpuLine,0) : Check(PpuDot,0) : Check(PpuDotFrac,0) : Check(PpuOdd,0)
+  Check(DmcTable(0),398) : Check(NoiseTable(2),14) : Check(DmcTimer,398) : Check(SdTimer,398)
+  ApuFrameClock=0 : ApuFrameStep=0 : ApuFive=0 : ApuInhibit=0 : ApuFrameIrq=0 : ApuResetDelay=0
+  ApuAdvance(33252) : Check(ApuFrameIrq,0)
+  ApuAdvance(1) : Check(ApuFrameIrq,1)
+  ApuSamples=0 : ApuSampleLeft=ApuSampleBase : ApuSampleFrac=ApuFracStep
+  ApuAdvance(166260) : Check(ApuSamples,4800)
+  ApuAdvance(1) : Check(ApuSamples,4800)
+  NesTiming(0) : PpuWarmup=warmup
+  Check(PpuLineCount,262) : Check(PpuPreLine,261) : Check(DmcTable(0),428) : Check(PaceCycles,315)
 EndProcedure
 Global Dim BenchRom.a(512)
 ; CPU throughput on a typical ROM loop (operands fetched through the PRG fast
@@ -672,6 +715,8 @@ Procedure TestMain()
   RomStoreTests()
   Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CartridgeViewTests()
+  Say("STEP PalTimingTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  PalTimingTests()
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
   If Failures=0

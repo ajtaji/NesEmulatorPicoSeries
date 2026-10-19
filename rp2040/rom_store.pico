@@ -94,7 +94,7 @@ Procedure RomStoreScan()
       ok=0 : Say("ROMSTORE refused: this diagnostic build lacks a CHR window") : Eol()
     ElseIf PicoSupported(mapper)=0
       ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: mapper ") : Num(mapper) : Say(" is unavailable on this board") : Eol()
-    ElseIf ((PeekA(e+35)&$F8)<>0 And Not (mapper=5 And (PeekA(e+35)&$C0)=0)) Or ((PeekA(e+35)&2)<>0 And PicoMapVersion<>2)
+    ElseIf ((PeekA(e+35)&$B8)<>0 And Not (mapper=5 And (PeekA(e+35)&$80)=0)) Or ((PeekA(e+35)&2)<>0 And PicoMapVersion<>2)
       ok=0 : Say("ROMSTORE refused: invalid cartridge flags/version") : Eol()
     ElseIf (PeekU(e+36)&(PeekU(e+36)-1))<>0 Or (PeekU(e+38)&(PeekU(e+38)-1))<>0
       ok=0 : Say("ROMSTORE refused: non-power-of-two banks") : Eol()
@@ -121,6 +121,7 @@ EndProcedure
 ; when the store holds none.
 Procedure CartSelect(number.i)
   Protected e.i
+  CartPal=0
   If RomScanned=0 : RomStoreScan() : EndIf
   If RomCount=0
     CartSelectBuiltin(number) : ProcedureReturn
@@ -129,6 +130,8 @@ Procedure CartSelect(number.i)
   e=RomEntry(number) : CartCount=RomCount : CartTitle=e
   CartMapper=PeekA(e+32) : PpuMirroring=PeekA(e+33) : CartConflicts=PeekA(e+34)&1 : CartChrRam=PeekA(e+35)&1
   CartPrgBanks=PeekU(e+36) : CartChrBanks=PeekU(e+38)
+  ; Bit 6 of the flags: PAL timing (firmware without PAL refuses the bit rather than run it at NTSC).
+  CartPal=(PeekA(e+35)>>6)&1
   CartPrg=#ROMSTORE_FLASH+PeekL(e+40) : CartChr=#ROMSTORE_FLASH+PeekL(e+48)
   PicoPrgBytes=PeekL(e+44) : PicoChrBytes=CartChrBanks*8192
   PicoSubmapper=(PeekA(e+34)>>4)&15 : PicoRamPresent=(PeekA(e+35)&4)<>0
