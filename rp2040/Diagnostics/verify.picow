@@ -484,6 +484,91 @@ Procedure ComparePpuAdvance()
     Check(WorkerFrames,expectedFrames) : Check(WorkerNmi,expectedNmi) : Check(PpuDotFrac,expectedFrac)
   Next
 EndProcedure
+; NMI and IRQ polling through NesSync: the final-cycle PPUCTRL edge, CLI/PLP and RTI. Moved here from
+; mappers.picow on 2026-10-19 (it never needed a mapper; that image had grown past the ROM store).
+Procedure InterruptPollTests()
+  Protected i.i, stamp.i
+  stamp=WorkerClock : If CpuCycles>stamp : stamp=CpuCycles : EndIf : If PpuClock>stamp : stamp=PpuClock : EndIf
+  PpuMask=0 : PicoMapActive=0 : PicoIrq=0 : WorkerIrq=0 : PicoPrgFlat()
+  stamp=stamp+1000 : NesRpc(0,0,0,stamp)
+  ; A final-cycle PPUCTRL edge must allow the following STA zero page.
+  M($200)=$8D : M($201)=0 : M($202)=$20 : M($203)=$85 : M($204)=0 : M($205)=$EA
+  PC=$200 : S=$FD : A=128 : M(0)=48 : CpuSetStatus($24)
+  CpuCycles=stamp : PpuClock=stamp : LastApuSend=stamp
+  PpuLine=242 : PpuDot=10 : PpuCtrl=0 : PpuStatus=128 : PpuWarmup=0
+  WorkerNmi=0 : NesSeenNmi=0 : NesNmiDelay=0 : CpuIrqDelay=0
+  Check(CpuRun(1),4) : Check(PC,$203) : Check(M(0),48) : Check(NesNmiDelay,1)
+  NesSync() : Check(M(0),128) : Check(M($1FC),5) : Check(M($1FD),2) : Check(S,$FA)
+  Check(NesSeenNmi,1) : Check(NesNmiDelay,0)
+  ; CLI and PLP poll old I: one following instruction precedes pending IRQ.
+  PpuStatus=0 : PpuCtrl=0 : WorkerNmi=1 : NesSeenNmi=1 : PicoIrq=1
+  M($200)=$58 : M($201)=$EA : M($202)=$EA
+  PC=$200 : S=$FD : CpuSetStatus($24)
+  Check(CpuRun(256),2) : Check(PC,$201) : Check(CpuIrqDelay,1)
+  NesSync() : Check(M($1FC),2) : Check(M($1FD),2) : Check(S,$FA)
+  M($200)=$28 : PC=$200 : S=$FC : M($1FD)=$20 : CpuSetStatus($24)
+  Check(CpuRun(256),4) : Check(PC,$201)
+  NesSync() : Check(M($1FC),2) : Check(S,$FA)
+  ; An already clear I flag must not acquire the CLI/PLP unmask delay.
+  M($200)=$58 : PC=$200 : S=$FD : CpuSetStatus($20)
+  Check(CpuRun(256),2) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),1)
+  M($200)=$28 : PC=$200 : S=$FC : M($1FD)=$20 : CpuSetStatus($20)
+  Check(CpuRun(256),4) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),1)
+  ; RTI polls restored I and takes an already pending IRQ immediately.
+  M($200)=$40 : PC=$200 : S=$FA : M($1FB)=$20 : M($1FC)=$20 : M($1FD)=2
+  Check(CpuRun(256),6) : Check(PC,$220) : Check(CpuIrqDelay,0)
+  NesSync() : Check(M($1FC),$20) : Check(S,$FA)
+  PicoIrq=0 : CpuIrqDelay=0 : NesRpc(0,0,0,CpuCycles)
+EndProcedure
+; The paged PRG dispatcher: operands and data that straddle separately mapped 8 KiB pages, and a
+; switch of the executing page. Moved here from mappers.picow on 2026-10-19 (it needs no mapper
+; vectors; that image had grown past the ROM store).
+CompilerIf #PICO_ADVANCED=1
+Procedure PagedFetchTests()
+  Protected i.i, stamp.i, savedPrg.i, savedMapper.i, savedBytes.i
+  savedPrg=CartPrg : savedMapper=CartMapper : savedBytes=PicoPrgBytes
+  stamp=WorkerClock : If CpuCycles>stamp : stamp=CpuCycles : EndIf : If PpuClock>stamp : stamp=PpuClock : EndIf
+  PicoPrgPaged=1 : PicoMapActive=1 : PicoIrq=0 : PpuMask=0
+  For i=0 To 3
+    PicoPrgBiases(i)=@PicoChrRam((i&1)*8192)-$8000-i*8192
+  Next
+  ; LDA absolute operand straddles separately mapped 8 KiB pages.
+  PicoChrRam(8190)=$AD : PicoChrRam(8191)=$34 : PicoChrRam(8192)=$02
+  PC=$9FFE : M($234)=77 : S=$FD : CpuSetStatus($24)
+  Check(CpuRun(1),4) : Check(A,77) : Check(PC,$A001)
+  ; Opcode at the last byte of a page; immediate is in the following bank.
+  PicoChrRam(8191)=$A9 : PicoChrRam(8192)=102 : PC=$9FFF
+  Check(CpuRun(1),2) : Check(A,102) : Check(PC,$A001)
+  ; Data reads use the selected page independently of the code page.
+  PicoChrRam(0)=$AD : PicoChrRam(1)=$80 : PicoChrRam(2)=$E0
+  PicoChrRam(8192+$80)=55 : PC=$8000
+  Check(CpuRun(1),4) : Check(A,55)
+  ; Indexed data crosses into a different mapped page.
+  PicoChrRam(0)=$BD : PicoChrRam(1)=$FF : PicoChrRam(2)=$9F
+  PC=$8000 : X=1
+  Check(CpuRun(1),5) : Check(A,102)
+  ; Switching the currently executing code page continues within the same
+  ; window. The next opcode must come from the new physical bank.
+  stamp=stamp+1000 : NesRpc(0,0,0,stamp)
+  CpuCycles=stamp : PpuClock=stamp : PpuLine=242 : PpuDot=0
+  PicoIrqEnable=0 : PicoIrq=0 : PicoSelect=6 : PicoRegs(6)=0 : PicoRegs(7)=1
+  CartMapper=4 : CartPrg=@PicoChrRam(0) : PicoPrgBytes=16384
+  ; the MMC3 initialised here (mappers.picow had done it in an earlier test), then this case's registers
+  PicoMapperInit() : PicoMapActive=1 : PicoPrgPaged=1 : PicoIrqEnable=0 : PicoIrq=0
+  PicoSelect=6 : PicoRegs(6)=0 : PicoRegs(7)=1
+  NesSeenNmi=WorkerNmi : NesNmiDelay=0 : PpuCtrl=0   ; no NMI pending (it would end the window)
+  PicoPrgSlots(0)=0 : PicoPrgBiases(0)=CartPrg-$8000
+  PicoChrRam(0)=$8C : PicoChrRam(1)=1 : PicoChrRam(2)=$80
+  PicoChrRam(8195)=$A9 : PicoChrRam(8196)=90
+  PC=$8000 : Y=1 : A=0 : CpuSetStatus($24)
+  Check(CpuRun(6),6) : Check(PC,$8005) : Check(A,90)
+  NesRpc(0,0,0,CpuCycles)
+  CartPrg=savedPrg : CartMapper=savedMapper : PicoPrgBytes=savedBytes : PicoMapActive=0 : PicoPrgPaged=0
+  PicoPrgFlat() : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+EndProcedure
+CompilerEndIf
 ; PAL timing (NesTiming(1)): the PPU comparison and the $2002 horizon again, on 312 lines at 3.2 dots
 ; a cycle; the frame's exact length (33247.5 cycles, no short line) and its vblank dot; PpuCyclesFor
 ; as PpuDotsFor's inverse in both systems; the APU's frame IRQ, rates and 48 kHz sample step.
@@ -715,8 +800,14 @@ Procedure TestMain()
   RomStoreTests()
   Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CartridgeViewTests()
+  Say("STEP InterruptPollTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  InterruptPollTests()
   Say("STEP PalTimingTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   PalTimingTests()
+  CompilerIf #PICO_ADVANCED=1
+    Say("STEP PagedFetchTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    PagedFetchTests()
+  CompilerEndIf
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
   If Failures=0
