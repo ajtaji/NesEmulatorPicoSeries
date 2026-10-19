@@ -229,6 +229,9 @@ ProcedureRAM NesWrite(addr.i, value.i)
     NesStrobe=value&1 : NesLatch=NesController : NesLatch2=NesController2
   ElseIf addr=$4014
     CpuNow()
+    CompilerIf #PICO_ADVANCED=1
+      PicoPredictValid=0
+    CompilerEndIf
     NesPost(3,0,value,CpuCycles+AccessPhase)
     If CpuInWindow
       Left=Left-513-((CpuCycles+AccessPhase+1)&1)

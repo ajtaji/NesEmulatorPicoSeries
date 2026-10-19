@@ -453,7 +453,7 @@ Procedure BudgetPredictionTests()
     PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
     PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
     PicoIrqEnable=1 : PicoIrq=0 : PicoIrqDot=0 : PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoSpriteBits=MapperRand()&255
-    ObserverSave(@ObserverStart(0)) : startDot=PicoDots
+    PicoPredictValid=0 : ObserverSave(@ObserverStart(0)) : startDot=PicoDots
     PicoMmc3TicksReference(256) : expected=256
     If PicoIrq : expected=NesDiv(PicoIrqDot-startDot+2,3) : If expected<1 : expected=1 : EndIf : EndIf
     ObserverRestore(@ObserverStart(0))
@@ -462,6 +462,43 @@ Procedure BudgetPredictionTests()
     If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
   Next
   FI=1 : PicoIrq=0 : PicoIrqEnable=0
+EndProcedure
+; The cached prediction (PicoCpuBudget) as the windows really go: budget, then the PPU and the
+; observer advance by a random part of it, and again - every budget must equal a fresh per-dot look.
+Procedure BudgetAdvancePos(dots.i)
+  Protected width.i,stepDots.i
+  While dots>0
+    width=341 : If PpuLine=261 And PpuOdd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    stepDots=width-PpuDot : If stepDots>dots : stepDots=dots : EndIf
+    PpuDot=PpuDot+stepDots : dots=dots-stepDots
+    If PpuDot=width : PpuDot=0 : PpuLine=PpuLine+1 : If PpuLine=262 : PpuLine=0 : PpuOdd=PpuOdd!1 : EndIf : EndIf
+  Wend
+EndProcedure
+Procedure BudgetCacheTests()
+  Protected trial.i,i.i,stepN.i,got.i,expected.i,startDot.i,c.i
+  CartMapper=4 : FI=0
+  For trial=0 To 299
+    For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
+    OamCacheDirty=1 : PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
+    PpuLine=MapperRand()%262 : PpuDot=MapperRand()%340 : PpuOdd=MapperRand()&1
+    PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
+    PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
+    PicoIrqEnable=1 : PicoIrq=0 : PicoIrqDot=0 : PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoSpriteBits=MapperRand()&255
+    PicoPredictValid=0
+    For stepN=0 To 23
+      If PicoIrq : Break : EndIf
+      got=PicoCpuBudget()
+      ObserverSave(@ObserverStart(0)) : startDot=PicoDots
+      PicoMmc3TicksReference(256) : expected=256
+      If PicoIrq : expected=NesDiv(PicoIrqDot-startDot+2,3) : If expected<1 : expected=1 : EndIf : EndIf
+      ObserverRestore(@ObserverStart(0))
+      Check(got,expected)
+      c=1+MapperRand()%got
+      PicoMmc3Ticks(c) : BudgetAdvancePos(c*3)
+    Next
+    If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
+  Next
+  FI=1 : PicoIrq=0 : PicoIrqEnable=0 : PicoPredictValid=0
 EndProcedure
 Procedure ObserverTests()
   Protected trial.i,i.i,count.i,startTime.i,referenceUs.i,optimizedUs.i,mode.i
@@ -900,7 +937,9 @@ Procedure TestMain()
     Say("STEP ObserverTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     ObserverTests()
     Say("STEP BudgetPredictionTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
-    BudgetPredictionTests() : CartMapper=0
+    BudgetPredictionTests()
+    Say("STEP BudgetCacheTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    BudgetCacheTests() : CartMapper=0
     Say("STEP CompareSb5b checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     CompareSb5b()
   CompilerEndIf

@@ -23,6 +23,8 @@ Declare PicoMmc3Ticks(cycles.i)
 Global PicoPrgCopyUs.i,PicoChrCopyUs.i,PicoFenceUs.i,PicoPrgCopies.i,PicoChrCopies.i,PicoObserverUs.i
 
 Global PicoIrqDot.i,PicoPredictCalls.i,PicoPredictUs.i
+Global PicoPredictCtrl.i,PicoPredictMask.i
+Global PicoPredictValid.i,PicoPredictIrqDot.i,PicoPredictEnd.i,PicoPredictReuse.i,PicoPredictDrift.i
 
 Global Dim PicoNtDesc.u(5120)
 ; MMC5 (mapper5.pico)

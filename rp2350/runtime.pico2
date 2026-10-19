@@ -118,7 +118,7 @@ Procedure PicoProfileReport()
   CompilerIf #PICO_ADVANCED=1
     Say("MAP_PROFILE prg_maps=") : Num(PicoPrgCopies) : Say(" prg_map_us=") : Num(PicoPrgCopyUs)
     Say(" chr_copies=") : Num(PicoChrCopies) : Say(" chr_us=") : Num(PicoChrCopyUs)
-    Say(" fence_us=") : Num(PicoFenceUs) : Say(" observer_us=") : Num(PicoObserverUs) : Say(" predictions=") : Num(PicoPredictCalls) : Say(" predict_us=") : Num(PicoPredictUs) : Say(" quick_writes=") : Num(PicoQuickWrites) : Eol()
+    Say(" fence_us=") : Num(PicoFenceUs) : Say(" observer_us=") : Num(PicoObserverUs) : Say(" predictions=") : Num(PicoPredictCalls) : Say(" predict_us=") : Num(PicoPredictUs) : Say(" predict_reuse=") : Num(PicoPredictReuse) : Say(" predict_drift=") : Num(PicoPredictDrift) : Say(" quick_writes=") : Num(PicoQuickWrites) : Eol()
   CompilerEndIf
 EndProcedure
 ; The TV system's timing (bridge.pico): pal 0 NTSC, 1 PAL. The APU's noise and DMC rates, the frame
@@ -417,6 +417,7 @@ Procedure Main()
       Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes) : Say(" dmc_fetches=") : Num(SdFetches) : Say(" dmc_drift=") : Num(SdDrift)
       CompilerIf #PICO_ADVANCED=1
         Say(" map_irqs=") : Num(PicoIrqAssertions+M5IrqAssertions+VrcIrqAssertions+N1IrqAssertions+F7IrqAssertions)
+        Say(" predict_drift=") : Num(PicoPredictDrift)
       CompilerEndIf
       Say(" nmi=") : Num(WorkerNmi) : Say(" err=") : Num(WorkerError+NesBridgeError)
       Say(" stop=") : Num(Stopped) : Say(" opcode=") : Num(BadOpcode) : Eol()
