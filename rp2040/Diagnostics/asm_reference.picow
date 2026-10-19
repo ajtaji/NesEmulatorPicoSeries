@@ -421,6 +421,81 @@ Procedure CompareChrRam()
   PpuMask=$1E : PpuCtrl=0 : PpuFineX=0 : PpuV=0
 EndProcedure
 
+; The MMC3 A12 observer (mapper_advanced.pico PicoMmc3Ticks, Thumb-1) against the per-dot
+; PicoMmc3TicksReference, and the window budget that predicts with it. Moved here from mappers.picow
+; on 2026-10-19 when the observer became assembly (and that image had grown past the ROM store).
+CompilerIf #PICO_ADVANCED=1
+XIncludeFile "mapper_reference.pico"
+Global MapperTestSeed.i=12345
+Global Dim ObserverStart.i(10)
+Global Dim ObserverExpected.i(10)
+Procedure.i MapperRand()
+  MapperTestSeed=(MapperTestSeed*1664525+1013904223)&$7FFFFFFF
+  ProcedureReturn MapperTestSeed>>8
+EndProcedure
+Procedure ObserverSave(dst.i)
+  PokeL(dst,PicoIrqClocks) : PokeL(dst+4,PicoIrqAssertions) : PokeL(dst+8,PicoIrq)
+  PokeL(dst+12,PicoIrqCount) : PokeL(dst+16,PicoIrqReload) : PokeL(dst+20,PicoA12High)
+  PokeL(dst+24,PicoLowSince) : PokeL(dst+28,PicoDots) : PokeL(dst+32,PicoSpriteBits) : PokeL(dst+36,PicoIrqDot)
+EndProcedure
+Procedure ObserverRestore(src.i)
+  PicoIrqClocks=PeekL(src) : PicoIrqAssertions=PeekL(src+4) : PicoIrq=PeekL(src+8)
+  PicoIrqCount=PeekL(src+12) : PicoIrqReload=PeekL(src+16) : PicoA12High=PeekL(src+20)
+  PicoLowSince=PeekL(src+24) : PicoDots=PeekL(src+28) : PicoSpriteBits=PeekL(src+32) : PicoIrqDot=PeekL(src+36)
+EndProcedure
+Procedure BudgetPredictionTests()
+  Protected trial.i,i.i,expected.i,startDot.i
+  CartMapper=4 : FI=0
+  For trial=0 To 499
+    For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
+    OamCacheDirty=1 : PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
+    PpuLine=MapperRand()%262 : PpuDot=MapperRand()%340 : PpuOdd=MapperRand()&1
+    PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
+    PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
+    PicoIrqEnable=1 : PicoIrq=0 : PicoIrqDot=0 : PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoSpriteBits=MapperRand()&255
+    ObserverSave(@ObserverStart(0)) : startDot=PicoDots
+    PicoMmc3TicksReference(256) : expected=256
+    If PicoIrq : expected=NesDiv(PicoIrqDot-startDot+2,3) : If expected<1 : expected=1 : EndIf : EndIf
+    ObserverRestore(@ObserverStart(0))
+    Check(PicoCpuBudget(),expected) : ObserverSave(@ObserverExpected(0))
+    For i=0 To 9 : Check(ObserverStart(i),ObserverExpected(i)) : Next
+    If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
+  Next
+  FI=1 : PicoIrq=0 : PicoIrqEnable=0
+EndProcedure
+Procedure ObserverTests()
+  Protected trial.i,i.i,count.i,startTime.i,referenceUs.i,optimizedUs.i,mode.i
+  For trial=0 To 1999
+    For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
+    OamCacheDirty=1
+    PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
+    PpuLine=MapperRand()%262 : PpuDot=MapperRand()%340 : PpuOdd=MapperRand()&1
+    PicoDots=100000 : PicoLowSince=PicoDots-(MapperRand()&31) : PicoA12High=MapperRand()&1
+    PicoIrqLatch=MapperRand()&7 : PicoIrqCount=MapperRand()&7 : PicoIrqReload=MapperRand()&1
+    PicoIrqEnable=MapperRand()&1 : PicoIrq=MapperRand()&1
+    PicoIrqClocks=0 : PicoIrqAssertions=0 : PicoIrqDot=0 : PicoSpriteBits=MapperRand()&255
+    count=1+(MapperRand()&1023) : ObserverSave(@ObserverStart(0))
+    PicoMmc3TicksReference(count) : ObserverSave(@ObserverExpected(0))
+    ObserverRestore(@ObserverStart(0)) : PicoMmc3Ticks(count) : ObserverSave(@ObserverStart(0))
+    For i=0 To 9 : Check(ObserverStart(i),ObserverExpected(i)) : Next
+    If (trial&31)=0 : UsbSerialTask() : SafetyPet() : EndIf
+  Next
+  For mode=0 To 1
+    PpuMask=24 : PpuCtrl=8 : If mode=1 : PpuCtrl=16 : EndIf
+    PpuLine=0 : PpuDot=0 : PpuOdd=0 : PicoSpriteBits=255
+    startTime=Micros()
+    For i=0 To 31 : PicoMmc3TicksReference(29781) : Next
+    referenceUs=Micros()-startTime : startTime=Micros()
+    For i=0 To 31 : PicoMmc3Ticks(29781) : Next
+    optimizedUs=Micros()-startTime
+    Say("OBSERVER mode=") : Num(mode) : Say(" reference_us=") : Num(referenceUs)
+    Say(" optimized_us=") : Num(optimizedUs) : Say(" frames=32") : Eol()
+    UsbSerialTask() : SafetyPet()
+  Next
+  PpuMask=0
+EndProcedure
+CompilerEndIf
+
 CompilerIf #PICO_ADVANCED=1
 ; MMC5's scanline IRQ: mapper5.pico's event model (one event at dot 3 of each rendered visible line)
 ; against Anvil's fetch-by-fetch replay (anvil/mapper5_video.pi4 M5PpuRead/M5PpuTicks), ported here
@@ -822,6 +897,10 @@ Procedure TestMain()
     CompareN163Irq()
     Say("STEP CompareN163Sound checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     CompareN163Sound()
+    Say("STEP ObserverTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    ObserverTests()
+    Say("STEP BudgetPredictionTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    BudgetPredictionTests() : CartMapper=0
     Say("STEP CompareSb5b checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     CompareSb5b()
   CompilerEndIf

@@ -265,84 +265,450 @@ ProcedureRAM PicoSpriteFetch(line.i)
     EndIf
   Next
 EndProcedure
+; The A12 observer: the PPU's pattern fetches over the next cycles CPU cycles, each A12 edge into the
+; MMC3 counter. Thumb-1 (both chips): r4 dots left, r5 line, r6 dot, r7 PicoDots; the A12 edge rule
+; (PicoA12) is the local __m3_a12 (r0 level 0/1, r1 dot). Three paths, as in the Basic form it
+; replaced: a whole rendered line with 8x8 sprites is its fixed few edges; a constant-high pattern
+; region keeps only its first qualifying rise and the final level and last fall; otherwise it steps
+; fetch edge to fetch edge. Diagnostics/asm_reference ObserverTests hold it to the per-dot
+; PicoMmc3TicksReference (Diagnostics/mapper_reference.pico).
+Global Mmc3Left.i, Mmc3Odd.i, Mmc3Width.i, Mmc3End.i, Mmc3FirstHigh.i
 ProcedureRAM PicoMmc3Ticks(cycles.i)
-  Protected remaining.i,line.i,dot.i,odd.i,width.i,edge.i,step.i,addr.i
-  Protected region.i,high.i,targetDot.i,lastLow.i,firstHigh.i,firstLow.i,endDot.i
-  remaining=cycles*3 : If CartPal : remaining=PpuDotsFor(cycles) : EndIf
-  line=PpuLine : dot=PpuDot : odd=PpuOdd
-  While remaining>0
-    width=341 : If line=PpuPreLine And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
-    ; With 8x8 sprites both pattern-table selections are fixed. Across a
-    ; complete rendered scanline, only the first high fetch after a long
-    ; low gap can clock MMC3; all intervening low pulses are four dots.
-    If dot=0 And remaining>=width And (PpuCtrl&32)=0 And (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
-      PicoA12(0,PicoDots+1)
-      If PpuCtrl&16
-        PicoA12($1000,PicoDots+5)
-        If (PpuCtrl&8)=0
-          PicoA12(0,PicoDots+257) : PicoA12($1000,PicoDots+325)
-        EndIf
-        PicoA12(0,PicoDots+337)
-      ElseIf PpuCtrl&8
-        PicoA12($1000,PicoDots+261) : PicoA12(0,PicoDots+321)
-      EndIf
-      PicoSpriteBits=0 : If PpuCtrl&8 : PicoSpriteBits=255 : EndIf
-      PicoDots=PicoDots+width : remaining=remaining-width
-      line=line+1 : If line=PpuLineCount : line=0 : odd=odd!PpuOddToggle : EndIf
-      Continue
-    EndIf
-    region=0 : high=0
-    If (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
-      If dot<257 : region=1 : high=(PpuCtrl&16)<>0
-      ElseIf dot<321 : region=2 : high=PicoSpriteBits=255
-      ElseIf dot<337 : region=3 : high=(PpuCtrl&16)<>0 : EndIf
-    EndIf
-    ; In a constant-high pattern region, only the first high fetch can
-    ; follow a qualifying low interval. Later low pulses are four dots.
-    ; Evaluate that first edge, then preserve the exact final electrical
-    ; level and last falling edge analytically.
-    If high
-      targetDot=336 : If region=1 : targetDot=256 : ElseIf region=2 : targetDot=320 : EndIf
-      step=targetDot-dot : If step>remaining : step=remaining : EndIf
-      If step>0
-        endDot=dot+step
-        firstLow=((dot+7)&$FFFFFFF8)+1
-        firstHigh=((dot+3)&$FFFFFFF8)+5
-        If firstLow<firstHigh And firstLow<=endDot : PicoA12(0,PicoDots+firstLow-dot) : EndIf
-        If firstHigh<=endDot : PicoA12($1000,PicoDots+firstHigh-dot) : EndIf
-        lastLow=((endDot-1)&$FFFFFFF8)+1
-        If lastLow>firstHigh And lastLow<=endDot : PicoLowSince=PicoDots+lastLow-dot : EndIf
-        edge=((endDot-1)&$FFFFFFFC)+1
-        If edge>dot : PicoA12High=(edge&7)=5 : EndIf
-        dot=endDot : remaining=remaining-step : PicoDots=PicoDots+step
-        Continue
-      EndIf
-    EndIf
-    edge=width
-    If (PpuMask&24)<>0 And (line<240 Or line=PpuPreLine)
-      If dot<337
-        If dot=0 : edge=1 : Else : edge=((dot-1)&$FFFFFFFC)+5 : EndIf
-        If (PpuCtrl&16)=0 And PicoA12High=0
-          If dot<257 : edge=257 : ElseIf dot>=321 : edge=337 : EndIf
-        EndIf
-        ; A whole sprite fetch interval can stay on pattern table zero.
-        If dot>=257 And dot<321 And PicoSpriteBits=0 And PicoA12High=0 : edge=321 : EndIf
-      EndIf
-    EndIf
-    step=edge-dot : If step>remaining : step=remaining : EndIf
-    dot=dot+step : remaining=remaining-step : PicoDots=PicoDots+step
-    If dot=edge
-      If dot=width
-        dot=0 : line=line+1 : If line=PpuLineCount : line=0 : odd=odd!PpuOddToggle : EndIf
-      Else
-        addr=0
-        If dot=257 : PicoSpriteFetch(line) : EndIf
-        If (dot&7)=5
-          If dot<257 Or dot>=321 : addr=(PpuCtrl&16)<<8
-          ElseIf (PicoSpriteBits&(1<<((dot-261)>>3)))<>0 : addr=$1000 : EndIf
-        EndIf
-        PicoA12(addr,PicoDots)
-      EndIf
-    EndIf
-  Wend
+  Mmc3Left=cycles*3 : If CartPal : Mmc3Left=PpuDotsFor(cycles) : EndIf
+  Mmc3Odd=PpuOdd
+  ASM
+    push {lr}
+    push {r7}
+    ldr r0, =global_mmc3left
+    ldr r4, [r0]
+    ldr r0, =global_ppuline
+    ldr r5, [r0]
+    ldr r0, =global_ppudot
+    ldr r6, [r0]
+    ldr r0, =global_picodots
+    ldr r7, [r0]
+__m3_loop:
+    cmp r4, #0
+    bgt __m3_go
+    b __m3_done
+__m3_go:
+    ; width: 340 on an odd frame's rendered pre-render line, else 341
+    ldr r0, =341
+    ldr r1, =global_ppupreline
+    ldr r1, [r1]
+    cmp r5, r1
+    bne __m3_wset
+    ldr r1, =global_mmc3odd
+    ldr r1, [r1]
+    cmp r1, #0
+    beq __m3_wset
+    ldr r1, =global_ppumask
+    ldr r1, [r1]
+    movs r2, #24
+    tst r1, r2
+    beq __m3_wset
+    subs r0, #1
+__m3_wset:
+    ldr r1, =global_mmc3width
+    str r0, [r1]
+    ; r12: 1 when this line fetches (rendering on, a visible or the pre-render line)
+    movs r3, #0
+    ldr r1, =global_ppumask
+    ldr r1, [r1]
+    movs r2, #24
+    tst r1, r2
+    beq __m3_rset
+    cmp r5, #240
+    blt __m3_ron
+    ldr r1, =global_ppupreline
+    ldr r1, [r1]
+    cmp r5, r1
+    bne __m3_rset
+__m3_ron:
+    movs r3, #1
+__m3_rset:
+    mov r12, r3
+    ; a whole rendered line, 8x8 sprites
+    cmp r6, #0
+    bne __m3_regions
+    cmp r4, r0
+    blt __m3_regions
+    cmp r3, #0
+    beq __m3_regions
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r1, #32
+    tst r2, r1
+    bne __m3_regions
+    movs r0, #0
+    adds r1, r7, #1
+    bl __m3_a12
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r1, #16
+    tst r2, r1
+    beq __m3_fl_bg0
+    movs r0, #1
+    adds r1, r7, #5
+    bl __m3_a12
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r1, #8
+    tst r2, r1
+    bne __m3_fl_337
+    movs r0, #0
+    ldr r1, =257
+    adds r1, r1, r7
+    bl __m3_a12
+    movs r0, #1
+    ldr r1, =325
+    adds r1, r1, r7
+    bl __m3_a12
+__m3_fl_337:
+    movs r0, #0
+    ldr r1, =337
+    adds r1, r1, r7
+    bl __m3_a12
+    b __m3_fl_end
+__m3_fl_bg0:
+    movs r1, #8
+    tst r2, r1
+    beq __m3_fl_end
+    movs r0, #1
+    ldr r1, =261
+    adds r1, r1, r7
+    bl __m3_a12
+    movs r0, #0
+    ldr r1, =321
+    adds r1, r1, r7
+    bl __m3_a12
+__m3_fl_end:
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r0, #0
+    movs r1, #8
+    tst r2, r1
+    beq __m3_fl_bits
+    movs r0, #255
+__m3_fl_bits:
+    ldr r1, =global_picospritebits
+    str r0, [r1]
+    ldr r0, =global_mmc3width
+    ldr r0, [r0]
+    adds r7, r7, r0
+    subs r4, r4, r0
+    bl __m3_nextline
+    b __m3_loop
+__m3_regions:
+    ; a constant-high pattern region: r0 its last dot, or 0 when none
+    movs r0, #0
+    cmp r3, #0
+    beq __m3_edge
+    ldr r1, =257
+    cmp r6, r1
+    bge __m3_reg2
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r1, #16
+    tst r2, r1
+    beq __m3_edge
+    ldr r0, =256
+    b __m3_high
+__m3_reg2:
+    ldr r1, =321
+    cmp r6, r1
+    bge __m3_reg3
+    ldr r2, =global_picospritebits
+    ldr r2, [r2]
+    cmp r2, #255
+    bne __m3_edge
+    ldr r0, =320
+    b __m3_high
+__m3_reg3:
+    ldr r1, =337
+    cmp r6, r1
+    bge __m3_edge
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    movs r1, #16
+    tst r2, r1
+    beq __m3_edge
+    ldr r0, =336
+__m3_high:
+    subs r1, r0, r6
+    cmp r1, r4
+    ble __m3_hstep
+    movs r1, r4
+__m3_hstep:
+    cmp r1, #0
+    ble __m3_edge
+    ; endDot, the first fall and the first rise at or after dot
+    adds r0, r6, r1
+    ldr r1, =global_mmc3end
+    str r0, [r1]
+    adds r2, r6, #7
+    lsrs r2, r2, #3
+    lsls r2, r2, #3
+    adds r2, #1
+    adds r3, r6, #3
+    lsrs r3, r3, #3
+    lsls r3, r3, #3
+    adds r3, #5
+    ldr r1, =global_mmc3firsthigh
+    str r3, [r1]
+    cmp r2, r3
+    bge __m3_h_nolow
+    cmp r2, r0
+    bgt __m3_h_nolow
+    subs r1, r2, r6
+    adds r1, r1, r7
+    movs r0, #0
+    bl __m3_a12
+__m3_h_nolow:
+    ldr r0, =global_mmc3end
+    ldr r0, [r0]
+    ldr r3, =global_mmc3firsthigh
+    ldr r3, [r3]
+    cmp r3, r0
+    bgt __m3_h_nohigh
+    subs r1, r3, r6
+    adds r1, r1, r7
+    movs r0, #1
+    bl __m3_a12
+__m3_h_nohigh:
+    ; the last fall: PicoLowSince when it follows the first rise
+    ldr r0, =global_mmc3end
+    ldr r0, [r0]
+    subs r2, r0, #1
+    lsrs r2, r2, #3
+    lsls r2, r2, #3
+    adds r2, #1
+    ldr r3, =global_mmc3firsthigh
+    ldr r3, [r3]
+    cmp r2, r3
+    ble __m3_h_nolast
+    cmp r2, r0
+    bgt __m3_h_nolast
+    subs r1, r2, r6
+    adds r1, r1, r7
+    ldr r3, =global_picolowsince
+    str r1, [r3]
+__m3_h_nolast:
+    ; the final level: the last edge passed (every 4 dots from 1) is a rise when it is dot 5 mod 8
+    subs r2, r0, #1
+    lsrs r2, r2, #2
+    lsls r2, r2, #2
+    adds r2, #1
+    cmp r2, r6
+    ble __m3_h_move
+    movs r1, #7
+    ands r2, r1
+    movs r1, #0
+    cmp r2, #5
+    bne __m3_h_level
+    movs r1, #1
+__m3_h_level:
+    ldr r2, =global_picoa12high
+    str r1, [r2]
+__m3_h_move:
+    subs r1, r0, r6
+    subs r4, r4, r1
+    adds r7, r7, r1
+    movs r6, r0
+    b __m3_loop
+__m3_edge:
+    ; the next fetch edge: r0
+    ldr r0, =global_mmc3width
+    ldr r0, [r0]
+    mov r3, r12
+    cmp r3, #0
+    beq __m3_estep
+    ldr r1, =337
+    cmp r6, r1
+    bge __m3_estep
+    movs r0, #1
+    cmp r6, #0
+    beq __m3_e_low
+    subs r0, r6, #1
+    lsrs r0, r0, #2
+    lsls r0, r0, #2
+    adds r0, #5
+__m3_e_low:
+    ldr r2, =global_picoa12high
+    ldr r2, [r2]
+    cmp r2, #0
+    bne __m3_estep
+    ldr r3, =global_ppuctrl
+    ldr r3, [r3]
+    movs r1, #16
+    tst r3, r1
+    bne __m3_e_sprites
+    ldr r1, =257
+    cmp r6, r1
+    bge __m3_e_late
+    movs r0, r1
+    b __m3_estep
+__m3_e_late:
+    ldr r1, =321
+    cmp r6, r1
+    blt __m3_e_sprites
+    ldr r0, =337
+    b __m3_estep
+__m3_e_sprites:
+    ; a whole sprite interval on pattern table zero
+    ldr r1, =257
+    cmp r6, r1
+    blt __m3_estep
+    ldr r1, =321
+    cmp r6, r1
+    bge __m3_estep
+    ldr r2, =global_picospritebits
+    ldr r2, [r2]
+    cmp r2, #0
+    bne __m3_estep
+    movs r0, r1
+__m3_estep:
+    subs r1, r0, r6
+    cmp r1, r4
+    ble __m3_etake
+    movs r1, r4
+__m3_etake:
+    adds r6, r6, r1
+    subs r4, r4, r1
+    adds r7, r7, r1
+    cmp r6, r0
+    beq __m3_at_edge
+    b __m3_loop
+__m3_at_edge:
+    ldr r1, =global_mmc3width
+    ldr r1, [r1]
+    cmp r6, r1
+    bne __m3_fetch
+    movs r6, #0
+    bl __m3_nextline
+    b __m3_loop
+__m3_fetch:
+    ldr r1, =257
+    cmp r6, r1
+    bne __m3_f_level
+    movs r0, r5
+    bl picospritefetch
+__m3_f_level:
+    ; r0: the fetch's A12 (1 = pattern table $1000)
+    movs r0, #0
+    movs r1, #7
+    ands r1, r6
+    cmp r1, #5
+    bne __m3_f_edge
+    ldr r1, =257
+    cmp r6, r1
+    blt __m3_f_bg
+    ldr r1, =321
+    cmp r6, r1
+    bge __m3_f_bg
+    ldr r1, =261
+    subs r1, r6, r1
+    lsrs r1, r1, #3
+    ldr r2, =global_picospritebits
+    ldr r2, [r2]
+    lsrs r2, r2, r1
+    movs r1, #1
+    ands r2, r1
+    movs r0, r2
+    b __m3_f_edge
+__m3_f_bg:
+    ldr r2, =global_ppuctrl
+    ldr r2, [r2]
+    lsrs r2, r2, #4
+    movs r1, #1
+    ands r2, r1
+    movs r0, r2
+__m3_f_edge:
+    movs r1, r7
+    bl __m3_a12
+    b __m3_loop
+; the next line (dot is already 0): r5 wraps at the frame, flipping the odd frame when NTSC
+__m3_nextline:
+    adds r5, #1
+    ldr r1, =global_ppulinecount
+    ldr r1, [r1]
+    cmp r5, r1
+    bne __m3_nl_done
+    movs r5, #0
+    ldr r1, =global_mmc3odd
+    ldr r2, [r1]
+    ldr r3, =global_ppuoddtoggle
+    ldr r3, [r3]
+    eors r2, r3
+    str r2, [r1]
+__m3_nl_done:
+    bx lr
+; PicoA12: r0 the level (0/1), r1 the absolute dot. A rise 10 or more dots after the last fall clocks
+; the counter (reload at 0 or on request, else count down); reaching 0 with IRQs on raises it.
+__m3_a12:
+    ldr r2, =global_picoa12high
+    ldr r3, [r2]
+    cmp r0, r3
+    beq __m3_a12_ret
+    str r0, [r2]
+    cmp r0, #0
+    bne __m3_a12_rise
+    ldr r2, =global_picolowsince
+    str r1, [r2]
+    bx lr
+__m3_a12_rise:
+    ldr r2, =global_picolowsince
+    ldr r2, [r2]
+    subs r2, r1, r2
+    cmp r2, #10
+    blt __m3_a12_ret
+    ldr r2, =global_picoirqclocks
+    ldr r3, [r2]
+    adds r3, #1
+    str r3, [r2]
+    ldr r2, =global_picoirqcount
+    ldr r3, [r2]
+    cmp r3, #0
+    beq __m3_a12_reload
+    ldr r0, =global_picoirqreload
+    ldr r0, [r0]
+    cmp r0, #0
+    bne __m3_a12_reload
+    subs r3, #1
+    b __m3_a12_count
+__m3_a12_reload:
+    ldr r3, =global_picoirqlatch
+    ldr r3, [r3]
+__m3_a12_count:
+    str r3, [r2]
+    ldr r0, =global_picoirqreload
+    movs r2, #0
+    str r2, [r0]
+    cmp r3, #0
+    bne __m3_a12_ret
+    ldr r0, =global_picoirqenable
+    ldr r0, [r0]
+    cmp r0, #0
+    beq __m3_a12_ret
+    ldr r0, =global_picoirq
+    ldr r2, [r0]
+    cmp r2, #0
+    bne __m3_a12_ret
+    movs r2, #1
+    str r2, [r0]
+    ldr r0, =global_picoirqassertions
+    ldr r2, [r0]
+    adds r2, #1
+    str r2, [r0]
+    ldr r0, =global_picoirqdot
+    str r1, [r0]
+__m3_a12_ret:
+    bx lr
+__m3_done:
+    ldr r0, =global_picodots
+    str r7, [r0]
+    pop {r7}
+    pop {r0}
+    mov lr, r0
+  EndASM
 EndProcedure
