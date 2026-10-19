@@ -119,25 +119,59 @@ ProcedureRAM SbWrite(addr.i,value.i)
 EndProcedure
 
 ; The level only changes when a timer fires or a register is written, so it is kept (SbLevel), with
-; the cycles to the next timer event (SbNext): between events a tick is one multiply-add. The plain
-; per-step form (Anvil's ExtraSoundAdvance) is SbTickReference in Diagnostics/asm_reference.picow;
-; the two give the same area, cycles and state.
+; the cycles to the next timer event (SbNext): between events a tick is one multiply-add. A timer that
+; cannot move the level (its channel muted or its tone off, noise no channel hears, a held envelope;
+; bit 0-2, 3, 4 of SbIdle) is no event: SbFold winds it on in bulk, to the same phase and noise.
+; Idle channels at period 0 fire every 16 cycles, and recomputing the level each time cost Gimmick!
+; most of core 1. The plain per-step form (Anvil's ExtraSoundAdvance) is SbTickReference in
+; Diagnostics/asm_reference.picow; the two give the same area, cycles and state.
 ProcedureRAM SbLevelUpdate()
-  Protected c.i,volume.i,level.i
-  level=0
+  Protected c.i,volume.i,level.i,heard.i
+  level=0 : SbIdle=0 : heard=0
   For c=0 To 2
+    volume=SbReg(8+c)&15
+    If SbReg(8+c)&16 : volume=SbEnvelope : EndIf
+    If volume=0 Or ((SbReg(7)>>c)&1)<>0 : SbIdle=SbIdle|(1<<c) : EndIf
+    If volume<>0 And ((SbReg(7)>>(c+3))&1)=0 : heard=1 : EndIf
     If (SbHigh(c) Or ((SbReg(7)>>c)&1)) And ((SbNoise&1) Or ((SbReg(7)>>(c+3))&1))
-      volume=SbReg(8+c)&15
-      If SbReg(8+c)&16 : volume=SbEnvelope : EndIf
       level=level+SbLevels(volume)
     EndIf
   Next
+  If heard=0 : SbIdle=SbIdle|8 : EndIf
+  If SbEnvHold : SbIdle=SbIdle|16 : EndIf
   SbLevel=level
-  SbNext=SbTimer(0)
-  If SbTimer(1)<SbNext : SbNext=SbTimer(1) : EndIf
-  If SbTimer(2)<SbNext : SbNext=SbTimer(2) : EndIf
-  If SbNoiseTimer<SbNext : SbNext=SbNoiseTimer : EndIf
-  If SbEnvTimer<SbNext : SbNext=SbEnvTimer : EndIf
+  SbNext=$40000000
+  For c=0 To 2
+    If ((SbIdle>>c)&1)=0 And SbTimer(c)<SbNext : SbNext=SbTimer(c) : EndIf
+  Next
+  If (SbIdle&8)=0 And SbNoiseTimer<SbNext : SbNext=SbNoiseTimer : EndIf
+  If (SbIdle&16)=0 And SbEnvTimer<SbNext : SbNext=SbEnvTimer : EndIf
+EndProcedure
+
+; The idle timers that ran out, wound on a period at a time: a tone flips, the noise steps, a held
+; envelope only reloads - what their events would have done, without touching the level.
+ProcedureRAM SbFold()
+  Protected c.i,period.i,feedback.i
+  For c=0 To 2
+    If ((SbIdle>>c)&1)<>0 And SbTimer(c)<=0
+      period=SbReg(c*2)|(SbReg(c*2+1)<<8) : If period=0 : period=1 : EndIf
+      period=period*16
+      While SbTimer(c)<=0 : SbTimer(c)=SbTimer(c)+period : SbHigh(c)=SbHigh(c)!1 : Wend
+    EndIf
+  Next
+  If (SbIdle&8)<>0 And SbNoiseTimer<=0
+    period=SbReg(6)&31 : If period=0 : period=1 : EndIf
+    period=period*32
+    While SbNoiseTimer<=0
+      SbNoiseTimer=SbNoiseTimer+period : feedback=(SbNoise!(SbNoise>>3))&1
+      SbNoise=(SbNoise>>1)|(feedback<<16)
+    Wend
+  EndIf
+  If (SbIdle&16)<>0 And SbEnvTimer<=0
+    period=SbReg(11)|(SbReg(12)<<8) : If period=0 : period=1 : EndIf
+    period=period*512
+    While SbEnvTimer<=0 : SbEnvTimer=SbEnvTimer+period : Wend
+  EndIf
 EndProcedure
 
 ProcedureRAM SbTick(dt.i)
@@ -150,6 +184,7 @@ ProcedureRAM SbTick(dt.i)
     SbTimer(0)=SbTimer(0)-stepCycles : SbTimer(1)=SbTimer(1)-stepCycles : SbTimer(2)=SbTimer(2)-stepCycles
     SbNoiseTimer=SbNoiseTimer-stepCycles : SbEnvTimer=SbEnvTimer-stepCycles
     SbNext=SbNext-stepCycles
+    If SbIdle : SbFold() : EndIf
     If SbNext=0
       For c=0 To 2
         If SbTimer(c)=0

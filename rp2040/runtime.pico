@@ -16,6 +16,7 @@ XIncludeFile "bridge.pico"
 XIncludeFile "ppu.pico"
 XIncludeFile "mappers.pico"
 XIncludeFile "apu.pico"
+XIncludeFile "dmc_shadow.pico"
 XIncludeFile "outputs/audio_api.pico"
 CompilerIf #NES_VIDEO_BACKEND=1
   XIncludeFile "RP2040/Lib/spi.pico"
@@ -63,12 +64,12 @@ EndProcedure
 
 Global LastApuSend.i, CpuRunUs.i, SyncUs.i, Windows.i
 ProcedureRAM NesSync()
-  Protected stalls.i,delay.i
+  Protected stalls.i,delay.i,irq.i
   CompilerIf #NES_SPLIT=2
     PpuSync(CpuCycles)
-    ; Synchronous only while a DMC sample is really fetching (its stalls and
-    ; IRQ belong inside this window); a latched $4015 bit 4 alone is not playback.
-    If CpuCycles-WorkerClock>512+PeekL(@AudioQueueSlack) Or PeekL(@DmcBytes)>0
+    ; Synchronous only when core 1 falls too far behind. The DMC's stalls and IRQ come from the
+    ; shadow (dmc_shadow.pico), so a playing sample no longer makes every sync wait for core 1.
+    If CpuCycles-WorkerClock>512+PeekL(@AudioQueueSlack)
       NesRpc(0,0,0,CpuCycles)
       LastApuSend=CpuCycles
     ElseIf CpuCycles-LastApuSend>=256
@@ -76,19 +77,21 @@ ProcedureRAM NesSync()
       LastApuSend=CpuCycles
     EndIf
     NesFence()
-    stalls=WorkerDmcCycles-NesSeenDmc
+    SdAdvance(CpuCycles)
+    stalls=SdFetches*4-NesSeenDmc
     If stalls>0
       CpuCycles=CpuCycles+stalls : NesSeenDmc=NesSeenDmc+stalls
       PpuSync(CpuCycles)
     EndIf
     delay=CpuIrqDelay : CpuIrqDelay=0
-    If (WorkerNmi<>NesSeenNmi And NesNmiDelay) Or ((WorkerIrq|PicoIrq)<>0 And FI=0 And delay)
+    irq=PeekL(@ApuFrameIrq)|SdIrq|PicoIrq
+    If (WorkerNmi<>NesSeenNmi And NesNmiDelay) Or (irq<>0 And FI=0 And delay)
       NesNmiDelay=0 : CpuRun(1) : PpuSync(CpuCycles)
     EndIf
     NesNmiDelay=0
     If WorkerNmi<>NesSeenNmi
       NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
-    ElseIf (WorkerIrq|PicoIrq)<>0 And FI=0
+    ElseIf irq<>0 And FI=0
       CpuInterrupt($FFFE)
     EndIf
     ProcedureReturn
@@ -344,6 +347,9 @@ Procedure Main()
         budget=NesDiv(distance+2,3)
       EndIf
       distance=PicoCpuBudget() : If budget>distance : budget=distance : EndIf
+      CompilerIf #NES_SPLIT=2
+        distance=SdBudget() : If budget>distance : budget=distance : EndIf
+      CompilerEndIf
       mark=Micros() : CpuRun(budget) : mark2=Micros() : NesSync()
       CpuRunUs=CpuRunUs+mark2-mark : SyncUs=SyncUs+Micros()-mark2 : Windows=Windows+1 : ran=1
     EndIf
@@ -353,6 +359,13 @@ Procedure Main()
     EndIf
     t=Micros()
     If t-report>=1000000
+      CompilerIf #NES_SPLIT=2
+        ; The DMC shadow against core 1, both at the same CPU time.
+        NesRpc(0,0,0,CpuCycles) : LastApuSend=CpuCycles : SdAdvance(CpuCycles)
+        If WorkerDmcCycles<>SdFetches*4 Or DmcBytes<>SdBytes Or DmcIrq<>SdIrq Or DmcEmpty<>SdEmpty Or DmcBits<>SdBits Or DmcTimer<>SdTimer
+          SdDrift=SdDrift+1
+        EndIf
+      CompilerEndIf
       Say("us=") : Num(t-report) : Say(" cycles=") : Num(CpuCycles-cycles)
       Say(" frames=") : Num(WorkerFrames-frames) : Say(" lcd=") : Num(WorkerDisplayed-display)
       Say(" samples=") : Num(ApuSamples-samples) : Say(" worker_us=") : Num(WorkerBusyUs-busy)
@@ -381,7 +394,7 @@ Procedure Main()
       Say(" core0_idle_us=") : Num(Core0IdleUs-lastIdle0) : Say(" core1_idle_us=") : Num(Core1IdleUs-lastIdle1)
       Say(" run_us=") : Num(CpuRunUs-lastRun) : Say(" sync_us=") : Num(SyncUs-lastSync) : Say(" windows=") : Num(Windows-lastWin)
       lastIdle0=Core0IdleUs : lastIdle1=Core1IdleUs : lastRun=CpuRunUs : lastSync=SyncUs : lastWin=Windows
-      Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes)
+      Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes) : Say(" dmc_fetches=") : Num(SdFetches) : Say(" dmc_drift=") : Num(SdDrift)
       CompilerIf #PICO_ADVANCED=1
         Say(" map_irqs=") : Num(PicoIrqAssertions+M5IrqAssertions+VrcIrqAssertions+N1IrqAssertions+F7IrqAssertions)
       CompilerEndIf
