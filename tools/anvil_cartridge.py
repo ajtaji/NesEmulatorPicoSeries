@@ -17,7 +17,8 @@ def corrections():
     with (ROOT/'anvil/rom_metadata.csv').open(newline='') as f:
         return {int(r['crc32'],16):int(r['mapper']) for r in csv.DictReader(f)}
 
-def read_anvil_rom(path):
+def read_anvil_rom(path, extra=frozenset()):
+    """extra: mappers a caller runs beyond Anvil's own (the Pico profile's VRC6), checked like the rest."""
     data=path.read_bytes()
     if len(data)<16 or data[:4]!=b'NES\x1a':
         raise ValueError('invalid iNES header')
@@ -34,7 +35,7 @@ def read_anvil_rom(path):
         mapper=corrections().get(zlib.crc32(data[16:16+p+c]), mapper if not any(h[12:16]) else h[6]>>4)
         if any(h[12:16]): h[8:16]=bytes(8)
     sub=h[8]>>4 if nes2 else 0
-    if mapper not in SUPPORTED:
+    if mapper not in SUPPORTED | set(extra):
         raise ValueError(f'unsupported Anvil mapper {mapper}')
     if (h[7]&3) or ((h[6]&8) and mapper not in (4,206)):
         raise ValueError('unsupported console or four-screen board')

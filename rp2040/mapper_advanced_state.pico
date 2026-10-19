@@ -44,5 +44,24 @@ Declare.i M5RamRead(addr.i)
 Declare M5Ticks(cycles.i)
 Declare.i M5Budget()
 Declare M5PpuWatch()
+; VRC6 (mapper_vrc6.pico): core 0 cartridge state, core 1 sound state
+Global VrcPrg16.i,VrcPrg8.i,VrcWarned.i,VrcIrqLatch.i,VrcIrqCounter.i,VrcIrqEnable.i,VrcIrqAfterAck.i
+Global VrcIrqMode.i,VrcIrqPending.i,VrcPrescaler.i,VrcIrqAssertions.i
+Global ExpChip.i,V6Rate.i,V6Acc.i,V6Halt.i
+Global Dim V6Period.i(3)
+Global Dim V6Enable.i(3)
+Global Dim V6Timer.i(3)
+Global Dim V6Step.i(3)
+Global Dim V6Duty.i(2)
+Global Dim V6Volume.i(2)
+Global Dim V6Mode.i(2)
+Declare VrcInit()
+Declare VrcWrite(addr.i,value.i,stamp.i)
+Declare VrcTicks(cycles.i)
+Declare.i VrcBudget()
+Declare ExpInit(chip.i)
+Declare ExpWrite(addr.i,value.i)
+Declare ExpTick(dt.i)
+Declare ExpMix()
 
 Global PicoQuickWrites.i

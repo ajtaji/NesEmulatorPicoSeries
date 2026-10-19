@@ -372,6 +372,9 @@ __ams_mix:
     ldr r0, =global_tndmix
     ldrh r0, [r0, r1]
     adds r4, r4, r0
+    ldr r0, =global_expsample
+    ldr r0, [r0]
+    adds r4, r4, r0
     ldr r0, =global_apulasty
     ldr r0, [r0]
     ldr r1, =65400
@@ -466,6 +469,9 @@ ProcedureRAM ApuAdvance(dt.i)
       step=event-ApuFrameClock
     EndIf
     ApuTick(step)
+    CompilerIf #PICO_ADVANCED=1
+      If ExpChip : ExpTick(step) : EndIf
+    CompilerEndIf
     ApuFrameClock=ApuFrameClock+step
     If ApuResetDelay>0
       ApuResetDelay=ApuResetDelay-step
@@ -491,6 +497,9 @@ ProcedureRAM ApuAdvance(dt.i)
     EndIf
     ApuSampleLeft=ApuSampleLeft-step : dt=dt-step
     If ApuSampleLeft=0
+      CompilerIf #PICO_ADVANCED=1
+        If ExpChip : ExpMix() : EndIf
+      CompilerEndIf
       ApuMixSample()
       ApuSampleFrac=ApuSampleFrac+101
       ApuSampleLeft=37

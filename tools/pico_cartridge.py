@@ -5,12 +5,13 @@ from anvil_cartridge import read_anvil_rom
 from rom_catalog import prg_views
 
 COMMON={0,2,3,7,11,34,41,66,71,79,144,148,232}
-ADVANCED={1,4,5,13,47,118,119,206}
+ADVANCED={1,4,5,13,24,26,47,118,119,206}
+PICO_ONLY={24,26}   # mappers the Pico profile runs and Anvil does not
 ENDS={'rp2040':0xFF000,'rp2350':0x1FF000}
 
 def _read_pico_rom(path,target='rp2040'):
     if target not in ENDS: raise ValueError('choose rp2040 or rp2350')
-    cart,header=read_anvil_rom(path)
+    cart,header=read_anvil_rom(path, extra=PICO_ONLY)
     allowed=COMMON | (ADVANCED if target=='rp2350' else set())
     if cart.mapper not in allowed:
         raise ValueError(f'{path.name}: mapper {cart.mapper} is unavailable on {target}; supported: {sorted(allowed)}')
