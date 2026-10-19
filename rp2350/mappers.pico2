@@ -141,6 +141,7 @@ EndProcedure
 Procedure PicoMapperInit()
   CompilerIf #PICO_ADVANCED=1
     PicoPrgPaged=0 : PicoPredictValid=0
+    PicoIsMmc3=PicoMmc3(CartMapper) : PicoIsAdvanced=PicoAdvancedSupported(CartMapper)
   CompilerEndIf
   Protected i.i
   PicoMapActive=CartMapper<>0 And CartMapper<>2 And CartMapper<>66
@@ -188,7 +189,7 @@ ProcedureRAM PicoMapperWrite(addr.i,value.i,stamp.i)
     If CartMapper=24 Or CartMapper=26 : VrcWrite(addr,value,stamp) : ProcedureReturn : EndIf
     If CartMapper=19 : N1Write(addr,value,stamp) : ProcedureReturn : EndIf
     If CartMapper=69 : F7Write(addr,value,stamp) : ProcedureReturn : EndIf
-    If PicoAdvancedSupported(CartMapper) : PicoAdvancedWrite(addr,value,stamp) : ProcedureReturn : EndIf
+    If PicoIsAdvanced : PicoAdvancedWrite(addr,value,stamp) : ProcedureReturn : EndIf
   CompilerEndIf
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=34 And CartChrRam=0 And PicoRamPresent And addr>=$6000 And addr<$8000 : PicoPrgRam(addr&8191)=value : EndIf
@@ -255,13 +256,22 @@ EndProcedure
 ProcedureRAM PicoChrWrite(addr.i,value.i)
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=5 Or CartMapper=19 Or CartMapper=24 Or CartMapper=26 Or CartMapper=69 : ProcedureReturn : EndIf
-    If PicoAdvancedSupported(CartMapper) : PicoAdvancedChrWrite(addr,value) : ProcedureReturn : EndIf
+    If PicoIsAdvanced : PicoAdvancedChrWrite(addr,value) : ProcedureReturn : EndIf
   CompilerEndIf
   PokeA(Chr+addr,value) : PpuDecode(addr)
 EndProcedure
+; A $2006/$2007 access puts its address on the PPU bus, so A12 follows it. Only an access that moves
+; the A12 state (its level, the last fall, a counter clock) ends the IRQ prediction: a run of
+; nametable writes keeps A12 low, and Mega Man 4's intro streams thousands of them - each one used
+; to end the CPU window and re-predict (hitches of ~200 ms every few seconds).
 ProcedureRAM PicoPpuNotice(addr.i)
   CompilerIf #PICO_ADVANCED=1
-    If PicoMmc3(CartMapper) : PicoA12(addr,PicoDots) : PicoPredictValid=0 : EndIf
+    Protected high.i,low.i,clocks.i
+    If PicoIsMmc3
+      high=PicoA12High : low=PicoLowSince : clocks=PicoIrqClocks
+      PicoA12(addr,PicoDots)
+      If high<>PicoA12High Or low<>PicoLowSince Or clocks<>PicoIrqClocks : PicoPredictValid=0 : EndIf
+    EndIf
   CompilerEndIf
 EndProcedure
 ProcedureRAM PicoPpuTicks(cycles.i)
@@ -271,7 +281,7 @@ ProcedureRAM PicoPpuTicks(cycles.i)
     If CartMapper=24 Or CartMapper=26 : VrcTicks(cycles) : ProcedureReturn : EndIf
     If CartMapper=19 : N1Ticks(cycles) : ProcedureReturn : EndIf
     If CartMapper=69 : F7Ticks(cycles) : ProcedureReturn : EndIf
-    If PicoMmc3(CartMapper)
+    If PicoIsMmc3
       CompilerIf #PPU_PROFILE=1
         started=Micros()
       CompilerEndIf
@@ -327,7 +337,7 @@ ProcedureRAM.i PicoCpuBudget()
     If CartMapper=24 Or CartMapper=26 : ProcedureReturn VrcBudget() : EndIf
     If CartMapper=19 : ProcedureReturn N1Budget() : EndIf
     If CartMapper=69 : ProcedureReturn F7Budget() : EndIf
-    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0
+    If PicoIsMmc3 And PicoIrqEnable And FI=0
       If PicoIrq : ProcedureReturn 1 : EndIf
       CompilerIf #PPU_PROFILE=1
         started=Micros()
@@ -427,13 +437,13 @@ ProcedureRAM PicoCpuPpuChanged()
     If (PpuCtrl&$38)<>PicoPredictCtrl Or (PpuMask&$18)<>PicoPredictMask : PicoPredictValid=0 : EndIf
     If OamCacheDirty<>0 And (PpuCtrl&32)<>0 : PicoPredictValid=0 : EndIf
     If CartMapper=5 : M5PpuWatch() : ProcedureReturn : EndIf
-    If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0 And PicoPredictValid=0 : CpuEndWindow() : EndIf
+    If PicoIsMmc3 And PicoIrqEnable And FI=0 And PicoPredictValid=0 : CpuEndWindow() : EndIf
   CompilerEndIf
 EndProcedure
 
 ProcedureRAM.i PicoQuickWrite(addr.i,value.i)
   CompilerIf #PICO_ADVANCED=1
-    If PicoMmc3(CartMapper)
+    If PicoIsMmc3
       Select addr&$E001
         Case $8000
           If ((PicoSelect!value)&192)=0

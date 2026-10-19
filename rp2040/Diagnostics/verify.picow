@@ -566,6 +566,7 @@ Procedure PagedFetchTests()
   Check(CpuRun(6),6) : Check(PC,$8005) : Check(A,90)
   NesRpc(0,0,0,CpuCycles)
   CartPrg=savedPrg : CartMapper=savedMapper : PicoPrgBytes=savedBytes : PicoMapActive=0 : PicoPrgPaged=0
+  PicoIsMmc3=PicoMmc3(CartMapper) : PicoIsAdvanced=PicoAdvancedSupported(CartMapper)
   PicoPrgFlat() : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
 EndProcedure
 CompilerEndIf

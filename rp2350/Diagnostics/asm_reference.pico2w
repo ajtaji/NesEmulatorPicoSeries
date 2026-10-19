@@ -446,7 +446,7 @@ Procedure ObserverRestore(src.i)
 EndProcedure
 Procedure BudgetPredictionTests()
   Protected trial.i,i.i,expected.i,startDot.i
-  CartMapper=4 : FI=0
+  CartMapper=4 : FI=0 : PicoIsMmc3=1 : PicoIsAdvanced=1
   For trial=0 To 499
     For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
     OamCacheDirty=1 : PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
@@ -477,7 +477,7 @@ Procedure BudgetAdvancePos(dots.i)
 EndProcedure
 Procedure BudgetCacheTests()
   Protected trial.i,i.i,stepN.i,got.i,expected.i,startDot.i,c.i
-  CartMapper=4 : FI=0
+  CartMapper=4 : FI=0 : PicoIsMmc3=1 : PicoIsAdvanced=1
   For trial=0 To 299
     For i=0 To 255 : Oam(i)=MapperRand()&255 : Next
     OamCacheDirty=1 : PpuCtrl=MapperRand()&255 : PpuMask=MapperRand()&24
