@@ -5,7 +5,7 @@ from anvil_cartridge import read_anvil_rom
 from rom_catalog import prg_views
 
 COMMON={0,2,3,7,11,34,41,66,71,79,144,148,232}
-ADVANCED={1,4,13,47,118,119,206}
+ADVANCED={1,4,5,13,47,118,119,206}
 ENDS={'rp2040':0xFF000,'rp2350':0x1FF000}
 
 def _read_pico_rom(path,target='rp2040'):

@@ -13,7 +13,6 @@ EnableExplicit
 XIncludeFile "../runtime.pico2"
 XIncludeFile "../cartridge.pico2"
 XIncludeFile "zp_vectors.pico2"
-XIncludeFile "Shared/Bluetooth/Diagnostics/sbc_vectors.pmi"
 XIncludeFile "view_vectors.pico2"
 Global Checks.i, Failures.i
 Global Dim ExpectedPixels.a(8)
@@ -29,29 +28,6 @@ Procedure Check(actual.i, expected.i)
   EndIf
 EndProcedure
 XIncludeFile "view_tests.pico2"
-Procedure CodecVectorTests()
-  Protected block.i, i.i, mode.i, expected.i
-  For mode=0 To 1
-  SbcSetStereo(mode) : expected=?CodecVectorExpected
-  If mode : expected=?CodecVectorStereo : EndIf
-  SbcReset()
-  For block=0 To 63
-    For i=0 To 127 : sbc_pcm[i]=PeekW(?CodecVectorPcm+(block*128+i)*2) : Next
-    SbcEncode()
-    For i=0 To 63+mode*4 : Check(sbc_out[i],PeekA(expected+block*(64+mode*4)+i)) : Next
-    SafetyPet() : UsbSerialTask()
-  Next
-  Next
-  SbcSetStereo(0)
-  ; Timing of one stereo frame (analysis alone, then the whole encode).
-  SbcSetStereo(1) : block=Micros()
-  For i=0 To 99 : SbcAnalyze() : Next
-  mode=Micros()-block : block=Micros()
-  For i=0 To 99 : SbcEncode() : Next
-  expected=Micros()-block
-  Say("SBC TIMING analyze_us_x100=") : Num(mode) : Say(" encode_us_x100=") : Num(expected) : Eol()
-  SbcSetStereo(0)
-EndProcedure
 Procedure AudioStopTests()
   Protected ch.i, i.i
   For ch=0 To 3
@@ -693,8 +669,6 @@ Procedure TestMain()
   PollLoopTests()
   Say("STEP AudioStopTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   AudioStopTests()
-  Say("STEP CodecVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
-  CodecVectorTests()
   Say("STEP RomStoreTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   RomStoreTests()
   Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()

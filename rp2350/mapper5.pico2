@@ -1,0 +1,339 @@
+; MMC5 (ExROM, mapper 5) on the RP2350 Pico profile. Ported from anvil/mapper5.pi4 and
+; anvil/mapper5_video.pi4 onto the Pico's mapper windows:
+;   PRG    four 8 KiB slots on the paged CPU fetch (PicoPrgBiases); a slot showing PRG-RAM points
+;          straight into the RAM, so reads need no copy and a write lands where the CPU reads it.
+;   CHR    1 KiB banks copied into the background window (PicoChrMap). With 8x16 sprites the sprites
+;          use set A ($5120-$5127) and the background set B ($5128-$512B); the sprite set gets its
+;          own 8 KiB decoded window and SpriteDelta points the sprite fetch at it. With 8x8 sprites
+;          both use the set written last.
+;   NAMES  $5105 picks a source per table: CIRAM page 0/1, ExRAM (page 2), fill (page 3); ExRAM in
+;          modes 2/3 reads as zeros (page 4). Pages live in PicoCiram/PicoNtDesc beside CIRAM.
+;   IRQ    an event model, not Anvil's fetch-by-fetch replay: with rendering on, each visible line
+;          has one scanline event at dot 3 (the first one of a frame starts it, scanline 0);
+;          scanline = $5203 raises the IRQ. M5Budget gives the CPU the exact distance to it.
+;   RAM    PRG-RAM in SRAM (M5Ram, 64 KiB). On the Pico Plus 2 W a 128 KiB board goes to PSRAM.
+; NOT YET DRAWN: ExRAM extended attributes (mode 1) and the vertical split. Both are announced on
+; the serial port the first time a game turns them on, rather than drawn wrong in silence.
+; MMC5 sound ($5000-$5015) is not produced; its registers are accepted.
+; The PSRAM library is included on every RP2350 build (its board test cannot be read while includes
+; are resolved); only the Pico Plus 2 W calls it, and an unused procedure is left out of the image.
+XIncludeFile "RP2350/Lib/psram.pico2"
+
+ProcedureRAM M5IrqUpdate()
+  PicoIrq=(M5Pending<>0 And M5IrqEnable<>0)
+EndProcedure
+
+; The RAM offset an MMC5 RAM bank number reaches on this board, or -1 if the board has no RAM there.
+ProcedureRAM.i M5RamOffset(bank.i)
+  bank=bank&15
+  If M5RamBytes=0 : ProcedureReturn -1 : EndIf
+  If M5RamBytes=8192
+    If bank&4 : ProcedureReturn -1 : EndIf
+    ProcedureReturn 0
+  ElseIf M5RamBytes=16384
+    ProcedureReturn ((bank>>2)&1)*8192
+  ElseIf M5RamBytes=32768
+    If bank&4 : ProcedureReturn -1 : EndIf
+    ProcedureReturn (bank&3)*8192
+  EndIf
+  ProcedureReturn (bank&((M5RamBytes/8192)-1))*8192
+EndProcedure
+
+; Points CPU slot 0..3 ($8000 + slot*8 KiB) at base; tag says what is shown.
+ProcedureRAM M5PrgSlot(slot.i,tag.i,base.i)
+  Protected bias.i
+  If M5PrgTags(slot)=tag : ProcedureReturn : EndIf
+  bias=base-$8000-slot*8192
+  PicoPrgBiases(slot)=bias : PicoPrgSlots(slot)=-1 : M5PrgTags(slot)=tag : PicoPrgChanged=1
+  If PicoPrgFenceNeeded
+    NesPost(6,slot,bias,PicoBankStamp)
+  Else
+    PicoWorkerBiases(slot)=bias
+  EndIf
+EndProcedure
+
+ProcedureRAM M5PrgUpdate()
+  Protected slot.i,reg.i,bank.i,group.i,offset.i
+  For slot=0 To 3
+    reg=slot+1 : group=1
+    If M5PrgMode=0 : reg=4 : group=4
+    ElseIf M5PrgMode=1 : reg=2+(slot/2)*2 : group=2
+    ElseIf M5PrgMode=2 And slot<2 : reg=2 : group=2 : EndIf
+    bank=(M5Prg(reg)&(127!(group-1)))+(slot&(group-1))
+    If (M5Prg(reg)&128)<>0 Or reg=4
+      bank=bank&((PicoPrgBytes/8192)-1)
+      M5PrgSlot(slot,bank,CartPrg+bank*8192) : M5RamSlots(slot)=-2
+    Else
+      offset=M5RamOffset(bank) : M5RamSlots(slot)=offset
+      If offset>=0
+        M5PrgSlot(slot,$100000+offset,M5RamBase+offset)
+      Else
+        ; No RAM behind this bank on this board: shows PRG bank 0, and says so once.
+        If M5Unmapped=0 : Say("MMC5: a PRG-RAM bank this board does not have was mapped; it reads as ROM") : Eol() : EndIf
+        M5Unmapped=M5Unmapped+1 : M5PrgSlot(slot,$200000,CartPrg)
+      EndIf
+    EndIf
+  Next
+EndProcedure
+
+; The 1 KiB CHR bank of pattern slot 0..7 in set 0 (A) or 1 (B).
+ProcedureRAM.i M5ChrBank(slot.i,set.i)
+  Protected shift.i,reg.i,group.i
+  shift=3-M5ChrMode : group=1<<shift
+  reg=(slot&(~(group-1)))+group-1
+  If set
+    If M5ChrMode=0 : reg=11 : Else : reg=8+(reg&3) : EndIf
+  EndIf
+  ProcedureReturn ((M5Chr(reg)&(~(group-1)))+(slot&(group-1)))&((PicoChrBytes/1024)-1)
+EndProcedure
+
+ProcedureRAM M5ChrUpdate()
+  Protected slot.i,bank.i,background.i
+  background=M5LastSet
+  If M5PpuControl&32 : background=1 : EndIf
+  For slot=0 To 7 : PicoChrMap(slot,M5ChrBank(slot,background)) : Next
+  If M5PpuControl&32
+    For slot=0 To 7
+      bank=M5ChrBank(slot,0)
+      If M5SprSlots(slot)<>bank
+        PicoCopy(@M5SprDecoded(0)+slot*1024,PicoChrDecoded+bank*1024,1024) : M5SprSlots(slot)=bank
+      EndIf
+    Next
+    SpriteDelta=@M5SprDecoded(0)-Pattern
+  Else
+    SpriteDelta=0
+  EndIf
+EndProcedure
+
+; A byte of nametable page 2..4 (ExRAM, fill, zeros): the page, every table showing it, descriptors.
+ProcedureRAM M5PageWrite(page.i,offset.i,value.i)
+  Protected table.i,base.i,x.i,y.i
+  PicoCiram(page*1024+offset)=value
+  For table=0 To 3
+    If PicoNtSlots(table)=page : Nt(table*1024+offset)=value : EndIf
+  Next
+  PicoNtDescriptor(page,offset)
+  If offset>=960
+    base=((offset&$38)<<4)|((offset&7)<<2)
+    For y=0 To 3
+      For x=0 To 3 : PicoNtDescriptor(page,base+y*32+x) : Next
+    Next
+  EndIf
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+
+ProcedureRAM M5NtRefresh()
+  Protected table.i,page.i
+  For table=0 To 3
+    page=(M5NtConfig>>(table*2))&3
+    If page=2 And M5ExMode>=2 : page=4 : EndIf
+    If PicoNtSlots(table)<>page
+      PicoNtSlots(table)=page
+      PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+page*1024,1024)
+      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+page*2048,2048)
+    EndIf
+  Next
+  BgCacheAddr=-1 : RgbLastKey=-1 : PicoMirror=-1
+EndProcedure
+
+; Page 3, the fill nametable: every tile M5FillTile, every attribute M5FillAttr.
+ProcedureRAM M5FillRefresh()
+  Protected i.i,table.i,attr.i,desc.i
+  attr=M5FillAttr*$55 : desc=M5FillTile|(M5FillAttr<<8)
+  For i=0 To 959 : PicoCiram(3072+i)=M5FillTile : PicoNtDesc(3072+i)=desc : Next
+  For i=960 To 1023 : PicoCiram(3072+i)=attr : PicoNtDesc(3072+i)=desc : Next
+  For table=0 To 3
+    If PicoNtSlots(table)=3
+      PicoCopy(@Nt(0)+table*1024,@PicoCiram(3072),1024)
+      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(3072),2048)
+    EndIf
+  Next
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+
+ProcedureRAM.i M5RamRead(addr.i)
+  Protected offset.i
+  offset=M5RamOffset(M5Prg(0))
+  If offset<0 : ProcedureReturn NesOpenBus : EndIf
+  ProcedureReturn PeekA(M5RamBase+offset+(addr&8191))
+EndProcedure
+
+ProcedureRAM M5PrgWrite(addr.i,value.i)
+  Protected offset.i
+  If M5Protect1<>2 Or M5Protect2<>1 : ProcedureReturn : EndIf
+  If addr<$8000
+    offset=M5RamOffset(M5Prg(0))
+  Else
+    offset=M5RamSlots((addr-$8000)>>13)
+  EndIf
+  If offset<0 : ProcedureReturn : EndIf
+  PokeA(M5RamBase+offset+(addr&8191),value)
+EndProcedure
+
+; $5000-$5FFF reads: status, multiplier, ExRAM in modes 2/3. The caller has synchronized the PPU.
+ProcedureRAM.i M5Read(addr.i)
+  Protected value.i
+  value=NesOpenBus
+  Select addr
+    Case $5010 : value=0
+    Case $5015 : value=0
+    Case $5204 : value=M5Pending*128+M5InFrame*64 : M5Pending=0 : M5IrqUpdate()
+    Case $5205 : value=(M5MulA*M5MulB)&255
+    Case $5206 : value=((M5MulA*M5MulB)>>8)&255
+    Default
+      If addr>=$5C00 And M5ExMode>=2 : value=PicoCiram(2048+(addr&1023)) : EndIf
+  EndSelect
+  ProcedureReturn value
+EndProcedure
+
+; Every CPU write the board decodes: $5000-$5FFF registers and ExRAM, $6000-$DFFF PRG-RAM.
+Procedure M5Write(addr.i,value.i,stamp.i)
+  Protected index.i,shift.i
+  If addr>=$6000 : M5PrgWrite(addr,value) : ProcedureReturn : EndIf
+  If addr<$5100 : ProcedureReturn : EndIf
+  ; Banking, nametables and ExRAM change what the PPU draws: the pixels before this write first.
+  PpuSync(stamp)
+  PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
+  If addr>=$5113 And addr<=$5117
+    M5Prg(addr-$5113)=value : M5PrgUpdate()
+  ElseIf addr>=$5120 And addr<=$512B
+    shift=3-M5ChrMode : index=addr-$5120
+    M5Chr(index)=((value|(M5ChrHigh<<8))<<shift)&1023
+    M5LastSet=Bool(index>=8) : M5ChrUpdate()
+  ElseIf addr>=$5C00 And addr<=$5FFF
+    If M5ExMode<>3
+      index=addr&1023
+      If M5ExMode<2
+        If M5InFrame=0 : value=0 : EndIf
+        M5PageWrite(2,index,value)
+      Else
+        PicoCiram(2048+index)=value
+      EndIf
+    EndIf
+  Else
+    Select addr
+      Case $5100 : M5PrgMode=value&3 : M5PrgUpdate()
+      Case $5101 : M5ChrMode=value&3 : M5ChrUpdate()
+      Case $5102 : M5Protect1=value&3
+      Case $5103 : M5Protect2=value&3
+      Case $5104
+        M5ExMode=value&3 : M5NtRefresh()
+        If M5ExMode=1 And M5WarnedAttr=0
+          M5WarnedAttr=1 : Say("MMC5: this game uses ExRAM extended attributes, which are not drawn yet") : Eol()
+        EndIf
+      Case $5105 : M5NtConfig=value : M5NtRefresh()
+      Case $5106 : M5FillTile=value : M5FillRefresh()
+      Case $5107 : M5FillAttr=value&3 : M5FillRefresh()
+      Case $5130 : M5ChrHigh=value&3
+      Case $5200
+        M5Split=value
+        If (value&128)<>0 And M5WarnedSplit=0
+          M5WarnedSplit=1 : Say("MMC5: this game uses the vertical split, which is not drawn yet") : Eol()
+        EndIf
+      Case $5201 : M5SplitScroll=value
+      Case $5202 : M5SplitBank=value
+      Case $5203 : M5IrqTarget=value
+      Case $5204 : M5IrqEnable=Bool((value&128)<>0) : M5IrqUpdate()
+      Case $5205 : M5MulA=value
+      Case $5206 : M5MulB=value
+    EndSelect
+  EndIf
+  PicoPrgFenceNeeded=0
+  CpuEndWindow()
+EndProcedure
+
+; One scanline event (dot 3 of a rendered visible line).
+ProcedureRAM M5LineEvent()
+  If M5InFrame=0
+    M5InFrame=1 : M5Scanline=0 : M5Pending=0
+  Else
+    M5Scanline=(M5Scanline+1)&255
+    If M5Scanline=M5IrqTarget And M5IrqTarget<>0 : M5Pending=1 : M5IrqAssertions=M5IrqAssertions+1 : EndIf
+  EndIf
+  M5IrqUpdate()
+EndProcedure
+
+; The PPU is about to advance cycles CPU cycles from (PpuLine, PpuDot): every scanline event and the
+; end of the frame on the way. The rendering state is constant across the call (a $2001 write
+; synchronizes first).
+ProcedureRAM M5Ticks(cycles.i)
+  Protected line.i,dot.i,dotsLeft.i,step.i
+  If (PpuMask&24)=0 : M5InFrame=0 : ProcedureReturn : EndIf
+  line=PpuLine : dot=PpuDot : dotsLeft=cycles*3
+  While dotsLeft>0
+    If line<240 And dot<3
+      step=3-dot
+      If step>dotsLeft : ProcedureReturn : EndIf
+      dotsLeft=dotsLeft-step : dot=3 : M5LineEvent()
+    ElseIf line=240 And dot<8
+      step=8-dot
+      If step>dotsLeft : ProcedureReturn : EndIf
+      dotsLeft=dotsLeft-step : dot=8 : M5InFrame=0
+    EndIf
+    step=341-dot
+    If step>dotsLeft : ProcedureReturn : EndIf
+    dotsLeft=dotsLeft-step : dot=0 : line=line+1
+    If line=262 : line=0 : EndIf
+  Wend
+EndProcedure
+
+; CPU cycles the next window may run before the scanline IRQ could fire (1 = now, 256 = not near).
+ProcedureRAM.i M5Budget()
+  Protected eventLine.i,dots.i
+  If M5IrqEnable=0 Or FI<>0 Or (PpuMask&24)=0 Or M5IrqTarget=0 : ProcedureReturn 256 : EndIf
+  If PicoIrq : ProcedureReturn 1 : EndIf
+  If M5InFrame And PpuLine<240
+    ; This line's event (dot 3) is still ahead while PpuDot<3.
+    eventLine=PpuLine+(M5IrqTarget-M5Scanline)
+    If PpuDot<3 : eventLine=eventLine-1 : EndIf
+    If M5IrqTarget<=M5Scanline Or eventLine>239 : ProcedureReturn 256 : EndIf
+  Else
+    eventLine=M5IrqTarget
+  EndIf
+  dots=eventLine*341+3-(PpuLine*341+PpuDot)
+  If dots<0 : dots=dots+262*341 : EndIf
+  dots=NesDiv(dots,3)+1
+  If dots>256 : dots=256 : EndIf
+  ProcedureReturn dots
+EndProcedure
+
+; After any PPU register write: the sprite size picks the CHR sets, and rendering off ends the frame.
+ProcedureRAM M5PpuWatch()
+  If (PpuCtrl&32)<>(M5PpuControl&32) : M5PpuControl=PpuCtrl : M5ChrUpdate() : EndIf
+  M5PpuControl=PpuCtrl
+  If (PpuMask&24)=0 : M5InFrame=0 : EndIf
+  M5PpuMask=PpuMask
+  If M5IrqEnable And FI=0 : CpuEndWindow() : EndIf
+EndProcedure
+
+Procedure M5Init()
+  Protected i.i
+  PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
+  PicoIrq=0 : M5Pending=0 : M5IrqEnable=0 : M5IrqTarget=0 : M5Scanline=0 : M5InFrame=0
+  M5PrgMode=3 : M5ChrMode=0 : M5Protect1=1 : M5Protect2=2
+  M5ExMode=3 : M5NtConfig=0 : M5FillTile=0 : M5FillAttr=0 : M5ChrHigh=0 : M5LastSet=0
+  M5Split=0 : M5SplitScroll=0 : M5SplitBank=0 : M5MulA=0 : M5MulB=0
+  M5PpuControl=PpuCtrl : M5PpuMask=PpuMask : M5Unmapped=0 : M5IrqAssertions=0
+  For i=0 To 4 : M5Prg(i)=0 : Next : M5Prg(4)=255
+  For i=0 To 3 : M5PrgTags(i)=-1 : M5RamSlots(i)=-2 : PicoPrgSlots(i)=-1 : Next
+  For i=0 To 11 : M5Chr(i)=0 : Next
+  For i=0 To 7 : PicoChrSlots(i)=-1 : M5SprSlots(i)=-1 : Next
+  M5RamBase=@M5Ram(0)
+  If M5RamBytes>65536
+    ; Only the Pico Plus 2 W can hold more: its PSRAM (RP2350B: 48 GPIO).
+    CompilerIf #PM_GPIO_COUNT=48
+      If PsramBegin(47)>=M5RamBytes : M5RamBase=#PSRAM_BASE : EndIf
+    CompilerEndIf
+    If M5RamBase=@M5Ram(0)
+      Say("MMC5: this board has ") : Num(M5RamBytes/1024) : Say(" KiB of PRG-RAM; only 64 KiB fit here, so it is cut to 64") : Eol()
+      M5RamBytes=65536
+    EndIf
+  EndIf
+  For i=0 To M5RamBytes-1 : PokeA(M5RamBase+i,0) : Next
+  For i=2048 To 5119 : PicoCiram(i)=0 : PicoNtDesc(i)=0 : Next
+  For i=0 To 3 : PicoNtSlots(i)=255 : Next
+  M5FillRefresh() : M5NtRefresh() : M5PrgUpdate()
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : ChrWritable=0
+  M5ChrUpdate()
+EndProcedure

@@ -1,6 +1,9 @@
 ; Instruction-timestamped NTSC PPU, tile-run renderer.
 ; Not a dot/bus-accurate 2C02: fetch races and sprite-overflow bug excluded.
 Global Chr.i, Pattern.i
+; Sprite patterns are read at Pattern+SpriteDelta: 0 for every board but MMC5 with 8x16 sprites,
+; whose sprites use their own CHR set (mapper5.pico's M5SprDecoded window).
+Global SpriteDelta.i
 Global Dim Nt.a(4096)
 Global Dim Pal.a(32)
 Global Dim Oam.a(256)
@@ -406,7 +409,7 @@ Procedure PpuSpritesReference()
             If SprAttr(i)&$40
               row=7-j
             EndIf
-            pixel=(PeekU(Pattern+SprRow(i))>>(row*2))&3
+            pixel=(PeekU(Pattern+SpriteDelta+SprRow(i))>>(row*2))&3
             If pixel
               SpriteLine(sx)=flags|pixel : SpriteSpan(sx>>3)=SpriteSpan(sx>>3)|1
               If i=0 And SprIndex(i)=0
@@ -550,6 +553,9 @@ __sp_flags_ready:
     ldr r1, =global_sprrow
     ldr r1, [r1, r2]
     ldr r5, =global_pattern
+    ldr r5, [r5]
+    adds r1, r1, r5
+    ldr r5, =global_spritedelta
     ldr r5, [r5]
     ldrh r1, [r5, r1]
     ldr r5, =global_sprx
