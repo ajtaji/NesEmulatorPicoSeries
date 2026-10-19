@@ -45,9 +45,13 @@ __pico_map_copy_done:
   EndASM
 EndProcedure
 ProcedureRAM PicoInvalidateChr()
-  BgCacheAddr=-1 : RgbLastKey=-1 : RgbPairsDirty=1
   ; Active-window mappers reuse CHR-bank key zero. Flush tags on every change
-  ; so banks beyond the old two-bit key cannot alias converted RGB rows.
+  ; so banks beyond the old two-bit key cannot alias converted RGB rows - by
+  ; moving the tile cache to its next generation (PpuChrChanged, one add), not
+  ; by rebuilding the palette pairs, which a CHR change leaves as they were.
+  ; A CHR-RAM byte comes through here too (PicoAdvancedChrWrite): Pinbot
+  ; clearing 4 KB with the background on fell to 2 FPS doing the rebuild.
+  BgCacheAddr=-1 : PpuChrChanged()
   PpuChrBank=0
 EndProcedure
 ProcedureRAM PicoChrSwitch(bank.i)

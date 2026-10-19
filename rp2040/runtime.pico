@@ -55,9 +55,9 @@ Global Dim FrameBottomStore.u(30720)
 Procedure CartPpuWriteNotice(addr.i,value.i)
   If (addr&7)=7 And (PpuV&$3FFF)<$2000
     CartChrDirty=1
-    If PpuMask&8 : RgbPairsDirty=1 : CartChrDirty=0 : EndIf
+    If PpuMask&8 : PpuChrChanged() : CartChrDirty=0 : EndIf
   ElseIf (addr&7)=1 And (value&8)<>0 And CartChrDirty<>0
-    RgbPairsDirty=1 : CartChrDirty=0
+    PpuChrChanged() : CartChrDirty=0
   EndIf
 EndProcedure
 

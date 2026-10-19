@@ -372,6 +372,54 @@ Procedure CompareApu()
   Next
 EndProcedure
 
+; CHR RAM written while the background is on (Pinbot's case): after each burst of pattern writes
+; through PpuWrite and the $2007 notice, the assembly renderer's line must match the plain reference
+; renderer drawn from the new patterns - the tile cache may not hand back a stale tile. The built-in
+; cartridge's background pattern table ($1000-$1FFF, PPUCTRL bit 4 set) is copied into RAM for the
+; test and put back afterwards - 4 KB, not the whole 8, so the RP2040 build still fits its SRAM.
+Global Dim TestChr.a(4096)
+Global Dim RefLine.u(256)
+Procedure RenderLineBoth(startV.i, startFx.i)
+  Protected x.i, span.i
+  PpuStatus=0 : PpuV=startV : PpuFineX=startFx
+  For span=0 To 31 : PpuDot=span*8 : PpuRender8Reference() : Next
+  For x=0 To 255 : RefLine(x)=RgbPal(LinePixels(x)) : Next
+  PpuStatus=0 : PpuV=startV : PpuFineX=startFx
+  FrameRow=@FrameTop(0)
+  For x=0 To 255 : FrameTop(x)=$1234 : Next
+  PpuDot=0 : PpuBatchLeft=32 : PpuRenderRaw()
+  For x=0 To 255 : Check(FrameTop(x),RefLine(x)) : Next
+EndProcedure
+Procedure CompareChrRam()
+  Protected i.i, round.i, k.i, savedChr.i, savedWritable.i, savedGen.i, startV.i, startFx.i, addr.i
+  savedChr=Chr : savedWritable=ChrWritable : savedGen=RgbTagGen
+  For i=0 To 4095 : TestChr(i)=PeekA(Chr+$1000+i) : Next
+  Chr=@TestChr(0)-$1000 : ChrWritable=1
+  For i=0 To 4095 : Nt(i)=VerifyRand(256) : Next
+  For i=0 To 31 : Pal(i)=VerifyRand(64) : Next
+  For i=0 To 31 : SpriteSpan(i)=0 : Next
+  ; Generations near the wrap are covered too: the last rounds cross it.
+  RgbTagGen=$F0000000
+  For round=0 To 63
+    PpuCtrl=$10 : PpuMask=$0A : PpuColours()
+    If round=0 : RgbPairsDirty=1 : NameDescDirty=1 : EndIf
+    PpuLine=VerifyRand(240) : startV=VerifyRand($8000) : startFx=VerifyRand(8)
+    RenderLineBoth(startV,startFx)
+    ; A burst of pattern bytes, as a $2007 loop with the background on writes them.
+    For k=0 To 255
+      addr=$1000+VerifyRand($1000)
+      PpuWrite(addr,VerifyRand(256))
+      PpuV=addr : CartPpuWriteNotice($2007,0)
+    Next
+    RenderLineBoth(startV,startFx)
+    If (round&7)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  Check(RgbTagGen,$F0000000)   ; 16,384 steps: 64 times round, back where it began
+  For i=$1000 To $1FFF : PpuWrite(i,PeekA(savedChr+i)) : Next
+  Chr=savedChr : ChrWritable=savedWritable : RgbTagGen=savedGen : RgbPairsDirty=1
+  PpuMask=$1E : PpuCtrl=0 : PpuFineX=0 : PpuV=0
+EndProcedure
+
 Procedure TestMain()
   Protected start.i
   SafetyBoot() : ClockInitKhz(150000) : TimerInit() : UsbSerialInit()
@@ -391,6 +439,8 @@ Procedure TestMain()
   CompareOamDma()
   Say("STEP CompareApu checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CompareApu()
+  Say("STEP CompareChrRam checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CompareChrRam()
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
   If Failures=0
