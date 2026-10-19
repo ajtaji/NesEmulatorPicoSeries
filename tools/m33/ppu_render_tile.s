@@ -16,7 +16,7 @@ __r_tile:
     orr r0, r0, r1, lsl #14
     add r0, r12
     eor r1, r0, r0, lsr #10
-    ubfx r1, r1, #0, #10
+    ubfx r1, r1, #0, #11   ; 2048 tags on the RP2350 (port_rp2350.py sizes the arrays)
     ldr r2, [r6, r1, lsl #2]
     adds r0, #1
     cmp r2, r0

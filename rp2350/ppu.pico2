@@ -29,8 +29,8 @@ Global RgbLastKey.i= -1, RgbLastPtr.i, RgbLookupLight.i
 Global RgbMisses.i, NameBuildUs.i, PairBuilds.i
 Global NameDescDirty.i=1, PpuChrBank.i, RgbRowPointer.i
 Global Dim NameDesc.u(4096)
-Global Dim RgbCache.i(4096)
-Global Dim RgbTags.i(1024)
+Global Dim RgbCache.i(8192)
+Global Dim RgbTags.i(2048)
 Global BgWord.i, BgPalette.i, RgbPairsDirty.i=1
 ; THE TILE CACHE'S GENERATION, in bits 24-31 of every RgbTags key (PpuRenderRaw adds it to the
 ; pattern base). A CHR-RAM write moves it on, so every cached tile misses and is converted again
@@ -128,7 +128,7 @@ ProcedureRAM PpuBuildRgbPairs()
       Next
     Next
   Next
-  For i=0 To 1023
+  For i=0 To 2047
     PokeL(@RgbTags(0)+i*4,0)
   Next
   RgbPairsDirty=0
