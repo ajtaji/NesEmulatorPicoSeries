@@ -80,7 +80,7 @@ Declare N1Tick(dt.i)
 Declare N1Mix()
 ; Sunsoft FME-7 and 5B (mapper_fme7.pico)
 Global F7Select.i,F7IrqRun.i,F7IrqEnable.i,F7IrqCount.i,F7IrqAssertions.i,F7Warned.i
-Global SbLevel.i,SbNext.i
+Global SbLevel.i,SbNext.i,SbIdle.i
 Global SbSelect.i,SbNoiseTimer.i,SbNoise.i,SbEnvTimer.i,SbEnvelope.i,SbEnvDirection.i,SbEnvHold.i,SbArea.i,SbCycles.i
 Global Dim F7Regs.i(16)
 Global Dim SbReg.i(16)

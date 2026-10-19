@@ -249,10 +249,9 @@ ProcedureRAM NesWrite(addr.i, value.i)
         CompilerIf #NES_PICO_MAPPERS=1
           If PicoMapActive And ((addr&7)=6 Or (addr&7)=7) : PicoRegisterNotice(addr&7) : EndIf
         CompilerEndIf
-      ElseIf addr=$4015
-        ; Synchronous, so core 0 sees a DMC start (DmcBytes) before the next window.
-        NesRpc(2,addr,value,CpuCycles+AccessPhase)
       Else
+        ; The DMC's stalls and IRQ come from core 0's own copy of its timing (dmc_shadow.pico).
+        If addr=$4010 Or addr=$4013 Or addr=$4015 : SdWrite(addr,value,CpuCycles+AccessPhase) : EndIf
         NesPost(2,addr,value,CpuCycles+AccessPhase)
       EndIf
     CompilerElse

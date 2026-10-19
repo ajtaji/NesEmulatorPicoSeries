@@ -1,0 +1,70 @@
+; THE DMC'S TIMING, SHADOWED ON CORE 0. Core 1 plays the DMC (apu.pico: the timer, ApuDmcFetch,
+; the output level). Core 0 needs only its effects on the CPU: four stall cycles per sample fetch
+; and the IRQ when a non-looping sample runs out. Both follow from the DMC registers - written by
+; core 0 - and the timer, so core 0 runs the same timer and fetch counter here, without reading
+; the sample bytes, and no longer waits for core 1 at every sync while a sample plays (Mr.
+; Gimmick plays DPCM nonstop: core 0 lost ~560 ms a second to those waits).
+; It mirrors apu.pico exactly: the timer reload from $4010's rate, a fetch at each byte boundary
+; when the buffer was full, the length and loop/IRQ rule of ApuDmcFetch, and $4010/$4015's effect
+; on the IRQ. Both start from the power-on values (timer 428, 8 bits, empty) at CPU time 0. The
+; once-a-second stats line checks it against core 1 (dmc_drift; 0 when they agree).
+Global SdTimer.i=428, SdBits.i=8, SdEmpty.i=1, SdBytes.i, SdIrq.i, SdClock.i, SdFetches.i
+Global SdReg16.i, SdReg19.i, SdDrift.i
+
+Procedure SdFetch()
+  If SdEmpty<>0 And SdBytes>0
+    SdEmpty=0 : SdFetches=SdFetches+1 : SdBytes=SdBytes-1
+    If SdBytes=0
+      If SdReg16&$40
+        SdBytes=SdReg19*16+1
+      ElseIf SdReg16&$80
+        SdIrq=1
+      EndIf
+    EndIf
+  EndIf
+EndProcedure
+
+; The shadow up to CPU time stamp.
+Procedure SdAdvance(stamp.i)
+  Protected dt.i
+  dt=stamp-SdClock
+  If dt<=0 : ProcedureReturn : EndIf
+  SdClock=stamp : SdTimer=SdTimer-dt
+  While SdTimer<=0
+    SdTimer=SdTimer+DmcTable(SdReg16&15)
+    SdBits=SdBits-1
+    If SdBits=0
+      SdBits=8
+      If SdEmpty=0 : SdEmpty=1 : SdFetch() : EndIf
+    EndIf
+  Wend
+EndProcedure
+
+; A write to $4010, $4013 or $4015 at CPU time stamp (core 1 gets the same write at the same time).
+Procedure SdWrite(addr.i,value.i,stamp.i)
+  SdAdvance(stamp)
+  If addr=$4010
+    SdReg16=value
+    If (value&$80)=0 : SdIrq=0 : EndIf
+  ElseIf addr=$4013
+    SdReg19=value
+  ElseIf addr=$4015
+    SdIrq=0
+    If (value&16)=0
+      SdBytes=0
+    ElseIf SdBytes=0
+      SdBytes=SdReg19*16+1 : SdFetch()
+    EndIf
+  EndIf
+EndProcedure
+
+; CPU cycles before the shadow's IRQ can rise (256 when no IRQ is coming soon): the fetch that empties
+; a non-looping sample with IRQ on comes at the next byte boundary.
+Procedure.i SdBudget()
+  Protected cycles.i
+  If (SdReg16&$C0)<>$80 Or SdBytes<>1 Or SdEmpty<>0 Or SdIrq<>0 Or FI<>0 : ProcedureReturn 256 : EndIf
+  cycles=SdTimer+(SdBits-1)*DmcTable(SdReg16&15)-(CpuCycles-SdClock)
+  If cycles<1 : cycles=1 : EndIf
+  If cycles>256 : cycles=256 : EndIf
+  ProcedureReturn cycles
+EndProcedure
