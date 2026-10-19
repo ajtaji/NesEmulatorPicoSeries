@@ -133,11 +133,17 @@ Procedure ExpInit(chip.i)
   Next
   For i=0 To 1 : V6Duty(i)=0 : V6Volume(i)=0 : V6Mode(i)=0 : Next
   V6Rate=0 : V6Acc=0 : V6Halt=0 : ExpSample=0
+  For i=0 To 127 : N1Sound(i)=0 : Next
+  For i=0 To 7 : N1Output(i)=0 : Next
+  N1Timer=15 : N1Current=0 : N1Mute=0
+  SbInit()
   ExpChip=chip
 EndProcedure
 
 ProcedureRAM ExpWrite(addr.i,value.i)
   Protected ch.i
+  If ExpChip=2 : N1SoundWrite(addr,value) : ProcedureReturn : EndIf
+  If ExpChip=3 : SbWrite(addr,value) : ProcedureReturn : EndIf
   If ExpChip<>1 : ProcedureReturn : EndIf
   ch=(addr>>12)-9
   Select addr&3
@@ -296,8 +302,8 @@ EndProcedure
 
 ; The chip in this cartridge, over dt CPU cycles / into ExpSample.
 ProcedureRAM ExpTick(dt.i)
-  If ExpChip=1 : V6Tick(dt) : EndIf
+  If ExpChip=1 : V6Tick(dt) : ElseIf ExpChip=2 : N1Tick(dt) : ElseIf ExpChip=3 : SbTick(dt) : EndIf
 EndProcedure
 ProcedureRAM ExpMix()
-  If ExpChip=1 : V6Mix() : EndIf
+  If ExpChip=1 : V6Mix() : ElseIf ExpChip=2 : N1Mix() : ElseIf ExpChip=3 : SbMix() : EndIf
 EndProcedure

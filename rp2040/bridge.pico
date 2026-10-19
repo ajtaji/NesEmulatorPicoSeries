@@ -150,6 +150,9 @@ ProcedureRAM.i NesReadSlow(addr.i)
   ElseIf addr>=$5000 And CartMapper=5 And PicoMapActive
     ; MMC5's registers and ExRAM: its scanline status needs the PPU brought up to now.
     CpuNow() : PpuSync(CpuCycles+AccessPhase) : v=M5Read(addr)
+  ElseIf addr>=$4800 And CartMapper=19 And PicoMapActive
+    ; Namco 163's sound RAM and IRQ counter (current once the PPU is brought up to now).
+    CpuNow() : PpuSync(CpuCycles+AccessPhase) : v=N1Read(addr)
   CompilerEndIf
   ElseIf addr=$4016
     If NesStrobe

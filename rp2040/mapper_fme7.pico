@@ -1,0 +1,206 @@
+; Sunsoft FME-7 (mapper 69) on the RP2350 Pico profile, with the Sunsoft 5B's sound: three AY-style
+; square channels with noise and an envelope. Gimmick!, Batman: Return of the Joker, Hebereke.
+; Ported from anvil/mapper_extra*.pi4 (case 69) and anvil/mapper69_audio.pi4.
+;   CORE 0  $8000 picks a command, $A000 writes it: 0-7 CHR 1 KiB banks, 8 the $6000 window (a PRG
+;           bank, or with bit 6 the 8 KiB of RAM, enabled by bit 7), 9-11 PRG 8 KiB banks at $8000,
+;           $A000, $C000 (the last 8 KiB fixed), 12 mirroring, 13-15 the IRQ: a 16-bit counter
+;           counting CPU cycles down, raising the IRQ as it wraps past 0. F7Budget is exact.
+;   CORE 1  the 5B: $C000 selects a register, $E000 writes it; both cross in the bus queue
+;           (command 7) at their CPU time. SbTick integrates the level over time, SbMix turns the
+;           average into ExpSample (40 per volume-table unit: a full channel is about 1.6 2A03 pulses).
+
+; ---------------------------------------------------------------- core 0: the cartridge
+ProcedureRAM F7Update()
+  Protected i.i
+  For i=0 To 2 : PicoPrgMap(i,F7Regs(9+i)&63) : Next
+  PicoPrgMap(3,PicoPrgBytes/8192-1)
+  For i=0 To 7 : PicoChrMap(i,F7Regs(i)) : Next
+EndProcedure
+
+ProcedureRAM F7Ticks(cycles.i)
+  Protected distance.i
+  If F7IrqRun=0 : ProcedureReturn : EndIf
+  distance=F7IrqCount+1 : F7IrqCount=(F7IrqCount-cycles)&65535
+  If cycles>=distance And F7IrqEnable : PicoIrq=1 : F7IrqAssertions=F7IrqAssertions+1 : EndIf
+EndProcedure
+
+ProcedureRAM.i F7Budget()
+  Protected cycles.i
+  If F7IrqRun=0 Or F7IrqEnable=0 Or FI<>0 : ProcedureReturn 256 : EndIf
+  If PicoIrq : ProcedureReturn 1 : EndIf
+  cycles=F7IrqCount+1
+  If cycles>256 : cycles=256 : EndIf
+  ProcedureReturn cycles
+EndProcedure
+
+; $6000-$7FFF: a PRG bank, the RAM, or open bus.
+ProcedureRAM.i F7RamRead(addr.i)
+  If (F7Regs(8)&64)=0
+    ProcedureReturn PeekA(CartPrg+((F7Regs(8)&63)&(PicoPrgBytes/8192-1))*8192+(addr&8191))
+  ElseIf F7Regs(8)&128
+    ProcedureReturn PicoPrgRam(addr&8191)
+  EndIf
+  ProcedureReturn NesOpenBus
+EndProcedure
+
+Procedure F7Write(addr.i,value.i,stamp.i)
+  Protected reg.i,mirror.i
+  If addr<$8000
+    If addr>=$6000 And (F7Regs(8)&$C0)=$C0 : PicoPrgRam(addr&8191)=value : EndIf
+    ProcedureReturn
+  EndIf
+  If addr>=$C000
+    ; the 5B, to core 1 at its CPU time
+    NesPost(7,addr&$E000,value,stamp)
+    ProcedureReturn
+  EndIf
+  If addr<$A000 : F7Select=value&15 : ProcedureReturn : EndIf
+  reg=F7Select
+  PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
+  If reg<8 Or reg=12 : PpuSync(stamp) : EndIf
+  F7Regs(reg)=value
+  If reg=8 And (value&$40)<>0 And (value&3)<>0 And F7Warned=0
+    F7Warned=1 : Say("FME-7: this game asks for more than 8 KiB of PRG-RAM; only 8 KiB is mapped") : Eol()
+  EndIf
+  Select reg
+    Case 12
+      mirror=value&3
+      Select mirror
+        Case 0 : PicoMirrorSet(1)
+        Case 1 : PicoMirrorSet(0)
+        Default : PicoMirrorSet(mirror)
+      EndSelect
+    Case 13
+      F7IrqRun=(value>>7)&1 : F7IrqEnable=value&1 : PicoIrq=0
+    Case 14 : F7IrqCount=(F7IrqCount&$FF00)|value
+    Case 15 : F7IrqCount=(F7IrqCount&255)|(value<<8)
+    Default : F7Update()
+  EndSelect
+  PicoPrgFenceNeeded=0
+  CpuEndWindow()
+EndProcedure
+
+Procedure F7Init()
+  Protected i.i
+  PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
+  For i=0 To 15 : F7Regs(i)=0 : Next
+  F7Regs(9)=0 : F7Regs(10)=1 : F7Regs(11)=2
+  F7Select=0 : F7IrqRun=0 : F7IrqEnable=0 : F7IrqCount=0 : F7IrqAssertions=0 : F7Warned=0 : PicoIrq=0
+  For i=0 To 3 : PicoPrgSlots(i)=-1 : Next
+  For i=0 To 7 : PicoChrSlots(i)=-1 : Next
+  For i=0 To 8191 : PicoPrgRam(i)=0 : Next
+  PicoRamPresent=1
+  F7Update()
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : ChrWritable=0
+  ExpInit(3)
+EndProcedure
+
+; ---------------------------------------------------------------- core 1: the 5B
+; (ExpChip 3.) Tone half-periods are period*16 CPU cycles, noise period*32, envelope period*512.
+ProcedureRAM SbWrite(addr.i,value.i)
+  Protected shape.i
+  If addr<$E000
+    SbSelect=value
+  ElseIf SbSelect<16
+    If SbSelect=1 Or SbSelect=3 Or SbSelect=5 : value=value&15 : EndIf
+    If SbSelect=6 : value=value&31 : EndIf
+    If SbSelect>=8 And SbSelect<=10 : value=value&31 : EndIf
+    SbReg(SbSelect)=value
+    If SbSelect=13
+      shape=value&15 : SbEnvDirection=-1 : SbEnvelope=15
+      If shape&4 : SbEnvDirection=1 : SbEnvelope=0 : EndIf
+      SbEnvHold=0
+      SbEnvTimer=(SbReg(11)|(SbReg(12)<<8))*512
+      If SbEnvTimer=0 : SbEnvTimer=512 : EndIf
+    EndIf
+    SbLevelUpdate()
+  EndIf
+EndProcedure
+
+; The level only changes when a timer fires or a register is written, so it is kept (SbLevel), with
+; the cycles to the next timer event (SbNext): between events a tick is one multiply-add. The plain
+; per-step form (Anvil's ExtraSoundAdvance) is SbTickReference in Diagnostics/asm_reference.picow;
+; the two give the same area, cycles and state.
+ProcedureRAM SbLevelUpdate()
+  Protected c.i,volume.i,level.i
+  level=0
+  For c=0 To 2
+    If (SbHigh(c) Or ((SbReg(7)>>c)&1)) And ((SbNoise&1) Or ((SbReg(7)>>(c+3))&1))
+      volume=SbReg(8+c)&15
+      If SbReg(8+c)&16 : volume=SbEnvelope : EndIf
+      level=level+SbLevels(volume)
+    EndIf
+  Next
+  SbLevel=level
+  SbNext=SbTimer(0)
+  If SbTimer(1)<SbNext : SbNext=SbTimer(1) : EndIf
+  If SbTimer(2)<SbNext : SbNext=SbTimer(2) : EndIf
+  If SbNoiseTimer<SbNext : SbNext=SbNoiseTimer : EndIf
+  If SbEnvTimer<SbNext : SbNext=SbEnvTimer : EndIf
+EndProcedure
+
+ProcedureRAM SbTick(dt.i)
+  Protected stepCycles.i,c.i,period.i,feedback.i,shape.i
+  While dt>0
+    stepCycles=SbNext
+    If stepCycles>dt : stepCycles=dt : EndIf
+    SbArea=SbArea+SbLevel*stepCycles : SbCycles=SbCycles+stepCycles
+    dt=dt-stepCycles
+    SbTimer(0)=SbTimer(0)-stepCycles : SbTimer(1)=SbTimer(1)-stepCycles : SbTimer(2)=SbTimer(2)-stepCycles
+    SbNoiseTimer=SbNoiseTimer-stepCycles : SbEnvTimer=SbEnvTimer-stepCycles
+    SbNext=SbNext-stepCycles
+    If SbNext=0
+      For c=0 To 2
+        If SbTimer(c)=0
+          period=SbReg(c*2)|(SbReg(c*2+1)<<8) : If period=0 : period=1 : EndIf
+          SbTimer(c)=period*16 : SbHigh(c)=SbHigh(c)!1
+        EndIf
+      Next
+      If SbNoiseTimer=0
+        period=SbReg(6)&31 : If period=0 : period=1 : EndIf
+        SbNoiseTimer=period*32 : feedback=(SbNoise!(SbNoise>>3))&1
+        SbNoise=(SbNoise>>1)|(feedback<<16)
+      EndIf
+      If SbEnvTimer=0
+        period=SbReg(11)|(SbReg(12)<<8) : If period=0 : period=1 : EndIf
+        SbEnvTimer=period*512
+        If SbEnvHold=0
+          SbEnvelope=SbEnvelope+SbEnvDirection
+          If SbEnvelope<0 Or SbEnvelope>15
+            shape=SbReg(13)&15
+            If (shape&8)=0
+              SbEnvelope=0 : SbEnvHold=1
+            ElseIf shape&1
+              If shape&2 : SbEnvDirection=-SbEnvDirection : EndIf
+              SbEnvelope=0 : If SbEnvDirection>0 : SbEnvelope=15 : EndIf
+              SbEnvHold=1
+            Else
+              If shape&2 : SbEnvDirection=-SbEnvDirection : EndIf
+              SbEnvelope=0 : If SbEnvDirection<0 : SbEnvelope=15 : EndIf
+            EndIf
+          EndIf
+        EndIf
+      EndIf
+      SbLevelUpdate()
+    EndIf
+  Wend
+EndProcedure
+
+ProcedureRAM SbMix()
+  If SbCycles>0 : ExpSample=NesDiv(SbArea*40,SbCycles) : Else : ExpSample=0 : EndIf
+  SbArea=0 : SbCycles=0
+EndProcedure
+
+Procedure SbInit()
+  Protected i.i
+  For i=0 To 15 : SbReg(i)=0 : SbLevels(i)=PeekU(?SbLevelTable+i*2) : Next
+  For i=0 To 2 : SbTimer(i)=16 : SbHigh(i)=0 : Next
+  SbSelect=0 : SbNoiseTimer=32 : SbNoise=1 : SbEnvTimer=512
+  SbEnvelope=0 : SbEnvDirection=-1 : SbEnvHold=1 : SbArea=0 : SbCycles=0
+  SbLevelUpdate()
+EndProcedure
+
+DataSection
+SbLevelTable: Data.u 0,1,2,3,4,6,8,12,17,24,34,49,69,98,139,197
+EndDataSection
