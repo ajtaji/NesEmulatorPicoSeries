@@ -66,7 +66,6 @@ if ($outputPath.EndsWith('.uf2')) {
         if ($blockEnd -gt $imageEnd) { $imageEnd = $blockEnd }
     }
     if ($imageEnd -gt 0x10050000) {
-        if ($Port) { throw ('Image reaches 0x{0:X8}, past the ROM store at 0x10050000: games stored on the board were overwritten; reload them with tools/rom_loader.py' -f $imageEnd) }
         throw ('Image reaches 0x{0:X8}, past the ROM store at 0x10050000: uploading it would overwrite the stored games' -f $imageEnd)
     }
 }

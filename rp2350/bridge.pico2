@@ -145,6 +145,11 @@ ProcedureRAM.i NesReadSlow(addr.i)
     CompilerIf #NES_PICO_MAPPERS=1
       If PicoMapActive : v=PicoRamRead(addr) : EndIf
     CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+  ElseIf addr>=$5000 And CartMapper=5 And PicoMapActive
+    ; MMC5's registers and ExRAM: its scanline status needs the PPU brought up to now.
+    CpuNow() : PpuSync(CpuCycles+AccessPhase) : v=M5Read(addr)
+  CompilerEndIf
   ElseIf addr=$4016
     If NesStrobe
       v=(NesController&1)|$40

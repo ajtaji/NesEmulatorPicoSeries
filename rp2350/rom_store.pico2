@@ -94,7 +94,7 @@ Procedure RomStoreScan()
       ok=0 : Say("ROMSTORE refused: this diagnostic build lacks a CHR window") : Eol()
     ElseIf PicoSupported(mapper)=0
       ok=0 : Say("ROMSTORE entry ") : Num(n) : Say(" refused: mapper ") : Num(mapper) : Say(" is unavailable on this board") : Eol()
-    ElseIf (PeekA(e+35)&$F8)<>0 Or ((PeekA(e+35)&2)<>0 And PicoMapVersion<>2)
+    ElseIf ((PeekA(e+35)&$F8)<>0 And Not (mapper=5 And (PeekA(e+35)&$C0)=0)) Or ((PeekA(e+35)&2)<>0 And PicoMapVersion<>2)
       ok=0 : Say("ROMSTORE refused: invalid cartridge flags/version") : Eol()
     ElseIf (PeekU(e+36)&(PeekU(e+36)-1))<>0 Or (PeekU(e+38)&(PeekU(e+38)-1))<>0
       ok=0 : Say("ROMSTORE refused: non-power-of-two banks") : Eol()
@@ -132,6 +132,11 @@ Procedure CartSelect(number.i)
   CartPrg=#ROMSTORE_FLASH+PeekL(e+40) : CartChr=#ROMSTORE_FLASH+PeekL(e+48)
   PicoPrgBytes=PeekL(e+44) : PicoChrBytes=CartChrBanks*8192
   PicoSubmapper=(PeekA(e+34)>>4)&15 : PicoRamPresent=(PeekA(e+35)&4)<>0
+  CompilerIf #PICO_ADVANCED=1
+    ; MMC5's PRG-RAM size, bits 3-5 of the flags: 0 none, n = 8 KiB << (n-1).
+    M5RamBytes=0
+    If (PeekA(e+35)>>3)&7 : M5RamBytes=8192<<(((PeekA(e+35)>>3)&7)-1) : EndIf
+  CompilerEndIf
   PicoChrDecoded=0
   If (PeekA(e+35)&2)<>0 : PicoChrDecoded=CartChr+PicoChrBytes : EndIf
 EndProcedure

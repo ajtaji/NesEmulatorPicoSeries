@@ -17,6 +17,7 @@
 EnableExplicit
 XIncludeFile "../runtime.pico2"
 XIncludeFile "../cartridge.pico2"
+XIncludeFile "Shared/Bluetooth/Diagnostics/sbc_vectors.pmi"
 Global Checks.i, Failures.i
 Procedure Check(actual.i, expected.i)
   Checks=Checks+1
@@ -420,6 +421,130 @@ Procedure CompareChrRam()
   PpuMask=$1E : PpuCtrl=0 : PpuFineX=0 : PpuV=0
 EndProcedure
 
+CompilerIf #PICO_ADVANCED=1
+; MMC5's scanline IRQ: mapper5.pico's event model (one event at dot 3 of each rendered visible line)
+; against Anvil's fetch-by-fetch replay (anvil/mapper5_video.pi4 M5PpuRead/M5PpuTicks), ported here
+; with its own state. Same PPU positions, same tick chunks, several frames with rendering on: the
+; scanline and the pending IRQ must agree after every chunk, and in-frame on the visible lines.
+Global R5Dots.i, R5LastRead.i, R5LastAddr.i, R5Matches.i, R5InFrame.i, R5Scanline.i, R5Pending.i
+Procedure R5PpuRead(addr.i,dot.i)
+  If dot-R5LastRead>=9
+    R5InFrame=0 : R5Matches=0 : R5LastAddr=-1
+  EndIf
+  If R5Matches>=2
+    R5Matches=0
+    If R5InFrame=0
+      R5InFrame=1 : R5Scanline=0 : R5Pending=0
+    Else
+      R5Scanline=(R5Scanline+1)&255
+      If R5Scanline=M5IrqTarget And M5IrqTarget<>0 : R5Pending=1 : EndIf
+      If R5Scanline=240 : R5InFrame=0 : R5Scanline=0 : R5Pending=0 : R5Matches=0 : R5LastAddr=-1 : EndIf
+    EndIf
+  ElseIf addr>=$2000 And addr<$3000 And addr=R5LastAddr
+    R5Matches=R5Matches+1
+  Else
+    R5Matches=0
+  EndIf
+  R5LastRead=dot : R5LastAddr=addr
+EndProcedure
+Procedure R5PpuTicks(cycles.i)
+  Protected rest.i,line.i,dot.i,odd.i,width.i,edge.i,stepDots.i,addr.i,fast.i,last.i
+  rest=cycles*3 : line=PpuLine : dot=PpuDot : odd=PpuOdd
+  While rest>0
+    width=341 : If line=261 And odd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    edge=width : fast=0
+    If (PpuMask&24)<>0 And (line<240 Or line=261)
+      If dot>=5 And dot<337 And R5Matches=0 And R5LastAddr=0
+        edge=337 : fast=1
+      ElseIf dot<339
+        If dot=0 : edge=1 : Else : edge=((dot-1)/2+1)*2+1 : EndIf
+      EndIf
+    EndIf
+    stepDots=edge-dot : If stepDots>rest : stepDots=rest : EndIf
+    dot=dot+stepDots : rest=rest-stepDots : R5Dots=R5Dots+stepDots
+    If fast
+      If R5Dots-stepDots-R5LastRead>=9 : R5InFrame=0 : EndIf
+      last=dot : If (last&1)=0 : last=last-1 : EndIf
+      If last>335 : last=335 : EndIf
+      R5LastRead=R5Dots-(dot-last) : R5Matches=0 : R5LastAddr=0
+      If last<257 Or last>=321
+        If (last&7)=1 : R5LastAddr=$2000 : ElseIf (last&7)=3 : R5LastAddr=$23C0 : EndIf
+      EndIf
+    EndIf
+    If dot=edge
+      If dot=width
+        dot=0 : line=line+1 : If line=262 : line=0 : odd=odd!1 : EndIf
+      Else
+        addr=0
+        If dot>=337 : addr=$2000
+        ElseIf dot<257 Or dot>=321
+          If (dot&7)=1 : addr=$2000 : ElseIf (dot&7)=3 : addr=$23C0 : EndIf
+        EndIf
+        R5PpuRead(addr,R5Dots)
+      EndIf
+    EndIf
+  Wend
+  If R5Dots-R5LastRead>=9 : R5InFrame=0 : R5Matches=0 : R5LastAddr=-1 : EndIf
+EndProcedure
+; Moves the PPU position on by dots (no rendering: only the counters the two models read).
+Procedure R5Advance(dots.i)
+  Protected width.i
+  While dots>0
+    width=341 : If PpuLine=261 And PpuOdd<>0 And (PpuMask&24)<>0 : width=340 : EndIf
+    If PpuDot+dots<width : PpuDot=PpuDot+dots : ProcedureReturn : EndIf
+    dots=dots-(width-PpuDot) : PpuDot=0 : PpuLine=PpuLine+1
+    If PpuLine=262 : PpuLine=0 : PpuOdd=PpuOdd!1 : EndIf
+  Wend
+EndProcedure
+Procedure CompareMmc5Irq()
+  Protected run.i, chunk.i, cycles.i, savedMask.i
+  savedMask=PpuMask
+  For run=0 To 199
+    PpuMask=$1E : PpuOdd=VerifyRand(2)
+    ; Start in vertical blank, so both models begin outside a frame.
+    PpuLine=241+VerifyRand(19) : PpuDot=VerifyRand(341)
+    M5IrqTarget=1+VerifyRand(239) : M5IrqEnable=1
+    M5InFrame=0 : M5Scanline=0 : M5Pending=0
+    R5InFrame=0 : R5Scanline=0 : R5Pending=0 : R5Matches=0 : R5LastAddr=-1 : R5Dots=100000 : R5LastRead=0
+    For chunk=0 To 1499
+      cycles=1+VerifyRand(120)
+      R5PpuTicks(cycles) : M5Ticks(cycles) : R5Advance(cycles*3)
+      Check(M5Pending,R5Pending) : Check(M5Scanline,R5Scanline)
+      If PpuLine>=1 And PpuLine<240 : Check(M5InFrame,R5InFrame) : EndIf
+      If M5Pending And R5Pending And VerifyRand(3)=0 : M5Pending=0 : R5Pending=0 : EndIf
+    Next
+    If (run&15)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  PpuMask=savedMask : M5IrqEnable=0 : M5Pending=0 : PicoIrq=0 : PpuLine=0 : PpuDot=0
+EndProcedure
+CompilerEndIf
+
+; The SBC encoder (the library's assembly on Arm) against the codec's test vectors, mono and stereo:
+; moved here from verify.picow on 2026-10-18 so that image stays below the ROM store.
+Procedure CodecVectorTests()
+  Protected block.i, i.i, mode.i, expected.i
+  For mode=0 To 1
+  SbcSetStereo(mode) : expected=?CodecVectorExpected
+  If mode : expected=?CodecVectorStereo : EndIf
+  SbcReset()
+  For block=0 To 63
+    For i=0 To 127 : sbc_pcm[i]=PeekW(?CodecVectorPcm+(block*128+i)*2) : Next
+    SbcEncode()
+    For i=0 To 63+mode*4 : Check(sbc_out[i],PeekA(expected+block*(64+mode*4)+i)) : Next
+    SafetyPet() : UsbSerialTask()
+  Next
+  Next
+  SbcSetStereo(0)
+  ; Timing of one stereo frame (analysis alone, then the whole encode).
+  SbcSetStereo(1) : block=Micros()
+  For i=0 To 99 : SbcAnalyze() : Next
+  mode=Micros()-block : block=Micros()
+  For i=0 To 99 : SbcEncode() : Next
+  expected=Micros()-block
+  Say("SBC TIMING analyze_us_x100=") : Num(mode) : Say(" encode_us_x100=") : Num(expected) : Eol()
+  SbcSetStereo(0)
+EndProcedure
+
 Procedure TestMain()
   Protected start.i
   SafetyBoot() : ClockInitKhz(150000) : TimerInit() : UsbSerialInit()
@@ -441,6 +566,12 @@ Procedure TestMain()
   CompareApu()
   Say("STEP CompareChrRam checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CompareChrRam()
+  CompilerIf #PICO_ADVANCED=1
+    Say("STEP CompareMmc5Irq checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareMmc5Irq()
+  CompilerEndIf
+  Say("STEP CodecVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CodecVectorTests()
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
   If Failures=0

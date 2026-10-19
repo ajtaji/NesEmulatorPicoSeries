@@ -33,6 +33,14 @@ def signed(crc):
     return crc - (1 << 32) if crc & 0x80000000 else crc
 
 
+def ram_code(cart):
+    """MMC5 only: its PRG-RAM size in flag bits 3-5 (0 none, n = 8 KiB << (n-1)); the firmware maps
+    RAM banks by it. Every other board leaves the bits clear, as older firmware requires."""
+    if cart.mapper != 5 or not cart.ram_size:
+        return 0
+    return cart.ram_size.bit_length() - 13
+
+
 def layout(paths, target="rp2040"):
     """Return (games, directory bytes, [(offset, data)]) or raise ValueError."""
     if len(paths) > MAX_GAMES:
@@ -53,7 +61,8 @@ def layout(paths, target="rp2040"):
                              f'need up to ${at:X} ({at - DATA} of {ENDS[target] - DATA} bytes)')
         blobs += [(prg_at, prg)] + ([(chr_at, chr_data)] if chr_data else [])
         entries += struct.pack('<32sBBBBHHIIIIII', title, cart.mapper, cart.mirror, int(cart.conflicts)|(cart.submapper<<4),
-                               int(not chr_data)|(4 if cart.ram_size else 0)|(2 if cart.chr and cart.mapper not in (0,2,66) else 0), len(prg) // 32768,
+                               int(not chr_data)|(4 if cart.ram_size else 0)|(2 if cart.chr and cart.mapper not in (0,2,66) else 0)|
+                               (ram_code(cart) << 3), len(prg) // 32768,
                                len(cart.chr) // 8192 if cart.chr else 2,
                                prg_at, len(prg), chr_at, len(chr_data),
                                zlib.crc32(prg), zlib.crc32(chr_data))

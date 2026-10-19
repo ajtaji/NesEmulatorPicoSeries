@@ -24,6 +24,25 @@ Global PicoPrgCopyUs.i,PicoChrCopyUs.i,PicoFenceUs.i,PicoPrgCopies.i,PicoChrCopi
 
 Global PicoIrqDot.i,PicoPredictCalls.i,PicoPredictUs.i
 
-Global Dim PicoNtDesc.u(2048)
+Global Dim PicoNtDesc.u(5120)
+; MMC5 (mapper5.pico)
+Global M5PrgMode.i,M5ChrMode.i,M5Protect1.i,M5Protect2.i,M5ExMode.i,M5NtConfig.i,M5FillTile.i,M5FillAttr.i
+Global M5ChrHigh.i,M5LastSet.i,M5Split.i,M5SplitScroll.i,M5SplitBank.i,M5MulA.i,M5MulB.i
+Global M5Scanline.i,M5InFrame.i,M5Pending.i,M5IrqEnable.i,M5IrqTarget.i,M5IrqAssertions.i
+Global M5PpuControl.i,M5PpuMask.i,M5RamBytes.i,M5RamBase.i,M5Unmapped.i,M5WarnedAttr.i,M5WarnedSplit.i
+Global Dim M5Prg.i(5)
+Global Dim M5Chr.i(12)
+Global Dim M5PrgTags.i(4)
+Global Dim M5RamSlots.i(4)
+Global Dim M5SprSlots.i(8)
+Global Dim M5Ram.a(65536)
+Global Dim M5SprDecoded.a(8192)
+Declare M5Init()
+Declare M5Write(addr.i,value.i,stamp.i)
+Declare.i M5Read(addr.i)
+Declare.i M5RamRead(addr.i)
+Declare M5Ticks(cycles.i)
+Declare.i M5Budget()
+Declare M5PpuWatch()
 
 Global PicoQuickWrites.i
