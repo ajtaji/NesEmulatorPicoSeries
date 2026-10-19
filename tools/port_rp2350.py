@@ -58,6 +58,18 @@ EndProcedure
         # Hot bus adapters must share SRAM with the computed-dispatch CPU.
         for proc in ('PicoMapperWrite','PicoNtRead','PicoNtWrite','PicoMirrorSet','PicoInvalidateChr','PicoChrSwitch','PicoChrFour','PicoRamRead','PicoChrWrite','PicoRegisterNotice','PicoWorkerPrgSet'):
             text=re.sub(r'Procedure(\.i)? '+proc+r'\(',lambda m:'ProcedureRAM'+(m[1] or '')+' '+proc+'(',text)
+    if name == 'ppu.pico':
+        # The background tile cache at 2048 entries (40 KB with its tags), from 1024: SMB3 shows more
+        # distinct tile rows than 1024 hold, and missed ~100k rows a second; at 2048 the capacity
+        # misses are gone (4096 gives no more). The Pico W keeps 1024 for its SRAM. The tile loop's
+        # hash mask is 11 bits in tools/m33/ppu_render_tile.s, the RP2350's only form of that loop.
+        for old, new in (('Global Dim RgbCache.i(4096)', 'Global Dim RgbCache.i(8192)'),
+                         ('Global Dim RgbTags.i(1024)', 'Global Dim RgbTags.i(2048)'),
+                         ('  For i=0 To 1023'+chr(10), '  For i=0 To 2047'+chr(10)),
+                         ('  For i=0 To 1023'+chr(13)+chr(10), '  For i=0 To 2047'+chr(13)+chr(10))):
+            text = text.replace(old, new)
+        if 'RgbTags.i(2048)' not in text or 'For i=0 To 2047' not in text:
+            raise SystemExit('ppu.pico: the tile cache size lines were not found')
     if name == 'dmc_shadow.pico':
         # Core 0 runs it at every sync while a sample plays; the RP2040 keeps it in flash for SRAM.
         for proc in ('SdFetch','SdAdvance','SdWrite','SdBudget'):
