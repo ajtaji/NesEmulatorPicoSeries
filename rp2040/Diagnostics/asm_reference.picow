@@ -217,6 +217,160 @@ Procedure CompareOamDma()
   PpuOamAddr=0
 EndProcedure
 
+; apu.pico's ApuTick in its plain form.
+Procedure ApuTickReference(dt.i)
+  Protected c.i, feedback.i, period.i, ticks.i
+  For c=0 To 1
+    ApuTimer(c)=ApuTimer(c)-dt
+    If ApuTimer(c)<=0
+      period=2*(ApuPeriod(c)+1) : ticks=1+NesDiv(0-ApuTimer(c),period)
+      ApuTimer(c)=ApuTimer(c)+ticks*period
+      ApuSeq(c)=(ApuSeq(c)+ticks)&7
+    EndIf
+  Next
+  ApuTimer(2)=ApuTimer(2)-dt
+  If ApuTimer(2)<=0
+    period=ApuPeriod(2)+1 : ticks=1+NesDiv(0-ApuTimer(2),period)
+    ApuTimer(2)=ApuTimer(2)+ticks*period
+    If ApuLength(2)>0 And ApuLinear>0
+      ApuSeq(2)=(ApuSeq(2)+ticks)&31
+      If ApuSeq(2)<16
+        TriDac=15-ApuSeq(2)
+      Else
+        TriDac=ApuSeq(2)-16
+      EndIf
+    EndIf
+  EndIf
+  ApuTimer(3)=ApuTimer(3)-dt
+  While ApuTimer(3)<=0
+    ApuTimer(3)=ApuTimer(3)+NoiseTable(ApuReg(14)&15)
+    If ApuReg(14)&$80
+      feedback=(NoiseShift!(NoiseShift>>6))&1
+    Else
+      feedback=(NoiseShift!(NoiseShift>>1))&1
+    EndIf
+    NoiseShift=(NoiseShift>>1)|(feedback<<14)
+  Wend
+  DmcTimer=DmcTimer-dt
+EndProcedure
+; apu.pico's ApuMixSample in its plain form.
+Procedure ApuMixSampleReference()
+  Protected c.i, duty.i, pulse.i, noise.i, target.i, x.i
+  pulse=0 : noise=0
+  For c=0 To 1
+    If ApuLength(c)>0 And ApuPeriod(c)>=8
+      target=ApuTarget(c)
+      If target<=$7FF
+        duty=(ApuReg(c*4)>>6)&3
+        If duty=0
+          duty=$02
+        ElseIf duty=1
+          duty=$06
+        ElseIf duty=2
+          duty=$1E
+        Else
+          duty=$F9
+        EndIf
+        If (duty>>ApuSeq(c))&1
+          pulse=pulse+ApuVolume(c)
+        EndIf
+      EndIf
+    EndIf
+  Next
+  If ApuLength(3)>0 And (NoiseShift&1)=0
+    noise=ApuVolume(2)
+  EndIf
+  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)
+  ApuOutput=ApuLastY*65400
+  If ApuOutput<0
+    ApuOutput=ApuOutput+65535
+  EndIf
+  ApuOutput=x-ApuLastX+(ApuOutput>>16)
+  ApuLastX=x
+  If ApuOutput>32767
+    ApuOutput=32767
+  ElseIf ApuOutput< -32768
+    ApuOutput= -32768
+  EndIf
+  ApuLastY=ApuOutput
+  Pcm(ApuSamples&(#NES_AUDIO_RING_SAMPLES-1))=ApuOutput
+  If ApuCapture<4096
+    ApuCapture=ApuCapture+1
+  EndIf
+  If ApuOutput<ApuMinimum
+    ApuMinimum=ApuOutput
+  EndIf
+  If ApuOutput>ApuMaximum
+    ApuMaximum=ApuOutput
+  EndIf
+  If ApuOutput<>0
+    ApuNonzero=ApuNonzero+1
+  EndIf
+  ApuSamples=ApuSamples+1
+EndProcedure
+Global Dim ApuState.i(40)
+Global Dim ApuWant.i(40)
+Global Dim ApuRegState.a(24)
+; Every value ApuTick or ApuMixSample reads or writes, saved and put back, so both forms start alike.
+Procedure ApuSave()
+  Protected i.i
+  For i=0 To 3 : ApuState(i)=ApuTimer(i) : ApuState(4+i)=ApuSeq(i) : ApuState(8+i)=ApuLength(i) : ApuState(12+i)=ApuPeriod(i) : Next
+  For i=0 To 2 : ApuState(16+i)=EnvDecay(i) : Next
+  ApuState(20)=TriDac : ApuState(21)=NoiseShift : ApuState(22)=DmcTimer : ApuState(23)=ApuLinear : ApuState(24)=DmcLevel
+  ApuState(25)=ApuLastX : ApuState(26)=ApuLastY : ApuState(27)=ApuOutput : ApuState(28)=ApuSamples : ApuState(29)=ApuCapture
+  ApuState(30)=ApuMinimum : ApuState(31)=ApuMaximum : ApuState(32)=ApuNonzero
+  For i=0 To 23 : ApuRegState(i)=ApuReg(i) : Next
+EndProcedure
+Procedure ApuRestore()
+  Protected i.i
+  For i=0 To 3 : ApuTimer(i)=ApuState(i) : ApuSeq(i)=ApuState(4+i) : ApuLength(i)=ApuState(8+i) : ApuPeriod(i)=ApuState(12+i) : Next
+  For i=0 To 2 : EnvDecay(i)=ApuState(16+i) : Next
+  TriDac=ApuState(20) : NoiseShift=ApuState(21) : DmcTimer=ApuState(22) : ApuLinear=ApuState(23) : DmcLevel=ApuState(24)
+  ApuLastX=ApuState(25) : ApuLastY=ApuState(26) : ApuOutput=ApuState(27) : ApuSamples=ApuState(28) : ApuCapture=ApuState(29)
+  ApuMinimum=ApuState(30) : ApuMaximum=ApuState(31) : ApuNonzero=ApuState(32)
+  For i=0 To 23 : ApuReg(i)=ApuRegState(i) : Next
+EndProcedure
+Procedure ApuRandom()
+  Protected i.i
+  For i=0 To 3
+    ApuTimer(i)=VerifyRand(300)-20 : ApuSeq(i)=VerifyRand(32) : ApuLength(i)=VerifyRand(3)
+    ApuPeriod(i)=VerifyRand(2048)
+    If VerifyRand(4)=0 : ApuPeriod(i)=VerifyRand(12) : EndIf
+  Next
+  For i=0 To 1 : ApuSeq(i)=ApuSeq(i)&7 : Next
+  For i=0 To 2 : EnvDecay(i)=VerifyRand(16) : Next
+  For i=0 To 23 : ApuReg(i)=VerifyRand(256) : Next
+  TriDac=VerifyRand(16) : NoiseShift=1+VerifyRand(32767) : DmcTimer=100000 : ApuLinear=VerifyRand(3) : DmcLevel=VerifyRand(128)
+  ApuLastX=VerifyRand(1200) : ApuLastY=VerifyRand(65536)-32768 : ApuSamples=VerifyRand(100000)
+  ApuCapture=4090+VerifyRand(10) : ApuMinimum=VerifyRand(40000)-30000 : ApuMaximum=VerifyRand(40000)-10000 : ApuNonzero=VerifyRand(1000)
+EndProcedure
+; Random APU states through the plain and the assembly forms of each routine: every value either writes.
+Procedure CompareApu()
+  Protected pass.i, i.i, dt.i, pcmAt.i, pcmWant.i
+
+  For pass=0 To 19999
+    ApuRandom() : ApuSave()
+    dt=1+VerifyRand(38)
+    ApuTickReference(dt)
+    For i=0 To 3 : ApuWant(i)=ApuTimer(i) : ApuWant(4+i)=ApuSeq(i) : Next
+    ApuWant(8)=TriDac : ApuWant(9)=NoiseShift : ApuWant(10)=DmcTimer
+    ApuRestore() : ApuTick(dt)
+    For i=0 To 3 : Check(ApuTimer(i),ApuWant(i)) : Check(ApuSeq(i),ApuWant(4+i)) : Next
+    Check(TriDac,ApuWant(8)) : Check(NoiseShift,ApuWant(9)) : Check(DmcTimer,ApuWant(10))
+    ApuRestore()
+    pcmAt=ApuSamples&(#NES_AUDIO_RING_SAMPLES-1)
+    ApuMixSampleReference()
+    pcmWant=Pcm(pcmAt)
+    ApuWant(0)=ApuOutput : ApuWant(1)=ApuLastX : ApuWant(2)=ApuLastY : ApuWant(3)=ApuSamples : ApuWant(4)=ApuCapture
+    ApuWant(5)=ApuMinimum : ApuWant(6)=ApuMaximum : ApuWant(7)=ApuNonzero
+    ApuRestore() : Pcm(pcmAt)=12345 : ApuMixSample()
+    Check(ApuOutput,ApuWant(0)) : Check(ApuLastX,ApuWant(1)) : Check(ApuLastY,ApuWant(2)) : Check(ApuSamples,ApuWant(3))
+    Check(ApuCapture,ApuWant(4)) : Check(ApuMinimum,ApuWant(5)) : Check(ApuMaximum,ApuWant(6)) : Check(ApuNonzero,ApuWant(7))
+    Check(Pcm(pcmAt),pcmWant)
+    If (pass&1023)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+EndProcedure
+
 Procedure TestMain()
   Protected start.i
   SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
@@ -234,6 +388,8 @@ Procedure TestMain()
   ComparePpuBuildSpriteCache()
   Say("STEP CompareOamDma checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CompareOamDma()
+  Say("STEP CompareApu checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CompareApu()
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
   If Failures=0
