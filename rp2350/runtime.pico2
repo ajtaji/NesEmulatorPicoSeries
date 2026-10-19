@@ -384,7 +384,7 @@ Procedure Main()
       lastIdle0=Core0IdleUs : lastIdle1=Core1IdleUs : lastRun=CpuRunUs : lastSync=SyncUs : lastWin=Windows
       Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes)
       CompilerIf #PICO_ADVANCED=1
-        Say(" map_irqs=") : Num(PicoIrqAssertions+M5IrqAssertions+VrcIrqAssertions)
+        Say(" map_irqs=") : Num(PicoIrqAssertions+M5IrqAssertions+VrcIrqAssertions+N1IrqAssertions+F7IrqAssertions)
       CompilerEndIf
       Say(" nmi=") : Num(WorkerNmi) : Say(" err=") : Num(WorkerError+NesBridgeError)
       Say(" stop=") : Num(Stopped) : Say(" opcode=") : Num(BadOpcode) : Eol()

@@ -1,0 +1,270 @@
+; Namco 163 (mapper 19) on the RP2350 Pico profile, with its sound: up to eight wavetable channels
+; playing 4-bit samples from 128 bytes of on-chip RAM. Megami Tensei II, Erika to Satoru no Yume
+; Bouken, King of Kings, Splatter House: Wanpaku Graffiti.
+;   CORE 0  banking ($E000/$E800/$F000: 8 KiB at $8000/$A000/$C000, the last 8 KiB fixed; $8000-$B800:
+;           eight 1 KiB CHR banks), nametable selects ($C000-$D800, CIRAM pages), PRG-RAM, the 15-bit
+;           IRQ counter ($5000/$5800, counting CPU cycles up to $7FFF) with an exact CPU budget, and
+;           the CPU's view of the sound RAM ($F800 address port, $4800 data port with auto-increment).
+;   CORE 1  the sound: every RAM write crosses in the bus queue (command 7, as $10000+address) at its
+;           CPU time, so core 1's copy changes when the game changed it; one channel is updated every
+;           15 CPU cycles, round-robin over the enabled ones, and ExpSample is their average.
+; Not drawn yet: nametables taken from CHR ROM and CHR-RAM patterns ($E0+ values); a game that asks
+; for either is told so on the serial port.
+
+; ---------------------------------------------------------------- core 0: the cartridge
+ProcedureRAM N1PrgUpdate()
+  PicoPrgMap(0,N1Prg(0)) : PicoPrgMap(1,N1Prg(1)) : PicoPrgMap(2,N1Prg(2))
+  PicoPrgMap(3,PicoPrgBytes/8192-1)
+EndProcedure
+
+ProcedureRAM N1Ticks(cycles.i)
+  If N1IrqEnable=0 Or N1IrqCounter>=$7FFF : ProcedureReturn : EndIf
+  N1IrqCounter=N1IrqCounter+cycles
+  If N1IrqCounter>=$7FFF
+    N1IrqCounter=$7FFF : PicoIrq=1 : N1IrqAssertions=N1IrqAssertions+1
+  EndIf
+EndProcedure
+
+ProcedureRAM.i N1Budget()
+  Protected cycles.i
+  If N1IrqEnable=0 Or FI<>0 Or N1IrqCounter>=$7FFF : ProcedureReturn 256 : EndIf
+  If PicoIrq : ProcedureReturn 1 : EndIf
+  cycles=$7FFF-N1IrqCounter
+  If cycles>256 : cycles=256 : EndIf
+  If cycles<1 : cycles=1 : EndIf
+  ProcedureReturn cycles
+EndProcedure
+
+; A sound-RAM byte from the CPU: core 0's copy now, core 1's at its CPU time.
+ProcedureRAM N1RamWrite(value.i,stamp.i)
+  Protected address.i
+  address=N1Address&127
+  N1Ram(address)=value
+  NesPost(7,$10000+address,value,stamp)
+  If N1Address&128 : N1Address=128|((address+1)&127) : EndIf
+EndProcedure
+
+; $4800-$5FFF reads (the caller has synchronized the PPU, so the counter is current).
+ProcedureRAM.i N1Read(addr.i)
+  Protected value.i,address.i
+  Select addr&$F800
+    Case $4800
+      address=N1Address&127 : value=N1Ram(address)
+      If N1Address&128 : N1Address=128|((address+1)&127) : EndIf
+      ProcedureReturn value
+    Case $5000 : ProcedureReturn N1IrqCounter&255
+    Case $5800 : ProcedureReturn ((N1IrqCounter>>8)&127)|(N1IrqEnable<<7)
+  EndSelect
+  ProcedureReturn NesOpenBus
+EndProcedure
+
+ProcedureRAM N1Nametable(table.i,value.i)
+  If value>=$E0
+    If PicoNtSlots(table)<>(value&1)
+      PicoNtSlots(table)=value&1
+      PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+(value&1)*1024,1024)
+      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+(value&1)*2048,2048)
+      BgCacheAddr=-1 : RgbLastKey=-1 : PicoMirror=-1
+    EndIf
+  ElseIf N1WarnedNt=0
+    N1WarnedNt=1 : Say("N163: this game takes a nametable from CHR ROM, which is not drawn yet") : Eol()
+  EndIf
+EndProcedure
+
+Procedure N1Write(addr.i,value.i,stamp.i)
+  If addr<$8000
+    If addr>=$6000
+      PicoPrgRam(addr&8191)=value
+    ElseIf (addr&$F800)=$4800
+      N1RamWrite(value,stamp)
+    ElseIf (addr&$F800)=$5000
+      PpuSync(stamp) : N1IrqCounter=(N1IrqCounter&$7F00)|value : PicoIrq=0
+    ElseIf (addr&$F800)=$5800
+      PpuSync(stamp) : N1IrqCounter=(N1IrqCounter&255)|((value&127)<<8) : N1IrqEnable=value>>7 : PicoIrq=0
+    EndIf
+    CpuEndWindow()
+    ProcedureReturn
+  EndIf
+  PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
+  If addr<$C000
+    PpuSync(stamp)
+    If value>=$E0 And N1WarnedChr=0 And (N1ChrRamOff>>(((addr>>14)&1)+6)&1)=0
+      N1WarnedChr=1 : Say("N163: this game maps CHR-RAM patterns, which are not drawn yet") : Eol()
+    EndIf
+    PicoChrMap((addr>>11)&7,value)
+  ElseIf addr<$E000
+    PpuSync(stamp) : N1Nametable((addr>>11)&3,value)
+  Else
+    Select addr&$F800
+      Case $E000 : N1Prg(0)=value&63 : N1PrgUpdate() : NesPost(7,$E000,value,stamp)
+      Case $E800 : N1Prg(1)=value&63 : N1ChrRamOff=value&$C0 : N1PrgUpdate()
+      Case $F000 : N1Prg(2)=value&63 : N1PrgUpdate()
+      Case $F800 : N1Address=value
+    EndSelect
+  EndIf
+  PicoPrgFenceNeeded=0
+  CpuEndWindow()
+EndProcedure
+
+Procedure N1Init()
+  Protected i.i
+  PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
+  N1Prg(0)=0 : N1Prg(1)=1 : N1Prg(2)=2 : N1Address=0 : N1ChrRamOff=0
+  N1IrqCounter=0 : N1IrqEnable=0 : N1IrqAssertions=0 : N1WarnedNt=0 : N1WarnedChr=0 : PicoIrq=0
+  For i=0 To 127 : N1Ram(i)=0 : Next
+  For i=0 To 3 : PicoPrgSlots(i)=-1 : Next
+  For i=0 To 7 : PicoChrSlots(i)=-1 : Next
+  For i=0 To 8191 : PicoPrgRam(i)=0 : Next
+  PicoRamEnable=1 : PicoRamProtect=0 : PicoRamPresent=1
+  N1PrgUpdate()
+  For i=0 To 7 : PicoChrMap(i,i) : Next
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : ChrWritable=0
+  ExpInit(2)
+EndProcedure
+
+; ---------------------------------------------------------------- core 1: the sound
+; (ExpChip 2.) N1Sound is core 1's copy of the 128 bytes; channel c (0 = the first updated, the
+; highest-numbered one) keeps its registers at $78-8*c: frequency (18 bits), phase (24 bits),
+; length (256-4*L samples), wave address, volume; $7F bits 4-6 = enabled channels - 1.
+ProcedureRAM N1SoundWrite(addr.i,value.i)
+  If addr>=$10000
+    N1Sound(addr&127)=value
+  ElseIf addr=$E000
+    N1Mute=(value>>6)&1
+  EndIf
+EndProcedure
+
+; One channel's update: phase on by its frequency, its sample out as (nibble - 8) * volume.
+ProcedureRAM N1Channel(base.i)
+  Protected freq.i,phase.i,length.i,sample.i,position.i
+  freq=N1Sound(base)|(N1Sound(base+2)<<8)|((N1Sound(base+4)&3)<<16)
+  phase=N1Sound(base+1)|(N1Sound(base+3)<<8)|(N1Sound(base+5)<<16)
+  length=(256-(N1Sound(base+4)&$FC))<<16
+  phase=(phase+freq)%length
+  N1Sound(base+1)=phase&255 : N1Sound(base+3)=(phase>>8)&255 : N1Sound(base+5)=(phase>>16)&255
+  position=((phase>>16)+N1Sound(base+6))&255
+  sample=(N1Sound(position>>1)>>((position&1)*4))&15
+  N1Output(((base-$40)>>3)&7)=(sample-8)*(N1Sound(base+7)&15)
+EndProcedure
+
+; Every 15 CPU cycles, the next enabled channel (N1Channel's work, inline). Thumb-1; the plain form
+; (N1Tick and N1Channel as first written) is in Diagnostics/asm_reference.picow. r7 = the sound
+; RAM, r6 = the channel's registers. The phase wraps by subtraction: the frequency (18 bits) is
+; always below the shortest wave (4 samples = 4<<16), so one subtraction does it; the loop covers a
+; phase the game left out of range.
+Global N1TickDt.i
+ProcedureRAM N1Tick(dt.i)
+  N1TickDt=dt
+  ASM
+    push {r7}
+    ldr r0, =global_n1mute
+    ldr r0, [r0]
+    cmp r0, #0
+    bne __n1t_done
+    ldr r1, =global_n1timer
+    ldr r2, [r1]
+    ldr r0, =global_n1tickdt
+    ldr r0, [r0]
+    subs r2, r2, r0
+    str r2, [r1]
+__n1t_next:
+    ldr r1, =global_n1timer
+    ldr r2, [r1]
+    cmp r2, #0
+    bgt __n1t_done
+    adds r2, #15
+    str r2, [r1]
+    ldr r7, =global_n1sound
+    movs r0, #127
+    ldrb r0, [r7, r0]
+    lsrs r0, r0, #4
+    movs r1, #7
+    ands r0, r1
+    adds r0, #1
+    ldr r1, =global_n1current
+    ldr r2, [r1]
+    adds r2, #1
+    cmp r2, r0
+    blt __n1t_current
+    movs r2, #0
+__n1t_current:
+    str r2, [r1]
+    lsls r2, r2, #3
+    movs r6, #120
+    subs r6, r6, r2
+    adds r6, r6, r7
+    ldrb r0, [r6, #0]
+    ldrb r1, [r6, #2]
+    lsls r1, r1, #8
+    orrs r0, r1
+    ldrb r1, [r6, #4]
+    movs r2, #3
+    ands r1, r2
+    lsls r1, r1, #16
+    orrs r0, r1
+    ldrb r1, [r6, #1]
+    ldrb r2, [r6, #3]
+    lsls r2, r2, #8
+    orrs r1, r2
+    ldrb r2, [r6, #5]
+    lsls r2, r2, #16
+    orrs r1, r2
+    adds r1, r1, r0
+    ldrb r2, [r6, #4]
+    movs r3, #252
+    ands r2, r3
+    movs r3, #128
+    lsls r3, r3, #1
+    subs r3, r3, r2
+    lsls r3, r3, #16
+__n1t_wrap:
+    cmp r1, r3
+    blo __n1t_wrapped
+    subs r1, r1, r3
+    b __n1t_wrap
+__n1t_wrapped:
+    strb r1, [r6, #1]
+    lsrs r2, r1, #8
+    strb r2, [r6, #3]
+    lsrs r2, r1, #16
+    strb r2, [r6, #5]
+    lsrs r2, r1, #16
+    ldrb r0, [r6, #6]
+    adds r2, r2, r0
+    uxtb r2, r2
+    lsrs r0, r2, #1
+    ldrb r0, [r7, r0]
+    movs r3, #1
+    tst r2, r3
+    beq __n1t_low_nibble
+    lsrs r0, r0, #4
+__n1t_low_nibble:
+    movs r3, #15
+    ands r0, r3
+    subs r0, #8
+    ldrb r2, [r6, #7]
+    ands r2, r3
+    muls r0, r2
+    subs r2, r6, r7
+    subs r2, #64
+    lsrs r2, r2, #3
+    movs r3, #7
+    ands r2, r3
+    lsls r2, r2, #2
+    ldr r3, =global_n1output
+    str r0, [r3, r2]
+    b __n1t_next
+__n1t_done:
+    pop {r7}
+  EndASM
+EndProcedure
+
+; The enabled channels averaged; one channel at full swing (+-120) is about a full 2A03 pulse.
+ProcedureRAM N1Mix()
+  Protected count.i,sum.i,i.i
+  If N1Mute : ExpSample=0 : ProcedureReturn : EndIf
+  count=((N1Sound($7F)>>4)&7)+1 : sum=0
+  For i=0 To count-1 : sum=sum+N1Output(7-i) : Next
+  ExpSample=(sum*20)/count
+EndProcedure

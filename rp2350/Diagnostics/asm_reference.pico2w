@@ -605,6 +605,164 @@ Procedure CompareVrc6Sound()
   Next
   ExpSample=0 : V6Halt=0
 EndProcedure
+
+; Namco 163: the IRQ budget is exact, and the sound tick's assembly against its plain form.
+Procedure CompareN163Irq()
+  Protected run.i, budget.i
+  For run=0 To 19999
+    N1IrqEnable=1 : PicoIrq=0 : FI=0 : N1IrqCounter=VerifyRand($8000)
+    If VerifyRand(3)=0 : N1IrqCounter=$7F00+VerifyRand(256) : EndIf
+    budget=N1Budget()
+    If N1IrqCounter>=$7FFF
+      Check(budget,256)
+    ElseIf budget<256
+      N1Ticks(budget-1) : Check(PicoIrq,0)
+      N1Ticks(1) : Check(PicoIrq,1)
+    Else
+      N1Ticks(255) : Check(PicoIrq,0)
+    EndIf
+    If (run&2047)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  N1IrqEnable=0 : PicoIrq=0
+EndProcedure
+Procedure N1ChannelReference(base.i)
+  Protected freq.i,phase.i,length.i,sample.i,position.i
+  freq=N1Sound(base)|(N1Sound(base+2)<<8)|((N1Sound(base+4)&3)<<16)
+  phase=N1Sound(base+1)|(N1Sound(base+3)<<8)|(N1Sound(base+5)<<16)
+  length=(256-(N1Sound(base+4)&$FC))<<16
+  phase=(phase+freq)%length
+  N1Sound(base+1)=phase&255 : N1Sound(base+3)=(phase>>8)&255 : N1Sound(base+5)=(phase>>16)&255
+  position=((phase>>16)+N1Sound(base+6))&255
+  sample=(N1Sound(position>>1)>>((position&1)*4))&15
+  N1Output(((base-$40)>>3)&7)=(sample-8)*(N1Sound(base+7)&15)
+EndProcedure
+Procedure N1TickReference(dt.i)
+  Protected count.i
+  If N1Mute : ProcedureReturn : EndIf
+  N1Timer=N1Timer-dt
+  While N1Timer<=0
+    N1Timer=N1Timer+15
+    count=((N1Sound($7F)>>4)&7)+1
+    N1Current=N1Current+1 : If N1Current>=count : N1Current=0 : EndIf
+    N1ChannelReference($78-N1Current*8)
+  Wend
+EndProcedure
+Global Dim N1Saved.a(128)
+Global Dim N1Want.a(128)
+Global Dim N1WantOut.i(8)
+Procedure CompareN163Sound()
+  Protected run.i, dt.i, i.i, timer.i, current.i, wantTimer.i, wantCurrent.i
+  For run=0 To 9999
+    For i=0 To 127 : N1Sound(i)=VerifyRand(256) : N1Saved(i)=N1Sound(i) : Next
+    For i=0 To 7 : N1Output(i)=0 : Next
+    N1Mute=Bool(VerifyRand(12)=0) : timer=1+VerifyRand(15) : current=VerifyRand(8) : dt=1+VerifyRand(38)
+    N1Timer=timer : N1Current=current
+    N1TickReference(dt)
+    For i=0 To 127 : N1Want(i)=N1Sound(i) : N1Sound(i)=N1Saved(i) : Next
+    For i=0 To 7 : N1WantOut(i)=N1Output(i) : N1Output(i)=0 : Next
+    wantTimer=N1Timer : wantCurrent=N1Current : N1Timer=timer : N1Current=current
+    N1Tick(dt)
+    For i=0 To 127 : Check(N1Sound(i),N1Want(i)) : Next
+    For i=0 To 7 : Check(N1Output(i),N1WantOut(i)) : Next
+    Check(N1Timer,wantTimer) : Check(N1Current,wantCurrent)
+    If (run&1023)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  N1Mute=0
+EndProcedure
+; The 5B: the cached-level tick against Anvil's per-step form (anvil/mapper69_audio.pi4).
+Procedure SbTickReference(dt.i)
+  Protected stepCycles.i,c.i,period.i,volume.i,level.i,feedback.i,shape.i
+  While dt>0
+    stepCycles=dt
+    For c=0 To 2 : If SbTimer(c)<stepCycles : stepCycles=SbTimer(c) : EndIf : Next
+    If SbNoiseTimer<stepCycles : stepCycles=SbNoiseTimer : EndIf
+    If SbEnvTimer<stepCycles : stepCycles=SbEnvTimer : EndIf
+    level=0
+    For c=0 To 2
+      If (SbHigh(c) Or ((SbReg(7)>>c)&1)) And ((SbNoise&1) Or ((SbReg(7)>>(c+3))&1))
+        volume=SbReg(8+c)&15
+        If SbReg(8+c)&16 : volume=SbEnvelope : EndIf
+        level=level+SbLevels(volume)
+      EndIf
+    Next
+    SbArea=SbArea+level*stepCycles : SbCycles=SbCycles+stepCycles
+    dt=dt-stepCycles
+    For c=0 To 2
+      SbTimer(c)=SbTimer(c)-stepCycles
+      If SbTimer(c)=0
+        period=SbReg(c*2)|(SbReg(c*2+1)<<8) : If period=0 : period=1 : EndIf
+        SbTimer(c)=period*16 : SbHigh(c)=SbHigh(c)!1
+      EndIf
+    Next
+    SbNoiseTimer=SbNoiseTimer-stepCycles
+    If SbNoiseTimer=0
+      period=SbReg(6)&31 : If period=0 : period=1 : EndIf
+      SbNoiseTimer=period*32 : feedback=(SbNoise!(SbNoise>>3))&1
+      SbNoise=(SbNoise>>1)|(feedback<<16)
+    EndIf
+    SbEnvTimer=SbEnvTimer-stepCycles
+    If SbEnvTimer=0
+      period=SbReg(11)|(SbReg(12)<<8) : If period=0 : period=1 : EndIf
+      SbEnvTimer=period*512
+      If SbEnvHold=0
+        SbEnvelope=SbEnvelope+SbEnvDirection
+        If SbEnvelope<0 Or SbEnvelope>15
+          shape=SbReg(13)&15
+          If (shape&8)=0
+            SbEnvelope=0 : SbEnvHold=1
+          ElseIf shape&1
+            If shape&2 : SbEnvDirection=-SbEnvDirection : EndIf
+            SbEnvelope=0 : If SbEnvDirection>0 : SbEnvelope=15 : EndIf
+            SbEnvHold=1
+          Else
+            If shape&2 : SbEnvDirection=-SbEnvDirection : EndIf
+            SbEnvelope=0 : If SbEnvDirection<0 : SbEnvelope=15 : EndIf
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Wend
+EndProcedure
+Global Dim SbState.i(64)
+; 0..13 one copy, 32..45 the other (slot 0 or 1).
+Procedure SbSaveState(slot.i)
+  Protected c.i,o.i
+  o=slot*32
+  For c=0 To 2 : SbState(o+c)=SbTimer(c) : SbState(o+3+c)=SbHigh(c) : Next
+  SbState(o+6)=SbNoiseTimer : SbState(o+7)=SbNoise : SbState(o+8)=SbEnvTimer : SbState(o+9)=SbEnvelope
+  SbState(o+10)=SbEnvDirection : SbState(o+11)=SbEnvHold : SbState(o+12)=SbArea : SbState(o+13)=SbCycles
+EndProcedure
+Procedure SbLoadState(slot.i)
+  Protected c.i,o.i
+  o=slot*32
+  For c=0 To 2 : SbTimer(c)=SbState(o+c) : SbHigh(c)=SbState(o+3+c) : Next
+  SbNoiseTimer=SbState(o+6) : SbNoise=SbState(o+7) : SbEnvTimer=SbState(o+8) : SbEnvelope=SbState(o+9)
+  SbEnvDirection=SbState(o+10) : SbEnvHold=SbState(o+11) : SbArea=SbState(o+12) : SbCycles=SbState(o+13)
+EndProcedure
+Procedure CompareSb5b()
+  Protected run.i, chunk.i, i.i, dt.i
+  SbInit()
+  For run=0 To 999
+    For i=0 To 15 : SbReg(i)=VerifyRand(256) : Next
+    For i=0 To 5 : If VerifyRand(2) : SbReg(i)=VerifyRand(4) : EndIf : Next
+    SbReg(6)=VerifyRand(32) : SbReg(11)=VerifyRand(4) : SbReg(12)=0 : SbReg(13)=VerifyRand(16)
+    For i=8 To 10 : SbReg(i)=VerifyRand(32) : Next
+    For i=0 To 2 : SbTimer(i)=1+VerifyRand(64) : SbHigh(i)=VerifyRand(2) : Next
+    SbNoiseTimer=1+VerifyRand(64) : SbNoise=1+VerifyRand(65535) : SbEnvTimer=1+VerifyRand(1024)
+    SbEnvelope=VerifyRand(16) : SbEnvHold=VerifyRand(2) : SbEnvDirection=1 : If VerifyRand(2) : SbEnvDirection=-1 : EndIf
+    SbArea=0 : SbCycles=0 : SbLevelUpdate()
+    For chunk=0 To 63
+      dt=1+VerifyRand(38)
+      SbSaveState(0)
+      SbTickReference(dt) : SbSaveState(1)
+      SbLoadState(0) : SbLevelUpdate()
+      SbTick(dt) : SbSaveState(0)
+      For i=0 To 13 : Check(SbState(i),SbState(32+i)) : Next
+    Next
+    If (run&127)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  SbInit()
+EndProcedure
 CompilerEndIf
 
 ; The SBC encoder (the library's assembly on Arm) against the codec's test vectors, mono and stereo:
@@ -661,6 +819,12 @@ Procedure TestMain()
     CompareVrcIrq()
     Say("STEP CompareVrc6Sound checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     CompareVrc6Sound()
+    Say("STEP CompareN163Irq checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareN163Irq()
+    Say("STEP CompareN163Sound checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareN163Sound()
+    Say("STEP CompareSb5b checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareSb5b()
   CompilerEndIf
   Say("STEP CodecVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CodecVectorTests()

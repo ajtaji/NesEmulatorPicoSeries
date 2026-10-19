@@ -17,7 +17,7 @@ Procedure.i PicoSupported(mapper.i)
     Case 232 : ProcedureReturn 1
   EndSelect
   CompilerIf #PICO_ADVANCED=1
-    If mapper=5 Or mapper=24 Or mapper=26 : ProcedureReturn 1 : EndIf
+    If mapper=5 Or mapper=19 Or mapper=24 Or mapper=26 Or mapper=69 : ProcedureReturn 1 : EndIf
     ProcedureReturn PicoAdvancedSupported(mapper)
   CompilerEndIf
   ProcedureReturn 0
@@ -162,6 +162,8 @@ Procedure PicoMapperInit()
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=5 : M5Init() : ProcedureReturn : EndIf
     If CartMapper=24 Or CartMapper=26 : VrcInit() : ProcedureReturn : EndIf
+    If CartMapper=19 : N1Init() : ProcedureReturn : EndIf
+    If CartMapper=69 : F7Init() : ProcedureReturn : EndIf
     If PicoAdvancedSupported(CartMapper) : PicoAdvancedInit() : ProcedureReturn : EndIf
   CompilerEndIf
   CompilerIf #PICO_ADVANCED=1
@@ -183,6 +185,8 @@ Procedure PicoMapperWrite(addr.i,value.i,stamp.i)
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=5 : M5Write(addr,value,stamp) : ProcedureReturn : EndIf
     If CartMapper=24 Or CartMapper=26 : VrcWrite(addr,value,stamp) : ProcedureReturn : EndIf
+    If CartMapper=19 : N1Write(addr,value,stamp) : ProcedureReturn : EndIf
+    If CartMapper=69 : F7Write(addr,value,stamp) : ProcedureReturn : EndIf
     If PicoAdvancedSupported(CartMapper) : PicoAdvancedWrite(addr,value,stamp) : ProcedureReturn : EndIf
   CompilerEndIf
   CompilerIf #PICO_ADVANCED=1
@@ -242,13 +246,14 @@ EndProcedure
 Procedure.i PicoRamRead(addr.i)
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=5 : ProcedureReturn M5RamRead(addr) : EndIf
+    If CartMapper=69 : ProcedureReturn F7RamRead(addr) : EndIf
     If PicoRamEnable And PicoRamPresent : ProcedureReturn PicoPrgRam(addr&8191) : EndIf
   CompilerEndIf
   ProcedureReturn NesOpenBus
 EndProcedure
 Procedure PicoChrWrite(addr.i,value.i)
   CompilerIf #PICO_ADVANCED=1
-    If CartMapper=5 Or CartMapper=24 Or CartMapper=26 : ProcedureReturn : EndIf
+    If CartMapper=5 Or CartMapper=19 Or CartMapper=24 Or CartMapper=26 Or CartMapper=69 : ProcedureReturn : EndIf
     If PicoAdvancedSupported(CartMapper) : PicoAdvancedChrWrite(addr,value) : ProcedureReturn : EndIf
   CompilerEndIf
   PokeA(Chr+addr,value) : PpuDecode(addr)
@@ -263,6 +268,8 @@ ProcedureRAM PicoPpuTicks(cycles.i)
   CompilerIf #PICO_ADVANCED=1
     If CartMapper=5 : M5Ticks(cycles) : ProcedureReturn : EndIf
     If CartMapper=24 Or CartMapper=26 : VrcTicks(cycles) : ProcedureReturn : EndIf
+    If CartMapper=19 : N1Ticks(cycles) : ProcedureReturn : EndIf
+    If CartMapper=69 : F7Ticks(cycles) : ProcedureReturn : EndIf
     If PicoMmc3(CartMapper)
       CompilerIf #PPU_PROFILE=1
         started=Micros()
@@ -279,6 +286,8 @@ ProcedureRAM.i PicoCpuBudget()
     Protected clocks.i,assertions.i,irq.i,count.i,reload.i,high.i,low.i,dots.i,bits.i,irqDot.i,budget.i,started.i
     If CartMapper=5 : ProcedureReturn M5Budget() : EndIf
     If CartMapper=24 Or CartMapper=26 : ProcedureReturn VrcBudget() : EndIf
+    If CartMapper=19 : ProcedureReturn N1Budget() : EndIf
+    If CartMapper=69 : ProcedureReturn F7Budget() : EndIf
     If PicoMmc3(CartMapper) And PicoIrqEnable And FI=0
       If PicoIrq : ProcedureReturn 1 : EndIf
       CompilerIf #PPU_PROFILE=1
@@ -309,6 +318,8 @@ CompilerIf #PICO_ADVANCED=1
   XIncludeFile "mapper_advanced.pico"
   XIncludeFile "mapper5.pico"
   XIncludeFile "mapper_vrc6.pico"
+  XIncludeFile "mapper_n163.pico"
+  XIncludeFile "mapper_fme7.pico"
 CompilerEndIf
 
 Procedure PicoRegisterNotice(reg.i)
