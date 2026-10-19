@@ -2,7 +2,8 @@
     ; of the Thumb-1 loop in rp2040/ppu_render.pico). Same contract: r4 = V, r5 = line buffer, r7 = tiles
     ; left, r12 = pattern base; leaves through __r_place. Thumb-2 does the masks with UBFX, the tag fetch
     ; and store as scaled loads ([Rn, Rm, lsl #2]), and keeps the tag base in r6, so a hit takes two literal loads, not
-    ; six. A miss converts the pattern row exactly as the Thumb-1 miss does.
+    ; six. A miss converts the pattern row exactly as the Thumb-1 miss does. The key carries the
+    ; cache generation (RgbTagGen) in bits 24-31, so the palette comes from bits 14-23 only.
     ldr r6, =global_rgbtags
 __r_tile:
     ubfx r0, r4, #0, #12
@@ -46,7 +47,8 @@ __r_miss:
     adds r3, #1
     str r3, [r2]
     push {r1, r4, r5}
-    lsrs r4, r0, #14
+    lsls r4, r0, #8
+    lsrs r4, r4, #22
     lsls r4, r4, #6
     ldr r2, =global_rgbpairs
     adds r4, r4, r2

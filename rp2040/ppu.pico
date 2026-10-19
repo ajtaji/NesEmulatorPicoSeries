@@ -29,6 +29,13 @@ Global Dim NameDesc.u(4096)
 Global Dim RgbCache.i(4096)
 Global Dim RgbTags.i(1024)
 Global BgWord.i, BgPalette.i, RgbPairsDirty.i=1
+; THE TILE CACHE'S GENERATION, in bits 24-31 of every RgbTags key (PpuRenderRaw adds it to the
+; pattern base). A CHR-RAM write moves it on, so every cached tile misses and is converted again
+; from the new pattern bytes - one add, where it used to rebuild the palette pairs and wipe all
+; 1,024 tags for each byte (Pinbot clears its CHR RAM 4,096 bytes at a time with the background
+; on: 2 FPS for seconds). After 256 moves it wraps, and a wrap does the full wipe, so a tag left
+; from 256 generations ago can never match.
+Global RgbTagGen.i
 Global Dim RgbPairs.i(64)
 Global BgCacheAddr.i= -1, BgCacheLo.i, BgCacheHi.i
 Global PpuPixels.i, PpuSpriteHits.i
@@ -103,6 +110,10 @@ Procedure PpuDecode(row.i)
     bits=bits|((((low>>(7-i))&1)|(((high>>(7-i))&1)<<1))<<(i*2))
   Next
   PokeU(Pattern+dest,bits)
+EndProcedure
+ProcedureRAM PpuChrChanged()
+  RgbTagGen=RgbTagGen+$1000000 : RgbLastKey= -1
+  If RgbTagGen=0 : RgbPairsDirty=1 : EndIf
 EndProcedure
 ProcedureRAM PpuBuildRgbPairs()
   Protected palette.i, low.i, high.i, i.i

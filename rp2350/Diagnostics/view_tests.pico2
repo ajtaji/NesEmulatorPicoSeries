@@ -34,8 +34,10 @@ Procedure CartridgeViewTests()
   PpuMask=0 : PpuV=0 : PpuWarmup=0 : RgbPairsDirty=0 : AccessPhase=0
   NesWrite($2007,128)
   Check(PeekA(Chr),128) : Check(PeekU(Pattern),1) : Check(RgbPairsDirty,0)
-  Check(CartChrDirty,1) : NesWrite($2001,8)
-  Check(RgbPairsDirty,1) : Check(CartChrDirty,0)
+  ; A pending CHR change meets the background switched on: the tile cache moves to its next
+  ; generation (one step) and the palette pairs are left alone.
+  Check(CartChrDirty,1) : RgbTagGen=0 : NesWrite($2001,8)
+  Check(RgbTagGen,$1000000) : Check(RgbPairsDirty,0) : Check(CartChrDirty,0)
   PpuMask=0
   CartChrRam=0 : ChrWritable=0 : LoadCartridge()
 EndProcedure
