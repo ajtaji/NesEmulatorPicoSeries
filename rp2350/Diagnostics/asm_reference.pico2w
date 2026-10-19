@@ -282,7 +282,7 @@ Procedure ApuMixSampleReference()
   If ApuLength(3)>0 And (NoiseShift&1)=0
     noise=ApuVolume(2)
   EndIf
-  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)
+  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)+ExpSample
   ApuOutput=ApuLastY*65400
   If ApuOutput<0
     ApuOutput=ApuOutput+65535
@@ -345,6 +345,7 @@ Procedure ApuRandom()
   TriDac=VerifyRand(16) : NoiseShift=1+VerifyRand(32767) : DmcTimer=100000 : ApuLinear=VerifyRand(3) : DmcLevel=VerifyRand(128)
   ApuLastX=VerifyRand(1200) : ApuLastY=VerifyRand(65536)-32768 : ApuSamples=VerifyRand(100000)
   ApuCapture=4090+VerifyRand(10) : ApuMinimum=VerifyRand(40000)-30000 : ApuMaximum=VerifyRand(40000)-10000 : ApuNonzero=VerifyRand(1000)
+  ExpSample=0 : If VerifyRand(2) : ExpSample=VerifyRand(62)<<8 : EndIf
 EndProcedure
 ; Random APU states through the plain and the assembly forms of each routine: every value either writes.
 Procedure CompareApu()
@@ -517,6 +518,93 @@ Procedure CompareMmc5Irq()
   Next
   PpuMask=savedMask : M5IrqEnable=0 : M5Pending=0 : PicoIrq=0 : PpuLine=0 : PpuDot=0
 EndProcedure
+
+; VRC6: the IRQ budget is exact (one cycle short of it raises nothing, the budget itself raises the
+; IRQ), and the sound's assembly against its plain form (mapper_vrc6.pico as first written).
+Procedure CompareVrcIrq()
+  Protected run.i, budget.i
+  For run=0 To 19999
+    VrcIrqEnable=1 : VrcIrqPending=0 : PicoIrq=0 : FI=0
+    VrcIrqMode=VerifyRand(2) : VrcIrqLatch=VerifyRand(256) : VrcIrqCounter=VerifyRand(256)
+    VrcPrescaler=1+VerifyRand(341)
+    budget=VrcBudget()
+    If budget<256
+      VrcTicks(budget-1) : Check(VrcIrqPending,0)
+      VrcTicks(1) : Check(VrcIrqPending,1)
+    Else
+      VrcTicks(255) : Check(VrcIrqPending,0)
+    EndIf
+    If (run&2047)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  VrcIrqEnable=0 : VrcIrqPending=0 : PicoIrq=0
+EndProcedure
+Procedure V6TickReference(dt.i)
+  Protected ch.i,t.i,s.i
+  If V6Halt : ProcedureReturn : EndIf
+  For ch=0 To 1
+    If V6Enable(ch)
+      t=V6Timer(ch)-dt
+      If t<=0
+        s=V6Step(ch)
+        While t<=0 : t=t+V6Period(ch)+1 : s=(s+1)&15 : Wend
+        V6Step(ch)=s
+      EndIf
+      V6Timer(ch)=t
+    EndIf
+  Next
+  If V6Enable(2)
+    t=V6Timer(2)-dt
+    While t<=0
+      t=t+V6Period(2)+1
+      V6Step(2)=V6Step(2)+1
+      If V6Step(2)=14
+        V6Step(2)=0 : V6Acc=0
+      ElseIf V6Step(2)&1
+        V6Acc=(V6Acc+V6Rate)&255
+      EndIf
+    Wend
+    V6Timer(2)=t
+  EndIf
+EndProcedure
+Procedure V6MixReference()
+  Protected ch.i,sum.i
+  sum=0
+  For ch=0 To 1
+    If V6Enable(ch)
+      If V6Mode(ch) Or 15-V6Step(ch)<=V6Duty(ch) : sum=sum+V6Volume(ch) : EndIf
+    EndIf
+  Next
+  If V6Enable(2) : sum=sum+(V6Acc>>3) : EndIf
+  ExpSample=sum<<8
+EndProcedure
+Global Dim V6Want.i(16)
+Procedure V6RandomState()
+  Protected ch.i
+  For ch=0 To 2
+    V6Enable(ch)=Bool(VerifyRand(4)>0) : V6Period(ch)=VerifyRand(4096) : V6Timer(ch)=1+VerifyRand(200)
+    If VerifyRand(3)=0 : V6Period(ch)=VerifyRand(8) : EndIf
+  Next
+  For ch=0 To 1
+    V6Step(ch)=VerifyRand(16) : V6Duty(ch)=VerifyRand(8) : V6Volume(ch)=VerifyRand(16) : V6Mode(ch)=Bool(VerifyRand(6)=0)
+  Next
+  V6Step(2)=VerifyRand(14) : V6Acc=VerifyRand(256) : V6Rate=VerifyRand(64) : V6Halt=Bool(VerifyRand(10)=0)
+EndProcedure
+Procedure CompareVrc6Sound()
+  Protected run.i, dt.i, ch.i, i.i
+  For run=0 To 19999
+    V6RandomState() : dt=1+VerifyRand(38)
+    For ch=0 To 2 : V6Want(ch)=V6Timer(ch) : V6Want(3+ch)=V6Step(ch) : Next
+    V6Want(6)=V6Acc
+    V6TickReference(dt) : V6MixReference()
+    For ch=0 To 2 : i=V6Timer(ch) : V6Timer(ch)=V6Want(ch) : V6Want(ch)=i : i=V6Step(ch) : V6Step(ch)=V6Want(3+ch) : V6Want(3+ch)=i : Next
+    i=V6Acc : V6Acc=V6Want(6) : V6Want(6)=i : V6Want(7)=ExpSample : ExpSample=-1
+    V6Tick(dt) : V6Mix()
+    For ch=0 To 2 : Check(V6Timer(ch),V6Want(ch)) : Check(V6Step(ch),V6Want(3+ch)) : Next
+    Check(V6Acc,V6Want(6)) : Check(ExpSample,V6Want(7))
+    If (run&2047)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  ExpSample=0 : V6Halt=0
+EndProcedure
 CompilerEndIf
 
 ; The SBC encoder (the library's assembly on Arm) against the codec's test vectors, mono and stereo:
@@ -569,6 +657,10 @@ Procedure TestMain()
   CompilerIf #PICO_ADVANCED=1
     Say("STEP CompareMmc5Irq checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     CompareMmc5Irq()
+    Say("STEP CompareVrcIrq checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareVrcIrq()
+    Say("STEP CompareVrc6Sound checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    CompareVrc6Sound()
   CompilerEndIf
   Say("STEP CodecVectorTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   CodecVectorTests()

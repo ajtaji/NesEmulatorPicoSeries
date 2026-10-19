@@ -280,6 +280,11 @@ ProcedureRAM WorkerCommand(command.i, addr.i, value.i, stamp.i)
   ElseIf command=6
     PicoWorkerPrgSet(addr,value)
   CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+  ElseIf command=7
+    ; a cartridge sound chip's register (VRC6), at its CPU time: the APU has just run up to it
+    ExpWrite(addr,value)
+  CompilerEndIf
   EndIf
 EndProcedure
 Declare.i QwstPoll()

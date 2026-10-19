@@ -257,9 +257,9 @@ EndProcedure
 ; end of the frame on the way. The rendering state is constant across the call (a $2001 write
 ; synchronizes first).
 ProcedureRAM M5Ticks(cycles.i)
-  Protected line.i,dot.i,dotsLeft.i,step.i
+  Protected line.i,dot.i,dotsLeft.i,step.i,odd.i,width.i
   If (PpuMask&24)=0 : M5InFrame=0 : ProcedureReturn : EndIf
-  line=PpuLine : dot=PpuDot : dotsLeft=cycles*3
+  line=PpuLine : dot=PpuDot : dotsLeft=cycles*3 : odd=PpuOdd
   While dotsLeft>0
     If line<240 And dot<3
       step=3-dot
@@ -270,10 +270,12 @@ ProcedureRAM M5Ticks(cycles.i)
       If step>dotsLeft : ProcedureReturn : EndIf
       dotsLeft=dotsLeft-step : dot=8 : M5InFrame=0
     EndIf
-    step=341-dot
+    ; With rendering on, an odd frame's pre-render line is one dot short (340).
+    width=341 : If line=261 And odd<>0 : width=340 : EndIf
+    step=width-dot
     If step>dotsLeft : ProcedureReturn : EndIf
     dotsLeft=dotsLeft-step : dot=0 : line=line+1
-    If line=262 : line=0 : EndIf
+    If line=262 : line=0 : odd=odd!1 : EndIf
   Wend
 EndProcedure
 
@@ -291,7 +293,10 @@ ProcedureRAM.i M5Budget()
     eventLine=M5IrqTarget
   EndIf
   dots=eventLine*341+3-(PpuLine*341+PpuDot)
-  If dots<0 : dots=dots+262*341 : EndIf
+  If dots<0
+    ; across the pre-render line: one dot short on an odd frame
+    dots=dots+262*341 : If PpuOdd : dots=dots-1 : EndIf
+  EndIf
   dots=NesDiv(dots,3)+1
   If dots>256 : dots=256 : EndIf
   ProcedureReturn dots

@@ -1,0 +1,303 @@
+; Konami VRC6 (mapper 24 = VRC6a, mapper 26 = VRC6b: A0 and A1 swapped) on the RP2350 Pico profile,
+; with its sound: two pulse channels and a sawtooth beside the 2A03's five. Akumajou Densetsu (the
+; Famicom Castlevania III), Madara, Esper Dream 2.
+;   CORE 0  banking (16 KiB at $8000, 8 KiB at $C000, the last 8 KiB fixed; eight 1 KiB CHR banks),
+;           mirroring and PRG-RAM enable ($B003), and the VRC IRQ: an 8-bit counter clocked every
+;           CPU cycle (cycle mode) or every 113 2/3 cycles (scanline mode, the 341/3 prescaler), raising
+;           the IRQ when it passes $FF. VrcBudget gives the CPU the exact distance to that.
+;   CORE 1  the sound: register writes cross in the bus queue (command 7) at their CPU time, after the
+;           APU has run up to it; ExpTick advances the three channels with the APU, ExpMix sets
+;           ExpSample, which ApuMixSample adds to the 2A03's mix.
+; Nametables from CHR ROM ($B003 modes other than standard) are not supported; a game that asks says so.
+
+; ---------------------------------------------------------------- core 0: the cartridge
+ProcedureRAM VrcPrgUpdate()
+  PicoPrgMap(0,VrcPrg16*2) : PicoPrgMap(1,VrcPrg16*2+1)
+  PicoPrgMap(2,VrcPrg8) : PicoPrgMap(3,PicoPrgBytes/8192-1)
+EndProcedure
+
+ProcedureRAM VrcIrqUpdate()
+  PicoIrq=VrcIrqPending
+EndProcedure
+
+; The VRC IRQ counter after cycles CPU cycles.
+ProcedureRAM VrcTicks(cycles.i)
+  Protected clocks.i,room.i
+  If VrcIrqEnable=0 : ProcedureReturn : EndIf
+  If VrcIrqMode
+    clocks=cycles
+  Else
+    VrcPrescaler=VrcPrescaler-cycles*3 : clocks=0
+    While VrcPrescaler<=0 : VrcPrescaler=VrcPrescaler+341 : clocks=clocks+1 : Wend
+  EndIf
+  While clocks>0
+    room=255-VrcIrqCounter
+    If clocks<=room
+      VrcIrqCounter=VrcIrqCounter+clocks : clocks=0
+    Else
+      clocks=clocks-room-1 : VrcIrqCounter=VrcIrqLatch : VrcIrqPending=1 : VrcIrqAssertions=VrcIrqAssertions+1
+    EndIf
+  Wend
+  VrcIrqUpdate()
+EndProcedure
+
+; CPU cycles the next window may run before the counter can raise the IRQ (1 = now, 256 = not near).
+ProcedureRAM.i VrcBudget()
+  Protected clocks.i,cycles.i
+  If VrcIrqEnable=0 Or FI<>0 : ProcedureReturn 256 : EndIf
+  If PicoIrq : ProcedureReturn 1 : EndIf
+  clocks=256-VrcIrqCounter
+  If VrcIrqMode
+    cycles=clocks
+  Else
+    ; the first clock when the prescaler reaches 0, then one every 341 thirds of a cycle
+    cycles=NesDiv(VrcPrescaler+(clocks-1)*341+2,3)
+  EndIf
+  If cycles>256 : cycles=256 : EndIf
+  If cycles<1 : cycles=1 : EndIf
+  ProcedureReturn cycles
+EndProcedure
+
+Procedure VrcWrite(addr.i,value.i,stamp.i)
+  Protected reg.i
+  If addr<$8000
+    If addr>=$6000 And PicoRamEnable : PicoPrgRam(addr&8191)=value : EndIf
+    ProcedureReturn
+  EndIf
+  If CartMapper=26 : addr=(addr&$FFFC)|((addr&1)<<1)|((addr>>1)&1) : EndIf
+  reg=addr&$F003
+  If reg>=$9000 And reg<=$B002
+    ; the sound: to core 1, at its CPU time
+    NesPost(7,reg,value,stamp)
+    ProcedureReturn
+  EndIf
+  PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
+  Select reg&$F000
+    Case $8000 : VrcPrg16=value&15 : VrcPrgUpdate()
+    Case $C000 : VrcPrg8=value&31 : VrcPrgUpdate()
+    Case $B000
+      If reg=$B003
+        PpuSync(stamp)
+        Select (value>>2)&3
+          Case 0 : PicoMirrorSet(1)
+          Case 1 : PicoMirrorSet(0)
+          Case 2 : PicoMirrorSet(2)
+          Case 3 : PicoMirrorSet(3)
+        EndSelect
+        PicoRamEnable=Bool((value&128)<>0)
+        If (value&$13)<>0 And VrcWarned=0
+          VrcWarned=1 : Say("VRC6: this game uses a nametable mode that is not supported ($B003=") : Num(value) : Say(")") : Eol()
+        EndIf
+      EndIf
+    Case $D000 : PpuSync(stamp) : PicoChrMap(reg&3,value)
+    Case $E000 : PpuSync(stamp) : PicoChrMap(4+(reg&3),value)
+    Case $F000
+      Select reg
+        Case $F000 : VrcIrqLatch=value
+        Case $F001
+          VrcIrqAfterAck=value&1 : VrcIrqEnable=Bool((value&2)<>0) : VrcIrqMode=Bool((value&4)<>0)
+          If VrcIrqEnable : VrcIrqCounter=VrcIrqLatch : VrcPrescaler=341 : EndIf
+          VrcIrqPending=0 : VrcIrqUpdate()
+        Case $F002
+          VrcIrqPending=0 : VrcIrqEnable=VrcIrqAfterAck : VrcIrqUpdate()
+      EndSelect
+  EndSelect
+  PicoPrgFenceNeeded=0
+  CpuEndWindow()
+EndProcedure
+
+Procedure VrcInit()
+  Protected i.i
+  PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
+  VrcPrg16=0 : VrcPrg8=0 : VrcWarned=0
+  VrcIrqLatch=0 : VrcIrqCounter=0 : VrcIrqEnable=0 : VrcIrqAfterAck=0 : VrcIrqMode=0 : VrcIrqPending=0
+  VrcPrescaler=341 : VrcIrqAssertions=0 : PicoIrq=0
+  For i=0 To 3 : PicoPrgSlots(i)=-1 : Next
+  For i=0 To 7 : PicoChrSlots(i)=-1 : Next
+  For i=0 To 8191 : PicoPrgRam(i)=0 : Next
+  PicoRamEnable=0 : PicoRamProtect=0 : PicoRamPresent=1   ; 8 KiB of PRG-RAM, switched on by $B003
+  VrcPrgUpdate()
+  For i=0 To 7 : PicoChrMap(i,i) : Next
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : ChrWritable=0
+  ExpInit(1)
+EndProcedure
+
+; ---------------------------------------------------------------- core 1: the sound
+; (ExpChip 1 = VRC6.) Channels 0 and 1 are the pulses, 2 the sawtooth.
+Procedure ExpInit(chip.i)
+  Protected i.i
+  ExpChip=0
+  For i=0 To 2
+    V6Period(i)=0 : V6Enable(i)=0 : V6Timer(i)=1 : V6Step(i)=0
+  Next
+  For i=0 To 1 : V6Duty(i)=0 : V6Volume(i)=0 : V6Mode(i)=0 : Next
+  V6Rate=0 : V6Acc=0 : V6Halt=0 : ExpSample=0
+  ExpChip=chip
+EndProcedure
+
+ProcedureRAM ExpWrite(addr.i,value.i)
+  Protected ch.i
+  If ExpChip<>1 : ProcedureReturn : EndIf
+  ch=(addr>>12)-9
+  Select addr&3
+    Case 0
+      If ch<2
+        V6Mode(ch)=value>>7 : V6Duty(ch)=(value>>4)&7 : V6Volume(ch)=value&15
+      Else
+        V6Rate=value&63
+      EndIf
+    Case 1
+      V6Period(ch)=(V6Period(ch)&$F00)|value
+    Case 2
+      V6Period(ch)=(V6Period(ch)&$FF)|((value&15)<<8)
+      V6Enable(ch)=value>>7
+      If V6Enable(ch)=0
+        V6Step(ch)=0
+        If ch=2 : V6Acc=0 : EndIf
+      EndIf
+    Case 3
+      If ch=0 : V6Halt=value&1 : EndIf
+  EndSelect
+EndProcedure
+
+; The three channels over dt CPU cycles: a timer that runs out is wound forward a period at a time.
+; Thumb-1 (both chips' core 1); the plain form is V6TickReference in Diagnostics/asm_reference.picow.
+Global V6TickDt.i
+ProcedureRAM V6Tick(dt.i)
+  V6TickDt=dt
+  ASM
+    ldr r0, =global_v6halt
+    ldr r0, [r0]
+    cmp r0, #0
+    bne __v6t_done
+    ldr r4, =global_v6tickdt
+    ldr r4, [r4]
+    movs r5, #0
+__v6t_pulse:
+    ldr r0, =global_v6enable
+    ldr r0, [r0, r5]
+    cmp r0, #0
+    beq __v6t_pulse_next
+    ldr r6, =global_v6timer
+    ldr r1, [r6, r5]
+    subs r1, r1, r4
+    cmp r1, #0
+    bgt __v6t_pulse_store
+    ldr r2, =global_v6period
+    ldr r2, [r2, r5]
+    adds r2, #1
+    ldr r3, =global_v6step
+    ldr r0, [r3, r5]
+__v6t_pulse_wind:
+    adds r1, r1, r2
+    adds r0, #1
+    cmp r1, #0
+    ble __v6t_pulse_wind
+    movs r2, #15
+    ands r0, r2
+    str r0, [r3, r5]
+__v6t_pulse_store:
+    str r1, [r6, r5]
+__v6t_pulse_next:
+    adds r5, #4
+    cmp r5, #8
+    blo __v6t_pulse
+    ldr r0, =global_v6enable
+    ldr r0, [r0, #8]
+    cmp r0, #0
+    beq __v6t_done
+    ldr r6, =global_v6timer
+    ldr r1, [r6, #8]
+    subs r1, r1, r4
+    cmp r1, #0
+    bgt __v6t_saw_store
+    ldr r2, =global_v6period
+    ldr r2, [r2, #8]
+    adds r2, #1
+    ldr r3, =global_v6step
+    ldr r0, [r3, #8]
+    ldr r5, =global_v6acc
+    ldr r4, [r5]
+__v6t_saw_wind:
+    adds r1, r1, r2
+    adds r0, #1
+    cmp r0, #14
+    bne __v6t_saw_odd
+    movs r0, #0
+    movs r4, #0
+    b __v6t_saw_check
+__v6t_saw_odd:
+    movs r3, #1
+    tst r0, r3
+    beq __v6t_saw_check
+    ldr r3, =global_v6rate
+    ldr r3, [r3]
+    adds r4, r4, r3
+    uxtb r4, r4
+__v6t_saw_check:
+    cmp r1, #0
+    ble __v6t_saw_wind
+    ldr r3, =global_v6step
+    str r0, [r3, #8]
+    str r4, [r5]
+__v6t_saw_store:
+    str r1, [r6, #8]
+__v6t_done:
+  EndASM
+EndProcedure
+
+; ExpSample for the next output sample: each step of a VRC6 channel is 256 in the 2A03 mix's
+; units (one 2A03 pulse step is about 330), so a full VRC6 pulse sits beside a full 2A03 pulse.
+; Thumb-1; the plain form is V6MixReference in Diagnostics/asm_reference.picow.
+ProcedureRAM V6Mix()
+  ASM
+    movs r4, #0
+    movs r5, #0
+__v6m_channel:
+    ldr r0, =global_v6enable
+    ldr r0, [r0, r5]
+    cmp r0, #0
+    beq __v6m_next
+    ldr r0, =global_v6mode
+    ldr r0, [r0, r5]
+    cmp r0, #0
+    bne __v6m_sounding
+    ldr r0, =global_v6step
+    ldr r0, [r0, r5]
+    movs r1, #15
+    subs r1, r1, r0
+    ldr r0, =global_v6duty
+    ldr r0, [r0, r5]
+    cmp r1, r0
+    bgt __v6m_next
+__v6m_sounding:
+    ldr r0, =global_v6volume
+    ldr r0, [r0, r5]
+    adds r4, r4, r0
+__v6m_next:
+    adds r5, #4
+    cmp r5, #8
+    blo __v6m_channel
+    ldr r0, =global_v6enable
+    ldr r0, [r0, #8]
+    cmp r0, #0
+    beq __v6m_out
+    ldr r0, =global_v6acc
+    ldr r0, [r0]
+    lsrs r0, r0, #3
+    adds r4, r4, r0
+__v6m_out:
+    lsls r4, r4, #8
+    ldr r0, =global_expsample
+    str r4, [r0]
+  EndASM
+EndProcedure
+
+; The chip in this cartridge, over dt CPU cycles / into ExpSample.
+ProcedureRAM ExpTick(dt.i)
+  If ExpChip=1 : V6Tick(dt) : EndIf
+EndProcedure
+ProcedureRAM ExpMix()
+  If ExpChip=1 : V6Mix() : EndIf
+EndProcedure

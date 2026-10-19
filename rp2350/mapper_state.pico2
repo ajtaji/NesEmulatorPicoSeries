@@ -11,6 +11,7 @@ CompilerElse
   Global Dim PicoCiram.a(2048)
 CompilerEndIf
 Global Dim PicoNtSlots.a(4)
+Global ExpSample.i   ; a cartridge sound chip's part of the next APU sample (0 without one)
 Declare.i PicoSupported(mapper.i)
 Declare PicoMapperInit()
 Declare PicoMapperWrite(addr.i,value.i,stamp.i)
