@@ -102,7 +102,8 @@ ProcedureRAM PicoAdvancedUpdate()
     PicoMmc3PrgUpdate() : PicoMmc3ChrUpdate()
   EndIf
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
-  Chr=(@Decoded(0)+8192) : Pattern=@Decoded(0) : ChrWritable=1
+  ; Pattern-table writes reach the mapper only on a board with CHR RAM (TQROM's is half of it).
+  Chr=(@Decoded(0)+8192) : Pattern=@Decoded(0) : ChrWritable=Bool(CartChrRam<>0 Or CartMapper=119)
 EndProcedure
 Procedure PicoAdvancedInit()
   Protected i.i
@@ -199,7 +200,7 @@ ProcedureRAM PicoAdvancedWrite(addr.i,value.i,stamp.i)
     EndSelect
   EndIf
   PicoPrgFenceNeeded=0
-  If WorkerNmi<>NesSeenNmi Or (PicoMmc3(CartMapper) And addr>=$C000)
+  If WorkerNmi<>NesSeenNmi Or (PicoIsMmc3<>0 And addr>=$C000)
     CpuEndWindow()
   EndIf
 EndProcedure
@@ -217,7 +218,11 @@ ProcedureRAM PicoAdvancedChrWrite(addr.i,value.i)
       PokeU(Pattern+slot*1024+(row&1023),bits)
     EndIf
   Next
-  PicoInvalidateChr()
+  ; A CHR-RAM board's tile cache is flushed by CartPpuWriteNotice, deferred while the background is
+  ; off: invalidating here too, per byte, ran the cache generation round every 256 bytes, and each
+  ; wrap rebuilt the palette pairs and wiped the tags (Mega Man 4's intro uploads ~8000 bytes a
+  ; second: 31 rebuilds, ~200 ms hitches). TQROM's RAM half (CartChrRam=0) still invalidates here.
+  If CartChrRam=0 : PicoInvalidateChr() : Else : BgCacheAddr=-1 : EndIf
 EndProcedure
 ProcedureRAM PicoA12(addr.i,dot.i)
   Protected high.i

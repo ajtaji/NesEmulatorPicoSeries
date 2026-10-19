@@ -24,6 +24,8 @@ Global PicoPrgCopyUs.i,PicoChrCopyUs.i,PicoFenceUs.i,PicoPrgCopies.i,PicoChrCopi
 
 Global PicoIrqDot.i,PicoPredictCalls.i,PicoPredictUs.i
 Global PicoPredictCtrl.i,PicoPredictMask.i
+; PicoMmc3(CartMapper) / PicoAdvancedSupported(CartMapper), fixed per game: set by PicoMapperInit
+Global PicoIsMmc3.i,PicoIsAdvanced.i
 Global PicoPredictValid.i,PicoPredictIrqDot.i,PicoPredictEnd.i,PicoPredictReuse.i,PicoPredictDrift.i
 
 Global Dim PicoNtDesc.u(5120)

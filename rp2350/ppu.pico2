@@ -104,15 +104,37 @@ ProcedureRAM PpuColours()
     RgbPairsDirty=1
   EndIf
 EndProcedure
-Procedure PpuDecode(row.i)
-  Protected low.i, high.i, dest.i, i.i, bits.i
-  row=row&$1FF7
-  low=PeekA(Chr+row) : high=PeekA(Chr+row+8)
-  dest=(row&$1FF0)+(row&7)*2 : bits=0
-  For i=0 To 7
-    bits=bits|((((low>>(7-i))&1)|(((high>>(7-i))&1)<<1))<<(i*2))
-  Next
-  PokeU(Pattern+dest,bits)
+; A pattern row's two bit planes as 2-bit pixels, leftmost in bits 0-1. On the RP2350 by table:
+; PpuSpread(b) puts bit 7-i of b at bit 2i, so a row is PpuSpread(low)|PpuSpread(high)<<1 (CHR-RAM
+; uploads decode every byte - Mega Man 4's intro ~8000 a second). The Pico W keeps the 8-step loop
+; and its 512 bytes of SRAM.
+CompilerIf #PICO_ADVANCED=1
+Global Dim PpuSpread.u(256)
+CompilerEndIf
+Procedure PpuSpreadInit()
+  CompilerIf #PICO_ADVANCED=1
+    Protected b.i, i.i, bits.i
+    For b=0 To 255
+      bits=0
+      For i=0 To 7 : bits=bits|(((b>>(7-i))&1)<<(i*2)) : Next
+      PpuSpread(b)=bits
+    Next
+  CompilerEndIf
+EndProcedure
+ProcedureRAM PpuDecode(row.i)
+  CompilerIf #PICO_ADVANCED=1
+    row=row&$1FF7
+    PokeU(Pattern+(row&$1FF0)+(row&7)*2,PpuSpread(PeekA(Chr+row))|(PpuSpread(PeekA(Chr+row+8))<<1))
+  CompilerElse
+    Protected low.i, high.i, dest.i, i.i, bits.i
+    row=row&$1FF7
+    low=PeekA(Chr+row) : high=PeekA(Chr+row+8)
+    dest=(row&$1FF0)+(row&7)*2 : bits=0
+    For i=0 To 7
+      bits=bits|((((low>>(7-i))&1)|(((high>>(7-i))&1)<<1))<<(i*2))
+    Next
+    PokeU(Pattern+dest,bits)
+  CompilerEndIf
 EndProcedure
 ProcedureRAM PpuChrChanged()
   RgbTagGen=RgbTagGen+$1000000 : RgbLastKey= -1

@@ -54,7 +54,7 @@ XIncludeFile "RP2350/Lib/i2c.pico2"
 XIncludeFile "qwstpad.pico2"
 XIncludeFile "input.pico2"
 Global Dim FrameBottomStore.u(30720)
-Procedure CartPpuWriteNotice(addr.i,value.i)
+ProcedureRAM CartPpuWriteNotice(addr.i,value.i)
   If (addr&7)=7 And (PpuV&$3FFF)<$2000
     CartChrDirty=1
     If PpuMask&8 : PpuChrChanged() : CartChrDirty=0 : EndIf
@@ -145,6 +145,7 @@ EndProcedure
 Procedure LoadCartridge()
   Protected i.i, bank.i
   FrameBottom=@FrameBottomStore(0)
+  PpuSpreadInit()
   CartSelect(CartIndex) : PicoPrgFlat()
   CartChrDirty=0 : PicoMapActive=0 : PicoIrq=0 : NesNmiDelay=0 : CpuIrqDelay=0
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase : CartPrgSelected=0 : CartChrSelected=0 : PpuChrBank=0

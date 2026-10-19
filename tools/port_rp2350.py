@@ -70,6 +70,12 @@ EndProcedure
             text = text.replace(old, new)
         if 'RgbTags.i(2048)' not in text or 'For i=0 To 2047' not in text:
             raise SystemExit('ppu.pico: the tile cache size lines were not found')
+    if name == 'ppu.pico':
+        # CHR-RAM uploads decode every byte (Mega Man 4's intro: ~8000 a second).
+        text=re.sub(r'Procedure PpuDecode\(','ProcedureRAM PpuDecode(',text)
+    if name == 'runtime.pico':
+        # Every PPU register write on a CHR-RAM board passes through it (Mega Man 4's intro: thousands a second).
+        text=re.sub(r'Procedure CartPpuWriteNotice\(','ProcedureRAM CartPpuWriteNotice(',text)
     if name == 'dmc_shadow.pico':
         # Core 0 runs it at every sync while a sample plays; the RP2040 keeps it in flash for SRAM.
         for proc in ('SdFetch','SdAdvance','SdWrite','SdBudget'):

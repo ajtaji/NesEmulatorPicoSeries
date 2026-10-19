@@ -144,6 +144,7 @@ EndProcedure
 Procedure LoadCartridge()
   Protected i.i, bank.i
   FrameBottom=@FrameBottomStore(0)
+  PpuSpreadInit()
   CartSelect(CartIndex) : PicoPrgFlat()
   CartChrDirty=0 : PicoMapActive=0 : PicoIrq=0 : NesNmiDelay=0 : CpuIrqDelay=0
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase : CartPrgSelected=0 : CartChrSelected=0 : PpuChrBank=0

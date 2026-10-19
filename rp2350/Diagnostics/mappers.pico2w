@@ -13,6 +13,22 @@ EnableExplicit
 XIncludeFile "../runtime.pico2"
 XIncludeFile "../cartridge.pico2"
 XIncludeFile "mapper_vectors.pico2"
+; MapperChr's decoded rows: data on the Pico W; on the RP2350 computed into RAM by MapperDecodeChr
+; (PpuDecode's representation), which keeps this image below the ROM store.
+CompilerIf #PICO_ADVANCED=0
+  XIncludeFile "mapper_vectors_decoded.pico2"
+CompilerElse
+  Global Dim MapperDecodedRam.a(32768)
+  Procedure MapperDecodeChr()
+    Protected tile.i, y.i
+    PpuSpreadInit()
+    For tile=0 To 32767 Step 16
+      For y=0 To 7
+        PokeU(@MapperDecodedRam(0)+tile+y*2,PpuSpread(PeekA(?MapperChr+tile+y))|(PpuSpread(PeekA(?MapperChr+tile+y+8))<<1))
+      Next
+    Next
+  EndProcedure
+CompilerEndIf
 Global Checks.i,Failures.i,Stamp.i=10000
 Procedure Check(actual.i,expected.i)
   Checks=Checks+1
@@ -26,7 +42,11 @@ Procedure InitMapper(kind.i,ram.i)
   NesRpc(0,0,0,Stamp)
   PpuMask=0 : CartMapper=kind : CartChrRam=ram : CartConflicts=0 : PicoSubmapper=0 : PicoRamPresent=1
   CartPrg=?MapperPrg : CartPrgBanks=2 : PicoPrgBytes=65536
-  CartChr=?MapperChr : CartChrBanks=4 : PicoChrBytes=32768 : PicoChrDecoded=?MapperDecoded
+  CompilerIf #PICO_ADVANCED=0
+    CartChr=?MapperChr : CartChrBanks=4 : PicoChrBytes=32768 : PicoChrDecoded=?MapperDecoded
+  CompilerElse
+    CartChr=?MapperChr : CartChrBanks=4 : PicoChrBytes=32768 : PicoChrDecoded=@MapperDecodedRam(0)
+  CompilerEndIf
   CartPrgSelected=0 : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   CartChrSelected=-1 : PicoMapperInit()
 EndProcedure
@@ -87,6 +107,9 @@ Procedure MapperTests()
   start=Micros()
   While UsbSerialReady()=0 And Micros()-start<10000000 : UsbSerialTask() : SafetyPet() : Wend
   WaitUs(200000) : RomStoreEnabled=0 : LoadCartridge() : WorkerDisplay=0
+  CompilerIf #PICO_ADVANCED=1
+    MapperDecodeChr()
+  CompilerEndIf
   Check(NesLaunchCore1(),1)
   A=90 : X=34 : Y=56 : S=201 : PC=$8888 : Res=12345
   FN=128 : FZ=1 : FC=256 : FV=128 : FD=0 : FI=1
@@ -187,6 +210,10 @@ Procedure MapperTests()
   CompilerEndIf
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("MAPPER checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Eol()
+  ; the line tools/build.ps1 -VerifyNes reads, as verify and asm_reference print it
+  Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
+  If Failures=0 : Say(" PASS") : Else : Say(" FAIL") : EndIf
+  Eol()
   PicoMapActive=0 : PpuMask=0
   Repeat : UsbSerialTask() : SafetyPet() : ForEver
 EndProcedure
