@@ -171,7 +171,10 @@ you to choose one. Loading reboots the chosen board into its boot menu.
   **69** (Sunsoft FME-7), with the extra sound channels of the VRC6, Namco 163 and
   Sunsoft 5B.
 - NTSC and PAL: a game runs at PAL timing (50 Hz) when its header says PAL or its
-  file name carries a PAL region tag such as `(E)` or `(Europe)`. Firmware older
+  file name carries a PAL region tag such as `(E)` or `(Europe)`, or when you mark
+  it PAL yourself: the **PAL on/off** button in the loader window, or `--pal FILE` on
+  the command line. Some PAL-only games (Elite) circulate with neither mark and
+  glitch at NTSC timing. Firmware older
   than the PAL support refuses a PAL game's store entry rather than run it at NTSC
   speed. Mapper board sizes, submappers and RAM must fit the supported
   profile. Trainers, four-screen boards and battery-save persistence are excluded.
