@@ -12,6 +12,7 @@ half-valid one. Afterwards the board's menu lists the new games.
     py -3 tools/rom_loader.py "My Game.nes" "Another Game.nes"
     py -3 tools/rom_loader.py --clear          # empty the store
     py -3 tools/rom_loader.py --dry-run ROM... # check and lay out only
+    py -3 tools/rom_loader.py --pal Elite.nes Elite.nes Other.nes   # run Elite at PAL timing
     tools/rom_loader_ui.pyw                  # the same, in a window, for users
 
 Only files named on the command line are read. The board must be running
@@ -41,8 +42,11 @@ def ram_code(cart):
     return cart.ram_size.bit_length() - 13
 
 
-def layout(paths, target="rp2040"):
-    """Return (games, directory bytes, [(offset, data)]) or raise ValueError."""
+def layout(paths, target="rp2040", pal=()):
+    """Return (games, directory bytes, [(offset, data)]) or raise ValueError.
+    pal: paths of games to run at PAL timing although neither their header nor their file name says so
+    (Elite's dumps carry no PAL mark and glitch at NTSC timing)."""
+    pal = {str(Path(x)) for x in pal}
     if len(paths) > MAX_GAMES:
         raise ValueError(f'{len(paths)} games named; the directory holds {MAX_GAMES}')
     games, blobs, entries = [], [], b''
@@ -62,7 +66,7 @@ def layout(paths, target="rp2040"):
         blobs += [(prg_at, prg)] + ([(chr_at, chr_data)] if chr_data else [])
         entries += struct.pack('<32sBBBBHHIIIIII', title, cart.mapper, cart.mirror, int(cart.conflicts)|(cart.submapper<<4),
                                int(not chr_data)|(4 if cart.ram_size else 0)|(2 if cart.chr and cart.mapper not in (0,2,66) else 0)|
-                               (ram_code(cart) << 3)|(64 if pico_pal(path) else 0), len(prg) // 32768,
+                               (ram_code(cart) << 3)|(64 if pico_pal(path) or str(Path(path)) in pal else 0), len(prg) // 32768,
                                len(cart.chr) // 8192 if cart.chr else 2,
                                prg_at, len(prg), chr_at, len(chr_data),
                                zlib.crc32(prg), zlib.crc32(chr_data))
@@ -160,17 +164,26 @@ def main():
     p.add_argument('--clear', action='store_true', help='empty the ROM store (the board shows its built-in demo)')
     p.add_argument('--dry-run', action='store_true', help='check and lay out the games; do not touch the board')
     p.add_argument('--no-reset', action='store_true', help='the board is already in the boot menu')
+    p.add_argument('--pal', action='append', default=[], metavar='ROM',
+                   help='run this game (one of the files named) at PAL timing, 50 Hz, although neither its header '
+                        'nor its file name says PAL; may be given more than once')
     a = p.parse_args()
     if bool(a.roms) == a.clear:
         p.error('name the .nes files to load, or --clear')
+    pal = []
+    for name in a.pal:
+        match = [r for r in a.roms if str(r) == name or r.name == Path(name).name]
+        if not match:
+            p.error(f'--pal {name}: that file is not among the games named')
+        pal += match
     try:
-        games, directory, blobs = layout(a.roms,a.target) if a.roms else ([], b'', [])
+        games, directory, blobs = layout(a.roms,a.target,pal) if a.roms else ([], b'', [])
     except (ValueError,OSError) as error:
         sys.exit(f'Refused: {error}')
     for cart, prg_at, prg_len, chr_at, chr_len in games:
         print(f'{cart.title}: mapper {cart.mapper}, PRG {prg_len} bytes at ${prg_at:X}'
               + (f', CHR {chr_len} bytes at ${chr_at:X}' if chr_len else ', CHR RAM')
-              + (', PAL (50 Hz)' if pico_pal(cart.path) else ''))
+              + (', PAL (50 Hz)' if pico_pal(cart.path) or cart.path in pal else ''))
     if games:
         used = max(o + len(d) for o, d in blobs) - DATA
         print(f'{len(games)} game(s), {used} of {ENDS[a.target] - DATA} ROM store bytes')

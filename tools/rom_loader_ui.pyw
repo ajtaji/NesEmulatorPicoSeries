@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rom_loader
-from pico_cartridge import read_pico_rom, pico_prg, stored_chr, ENDS
+from pico_cartridge import read_pico_rom, pico_pal, pico_prg, stored_chr, ENDS
 
 CAPACITY = rom_loader.END - rom_loader.DATA
 
@@ -19,6 +19,7 @@ class LoaderWindow:
     def __init__(self, root):
         self.root = root
         self.games = []                     # [(path, cartridge)]
+        self.pal = set()                    # paths marked PAL by hand (the PAL button)
         self.events = queue.Queue()
         self.busy = False
         self.failed = False
@@ -30,9 +31,11 @@ class LoaderWindow:
         ttk.Label(frame, text='Games to load (the boot menu shows them in this order):').pack(anchor='w')
         table = ttk.Frame(frame)
         table.pack(fill='both', expand=True, pady=(4, 6))
-        self.list = ttk.Treeview(table, columns=('mapper', 'size', 'file'), show='tree headings', height=9)
+        self.list = ttk.Treeview(table, columns=('mapper', 'tv', 'size', 'file'), show='tree headings', height=9)
         self.list.heading('#0', text='Title')
         self.list.heading('mapper', text='Mapper')
+        self.list.heading('tv', text='TV')
+        self.list.column('tv', width=110, anchor='center')
         self.list.heading('size', text='Size in store')
         self.list.heading('file', text='File')
         self.list.column('#0', width=220)
@@ -50,7 +53,9 @@ class LoaderWindow:
         self.remove_button = ttk.Button(buttons, text='Remove', command=self.remove)
         self.up_button = ttk.Button(buttons, text='Move up', command=lambda: self.move(-1))
         self.down_button = ttk.Button(buttons, text='Move down', command=lambda: self.move(1))
-        for b in (self.add_button, self.remove_button, self.up_button, self.down_button):
+        # A PAL game whose header and file name do not say so (Elite) runs wrong at NTSC timing.
+        self.pal_button = ttk.Button(buttons, text='PAL on/off', command=self.toggle_pal)
+        for b in (self.add_button, self.remove_button, self.up_button, self.down_button, self.pal_button):
             b.pack(side='left', padx=(0, 6))
 
         self.capacity_text = tk.StringVar()
@@ -109,6 +114,22 @@ class LoaderWindow:
             del self.games[index]
             self.redraw()
 
+    def toggle_pal(self):
+        index = self.selected()
+        if index is None:
+            return
+        path = self.games[index][0]
+        if pico_pal(path):
+            messagebox.showinfo('Already PAL', f'{path.name} is PAL by its header or file name.')
+            return
+        self.pal.symmetric_difference_update({path})
+        self.redraw(select=index)
+
+    def tv(self, path):
+        if pico_pal(path):
+            return 'PAL (50 Hz)'
+        return 'PAL (50 Hz, set)' if path in self.pal else 'NTSC (60 Hz)'
+
     def move(self, step):
         index = self.selected()
         if index is None or not 0 <= index + step < len(self.games):
@@ -121,7 +142,7 @@ class LoaderWindow:
         for n, (path, cart) in enumerate(self.games):
             size = self.store_size(cart)
             self.list.insert('', 'end', iid=str(n), text=cart.title[:31],
-                             values=(cart.mapper, f'{size // 1024} KiB', path.name))
+                             values=(cart.mapper, self.tv(path), f'{size // 1024} KiB', path.name))
         if select is not None:
             self.list.selection_set(str(select))
         self.update_capacity()
@@ -172,7 +193,8 @@ class LoaderWindow:
             messagebox.showinfo('Nothing to load', 'Add one or more .nes files first.')
             return
         try:
-            games, directory, blobs = rom_loader.layout([p for p, _ in self.games], self.target.get())
+            games, directory, blobs = rom_loader.layout([p for p, _ in self.games], self.target.get(),
+                                                        [p for p, _ in self.games if p in self.pal])
         except ValueError as error:
             messagebox.showerror('Cannot load these games', str(error))
             return
@@ -222,7 +244,7 @@ class LoaderWindow:
         self.busy = busy
         self.target['state'] = 'disabled' if busy else 'readonly'
         state = 'disabled' if busy else 'normal'
-        for b in (self.add_button, self.remove_button, self.up_button, self.down_button,
+        for b in (self.add_button, self.remove_button, self.up_button, self.down_button, self.pal_button,
                   self.load_button, self.clear_button):
             b['state'] = state
 

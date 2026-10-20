@@ -48,6 +48,12 @@ class CartridgeTests(unittest.TestCase):
             q=Path(self.temp.name)/name; q.write_bytes(data)
             self.assertEqual(pico_pal(q),pal,name)
             self.assertEqual(layout([q],'rp2350')[1][16+35]>>6&1,int(pal),name)
+    def test_pal_by_hand(self):
+        # A PAL game whose header and name do not say so is marked by the caller (--pal / the PAL button).
+        p=self.rom(2,chr=0)
+        self.assertEqual(layout([p],'rp2350')[1][16+35]&64,0)
+        self.assertEqual(layout([p],'rp2350',[p])[1][16+35]&64,64)
+        self.assertEqual(layout([p],'rp2350',[Path(str(p))])[1][16+35]&64,64)
     def test_prg_views(self):
         c=read_pico_rom(self.rom(71,prg=16,chr=0))
         c=replace(c,prg=b''.join(bytes([n])*16384 for n in range(16)))
