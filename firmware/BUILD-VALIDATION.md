@@ -1,6 +1,6 @@
 # Firmware downloads and hardware validation
 
-Release v0.1.0 assets refreshed October 16, 2026. Eight UF2 files cover four
+Release v0.1.0 assets refreshed October 20, 2026. Eight UF2 files cover four
 displays on both MCU families. Download the file matching your chip and wiring.
 
 | UF2 file | Target | Display | Hardware validation | Display output |
@@ -23,6 +23,12 @@ displays on both MCU families. Download the file matching your chip and wiring.
 - **DISPLAY UNTESTED:** both ST7789 builds compiled and passed physical-board
   SPI/DMA transport checks with **no ST7789 panel attached**. Those checks do
   not verify orientation, colors, stability or visible refresh.
+- **October 20 rebuild:** the two LAFVIN images were run on their boards (boot
+  menu at 60 FPS; a game started on each). The ILI9341, HX8357D and ST7789
+  results above were measured on the October 16 builds of the same displays;
+  the rebuilt images for those panels were compiled and checked, not re-run.
+  The board tests in `rp2040/Diagnostics` and `rp2350/Diagnostics` pass on
+  this source on both chips.
 - **COMPILE ONLY:** the RP2350 ILI9341/HX8357D builds compiled, but have not been
   tested with the matching physical display. Their RP2040 results do not
   establish RP2350 hardware validation.
@@ -40,11 +46,9 @@ No download contains commercial game ROMs or private speaker pairing details.
 ## Binary provenance
 
 The v0.1.0 Git tag remains its original source snapshot; it has not been moved.
-The four original LAFVIN/Display Pack binaries are retained byte-for-byte.
-The added ILI9341 binaries come from source snapshot
-[1cb3e85](https://github.com/ajtaji/NesEmulatorPicoSeries/tree/1cb3e85), and the
-HX8357D binaries from
-[ddc18ff](https://github.com/ajtaji/NesEmulatorPicoSeries/tree/ddc18ff).
+All eight binaries were rebuilt on October 20, 2026 from source snapshot
+[c9f001f](https://github.com/ajtaji/NesEmulatorPicoSeries/tree/c9f001f): the
+mapper additions, PAL mode and the TrueType boot menu are in every image.
 `SHA256SUMS.txt` covers all eight UF2 files. Each image's family ID and end address
 were checked; every image ends before the ROM-store boundary at 0x10050000.
 
