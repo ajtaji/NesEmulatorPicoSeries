@@ -48,6 +48,10 @@ player. A button change counts once two reads 4 ms apart agree, which rejects
 contact bounce. Core 0 merges the bytes into the controller ports in its normal
 input poll, so the CPU core spends no time on I2C.
 
+On the Pico 2 W, build with PureMetal Forge 2026-10-19 or later. Earlier releases'
+I2C library waited about 4 ms on every register read (forum 1357), and with a pad
+attached the emulator fell to about one frame a second.
+
 To use other pins or turn the pad support off, set these in your wrapper before
 `Main()`:
 
