@@ -14,13 +14,17 @@ CPU timing, renderer or audio settings are used.
 | 2 | UxROM | Yes | Yes |
 | 3 | CNROM | Yes | Yes |
 | 4 | MMC3 | No | Yes |
+| 5 | MMC5 (Castlevania III), scanline IRQ; MMC5 sound not emulated | No | Yes |
 | 7 | AxROM, one-screen mirroring | Yes | Yes |
 | 11 | Color Dreams | Yes | Yes |
 | 13 | CPROM, 16 KiB CHR RAM | No | Yes |
+| 19 | Namco 163, with its wavetable sound | No | Yes |
+| 24, 26 | Konami VRC6, with its sound | No | Yes |
 | 34 | BNROM / NINA-001 | BNROM | Both |
 | 41 | Caltron | Yes | Yes |
 | 47 | MMC3 multicart | No | Yes |
 | 66 | GxROM | Yes | Yes |
+| 69 | Sunsoft FME-7, with the 5B's sound | No | Yes |
 | 71 | Codemasters, including BF9097 mirroring | Yes | Yes |
 | 79 | NINA-03/06 | Yes | Yes |
 | 118 | TxSROM | No | Yes |
@@ -31,7 +35,7 @@ CPU timing, renderer or audio settings are used.
 | 232 | Camerica multicart, including submapper 1 | Yes | Yes |
 
 These are bounded hardware profiles, not a guarantee that every ROM using an ID
-works. The parser checks board sizes and submappers. NTSC only; trainers,
+works. The parser checks board sizes and submappers. NTSC and PAL (from the header or a PAL region tag in the file name); trainers,
 four-screen boards, MMC1 outer-bank variants and persistent battery saves are
 excluded. Cartridge RAM is volatile. The native PPU remains instruction-timestamped,
 with its existing 8-pixel rendering granularity and approximate edge behavior.
@@ -108,8 +112,10 @@ validation. Some MMC3 workloads still fall below 60 FPS.
 
 ## Remaining mappers
 
-MMC5, MMC2, RAMBO-1, Sunsoft and the other Anvil-only boards are not exposed by
-these Pico profiles. Their extra pattern-fetch, extended nametable, IRQ or sound
+MMC2, RAMBO-1, the other Sunsoft boards and the remaining Anvil-only boards are not exposed by
+these Pico profiles. (MMC5, Namco 163, VRC6 and Sunsoft FME-7 run on the Pico 2 W.
+Not drawn yet: MMC5's extended-attribute mode and vertical split, and Namco 163
+nametables taken from CHR ROM.) Their extra pattern-fetch, extended nametable, IRQ or sound
 requirements need a separate native-renderer adapter and validation. Pico W's
 remaining SRAM also prevents the additional RAM and advanced mapper profile used on Pico 2 W.
 They are refused rather than silently run as another mapper.

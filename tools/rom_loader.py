@@ -169,7 +169,8 @@ def main():
         sys.exit(f'Refused: {error}')
     for cart, prg_at, prg_len, chr_at, chr_len in games:
         print(f'{cart.title}: mapper {cart.mapper}, PRG {prg_len} bytes at ${prg_at:X}'
-              + (f', CHR {chr_len} bytes at ${chr_at:X}' if chr_len else ', CHR RAM'))
+              + (f', CHR {chr_len} bytes at ${chr_at:X}' if chr_len else ', CHR RAM')
+              + (', PAL (50 Hz)' if pico_pal(cart.path) else ''))
     if games:
         used = max(o + len(d) for o, d in blobs) - DATA
         print(f'{len(games)} game(s), {used} of {ENDS[a.target] - DATA} ROM store bytes')

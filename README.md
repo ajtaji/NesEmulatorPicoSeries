@@ -1,6 +1,6 @@
 # PureMetal NES for the Raspberry Pi Pico series
 
-An NES (NTSC) emulator for the Raspberry Pi Pico family, written in PureMetal and
+An NES emulator (NTSC and PAL) for the Raspberry Pi Pico family, written in PureMetal and
 compiled with PureMetalForge to bare-metal machine code: no SDK and no RTOS.
 Games are not part of the firmware. You load your own `.nes` files onto the
 board's flash with a small Python tool, which has a window for everyday use and
@@ -49,7 +49,7 @@ and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 | Raspberry Pi Pico 2 W | RP2350 Arm | Runs; diagnostics and three-game board tests pass |
 | Raspberry Pi Pico 2 | RP2350 Arm | Same port; not yet run on a board here (no Bluetooth audio) |
 | Raspberry Pi 4 / Anvil | BCM2711 AArch64 | [Returning application, Neon/Vulkan, touch and Bluetooth](anvil/README.md) |
-| Pimoroni Pico Plus 2 / Pico Plus 2 W | RP2350B + 8 MB PSRAM | Planned; not ported yet |
+| Pimoroni Pico Plus 2 / Pico Plus 2 W | RP2350B + 8 MB PSRAM | Runs on a board without a display (no published wrapper yet); MMC5's largest PRG-RAM uses the PSRAM |
 | Pimoroni Pico 2 W with a PSRAM kit | RP2350A + PSRAM | Planned; not ported yet |
 
 Each chip family has its own folder (`rp2040/` and `rp2350/`). A port is added only after
@@ -167,7 +167,13 @@ you to choose one. Loading reboots the chosen board into its boot menu.
 
 - Pico W: **0, 2, 3, 7, 11, 34 (BNROM), 41, 66, 71, 79, 144, 148, 232**.
 - Pico 2 W adds **1, 4, 13, 47, 118, 119, 206**, plus NINA-001 mapper 34.
-- NTSC only. Mapper board sizes, submappers and RAM must fit the supported
+- Pico 2 W also runs **5** (MMC5), **19** (Namco 163), **24/26** (Konami VRC6) and
+  **69** (Sunsoft FME-7), with the extra sound channels of the VRC6, Namco 163 and
+  Sunsoft 5B.
+- NTSC and PAL: a game runs at PAL timing (50 Hz) when its header says PAL or its
+  file name carries a PAL region tag such as `(E)` or `(Europe)`. Firmware older
+  than the PAL support refuses a PAL game's store entry rather than run it at NTSC
+  speed. Mapper board sizes, submappers and RAM must fit the supported
   profile. Trainers, four-screen boards and battery-save persistence are excluded.
 - Up to 63 games in **696 KiB** (Pico W) or **1720 KiB** (Pico 2 W).
   Prebuilt PRG views and predecoded CHR count toward this space.
@@ -234,7 +240,7 @@ PureMetal Forge release that includes them (the first one after 2026-10-17).
 
 Accuracy limits: the PPU is not dot-exact (mid-scanline changes take effect at
 8-pixel granularity), only documented CPU opcodes are implemented, and some
-DMC/OAM/IRQ edge timing is approximate. Only NTSC is supported.
+DMC/OAM/IRQ edge timing is approximate. NTSC and PAL timing are emulated; Dendy is not.
 
 ## Building
 
