@@ -3,20 +3,11 @@
 Global Dim HudPixels.u(80)
 Global HudLastUs.i, HudLastLcd.i, HudLastEmu.i, HudColumn.i
 Global HudLcdTenths.i, HudEmuTenths.i
+; The 18 glyphs (0-9, F P S E M U, space, dot) are 8x10 RGB565 sprites rendered once on the PC from JetBrains
+; Mono (tools/make_menu_font.py, HudSprites in menu_font.pico): a glyph is a copy, never drawn here.
 Procedure HudGlyph(glyph.i)
-  Protected bits.i, x.i, y.i, c.i
-  bits=PeekU(?HudFont+glyph*2)
-  For y=0 To 9
-    For x=0 To 7
-      c=0
-      If x<6
-        If (bits>>((y>>1)*3+(x>>1)))&1
-          c=$FFFF
-        EndIf
-      EndIf
-      HudPixels(y*8+x)=c
-    Next
-  Next
+  Protected i.i
+  For i=0 To 79 : HudPixels(i)=PeekU(?HudSprites+glyph*160+i*2) : Next
   VideoHudRect(4+HudColumn*8,4,8,10,@HudPixels(0))
   HudColumn=HudColumn+1
 EndProcedure
@@ -45,9 +36,3 @@ Procedure HudUpdate()
   HudGlyph(13) : HudGlyph(14) : HudGlyph(15) : HudGlyph(16)
   HudNumber(HudEmuTenths)
 EndProcedure
-DataSection
-HudFont:
-  ; Digits 0..9, F P S E M U space dot. Each row is three LSB-first bits.
-  Data.u $7B6F,$2492,$73E7,$79E7,$49ED,$79CF,$7BCF,$4927,$7BEF,$79EF
-  Data.u $12CF,$12EF,$79CF,$73CF,$5B7D,$7B6D,0,$2000
-EndDataSection

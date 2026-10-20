@@ -12,7 +12,6 @@ EnableExplicit
 XIncludeFile "../runtime.pico"
 XIncludeFile "../cartridge.pico"
 XIncludeFile "zp_vectors.pico"
-XIncludeFile "view_vectors.pico"
 Global Checks.i, Failures.i
 Global Dim ExpectedPixels.a(8)
 Global Dim ExpectedRow.u(256)
@@ -26,7 +25,6 @@ Procedure Check(actual.i, expected.i)
     EndIf
   EndIf
 EndProcedure
-XIncludeFile "view_tests.pico"
 Procedure AudioStopTests()
   Protected ch.i, i.i
   For ch=0 To 3
@@ -799,8 +797,6 @@ Procedure TestMain()
   AudioStopTests()
   Say("STEP RomStoreTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   RomStoreTests()
-  Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
-  CartridgeViewTests()
   Say("STEP InterruptPollTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   InterruptPollTests()
   Say("STEP PalTimingTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()

@@ -13,45 +13,94 @@ Procedure MenuRect(x.i,y.i,w.i,h.i,colour.i)
     For col=x To x+w-1 : MenuPixel(col,row,colour) : Next
   Next
 EndProcedure
-Procedure MenuText(x.i,y.i,text.i,colour.i)
-  Protected c.i, bits.i, row.i, col.i, n.i
-  For n=0 To 29
-    c=PeekA(text+n)
-    If c=0 : Break : EndIf
-    If c>=97 And c<=122 : c=c-32 : EndIf
-    bits=0
-    If c>=48 And c<=57
-      bits=PeekU(?HudFont+(c-48)*2)
-    ElseIf c>=65 And c<=90
-      bits=PeekU(?MenuLetters+(c-65)*2)
-    ElseIf c=45
-      bits=7<<6
-    EndIf
-    For row=0 To 4
-      For col=0 To 2
-        If (bits>>(row*3+col))&1
-          MenuRect(x+n*8+col*2,y+row*2,2,2,colour)
-        EndIf
+; TrueType text, rendered once on the PC (tools/make_menu_font.py writes menu_font.pico) and blitted here:
+; each glyph's 4-bit coverage blends the text colour into the known background through MenuRamp. Font 0 is
+; Menu Sans at 20 px (the heading), font 1 at 14 px (the list and prompts). Nothing is rasterised on the board.
+Global Dim MenuRamp.u(16)
+Global MenuRampFg.i=-1, MenuRampBg.i=-1
+Procedure MenuSetColours(fg.i,bg.i)
+  Protected level.i, r.i, g.i, b.i
+  If fg=MenuRampFg And bg=MenuRampBg : ProcedureReturn : EndIf
+  For level=0 To 15
+    r=((fg>>11)*level+(bg>>11)*(15-level)+7)/15
+    g=(((fg>>5)&63)*level+((bg>>5)&63)*(15-level)+7)/15
+    b=((fg&31)*level+(bg&31)*(15-level)+7)/15
+    MenuRamp(level)=(r<<11)|(g<<5)|b
+  Next
+  MenuRampFg=fg : MenuRampBg=bg
+EndProcedure
+Procedure.i MenuMetrics(font.i)
+  If font=0 : ProcedureReturn ?MenuSansLargeMetrics : EndIf
+  ProcedureReturn ?MenuSansSmallMetrics
+EndProcedure
+Procedure.i MenuGlyphWidth(font.i,c.i)
+  If c<32 Or c>126 : c=63 : EndIf
+  ProcedureReturn PeekA(MenuMetrics(font)+(c-32)*5+4)
+EndProcedure
+Procedure MenuGlyph(x.i,y.i,font.i,c.i)
+  Protected m.i, bits.i, w.i, h.i, row.i, col.i, level.i, stride.i, px.i, py.i
+  If c<32 Or c>126 : c=63 : EndIf
+  m=MenuMetrics(font)+(c-32)*5
+  If font=0
+    bits=?MenuSansLargeBits+PeekU(?MenuSansLargeOffsets+(c-32)*2)
+  Else
+    bits=?MenuSansSmallBits+PeekU(?MenuSansSmallOffsets+(c-32)*2)
+  EndIf
+  w=PeekA(m) : h=PeekA(m+1) : stride=(w+1)>>1
+  For row=0 To h-1
+    py=y+PeekA(m+3)+row
+    If py>=0 And py<240
+      For col=0 To w-1
+        level=PeekA(bits+row*stride+(col>>1))
+        If col&1 : level=level>>4 : Else : level=level&15 : EndIf
+        px=x+PeekA(m+2)-64+col
+        If level<>0 And px>=0 And px<256 : MenuPixel(px,py,MenuRamp(level)) : EndIf
       Next
-    Next
+    EndIf
   Next
 EndProcedure
+; text: a zero-terminated ASCII string. A text wider than maxWidth ends in "..." where it still fits.
+Procedure MenuText(x.i,y.i,text.i,font.i,fg.i,bg.i,maxWidth.i)
+  Protected n.i, c.i, width.i, dots.i, last.i
+  MenuSetColours(fg,bg)
+  For n=0 To 63
+    c=PeekA(text+n)
+    If c=0 : Break : EndIf
+    width=width+MenuGlyphWidth(font,c)
+  Next
+  last=n
+  If width>maxWidth
+    dots=MenuGlyphWidth(font,46)*3 : width=0
+    For n=0 To last-1
+      If width+MenuGlyphWidth(font,PeekA(text+n))+dots>maxWidth : Break : EndIf
+      width=width+MenuGlyphWidth(font,PeekA(text+n))
+    Next
+    last=n
+  EndIf
+  For n=0 To last-1
+    c=PeekA(text+n) : MenuGlyph(x,y,font,c) : x=x+MenuGlyphWidth(font,c)
+  Next
+  If PeekA(text+last)<>0
+    For n=0 To 2 : MenuGlyph(x,y,font,46) : x=x+MenuGlyphWidth(font,46) : Next
+  EndIf
+EndProcedure
 Procedure MenuDraw(selected.i,first.i)
-  Protected index.i, y.i, colour.i
+  Protected index.i, y.i
   MenuRect(0,0,256,240,$0841)
-  MenuText(12,12,?MenuHeading,$FFFF)
-  MenuText(12,32,?MenuChoose,$BDF7)
-  For index=first To first+3
+  MenuText(12,8,?MenuHeading,0,$FFFF,$0841,232)
+  MenuText(12,36,?MenuChoose,1,$BDF7,$0841,232)
+  For index=first To first+4
     If index>=CartCount : Break : EndIf
-    CartSelect(index) : y=58+(index-first)*34 : colour=$BDF7
+    CartSelect(index) : y=62+(index-first)*26
     If index=selected
-      MenuRect(6,y-7,244,30,$2188) : colour=$FFE0
+      MenuRect(6,y-3,244,22,$2188) : MenuText(12,y,CartTitle,1,$FFE0,$2188,232)
+    Else
+      MenuText(12,y,CartTitle,1,$BDF7,$0841,232)
     EndIf
-    MenuText(12,y,CartTitle,colour)
   Next
   CartSelect(selected)
-  MenuText(12,207,?MenuPlay,$FFFF)
-  MenuText(12,225,?MenuStart,$BDF7)
+  MenuText(12,198,?MenuPlay,1,$FFFF,$0841,232)
+  MenuText(12,216,?MenuStart,1,$BDF7,$0841,232)
 EndProcedure
 Procedure.i BootMenu()
   Protected selected.i, first.i, dirty.i, previous.i, mask.i, key.i, launch.i
@@ -92,7 +141,7 @@ Procedure.i BootMenu()
     If PeekL(@DisplayDone)=DisplayReady
       If dirty
         If selected<first : first=selected : EndIf
-        If selected>=first+4 : first=selected-3 : EndIf
+        If selected>=first+5 : first=selected-4 : EndIf
         MenuDraw(selected,first) : dirty=0
         Say("BOOT_SELECT index=") : Num(selected) : Say(" mapper=") : Num(CartMapper) : Eol()
       EndIf
@@ -112,13 +161,8 @@ Procedure.i BootMenu()
   ProcedureReturn selected
 EndProcedure
 DataSection
-MenuHeading: Data.a 80,85,82,69,77,69,84,65,76,32,78,69,83,0
-MenuChoose: Data.a 67,72,79,79,83,69,32,65,32,71,65,77,69,0
-MenuPlay: Data.a 65,32,84,79,32,80,76,65,89,0
-MenuStart: Data.a 66,79,84,72,32,65,78,68,32,85,80,32,70,79,82,32,83,84,65,82,84,0
-MenuLetters:
-  ; A..Z, row-major 3x5, LSB-left.
-  Data.u $5BEA,$3AEB,$624E,$3B6B,$72CF,$12CF,$6B4E,$5BED,$7497,$2B24
-  Data.u $5AED,$7249,$5B7D,$5B6B,$3B6E,$12EF,$6F6E,$5AEF,$798E,$2497
-  Data.u $3B6D,$2B6D,$5F6D,$5AAD,$24AD,$72A7
+MenuHeading: Data.a 80,117,114,101,77,101,116,97,108,32,78,69,83,0
+MenuChoose: Data.a 67,104,111,111,115,101,32,97,32,103,97,109,101,0
+MenuPlay: Data.a 65,32,116,111,32,112,108,97,121,0
+MenuStart: Data.a 66,111,116,104,32,98,117,116,116,111,110,115,32,97,110,100,32,85,112,32,102,111,114,32,83,116,97,114,116,0
 EndDataSection

@@ -47,6 +47,7 @@ CompilerElseIf #NES_AUDIO_BACKEND=0
   XIncludeFile "outputs/audio_null.pico2"
 CompilerEndIf
 XIncludeFile "hud.pico2"
+XIncludeFile "menu_font.pico2"
 XIncludeFile "display.pico2"
 XIncludeFile "worker.pico2"
 XIncludeFile "io.pico2"

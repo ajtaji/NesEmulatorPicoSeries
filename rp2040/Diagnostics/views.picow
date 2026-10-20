@@ -1,0 +1,57 @@
+; The cartridge address-window tests (view_tests.pico) and their 64 KB of UxROM fixtures, in an image of their
+; own: moved out of verify.picow on 2026-10-20, when the boot menu's TrueType glyphs made the Pico 2 W's verify
+; image reach past the ROM store at $50000. Build and run it through tools/build.ps1 -VerifyNes, like verify:
+; it ends with "NES board checks=... PASS".
+#NES_VIDEO_BACKEND=1
+#NES_AUDIO_BACKEND=1
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=1
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "../runtime.pico"
+XIncludeFile "../cartridge.pico"
+XIncludeFile "view_vectors.pico"
+Global Checks.i, Failures.i
+Procedure Check(actual.i, expected.i)
+  Checks=Checks+1
+  If actual<>expected
+    Failures=Failures+1
+    If Failures<=16
+      Say("FAIL check=") : Num(Checks) : Say(" actual=") : Num(actual)
+      Say(" expected=") : Num(expected) : Eol()
+    EndIf
+  EndIf
+EndProcedure
+XIncludeFile "view_tests.pico"
+Procedure TestMain()
+  Protected start.i
+  SafetyBoot() : ClockInitKhz(200000) : TimerInit() : UsbSerialInit()
+  start=Micros()
+  While UsbSerialReady()=0 And Micros()-start<10000000
+    UsbSerialTask() : SafetyPet()
+  Wend
+  WaitUs(200000) : LoadCartridge() : WorkerDisplay=0
+  Check(multicore_launch(),1)
+  CpuReset()
+  Say("STEP CartridgeViewTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CartridgeViewTests()
+  Check(WorkerError,0) : Check(NesBridgeError,0)
+  Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
+  If Failures=0
+    Say(" PASS")
+  Else
+    Say(" FAIL")
+  EndIf
+  Eol()
+  Repeat
+    UsbSerialTask() : SafetyPet()
+  ForEver
+EndProcedure
+; The checks run on the built-in cartridge, whatever the ROM store holds.
+RomStoreEnabled=0
+TestMain()
