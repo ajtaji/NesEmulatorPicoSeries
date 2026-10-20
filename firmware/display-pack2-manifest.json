@@ -1,21 +1,23 @@
 {
   "rp2040": {
-    "public_uf2_sha256": "4fc8a1ec7e16be819a8e681af1517b16e945dee199181fa91e648f437e757b34",
+    "public_uf2_sha256": "4f8ca8e0d298907fdcf40d99b6807f656f7ed4657537b64a8cb3c11605192db7",
     "display_frame_divider": 2,
     "guest_timing": "NTSC; presentation decimation only",
     "panel_validation": "Experimental; no ST7789 display available",
     "native_spi_dma_checks": 90,
     "native_failures": 0,
     "bus_hz": 50000000,
-    "private_board_test_sha256": "1c052db15159ed909b41659909dbb06abfebd9650778ebffdca1fc120c93e5cc"
+    "private_board_test_sha256": "1c052db15159ed909b41659909dbb06abfebd9650778ebffdca1fc120c93e5cc",
+    "public_uf2_source": "c9f001f (built 2026-10-20)"
   },
   "rp2350": {
-    "public_uf2_sha256": "8c115b00a83dd0b54bad6a31f73aff826c83ec4ff2bb2a8bc28ce977bb7d0c5d",
+    "public_uf2_sha256": "8f2f662dfd78c4ce83232838134f4df0086632858482b36b56f28392112dccab",
     "display_frame_divider": 1,
     "guest_timing": "NTSC; presentation decimation only",
     "panel_validation": "Experimental; no ST7789 display available",
     "native_spi_dma_checks": 90,
     "native_failures": 0,
-    "bus_hz": 75000000
+    "bus_hz": 75000000,
+    "public_uf2_source": "c9f001f (built 2026-10-20)"
   }
 }
