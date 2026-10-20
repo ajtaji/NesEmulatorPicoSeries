@@ -280,7 +280,10 @@ published.
 Generated sources are produced by scripts in `rp2040/` and reproduce
 byte-for-byte: `generate_cpu.py` (the 2A03 core, from `nmos6502.pico`; needs
 `py65`), `generate_ppu.py` (the renderer), `make_demo.py` (the built-in demo
-cartridge) and `Diagnostics/generate_zp_vectors.py` (test vectors). The SBC
+cartridge) and `Diagnostics/generate_zp_vectors.py` (test vectors).
+`tools/make_menu_font.py` (needs Pillow) renders the boot menu's text and the
+FPS counter's digits from TrueType fonts into `rp2040/menu_font.pico`; the
+firmware only copies those pre-rendered glyphs, it never rasterises a font. The SBC
 test vectors moved to PureMetal Forge with the encoder
 (`Shared/Bluetooth/Diagnostics/sbc_vectors.pmi`, made by its
 `tools/make_sbc_vectors.py`).
@@ -295,6 +298,9 @@ The suite compares the optimized renderer, sprite evaluation and CPU against
 independent reference implementations. It also covers controller logic, the APU,
 the SBC encoder (byte-exact vectors), the ROM store's flash writes and CRC, and a
 CPU throughput benchmark. It reports `NES board checks=N failures=0 PASS`.
+The cartridge address-window tests run the same way from
+`rp2040/Diagnostics/views.picow`, and the assembly and mapper comparisons from
+`asm_reference.picow` and `mappers.picow`.
 `tools/capture.py` saves a framebuffer or the PCM ring from a running board.
 
 ## Repository layout
@@ -319,6 +325,10 @@ FPS counter placement and hardware validation status. LAFVIN remains the default
 MIT (see `LICENSE`). The CYW43439 Bluetooth firmware is included under its own
 licences (`licenses/CYW43439-*.txt`). The SBC prototype filter coefficients are
 cross-checked against BlueZ (`licenses/SBC-TABLES.md`, LGPL-2.1).
+The boot menu's text ("Menu Sans") is rendered from Lato, and the FPS digits
+("Menu Mono") from JetBrains Mono, both under the SIL Open Font License 1.1
+(`fonts/source/*/OFL.txt`). "Lato" is a Reserved Font Name, so the rendered
+bitmaps carry another name.
 
 The [Pi 4 / Anvil port](anvil/README.md) supports 30 mapper IDs, including
 MMC1/2/3/5, NINA, Codemasters, Namco 108, RAMBO, Sunsoft, TQROM and multicarts.
