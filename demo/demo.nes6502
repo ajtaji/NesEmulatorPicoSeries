@@ -1,0 +1,404 @@
+; ======================================================================
+;  demo.nes6502 - the PureMetal NES demo. NTSC, a UxROM cartridge with
+;  CHR RAM (mapper 2), 32 KB of program.
+;
+;  ALL OF IT IS PUREMETAL: no inline assembly. The compiler's NES board
+;  (.nes6502) puts the code at $8000, writes the vectors, and calls NMI()
+;  at every vertical blank; demo_assets.nes6502 holds the tiles, the
+;  tables and the song (made by make_demo_assets.py).
+;
+;  WHAT IT SHOWS
+;    - "PUREMETAL" in big shaded letters, fading in from black, its colours
+;      shimmering through a band of hues;
+;    - three layers of stars drifting left at three speeds (sprites);
+;    - "PUREMETAL NES" in rainbow sprite letters riding a sine wave;
+;    - a marquee along the bottom, scrolling while the picture above it
+;      stands still: the PPU's sprite-0 hit tells the program the beam has
+;      reached the divider line, and the horizontal scroll changes there;
+;    - a four-channel tune on the 2A03 (two pulses, triangle bass, noise
+;      drums) with a small player and per-frame volume envelopes.
+;
+;  THE FRAME. NMI() runs at the start of vertical blank: it copies the
+;  sprite table with one DMA, writes what the main loop queued (the
+;  marquee's next column, the shimmer colours), sets the scroll for the top
+;  of the picture and counts the frame. The main loop waits for that count
+;  to change, waits for sprite 0 to clear (vertical blank is over) and
+;  then for the sprite-0 hit, sets the marquee's scroll at once, and only
+;  then works out the next frame's sprites, colours and music - in the
+;  lines below the divider and the vertical blank. Doing the work first
+;  made the split late whenever the work ran long, and the marquee
+;  flickered.
+; ======================================================================
+XIncludeFile "demo_assets.nes6502"
+
+; ---- the 2C02 PPU and the 2A03's sound ----
+#PPUCTRL   = $2000
+#PPUMASK   = $2001
+#PPUSTATUS = $2002
+#OAMADDR   = $2003
+#PPUSCROLL = $2005
+#PPUADDR   = $2006
+#PPUDATA   = $2007
+#OAMDMA    = $4014
+#APUSTATUS = $4015
+#APUFRAME  = $4017
+#OAM       = $0200                  ; the sprite table's copy in RAM (the board keeps $0200-$02FF free)
+
+; PPUCTRL for the frame: NMI on, sprites from pattern table 1, background from 0
+#CTRL_BASE = $88
+#MASK_ON   = $1E                    ; background and sprites, both in the left 8 pixels too
+
+#MARQUEE_ROW = 26
+#DIVIDER_ROW = 24
+#STARS       = 30
+#WAVE_FIRST  = 1                    ; sprite 0 is the split; the wave letters follow it
+#STAR_FIRST  = 14
+#SPEED       = 6                    ; frames a row of the song
+
+Global frame.a, seen.a
+Global scrollX.u, textPos.u, nextColumn.a
+Global colPending.a, colTile.a, colAddr.u
+Global palPending.a, outline.a, shimmer1.a, shimmer2.a, fade.a
+Global songRow.u, songTick.a
+Global vol1.a, vol2.a, volN.a, decayN.a
+Global Dim starX.a(#STARS)
+Global Dim starY.a(#STARS)
+Global Dim starLayer.a(#STARS)
+Global Dim waveTile.a(16)
+
+; ======================================================================
+;  THE VERTICAL BLANK
+; ======================================================================
+ProcedureInterrupt NMI()
+  PokeA(#OAMADDR, 0)
+  PokeA(#OAMDMA, #OAM >> 8)               ; 256 bytes of sprites in 513 cycles
+  If palPending
+    PokeA(#PPUADDR, $3F) : PokeA(#PPUADDR, $01)
+    PokeA(#PPUDATA, outline)              ; logo outline
+    PokeA(#PPUDATA, shimmer1)             ; logo body
+    PokeA(#PPUDATA, shimmer2)             ; logo light band
+    palPending = 0
+  EndIf
+  If colPending
+    PokeA(#PPUADDR, colAddr >> 8) : PokeA(#PPUADDR, colAddr & $FF)
+    PokeA(#PPUDATA, colTile)
+    colPending = 0
+  EndIf
+  ; the top of the picture never scrolls
+  PokeA(#PPUCTRL, #CTRL_BASE)
+  PokeA(#PPUSCROLL, 0) : PokeA(#PPUSCROLL, 0)
+  frame = frame + 1
+EndProcedure
+
+; ======================================================================
+;  SETTING UP (rendering off)
+; ======================================================================
+Procedure WaitVblankPolled()
+  While (PeekA(#PPUSTATUS) & $80) = 0 : Wend
+EndProcedure
+
+Procedure PpuAddress(addr.u)
+  PokeA(#PPUADDR, addr >> 8)
+  PokeA(#PPUADDR, addr & $FF)
+EndProcedure
+
+Procedure CopyToPpu(src.u, dest.u, count.u)
+  Protected i.u
+  PpuAddress(dest)
+  i = 0
+  While i < count
+    PokeA(#PPUDATA, PeekA(src + i))
+    i = i + 1
+  Wend
+EndProcedure
+
+Procedure FillPpu(dest.u, count.u, value.a)
+  Protected i.u
+  PpuAddress(dest)
+  i = 0
+  While i < count
+    PokeA(#PPUDATA, value)
+    i = i + 1
+  Wend
+EndProcedure
+
+Procedure WriteText(dest.u, src.u)
+  Protected c.a
+  PpuAddress(dest)
+  c = PeekA(src)
+  While c <> 0
+    PokeA(#PPUDATA, c)
+    src = src + 1
+    c = PeekA(src)
+  Wend
+EndProcedure
+
+Procedure LoadPalette()
+  PpuAddress($3F00)
+  ; background: logo (shimmering), subtitle, marquee, unused
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $10) : PokeA(#PPUDATA, $30)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $06) : PokeA(#PPUDATA, $16) : PokeA(#PPUDATA, $38)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $0F)
+  ; sprites: three letter colours, then the stars (and sprite 0, which matches the divider)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $16)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $28)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $2A)
+  PokeA(#PPUDATA, $0F) : PokeA(#PPUDATA, $00) : PokeA(#PPUDATA, $16) : PokeA(#PPUDATA, $30)
+EndProcedure
+
+Procedure SetUpPicture()
+  ; pattern table 0 (background): blank tile 0, the logo from tile 1, the divider, the font
+  FillPpu($0000, 16, 0)
+  CopyToPpu(?LogoChr, $0010, #LOGO_TILES * 16)
+  CopyToPpu(?DividerChr, #DIVIDER_TILE * 16, 16)
+  CopyToPpu(?FontChr, #FONT_BASE * 16, #FONT_GLYPHS * 16)
+  ; pattern table 1 (sprites): stars at 1-3, sprite 0 at 4, the font at the same numbers
+  FillPpu($1000, 16, 0)
+  CopyToPpu(?StarChr, $1010, 64)
+  CopyToPpu(?FontChr, $1000 + #FONT_BASE * 16, #FONT_GLYPHS * 16)
+  ; both nametables (vertical mirroring: $2000 and $2400 side by side), cleared to the font's space
+  FillPpu($2000, 960, #FONT_BASE)
+  FillPpu($23C0, 64, 0)
+  FillPpu($2400, 960, #FONT_BASE)
+  FillPpu($27C0, 64, 0)
+  ; the logo, rows 2-7 (its blank tile is 0, so it needs its own row clear)
+  FillPpu($2000 + 2 * 32, #LOGO_ROWS * 32, 0)
+  CopyToPpu(?LogoMap, $2000 + 2 * 32, #LOGO_ROWS * 32)
+  WriteText($2000 + 10 * 32 + 6, ?SubText)
+  ; the divider line, across both nametables
+  FillPpu($2000 + #DIVIDER_ROW * 32, 32, #DIVIDER_TILE)
+  FillPpu($2400 + #DIVIDER_ROW * 32, 32, #DIVIDER_TILE)
+  ; attributes: logo rows palette 0, subtitle palette 1, divider and marquee palette 2
+  FillPpu($23C0 + 2 * 8, 8, $55)
+  FillPpu($23C0 + 6 * 8, 8, $AA)
+  FillPpu($27C0 + 6 * 8, 8, $AA)
+  LoadPalette()
+EndProcedure
+
+Procedure SetUpSprites()
+  Protected i.a, j.a, k.a
+  ; everything off-screen first (Y = $F0)
+  For i = 0 To 63
+    PokeA(#OAM + (i << 2), $F0)
+  Next
+  ; sprite 0: on the divider's middle row, at the left
+  PokeA(#OAM + 0, #DIVIDER_ROW * 8 - 1)
+  PokeA(#OAM + 1, #SPRITE0_TILE)
+  PokeA(#OAM + 2, 3)
+  PokeA(#OAM + 3, 16)
+  ; the stars: spread down the middle of the screen, three layers
+  j = 0
+  For i = 0 To #STARS - 1
+    k = PeekA(?Sine + ((i * 37) & 255))
+    starX(i) = k + i * 53
+    starY(i) = 96 + ((i * 29) & 63) + (i & 15)
+    starLayer(i) = j                       ; 0, 1, 2, 0, 1, 2 ... - no division every frame
+    j = j + 1
+    If j = 3 : j = 0 : EndIf
+  Next
+  ; the wave text's tiles
+  For i = 0 To 15
+    k = PeekA(?WaveText + i)
+    waveTile(i) = k
+    If k = 0 : Break : EndIf
+  Next
+EndProcedure
+
+; ======================================================================
+;  EVERY FRAME
+; ======================================================================
+Procedure MoveStars()
+  Protected i.a, j.a, layer.a
+  j = #STAR_FIRST << 2
+  For i = 0 To #STARS - 1
+    layer = starLayer(i)
+    starX(i) = starX(i) - 1 - layer
+    PokeA(#OAM + j, starY(i))
+    PokeA(#OAM + j + 1, layer + 1)
+    PokeA(#OAM + j + 2, 3 | $20)          ; palette 3, behind the background
+    PokeA(#OAM + j + 3, starX(i))
+    j = j + 4
+  Next
+EndProcedure
+
+Procedure MoveWave()
+  Protected i.a, j.a, phase.a, tile.a, x.a, colour.a
+  j = #WAVE_FIRST << 2
+  ; the letters' colours step along the word every 8 frames: a counter, not a division
+  colour = (frame >> 3) & 3
+  If colour = 3 : colour = 0 : EndIf
+  i = 0
+  tile = waveTile(0)
+  x = 24
+  While tile <> 0
+    phase = (frame << 1) + (frame) + (i << 4) + (i << 2)
+    If tile <> #FONT_BASE
+      PokeA(#OAM + j, 104 + (PeekA(?Sine + phase) >> 2))
+      PokeA(#OAM + j + 1, tile)
+      PokeA(#OAM + j + 2, colour)
+      PokeA(#OAM + j + 3, x)
+    Else
+      PokeA(#OAM + j, $F0)
+    EndIf
+    j = j + 4
+    x = x + 16
+    i = i + 1
+    colour = colour + 1
+    If colour = 3 : colour = 0 : EndIf
+    tile = waveTile(i)
+  Wend
+EndProcedure
+
+Procedure Shimmer()
+  Protected p.a
+  ; the fade: outline dark blue, body and band up from black over the first 64 frames
+  If fade < 4
+    If (frame & 15) = 0
+      fade = fade + 1
+    EndIf
+  EndIf
+  p = (frame >> 3) & 15
+  If p > 11 : p = 23 - p : EndIf           ; 0..11 and back: a band of hues, not a jump
+  outline = $01
+  shimmer1 = $21 + p
+  shimmer2 = $31 + p
+  If fade < 4
+    ; each step of the fade is one brightness row of the NES palette ($x0 -> $0x)
+    outline = $0F
+    shimmer1 = shimmer1 - ((3 - fade) << 4)
+    shimmer2 = shimmer2 - ((3 - fade) << 4)
+    If shimmer1 > $3F : shimmer1 = $0F : EndIf
+    If shimmer2 > $3F : shimmer2 = $0F : EndIf
+  EndIf
+  palPending = 1
+EndProcedure
+
+Procedure Marquee()
+  Protected c.a, col.a
+  scrollX = (scrollX + 1) & 511
+  If (scrollX & 7) = 0
+    ; the column just past the right edge gets the next letter
+    col = ((scrollX >> 3) + 32) & 63
+    c = PeekA(?ScrollText + textPos)
+    If c = 0
+      textPos = 0
+      c = PeekA(?ScrollText)
+    EndIf
+    textPos = textPos + 1
+    If col < 32
+      colAddr = $2000 + #MARQUEE_ROW * 32 + col
+    Else
+      colAddr = $2400 + #MARQUEE_ROW * 32 + (col - 32)
+    EndIf
+    colTile = c
+    colPending = 1
+  EndIf
+EndProcedure
+
+; ---- the music ----
+Procedure PlayNote(channel.a, note.a)
+  Protected lo.a, hi.a
+  If channel = 2
+    lo = PeekA(?TriLo + note) : hi = PeekA(?TriHi + note)
+    PokeA($4008, $FF)
+    PokeA($400A, lo) : PokeA($400B, hi | $F8)
+  ElseIf channel = 0
+    lo = PeekA(?PulseLo + note) : hi = PeekA(?PulseHi + note)
+    vol1 = 12
+    PokeA($4000, $B0 | vol1)
+    PokeA($4002, lo) : PokeA($4003, hi | $F8)
+  Else
+    lo = PeekA(?PulseLo + note) : hi = PeekA(?PulseHi + note)
+    vol2 = 7
+    PokeA($4004, $70 | vol2)
+    PokeA($4006, lo) : PokeA($4007, hi | $F8)
+  EndIf
+EndProcedure
+
+Procedure PlayDrum(kind.a)
+  If kind = 1
+    PokeA($400E, $0D) : volN = 15 : decayN = 3
+  ElseIf kind = 2
+    PokeA($400E, $06) : volN = 13 : decayN = 2
+  Else
+    PokeA($400E, $02) : volN = 6 : decayN = 3
+  EndIf
+  PokeA($400C, $30 | volN)
+  PokeA($400F, $F8)
+EndProcedure
+
+Procedure Music()
+  Protected p.u, n.a
+  songTick = songTick - 1
+  If songTick = 0
+    songTick = #SPEED
+    p = ?Song + (songRow << 2)
+    n = PeekA(p)
+    If n <> 0 : PlayNote(0, n) : EndIf
+    n = PeekA(p + 1)
+    If n <> 0 : PlayNote(1, n) : EndIf
+    n = PeekA(p + 2)
+    If n <> 0 : PlayNote(2, n) : EndIf
+    n = PeekA(p + 3)
+    If n <> 0 : PlayDrum(n) : EndIf
+    songRow = songRow + 1
+    If songRow >= #SONG_ROWS
+      songRow = 16                         ; the intro once; then the theme, round and round
+    EndIf
+  EndIf
+  ; envelopes: the lead fades slowly to a floor, the chord quickly to nothing, the drums by their kind
+  If (frame & 3) = 0 And vol1 > 5
+    vol1 = vol1 - 1
+    PokeA($4000, $B0 | vol1)
+  EndIf
+  If vol2 > 0
+    vol2 = vol2 - 1
+    PokeA($4004, $70 | vol2)
+  EndIf
+  If volN > 0
+    If volN > decayN
+      volN = volN - decayN
+    Else
+      volN = 0
+    EndIf
+    PokeA($400C, $30 | volN)
+  EndIf
+EndProcedure
+
+; ======================================================================
+Procedure Main()
+  m6502_sei()
+  PokeA(#PPUCTRL, 0)
+  PokeA(#PPUMASK, 0)
+  PokeA(#APUFRAME, $40)                    ; no frame-counter interrupt
+  WaitVblankPolled()
+  WaitVblankPolled()                       ; the PPU is awake after two
+  SetUpPicture()
+  SetUpSprites()
+  PokeA(#APUSTATUS, $0F)                   ; pulse 1, pulse 2, triangle, noise
+  songTick = 1 : songRow = 0
+  fade = 0
+  Shimmer()
+  WaitVblankPolled()
+  PokeA(#PPUCTRL, #CTRL_BASE)
+  PokeA(#PPUSCROLL, 0) : PokeA(#PPUSCROLL, 0)
+  PokeA(#PPUMASK, #MASK_ON)
+  Repeat
+    While frame = seen : Wend
+    seen = frame
+    ; vertical blank is over when the sprite-0 flag clears
+    While (PeekA(#PPUSTATUS) & $40) <> 0 : Wend
+    ; the beam reaches the divider: from here down, the marquee's scroll
+    While (PeekA(#PPUSTATUS) & $40) = 0 : Wend
+    PokeA(#PPUSCROLL, scrollX & $FF) : PokeA(#PPUSCROLL, 0)
+    PokeA(#PPUCTRL, #CTRL_BASE | (scrollX >> 8))
+    ; the next frame's work, while the bottom of this one is drawn
+    MoveStars()
+    MoveWave()
+    Shimmer()
+    Marquee()
+    Music()
+  ForEver
+EndProcedure
+Main()

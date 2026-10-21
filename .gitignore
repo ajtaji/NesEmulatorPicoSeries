@@ -12,6 +12,8 @@ __pycache__/
 # Never commit games or a wrapper carrying your speaker address
 *.nes
 !rp2040/demo.nes
+!demo/PureMetalDemo.nes
+demo/preview/
 my-*.picow
 my-*.pico2w
 *.board.log
