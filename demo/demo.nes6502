@@ -2,6 +2,10 @@
 ;  demo.nes6502 - the PureMetal NES demo. NTSC, a UxROM cartridge with
 ;  CHR RAM (mapper 2), 32 KB of program.
 ;
+;  BUILDING IT NEEDS THE PUREMETAL FORGE COMPILER BUILD OF 2026-10-21 OR
+;  LATER (the .nes6502 board, ProcedureInterrupt and DataSection on the 6502,
+;  and the 6502 optimiser); an earlier compiler refuses this source.
+;
 ;  ALL OF IT IS PUREMETAL: no inline assembly. The compiler's NES board
 ;  (.nes6502) puts the code at $8000, writes the vectors, and calls NMI()
 ;  at every vertical blank; demo_assets.nes6502 holds the tiles, the

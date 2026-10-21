@@ -26,15 +26,18 @@ Bluetooth speaker with the speaker builds.
 
 ## Building
 
+> Needs the PureMetal Forge compiler build of 2026-10-21 or later.
+
 ```
 PureMetalForge.exe --compile demo/demo.nes6502 -o demo/PureMetalDemo.hex
 ```
 
 The `.nes6502` extension selects PureMetal Forge's Nintendo Entertainment System board: code at
 $8000, the compiler writes the vectors and calls the program's `NMI()` at every vertical blank, and a
-`.nes` cartridge is written beside the `.hex`. That board, interrupt handlers and DataSection tables
-on the 6502, and the 6502 code optimiser the demo needs to fit its frame, are in the PureMetal Forge
-release after 2026-10-19; an earlier compiler refuses this source.
+`.nes` cartridge is written beside the `.hex`. **Building from source needs the PureMetal Forge compiler build of 2026-10-21 or later.** That
+build adds the NES board, interrupt handlers and DataSection tables on the 6502, and the 6502 code
+optimiser the demo needs to fit its frame; an earlier compiler refuses this source. The ready
+`PureMetalDemo.nes` needs no compiler at all.
 
 ## Credits
 

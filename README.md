@@ -310,6 +310,8 @@ firmware/   ROM-free firmware images
 rp2040/     firmware sources, generators and Diagnostics/ (board tests) for RP2040
 rp2350/     reproducible Arm Pico 2 W port and the same board tests
 tools/      ROM loader (window and command line), firmware upload, build, capture
+demo/       a NES demo written in PureMetal: PureMetalDemo.nes, its source and assets
+            (building it from source needs the compiler build of 2026-10-21 or later)
 licenses/   third-party licences
 ```
 
