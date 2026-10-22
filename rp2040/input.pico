@@ -74,7 +74,8 @@ Procedure InputPoll()
     ProcedureReturn
   EndIf
   now=Micros()
-  If now-InputLast<1000
+  ; The stick at 250 Hz, four reads a frame: each read waits on two ADC conversions.
+  If now-InputLast<4000
     ProcedureReturn
   EndIf
   InputLast=now
