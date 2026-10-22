@@ -188,13 +188,15 @@ ProcedureRAM.i NesReadSlow(addr.i)
           If PicoMapActive And (addr&7)=7 : PicoRegisterNotice(addr&7) : EndIf
         CompilerEndIf
       Else
-        v=NesRpc(1,addr,0,CpuCycles+AccessPhase)
+        ; Answered from core 0's shadow (dmc_shadow.pico); core 1 still sees the read, for its flag.
+        v=SaRead(CpuCycles+AccessPhase)
+        NesPost(1,addr,0,CpuCycles+AccessPhase)
       EndIf
     CompilerElse
       v=NesRpc(1,addr,0,CpuCycles+AccessPhase)
     CompilerEndIf
     CompilerIf #NES_SPLIT=2
-      If addr=$4015 Or WorkerNmi<>NesSeenNmi
+      If WorkerNmi<>NesSeenNmi
         CpuEndWindow()
       EndIf
     CompilerElse
@@ -262,6 +264,7 @@ ProcedureRAM NesWrite(addr.i, value.i)
       Else
         ; The DMC's stalls and IRQ come from core 0's own copy of its timing (dmc_shadow.pico).
         If addr=$4010 Or addr=$4013 Or addr=$4015 : SdWrite(addr,value,CpuCycles+AccessPhase) : EndIf
+        SaWrite(addr,value,CpuCycles+AccessPhase)
         NesPost(2,addr,value,CpuCycles+AccessPhase)
       EndIf
     CompilerElse

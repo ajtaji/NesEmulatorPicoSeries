@@ -80,13 +80,14 @@ ProcedureRAM NesSync()
     EndIf
     NesFence()
     If SdEmpty=0 : SdAdvance(CpuCycles) : EndIf
+    SaAdvance(CpuCycles)
     stalls=SdFetches*4-NesSeenDmc
     If stalls>0
       CpuCycles=CpuCycles+stalls : NesSeenDmc=NesSeenDmc+stalls
       PpuSync(CpuCycles)
     EndIf
     delay=CpuIrqDelay : CpuIrqDelay=0
-    irq=PeekL(@ApuFrameIrq)|SdIrq|PicoIrq
+    irq=SaFrameIrq|SdIrq|PicoIrq
     If (WorkerNmi<>NesSeenNmi And NesNmiDelay) Or (irq<>0 And FI=0 And delay)
       NesNmiDelay=0 : CpuRun(1) : PpuSync(CpuCycles)
     EndIf
@@ -382,9 +383,12 @@ ProcedureRAM Main()
     If t-report>=1000000
       CompilerIf #NES_SPLIT=2
         ; The DMC shadow against core 1, both at the same CPU time.
-        NesRpc(0,0,0,CpuCycles) : LastApuSend=CpuCycles : SdAdvance(CpuCycles)
+        NesRpc(0,0,0,CpuCycles) : LastApuSend=CpuCycles : SdAdvance(CpuCycles) : SaAdvance(CpuCycles)
         If WorkerDmcCycles<>SdFetches*4 Or DmcBytes<>SdBytes Or DmcIrq<>SdIrq Or DmcEmpty<>SdEmpty Or DmcBits<>SdBits Or DmcTimer<>SdTimer
           SdDrift=SdDrift+1
+        EndIf
+        If ApuFrameIrq<>SaFrameIrq Or ApuFrameClock<>SaFrameClock Or ApuFrameStep<>SaFrameStep Or ApuResetDelay<>SaResetDelay Or ApuEnable<>SaEnable Or ApuFive<>SaFive Or ApuInhibit<>SaInhibit Or ApuLength(0)<>SaLength(0) Or ApuLength(1)<>SaLength(1) Or ApuLength(2)<>SaLength(2) Or ApuLength(3)<>SaLength(3)
+          SaDrift=SaDrift+1
         EndIf
       CompilerEndIf
       Say("us=") : Num(t-report) : Say(" cycles=") : Num(CpuCycles-cycles)
@@ -415,7 +419,7 @@ ProcedureRAM Main()
       Say(" core0_idle_us=") : Num(Core0IdleUs-lastIdle0) : Say(" core1_idle_us=") : Num(Core1IdleUs-lastIdle1)
       Say(" run_us=") : Num(CpuRunUs-lastRun) : Say(" sync_us=") : Num(SyncUs-lastSync) : Say(" windows=") : Num(Windows-lastWin)
       lastIdle0=Core0IdleUs : lastIdle1=Core1IdleUs : lastRun=CpuRunUs : lastSync=SyncUs : lastWin=Windows
-      Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes) : Say(" dmc_fetches=") : Num(SdFetches) : Say(" dmc_drift=") : Num(SdDrift)
+      Say(" rpc_calls=") : Num(NesRpcCalls) : Say(" rpc_wait_us=") : Num(NesRpcWaitUs) : Say(" dmc=") : Num(ApuEnable&16) : Say(",") : Num(DmcBytes) : Say(" dmc_fetches=") : Num(SdFetches) : Say(" dmc_drift=") : Num(SdDrift) : Say(" apu_drift=") : Num(SaDrift)
       CompilerIf #PICO_ADVANCED=1
         Say(" map_irqs=") : Num(PicoIrqAssertions+M5IrqAssertions+VrcIrqAssertions+N1IrqAssertions+F7IrqAssertions)
         Say(" predict_drift=") : Num(PicoPredictDrift)

@@ -482,6 +482,45 @@ Procedure ComparePpuAdvance()
     Check(WorkerFrames,expectedFrames) : Check(WorkerNmi,expectedNmi) : Check(PpuDotFrac,expectedFrac)
   Next
 EndProcedure
+; The APU status shadow (dmc_shadow.pico) against core 1's own APU code, run here side by side: random
+; time steps and register traffic (length loads, halt bits, enables, $4017 modes, $4015 reads). Every
+; read must match and every shadowed field must agree after each step. The DMC stays idle (it has its
+; own shadow and check).
+Procedure CompareApuShadow()
+  Protected i.i, op.i, t.i, dt.i, addr.i, value.i, want.i, got.i, c.i
+  ApuFrameClock=0 : ApuFrameStep=0 : ApuFive=0 : ApuInhibit=0 : ApuFrameIrq=0 : ApuResetDelay=0 : ApuEnable=0
+  SaFrameClock=0 : SaFrameStep=0 : SaFive=0 : SaInhibit=0 : SaFrameIrq=0 : SaResetDelay=0 : SaEnable=0
+  For c=0 To 3 : ApuLength(c)=0 : SaLength(c)=0 : ApuReg(c*4)=0 : SaHalt(c)=0 : Next
+  DmcBytes=0 : DmcIrq=0 : SdBytes=0 : SdIrq=0 : SdEmpty=1 : DmcEmpty=1
+  t=1000 : SaClock=t : SdClock=t
+  For i=0 To 19999
+    dt=1+TestRand()%2500 : t=t+dt : ApuAdvance(dt) : SaAdvance(t)
+    op=TestRand()%8 : value=TestRand()&255
+    If op=0
+      addr=$4017 : value=value&$C0
+    ElseIf op=1
+      addr=$4015 : value=value&15
+    ElseIf op<=3
+      addr=$4003+(TestRand()&3)*4
+    ElseIf op=4
+      addr=$4000+(TestRand()&3)*4
+    Else
+      addr=0
+    EndIf
+    WorkerClock=t
+    If addr
+      ApuWrite(addr,value) : SaWrite(addr,value,t)
+    ElseIf op=5
+      want=ApuReadStatus() : got=SaRead(t) : Check(got,want)
+    EndIf
+    Check(SaFrameIrq,ApuFrameIrq) : Check(SaFrameClock,ApuFrameClock) : Check(SaFrameStep,ApuFrameStep)
+    Check(SaResetDelay,ApuResetDelay) : Check(SaEnable,ApuEnable&15)
+    For c=0 To 3 : Check(SaLength(c),ApuLength(c)) : Next
+    If (i&1023)=0 : SafetyPet() : UsbSerialTask() : EndIf
+  Next
+  ; quiet afterwards: no frame IRQ for the tests that follow
+  ApuInhibit=1 : SaInhibit=1 : ApuFrameIrq=0 : SaFrameIrq=0 : SaClock=0 : ApuEnable=0 : SaEnable=0
+EndProcedure
 ; NMI and IRQ polling through NesSync: the final-cycle PPUCTRL edge, CLI/PLP and RTI. Moved here from
 ; mappers.picow on 2026-10-19 (it never needed a mapper; that image had grown past the ROM store).
 Procedure InterruptPollTests()
@@ -831,6 +870,8 @@ Procedure TestMain()
   AudioStopTests()
   Say("STEP RomStoreTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   RomStoreTests()
+  Say("STEP CompareApuShadow checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+  CompareApuShadow()
   Say("STEP InterruptPollTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
   InterruptPollTests()
   Say("STEP PalTimingTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
