@@ -3,7 +3,8 @@
     ; left, r12 = pattern base; leaves through __r_place. Thumb-2 does the masks with UBFX, the tag fetch
     ; and store as scaled loads ([Rn, Rm, lsl #2]), and keeps the tag base in r6, so a hit takes two literal loads, not
     ; six. A miss converts the pattern row exactly as the Thumb-1 miss does. The key carries the
-    ; cache generation (RgbTagGen) in bits 24-31, so the palette comes from bits 14-23 only.
+    ; cache generation (RgbTagGen) in bits 24-31 and the MMC5 ExRAM bank in 16-21, so the palette comes
+    ; from bits 14-15 only; with PpuExtChr set the row comes from that 4 KiB bank of the decoded CHR.
     ldr r6, =global_rgbtags
 __r_tile:
     ubfx r0, r4, #0, #12
@@ -47,16 +48,29 @@ __r_miss:
     adds r3, #1
     str r3, [r2]
     push {r1, r4, r5}
-    lsls r4, r0, #8
-    lsrs r4, r4, #22
+    lsls r4, r0, #16
+    lsrs r4, r4, #30
     lsls r4, r4, #6
     ldr r2, =global_rgbpairs
     adds r4, r4, r2
+    ldr r2, =global_ppuextchr
+    ldr r2, [r2]
+    cmp r2, #0
+    bne __r_ext_row
     ubfx r0, r0, #0, #12
     lsls r0, r0, #1
     ldr r2, =global_pattern
     ldr r2, [r2]
     ldrh r5, [r2, r0]
+    b __r_have_row
+__r_ext_row:
+    ; MMC5 ExRAM attributes: key bits 16-21 pick a 4 KiB bank of the whole decoded CHR at PpuExtChr
+    ubfx r3, r0, #16, #6
+    add.w r2, r2, r3, lsl #12
+    ubfx r0, r0, #0, #11
+    lsls r0, r0, #1
+    ldrh r5, [r2, r0]
+__r_have_row:
     movs r0, #15
     ands r0, r5
     lsls r0, r0, #2

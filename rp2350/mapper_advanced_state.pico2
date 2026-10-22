@@ -28,9 +28,11 @@ Global PicoPredictCtrl.i,PicoPredictMask.i
 Global PicoIsMmc3.i,PicoIsAdvanced.i
 Global PicoPredictValid.i,PicoPredictIrqDot.i,PicoPredictEnd.i,PicoPredictReuse.i,PicoPredictDrift.i
 
-Global Dim PicoNtDesc.u(5120)
+Global Dim PicoNtDesc.u(6144)
 ; MMC5 (mapper5.pico)
 Global M5PrgMode.i,M5ChrMode.i,M5Protect1.i,M5Protect2.i,M5ExMode.i,M5NtConfig.i,M5FillTile.i,M5FillAttr.i
+Global M5ExMask.i
+Declare M5ExCell(offset.i)
 Global M5ChrHigh.i,M5LastSet.i,M5Split.i,M5SplitScroll.i,M5SplitBank.i,M5MulA.i,M5MulB.i
 Global M5Scanline.i,M5InFrame.i,M5Pending.i,M5IrqEnable.i,M5IrqTarget.i,M5IrqAssertions.i
 Global M5PpuControl.i,M5PpuMask.i,M5RamBytes.i,M5RamBase.i,M5Unmapped.i,M5WarnedAttr.i,M5WarnedSplit.i
@@ -52,6 +54,22 @@ Declare M5PpuWatch()
 Global VrcPrg16.i,VrcPrg8.i,VrcWarned.i,VrcIrqLatch.i,VrcIrqCounter.i,VrcIrqEnable.i,VrcIrqAfterAck.i
 Global VrcIrqMode.i,VrcIrqPending.i,VrcPrescaler.i,VrcIrqAssertions.i
 Global ExpChip.i,V6Rate.i,V6Acc.i,V6Halt.i
+; MMC5 sound (mapper5.pico, ExpChip 4)
+Global M5AudioEnable.i,M5AudioClock.i,M5AudioLastX.i,M5AudioLastY.i,M5SampleCycles.i,M5PcmArea.i,M5PcmMode.i,M5PcmValue.i
+Global Dim M5SoundReg.i(8)
+Global Dim M5PulseArea.i(2)
+Global Dim M5PulseCarry.i(2)
+Global Dim M5Length.i(2)
+Global Dim M5Period.i(2)
+Global Dim M5PulseTimer.i(2)
+Global Dim M5Seq.i(2)
+Global Dim M5EnvStart.i(2)
+Global Dim M5EnvDiv.i(2)
+Global Dim M5EnvDecay.i(2)
+Declare M5AudioInit()
+Declare M5SoundWrite(addr.i,value.i)
+Declare M5AudioTick(dt.i)
+Declare M5AudioMix()
 Global Dim V6Period.i(3)
 Global Dim V6Enable.i(3)
 Global Dim V6Timer.i(3)
@@ -68,7 +86,8 @@ Declare ExpWrite(addr.i,value.i)
 Declare ExpTick(dt.i)
 Declare ExpMix()
 ; Namco 163 (mapper_n163.pico)
-Global N1Address.i,N1ChrRamOff.i,N1IrqCounter.i,N1IrqEnable.i,N1IrqAssertions.i,N1WarnedNt.i,N1WarnedChr.i
+Global N1Address.i,N1ChrRamOff.i,N1IrqCounter.i,N1IrqEnable.i,N1IrqAssertions.i,N1WarnedChr.i
+Global Dim N1NtBank.i(4)
 Global N1Timer.i,N1Current.i,N1Mute.i
 Global Dim N1Prg.i(3)
 Global Dim N1Ram.a(128)

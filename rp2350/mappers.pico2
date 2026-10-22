@@ -95,6 +95,9 @@ EndProcedure
 CompilerIf #PICO_ADVANCED=1
 ProcedureRAM PicoNtDescriptor(page.i,offset.i)
   Protected base.i,attr.i,palette.i,desc.i,table.i
+  CompilerIf #PICO_ADVANCED=1
+    If PpuExtChr<>0 : M5ExCell(offset) : ProcedureReturn : EndIf
+  CompilerEndIf
   base=page*1024
   attr=PicoCiram(base|$3C0|((offset>>4)&$38)|((offset>>2)&7))
   palette=(attr>>(((offset>>4)&4)|(offset&2)))&3
@@ -108,8 +111,9 @@ ProcedureRAM PicoNtWrite(addr.i,value.i)
   Protected table.i,page.i,offset.i,dst.i,base.i,x.i,y.i
   page=PicoNtSlots((addr>>10)&3) : offset=addr&1023
   CompilerIf #PICO_ADVANCED=1
-    ; MMC5: the fill page and the zero page take no writes; ExRAM (page 2) does.
-    If page>2 : ProcedureReturn : EndIf
+    ; MMC5: the fill page and the zero page take no writes; ExRAM (page 2) does. N163: pages 2-5 hold
+    ; nametables read from CHR ROM, which take none.
+    If page>2 Or (page=2 And CartMapper<>5) : ProcedureReturn : EndIf
   CompilerEndIf
   PicoCiram(page*1024+offset)=value
   For table=0 To 3

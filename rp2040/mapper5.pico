@@ -12,9 +12,13 @@
 ;          has one scanline event at dot 3 (the first one of a frame starts it, scanline 0);
 ;          scanline = $5203 raises the IRQ. M5Budget gives the CPU the exact distance to it.
 ;   RAM    PRG-RAM in SRAM (M5Ram, 64 KiB). On the Pico Plus 2 W a 128 KiB board goes to PSRAM.
-; NOT YET DRAWN: ExRAM extended attributes (mode 1) and the vertical split. Both are announced on
-; the serial port the first time a game turns them on, rather than drawn wrong in silence.
-; MMC5 sound ($5000-$5015) is not produced; its registers are accepted.
+;   EXRAM  mode 1, extended attributes: every background tile takes its palette (bits 6-7) and a 4 KiB
+;          CHR bank (bits 0-5, with $5130 above) from the ExRAM byte of its cell. The descriptors carry
+;          the bank in bits 10-15 (M5ExCell) and the renderer reads those rows from the whole decoded
+;          CHR at PpuExtChr.
+; NOT YET DRAWN: the vertical split - announced on the serial port the first time a game turns it on,
+; rather than drawn wrong in silence (no game here uses it to test against).
+;   SOUND  $5000-$5015 cross to core 1 in the bus queue at their CPU time (ExpChip 4, at the end).
 ; The PSRAM library is included on every RP2350 build (its board test cannot be read while includes
 ; are resolved); only the Pico Plus 2 W calls it, and an unused procedure is left out of the image.
 XIncludeFile "RP2350/Lib/psram.pico2"
@@ -89,7 +93,8 @@ EndProcedure
 
 ProcedureRAM M5ChrUpdate()
   Protected slot.i,bank.i,background.i
-  background=M5LastSet
+  ; 8x8 sprites: everything from set A ($5120-$5127; $5128-$512B are ignored), as Anvil and Mesen.
+  background=0
   If M5PpuControl&32 : background=1 : EndIf
   For slot=0 To 7 : PicoChrMap(slot,M5ChrBank(slot,background)) : Next
   If M5PpuControl&32
@@ -136,6 +141,32 @@ ProcedureRAM M5NtRefresh()
   BgCacheAddr=-1 : RgbLastKey=-1 : PicoMirror=-1
 EndProcedure
 
+; ExRAM attributes (mode 1): cell offset of every page and every table - the tile, the palette in bits
+; 8-9 and the 4 KiB bank in bits 10-15, all from ExRAM byte offset.
+ProcedureRAM M5ExCell(offset.i)
+  Protected ex.i,page.i,table.i,high.i
+  ex=PicoCiram(2048+offset) : high=((ex>>6)<<8)|(((ex&63)&M5ExMask)<<10)
+  For page=0 To 4 : PicoNtDesc(page*1024+offset)=PicoCiram(page*1024+offset)|high : Next
+  For table=0 To 3 : NameDesc(table*1024+offset)=PicoNtDesc(PicoNtSlots(table)*1024+offset) : Next
+  BgCacheAddr=-1 : RgbLastKey=-1
+EndProcedure
+
+; Mode 1 on or off ($5104), or its upper bank bits ($5130): the base, then every descriptor again.
+ProcedureRAM M5ExRefresh()
+  Protected page.i,offset.i,banks.i
+  If M5ExMode=1
+    banks=PicoChrBytes/4096 : M5ExMask=banks-1 : If M5ExMask>63 : M5ExMask=63 : EndIf
+    PpuExtChr=PicoChrDecoded+(((M5ChrHigh<<6)*4096)&(PicoChrBytes-1))
+    For offset=0 To 1023 : M5ExCell(offset) : Next
+  ElseIf PpuExtChr<>0
+    PpuExtChr=0
+    For page=0 To 4
+      For offset=0 To 1023 : PicoNtDescriptor(page,offset) : Next
+    Next
+  EndIf
+  PpuChrChanged()
+EndProcedure
+
 ; Page 3, the fill nametable: every tile M5FillTile, every attribute M5FillAttr.
 ProcedureRAM M5FillRefresh()
   Protected i.i,table.i,attr.i,desc.i
@@ -148,6 +179,9 @@ ProcedureRAM M5FillRefresh()
       PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(3072),2048)
     EndIf
   Next
+  If PpuExtChr<>0
+    For i=0 To 1023 : M5ExCell(i) : Next
+  EndIf
   BgCacheAddr=-1 : RgbLastKey=-1
 EndProcedure
 
@@ -190,7 +224,10 @@ EndProcedure
 ProcedureRAM M5Write(addr.i,value.i,stamp.i)
   Protected index.i,shift.i
   If addr>=$6000 : M5PrgWrite(addr,value) : ProcedureReturn : EndIf
-  If addr<$5100 : ProcedureReturn : EndIf
+  If addr<$5100
+    If addr<=$5015 : NesPost(7,addr,value,stamp) : EndIf
+    ProcedureReturn
+  EndIf
   ; Banking, nametables and ExRAM change what the PPU draws: the pixels before this write first.
   PpuSync(stamp)
   PicoBankStamp=stamp : PicoPrgFenceNeeded=1 : PicoPrgChanged=0
@@ -216,15 +253,11 @@ ProcedureRAM M5Write(addr.i,value.i,stamp.i)
       Case $5101 : M5ChrMode=value&3 : M5ChrUpdate()
       Case $5102 : M5Protect1=value&3
       Case $5103 : M5Protect2=value&3
-      Case $5104
-        M5ExMode=value&3 : M5NtRefresh()
-        If M5ExMode=1 And M5WarnedAttr=0
-          M5WarnedAttr=1 : Say("MMC5: this game uses ExRAM extended attributes, which are not drawn yet") : Eol()
-        EndIf
+      Case $5104 : M5ExMode=value&3 : M5NtRefresh() : M5ExRefresh()
       Case $5105 : M5NtConfig=value : M5NtRefresh()
       Case $5106 : M5FillTile=value : M5FillRefresh()
       Case $5107 : M5FillAttr=value&3 : M5FillRefresh()
-      Case $5130 : M5ChrHigh=value&3
+      Case $5130 : M5ChrHigh=value&3 : If M5ExMode=1 : M5ExRefresh() : EndIf
       Case $5200
         M5Split=value
         If (value&128)<>0 And M5WarnedSplit=0
@@ -317,7 +350,7 @@ Procedure M5Init()
   PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
   PicoIrq=0 : M5Pending=0 : M5IrqEnable=0 : M5IrqTarget=0 : M5Scanline=0 : M5InFrame=0
   M5PrgMode=3 : M5ChrMode=0 : M5Protect1=1 : M5Protect2=2
-  M5ExMode=3 : M5NtConfig=0 : M5FillTile=0 : M5FillAttr=0 : M5ChrHigh=0 : M5LastSet=0
+  PpuExtChr=0 : M5ExMode=3 : M5NtConfig=0 : M5FillTile=0 : M5FillAttr=0 : M5ChrHigh=0 : M5LastSet=0
   M5Split=0 : M5SplitScroll=0 : M5SplitBank=0 : M5MulA=0 : M5MulB=0
   M5PpuControl=PpuCtrl : M5PpuMask=PpuMask : M5Unmapped=0 : M5IrqAssertions=0
   For i=0 To 4 : M5Prg(i)=0 : Next : M5Prg(4)=255
@@ -342,4 +375,104 @@ Procedure M5Init()
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : ChrWritable=0
   M5ChrUpdate()
+EndProcedure
+
+; ---------------------------------------------------------------- core 1: the MMC5's sound (ExpChip 4)
+; Ported from anvil/mapper5_audio.pi4: two pulse channels like the 2A03's (no sweep), their length
+; counters and envelopes clocked at 240 Hz (every 7457 CPU cycles), and the 8-bit PCM register in
+; write mode. Each pulse is integrated over the sample (a period below 4 keeps only its mean), and the
+; mix goes out inverted, as the chip's, through its own DC blocker. Core 1 turns it on at the first
+; write to $5000-$5015 (ExpWrite), so a game that never uses it never pays for it. Not modelled: PCM
+; read mode and its IRQ ($5010 bit 0), and $5015 reads, which return 0.
+ProcedureRAM M5AudioInit()
+  Protected c.i
+  M5AudioEnable=0 : M5AudioClock=7457 : M5AudioLastX=0 : M5AudioLastY=0
+  M5SampleCycles=0 : M5PcmArea=0 : M5PcmMode=0 : M5PcmValue=0
+  For c=0 To 7 : M5SoundReg(c)=0 : Next
+  For c=0 To 1
+    M5PulseArea(c)=0 : M5PulseCarry(c)=0 : M5Length(c)=0 : M5Period(c)=0 : M5PulseTimer(c)=2 : M5Seq(c)=0
+    M5EnvStart(c)=0 : M5EnvDiv(c)=0 : M5EnvDecay(c)=0
+  Next
+EndProcedure
+ProcedureRAM M5SoundWrite(addr.i,value.i)
+  Protected c.i,r.i
+  If addr<$5008
+    r=addr-$5000 : c=r>>2 : M5SoundReg(r)=value
+    If (r&3)=2 : M5Period(c)=(M5Period(c)&$700)|value
+    ElseIf (r&3)=3
+      M5Period(c)=(M5Period(c)&255)|((value&7)<<8)
+      If M5AudioEnable&(1<<c) : M5Length(c)=PeekA(?LengthData+(value>>3)) : EndIf   ; the 2A03 length table
+      M5Seq(c)=0 : M5EnvStart(c)=1
+    EndIf
+  ElseIf addr=$5010
+    M5PcmMode=value&1
+  ElseIf addr=$5011
+    If M5PcmMode=0 And value<>0 : M5PcmValue=value : EndIf
+  ElseIf addr=$5015
+    M5AudioEnable=value&3
+    For c=0 To 1 : If (value&(1<<c))=0 : M5Length(c)=0 : EndIf : Next
+  EndIf
+EndProcedure
+ProcedureRAM M5AudioTick(dt.i)
+  Protected stepCycles.i,c.i,period.i,ticks.i,r.i,rest.i,chunk.i,duty.i,volume.i
+  While dt>0
+    stepCycles=dt : If stepCycles>M5AudioClock : stepCycles=M5AudioClock : EndIf
+    For c=0 To 1
+      period=2*(M5Period(c)+1)
+      If M5Length(c)=0 Or M5Period(c)<4
+        If M5Length(c)>0
+          r=M5SoundReg(c*4) : volume=M5EnvDecay(c) : If r&16 : volume=r&15 : EndIf
+          duty=r>>6
+          If duty=0 : duty=1 : ElseIf duty=1 : duty=2 : ElseIf duty=2 : duty=4 : Else : duty=6 : EndIf
+          ticks=M5PulseCarry(c)+volume*duty*stepCycles
+          M5PulseArea(c)=M5PulseArea(c)+(ticks>>3) : M5PulseCarry(c)=ticks&7
+        EndIf
+        M5PulseTimer(c)=M5PulseTimer(c)-stepCycles
+        If M5PulseTimer(c)<=0
+          ticks=1+NesDiv(-M5PulseTimer(c),period)
+          M5PulseTimer(c)=M5PulseTimer(c)+ticks*period : M5Seq(c)=(M5Seq(c)-ticks)&7
+        EndIf
+      Else
+        r=M5SoundReg(c*4) : volume=M5EnvDecay(c) : If r&16 : volume=r&15 : EndIf
+        duty=r>>6
+        If duty=0 : duty=2 : ElseIf duty=1 : duty=6 : ElseIf duty=2 : duty=30 : Else : duty=249 : EndIf
+        rest=stepCycles
+        While rest>0
+          chunk=rest : If chunk>M5PulseTimer(c) : chunk=M5PulseTimer(c) : EndIf
+          If (duty>>M5Seq(c))&1 : M5PulseArea(c)=M5PulseArea(c)+volume*chunk : EndIf
+          M5PulseTimer(c)=M5PulseTimer(c)-chunk : rest=rest-chunk
+          If M5PulseTimer(c)=0 : M5Seq(c)=(M5Seq(c)-1)&7 : M5PulseTimer(c)=period : EndIf
+        Wend
+      EndIf
+    Next
+    M5SampleCycles=M5SampleCycles+stepCycles : M5PcmArea=M5PcmArea+M5PcmValue*stepCycles
+    M5AudioClock=M5AudioClock-stepCycles : dt=dt-stepCycles
+    If M5AudioClock=0
+      M5AudioClock=7457
+      For c=0 To 1
+        r=M5SoundReg(c*4)
+        If M5Length(c)>0 And (r&32)=0 : M5Length(c)=M5Length(c)-1 : EndIf
+        If M5EnvStart(c)
+          M5EnvStart(c)=0 : M5EnvDecay(c)=15 : M5EnvDiv(c)=r&15
+        ElseIf M5EnvDiv(c)>0
+          M5EnvDiv(c)=M5EnvDiv(c)-1
+        Else
+          M5EnvDiv(c)=r&15
+          If M5EnvDecay(c)>0 : M5EnvDecay(c)=M5EnvDecay(c)-1
+          ElseIf r&32 : M5EnvDecay(c)=15 : EndIf
+        EndIf
+      Next
+    EndIf
+  Wend
+EndProcedure
+ProcedureRAM M5AudioMix()
+  Protected x.i,y.i
+  x=0
+  If M5SampleCycles>0
+    x=-NesDiv((M5PulseArea(0)+M5PulseArea(1))*380+M5PcmArea*64,M5SampleCycles)
+  EndIf
+  M5PulseArea(0)=0 : M5PulseArea(1)=0 : M5PcmArea=0 : M5SampleCycles=0
+  y=M5AudioLastY*65400 : If y<0 : y=y+65535 : EndIf
+  y=x-M5AudioLastX+(y>>16) : M5AudioLastX=x : M5AudioLastY=y
+  ExpSample=y
 EndProcedure

@@ -8,8 +8,10 @@
 ;   CORE 1  the sound: every RAM write crosses in the bus queue (command 7, as $10000+address) at its
 ;           CPU time, so core 1's copy changes when the game changed it; one channel is updated every
 ;           15 CPU cycles, round-robin over the enabled ones, and ExpSample is their average.
-; Not drawn yet: nametables taken from CHR ROM and CHR-RAM patterns ($E0+ values); a game that asks
-; for either is told so on the serial port.
+;   NAMES   $C000-$D800 pick a nametable per table: $E0+ a CIRAM page, below that a 1 KiB CHR-ROM bank,
+;           copied read-only (with its descriptors) into page 2+table of PicoCiram.
+; Not drawn yet: CHR-RAM patterns ($E0+ values in the CHR registers); a game that asks is told so on the
+; serial port.
 
 ; ---------------------------------------------------------------- core 0: the cartridge
 ProcedureRAM N1PrgUpdate()
@@ -59,15 +61,23 @@ ProcedureRAM.i N1Read(addr.i)
 EndProcedure
 
 ProcedureRAM N1Nametable(table.i,value.i)
+  Protected page.i,offset.i
   If value>=$E0
-    If PicoNtSlots(table)<>(value&1)
-      PicoNtSlots(table)=value&1
-      PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+(value&1)*1024,1024)
-      PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+(value&1)*2048,2048)
-      BgCacheAddr=-1 : RgbLastKey=-1 : PicoMirror=-1
+    page=value&1 : N1NtBank(table)=-1
+  Else
+    ; a 1 KiB CHR-ROM bank, read-only: its own page, copied once per bank change
+    page=2+table
+    If N1NtBank(table)<>value
+      N1NtBank(table)=value : PicoNtSlots(table)=-1
+      PicoCopy(@PicoCiram(0)+page*1024,CartChr+((value*1024)&(PicoChrBytes-1)),1024)
+      For offset=0 To 1023 : PicoNtDescriptor(page,offset) : Next
     EndIf
-  ElseIf N1WarnedNt=0
-    N1WarnedNt=1 : Say("N163: this game takes a nametable from CHR ROM, which is not drawn yet") : Eol()
+  EndIf
+  If PicoNtSlots(table)<>page
+    PicoNtSlots(table)=page
+    PicoCopy(@Nt(0)+table*1024,@PicoCiram(0)+page*1024,1024)
+    PicoCopy(@NameDesc(0)+table*2048,@PicoNtDesc(0)+page*2048,2048)
+    BgCacheAddr=-1 : RgbLastKey=-1 : PicoMirror=-1
   EndIf
 EndProcedure
 
@@ -110,7 +120,8 @@ Procedure N1Init()
   Protected i.i
   PicoPrgPaged=1 : PicoPrgFenceNeeded=0 : PicoPrgChanged=0
   N1Prg(0)=0 : N1Prg(1)=1 : N1Prg(2)=2 : N1Address=0 : N1ChrRamOff=0
-  N1IrqCounter=0 : N1IrqEnable=0 : N1IrqAssertions=0 : N1WarnedNt=0 : N1WarnedChr=0 : PicoIrq=0
+  N1IrqCounter=0 : N1IrqEnable=0 : N1IrqAssertions=0 : N1WarnedChr=0 : PicoIrq=0
+  For i=0 To 3 : N1NtBank(i)=-1 : Next
   For i=0 To 127 : N1Ram(i)=0 : Next
   For i=0 To 3 : PicoPrgSlots(i)=-1 : Next
   For i=0 To 7 : PicoChrSlots(i)=-1 : Next

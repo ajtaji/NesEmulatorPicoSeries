@@ -569,6 +569,40 @@ Procedure PagedFetchTests()
   PicoPrgFlat() : PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
 EndProcedure
 CompilerEndIf
+; MMC5 ExRAM attributes (mode 1) in the renderer: descriptor bits 10-15 pick a 4 KiB bank of the decoded
+; CHR at PpuExtChr. A line drawn with a random bank 0/1 per cell must match, tile for tile, the same line
+; drawn the ordinary way from pattern table $0000 or $1000 of that CHR. Runs last: it scrambles CHR.
+CompilerIf #PICO_ADVANCED=1
+Global Dim ExtRef.i(512)
+Procedure ExtRender(v.i)
+  PpuV=v : PpuFineX=0 : PpuDot=0 : FrameRow=@FrameTop(0) : PpuBatchLeft=32 : PpuRenderRaw()
+EndProcedure
+Procedure ExtAttrTests()
+  Protected trial.i, i.i, x.i, bank.i, s.i, v.i, startV.i
+  For trial=0 To 63
+    For i=0 To 8191 : PokeA(@Decoded(0)+i,TestRand()&255) : Next
+    For i=0 To 4095 : Nt(i)=TestRand()&255 : Next
+    For i=0 To 31 : Pal(i)=TestRand()&63 : Next
+    PpuMask=$0A : PpuColours() : RgbPairsDirty=1 : PpuExtChr=0 : PpuChrBank=0
+    Pattern=@Decoded(0) : PpuLine=TestRand()%240 : startV=TestRand()&$7FFF
+    For bank=0 To 1
+      PpuCtrl=bank*16 : NameDescDirty=1 : PpuChrChanged() : ExtRender(startV)
+      For x=0 To 255 : ExtRef(bank*256+x)=FrameTop(x) : Next
+    Next
+    For i=0 To 4095 : NameDesc(i)=(NameDesc(i)&1023)|((TestRand()&1)<<10) : Next
+    PpuExtChr=@Decoded(0) : PpuCtrl=0 : PpuChrChanged() : ExtRender(startV)
+    v=startV
+    For s=0 To 31
+      bank=(NameDesc(v&$FFF)>>10)&1
+      For x=s*8 To s*8+7 : Check(FrameTop(x),ExtRef(bank*256+x)) : Next
+      If (v&31)=31 : v=(v-31)!$400 : Else : v=v+1 : EndIf
+    Next
+    PpuExtChr=0
+    SafetyPet() : UsbSerialTask()
+  Next
+  PpuChrChanged() : PpuMask=$1E : PpuCtrl=0
+EndProcedure
+CompilerEndIf
 ; PAL timing (NesTiming(1)): the PPU comparison and the $2002 horizon again, on 312 lines at 3.2 dots
 ; a cycle; the frame's exact length (33247.5 cycles, no short line) and its vblank dot; PpuCyclesFor
 ; as PpuDotsFor's inverse in both systems; the APU's frame IRQ, rates and 48 kHz sample step.
@@ -805,6 +839,10 @@ Procedure TestMain()
   CompilerIf #PICO_ADVANCED=1
     Say("STEP PagedFetchTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
     PagedFetchTests()
+  CompilerEndIf
+  CompilerIf #PICO_ADVANCED=1
+    Say("STEP ExtAttrTests checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Say(" error=") : Num(WorkerError) : Eol() : UsbSerialTask()
+    ExtAttrTests()
   CompilerEndIf
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("NES board checks=") : Num(Checks) : Say(" failures=") : Num(Failures)
