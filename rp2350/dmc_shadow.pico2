@@ -74,3 +74,98 @@ ProcedureRAM.i SdBudget()
   If cycles>256 : cycles=256 : EndIf
   ProcedureReturn cycles
 EndProcedure
+
+; ---------------------------------------------------------------- the APU's status, shadowed too
+; A $4015 read used to wait for core 1 (NesRpc) to answer it. Sound drivers poll it - Nobunaga's
+; Ambition 2 ~20,000 times a second for seconds at a time - and every read cost core 0 a round trip.
+; Its answer follows from core 0's own writes and the frame sequencer, so core 0 keeps them here: the
+; sequencer (clock, step, $4017's mode, inhibit and reset delay), the four length counters with their
+; halt bits, the enables and the frame IRQ - mirroring apu.pico's ApuAdvance (without the sample
+; clipping, which changes nothing here), ApuWrite, ApuHalf and ApuReadStatus. The read clears the frame
+; IRQ here and is posted to core 1, which clears its own at the same CPU time. NesSync takes the frame
+; IRQ from here too. The stats line checks it all against core 1 once a second (apu_drift).
+Global SaClock.i, SaEnable.i, SaFive.i, SaInhibit.i, SaFrameIrq.i, SaFrameClock.i, SaFrameStep.i
+Global SaResetDelay.i, SaDrift.i
+Global Dim SaLength.i(4)
+Global Dim SaHalt.i(4)
+
+ProcedureRAM SaHalf()
+  Protected c.i
+  For c=0 To 3
+    If SaLength(c)>0 And SaHalt(c)=0 : SaLength(c)=SaLength(c)-1 : EndIf
+  Next
+EndProcedure
+
+; The shadow up to CPU time stamp.
+ProcedureRAM SaAdvance(stamp.i)
+  Protected dt.i,stepCycles.i,event.i
+  dt=stamp-SaClock
+  If dt<=0 : ProcedureReturn : EndIf
+  SaClock=stamp
+  While dt>0
+    stepCycles=dt
+    If SaResetDelay>0 And stepCycles>SaResetDelay : stepCycles=SaResetDelay : EndIf
+    event=ApuStep1
+    If SaFrameStep=1
+      event=ApuStep2
+    ElseIf SaFrameStep=2
+      event=ApuStep3
+    ElseIf SaFrameStep=3
+      event=ApuStep4 : If SaFive : event=ApuStep5 : EndIf
+    EndIf
+    If stepCycles>event-SaFrameClock : stepCycles=event-SaFrameClock : EndIf
+    SaFrameClock=SaFrameClock+stepCycles
+    If SaResetDelay>0
+      SaResetDelay=SaResetDelay-stepCycles
+      If SaResetDelay=0
+        SaFrameClock=0 : SaFrameStep=0
+        If SaFive : SaHalf() : EndIf
+      EndIf
+    EndIf
+    If SaFrameClock>=event
+      If SaFrameStep=1 Or SaFrameStep=3 : SaHalf() : EndIf
+      SaFrameStep=SaFrameStep+1
+      If SaFrameStep=4
+        If SaFive=0 And SaInhibit=0 : SaFrameIrq=1 : EndIf
+        SaFrameClock=SaFrameClock-event-1 : SaFrameStep=0
+      EndIf
+    EndIf
+    dt=dt-stepCycles
+  Wend
+EndProcedure
+
+; A write to $4000-$4017 at CPU time stamp (core 1 gets the same write at the same time).
+ProcedureRAM SaWrite(addr.i,value.i,stamp.i)
+  Protected r.i,ch.i
+  SaAdvance(stamp) : r=addr-$4000
+  If r=0 Or r=4 Or r=12
+    SaHalt(r>>2)=value&$20
+  ElseIf r=8
+    SaHalt(2)=value&$80
+  ElseIf r=3 Or r=7 Or r=11 Or r=15
+    ch=r>>2
+    If (SaEnable>>ch)&1 : SaLength(ch)=LengthTable(value>>3) : EndIf
+  ElseIf r=21
+    SaEnable=value&31
+    For ch=0 To 3
+      If ((value>>ch)&1)=0 : SaLength(ch)=0 : EndIf
+    Next
+  ElseIf r=23
+    SaFive=(value>>7)&1 : SaInhibit=(value>>6)&1
+    If SaInhibit : SaFrameIrq=0 : EndIf
+    SaResetDelay=3+(stamp&1)
+  EndIf
+EndProcedure
+
+; A $4015 read at CPU time stamp: ApuReadStatus's answer, without asking core 1.
+ProcedureRAM.i SaRead(stamp.i)
+  Protected v.i,c.i
+  SaAdvance(stamp) : SdAdvance(stamp)
+  v=(SaFrameIrq<<6)|(SdIrq<<7)
+  For c=0 To 3
+    If SaLength(c)>0 : v=v|(1<<c) : EndIf
+  Next
+  If SdBytes>0 : v=v|16 : EndIf
+  SaFrameIrq=0
+  ProcedureReturn v
+EndProcedure
