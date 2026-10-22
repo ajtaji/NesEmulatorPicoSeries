@@ -200,6 +200,20 @@ Procedure MapperTests()
     Check(PeekU(Pattern+$1400),PeekU(Pattern+$1000))
     InitMapper(118,0) : WriteMapper($8000,0) : WriteMapper($8001,128)
     Check(PicoNtSlots(0),1) : Check(PicoNtSlots(1),1) : Check(PicoNtSlots(2),0)
+    ; N163 nametables from CHR ROM: bank n of the vectors is all n; read-only; $E0 is CIRAM page 0 again.
+    InitMapper(19,0) : PicoNtWrite($2000,77) : WriteMapper($C000,5)
+    Check(PicoNtRead($2000),5) : Check(Nt(0),5) : Check(NameDesc(0),5|(1<<8)) : Check(Nt(1023),5)
+    PicoNtWrite($2000,99) : Check(PicoNtRead($2000),5) : Check(Nt(0),5)
+    WriteMapper($C800,6) : Check(PicoNtRead($2400),6) : Check(PicoNtRead($2000),5)
+    WriteMapper($C000,$E0) : Check(PicoNtRead($2000),77) : Check(Nt(0),77)
+    ; MMC5 sound (core 1 code, called here directly): a 50% pulse at volume 8 for 10 periods of 1600
+    ; cycles is high half the time; $5015=0 silences it; the PCM register integrates its value.
+    M5AudioInit() : M5SoundWrite($5015,1) : M5SoundWrite($5000,$98) : M5SoundWrite($5002,99) : M5SoundWrite($5003,8)
+    Check(M5Length(0),254) : M5AudioTick(16000)
+    Check(Bool(M5PulseArea(0)>=64000-3200 And M5PulseArea(0)<=64000+3200),1) : Check(M5Length(0),252)
+    M5SoundWrite($5015,0) : Check(M5Length(0),0) : i=M5PulseArea(0) : M5AudioTick(1000) : Check(M5PulseArea(0),i)
+    M5SoundWrite($5011,100) : M5AudioTick(100) : Check(M5PcmArea>=10000,1)
+    M5AudioMix() : Check(Bool(ExpSample<0),1) : M5AudioInit() : ExpSample=0
     InitMapper(206,0) : WriteMapper($8000,70) : WriteMapper($8001,5)
     Check(NesRead($8000),5) : Check(NesRead($C000),6)
     InitMapper(47,0) : WriteMapper($6000,1) : Check(PicoOuter,1)

@@ -6,7 +6,7 @@ Global PicoMirror.i,PicoSelect.i,PicoOuter.i,PicoValue.i,PicoChrLow.i,PicoChrHig
 Global PicoIrq.i,PicoIrqEnable.i,PicoRamEnable.i=1,PicoRamProtect.i,PicoRamPresent.i
 ; CIRAM pages 0 and 1; the RP2350's MMC5 adds ExRAM (2), fill (3) and zeros (4).
 CompilerIf #PICO_ADVANCED=1
-  Global Dim PicoCiram.a(5120)
+  Global Dim PicoCiram.a(6144)
 CompilerElse
   Global Dim PicoCiram.a(2048)
 CompilerEndIf

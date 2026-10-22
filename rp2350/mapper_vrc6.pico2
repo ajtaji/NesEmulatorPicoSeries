@@ -142,6 +142,8 @@ EndProcedure
 
 ProcedureRAM ExpWrite(addr.i,value.i)
   Protected ch.i
+  If ExpChip=0 And CartMapper=5 : M5AudioInit() : ExpChip=4 : EndIf
+  If ExpChip=4 : M5SoundWrite(addr,value) : ProcedureReturn : EndIf
   If ExpChip=2 : N1SoundWrite(addr,value) : ProcedureReturn : EndIf
   If ExpChip=3 : SbWrite(addr,value) : ProcedureReturn : EndIf
   If ExpChip<>1 : ProcedureReturn : EndIf
@@ -302,8 +304,8 @@ EndProcedure
 
 ; The chip in this cartridge, over dt CPU cycles / into ExpSample.
 ProcedureRAM ExpTick(dt.i)
-  If ExpChip=1 : V6Tick(dt) : ElseIf ExpChip=2 : N1Tick(dt) : ElseIf ExpChip=3 : SbTick(dt) : EndIf
+  If ExpChip=1 : V6Tick(dt) : ElseIf ExpChip=2 : N1Tick(dt) : ElseIf ExpChip=3 : SbTick(dt) : ElseIf ExpChip=4 : M5AudioTick(dt) : EndIf
 EndProcedure
 ProcedureRAM ExpMix()
-  If ExpChip=1 : V6Mix() : ElseIf ExpChip=2 : N1Mix() : ElseIf ExpChip=3 : SbMix() : EndIf
+  If ExpChip=1 : V6Mix() : ElseIf ExpChip=2 : N1Mix() : ElseIf ExpChip=3 : SbMix() : ElseIf ExpChip=4 : M5AudioMix() : EndIf
 EndProcedure

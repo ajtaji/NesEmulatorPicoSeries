@@ -28,6 +28,9 @@ Global Dim SpriteSpan.a(32)
 Global RgbLastKey.i= -1, RgbLastPtr.i, RgbLookupLight.i
 Global RgbMisses.i, NameBuildUs.i, PairBuilds.i
 Global NameDescDirty.i=1, PpuChrBank.i, RgbRowPointer.i
+; MMC5 ExRAM attributes (mode 1): the decoded CHR every 4 KiB bank of the descriptors' bits 10-15 is
+; counted from, or 0. Only mapper5.pico sets it.
+Global PpuExtChr.i
 Global Dim NameDesc.u(4096)
 Global Dim RgbCache.i(4096)
 Global Dim RgbTags.i(1024)
