@@ -76,6 +76,9 @@ EndProcedure
     if name == 'runtime.pico':
         # Every PPU register write on a CHR-RAM board passes through it (Mega Man 4's intro: thousands a second).
         text=re.sub(r'Procedure CartPpuWriteNotice\(','ProcedureRAM CartPpuWriteNotice(',text)
+    if name == 'runtime.pico':
+        # The main loop runs between every CPU window: in flash it cost CV3 ~4% of core 0 (XIP misses).
+        text=re.sub(r'(?m)^Procedure Main\(\)','ProcedureRAM Main()',text)
     if name == 'dmc_shadow.pico':
         # Core 0 runs it at every sync while a sample plays; the RP2040 keeps it in flash for SRAM.
         for proc in ('SdFetch','SdAdvance','SdWrite','SdBudget'):

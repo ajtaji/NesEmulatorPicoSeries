@@ -234,7 +234,7 @@ Procedure DumpPcm()
 EndProcedure
 XIncludeFile "rom_store.pico2"
 XIncludeFile "menu.pico2"
-Procedure Main()
+ProcedureRAM Main()
   Protected t.i, tick.i, report.i, start.i, cycles.i, budget.i, target.i, frames.i, samples.i
   Protected lastPpu.i, lastApu.i, lastLcd.i, lastRender.i, lastSprites.i, lastRgb.i, lastWait.i
   Protected display.i, busy.i, dt.i, key.i, release.i, mode.i, distance.i
@@ -262,11 +262,10 @@ Procedure Main()
   Repeat
     passStart=Micros() : ran=0
     key= -1
-    If inputPoll=0
-      InputPoll()
-      UsbSerialTask() : SafetyPet() : key=UsbSerialRead() : inputPoll=3
-    Else
-      inputPoll=inputPoll-1
+    ; The controls, USB and the watchdog once a millisecond (every few windows cost core 0 ~2%).
+    If passStart-inputPoll>=1000
+      inputPoll=passStart : InputPoll()
+      UsbSerialTask() : SafetyPet() : key=UsbSerialRead()
     EndIf
     If key=115
       InputHost=8 : release=WorkerFrames+6

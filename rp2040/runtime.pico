@@ -261,11 +261,10 @@ Procedure Main()
   Repeat
     passStart=Micros() : ran=0
     key= -1
-    If inputPoll=0
-      InputPoll()
-      UsbSerialTask() : SafetyPet() : key=UsbSerialRead() : inputPoll=3
-    Else
-      inputPoll=inputPoll-1
+    ; The controls, USB and the watchdog once a millisecond (every few windows cost core 0 ~2%).
+    If passStart-inputPoll>=1000
+      inputPoll=passStart : InputPoll()
+      UsbSerialTask() : SafetyPet() : key=UsbSerialRead()
     EndIf
     If key=115
       InputHost=8 : release=WorkerFrames+6
