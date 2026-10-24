@@ -116,7 +116,12 @@ Procedure ReadController()
   Protected m.i
   If KeyHeld(#PB_Shortcut_X) : m|1 : EndIf
   If KeyHeld(#PB_Shortcut_Z) : m|2 : EndIf
-  If KeyHeld(#PB_Shortcut_Tab) Or KeyHeld(#PB_Shortcut_Shift) Or KeyHeld(#PB_Shortcut_Space) : m|4 : EndIf
+  If KeyHeld(#PB_Shortcut_Tab) Or KeyHeld(#PB_Shortcut_Space) : m|4 : EndIf
+  ; #PB_Shortcut_Shift is a modifier FLAG ($10000), not a key code: indexing KeyHeld() with it read past the
+  ; array. The Shift key on its own arrives as its virtual-key code.
+  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+    If KeyHeld(#VK_SHIFT) : m|4 : EndIf
+  CompilerEndIf
   If KeyHeld(#PB_Shortcut_Return) : m|8 : EndIf
   If KeyHeld(#PB_Shortcut_Up) : m|16 : EndIf
   If KeyHeld(#PB_Shortcut_Down) : m|32 : EndIf
@@ -319,3 +324,10 @@ Procedure Main()
   SoundEnd()
 EndProcedure
 Main()
+
+; IDE Options = PureBasic 6.41 (Windows - x64)
+; Folding = ---
+; EnableXP
+; DPIAware
+; DisableDebugger
+; Compiler = PureBasic 6.41 - C Backend (Windows - x64)
