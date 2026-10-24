@@ -209,6 +209,49 @@ body="""  If Res=-6
 """
 a=s.index('OpD0: ; $D0 BNE rel'); b=s.index('OpD1:',a)
 s=s[:a]+s[a:b].replace('  NextOp(2)',body+'  NextOp(2)')+s[b:]
+# Countdown superinstruction: an exact ROM DEX/BNE or DEY/BNE loop onto itself (a timing delay, e.g.
+# Pinbot's raster waits) runs further passes at once: each is 5 cycles (6 if the branch crosses a
+# page) and 2 instructions, the counter falls by one, and no bus access happens. The taken branch
+# just executed still owes its final two cycles (Left-3, as above); the batch stops one pass short
+# of zero so the ordinary dispatcher executes the terminating DEX/BNE.
+body="""  If Res=-3
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And Left>8 And PC>=$8000 And PC<=$FFFD
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr+1)=$D0 And PeekA(NesPollPtr+2)=$FD
+      Tmp=PeekA(NesPollPtr)
+      If Tmp=$CA Or Tmp=$88
+        NesPollCycles=5
+        If (Base&$FF00)<>(PC&$FF00)
+          NesPollCycles=6
+        EndIf
+        NesPollCount=NesDiv(Left-3,NesPollCycles)
+        If Tmp=$CA
+          Ea=X
+        Else
+          Ea=Y
+        EndIf
+        If NesPollCount>((Ea-1)&255)
+          NesPollCount=(Ea-1)&255
+        EndIf
+        If NesPollCount>0
+          Charge(NesPollCount*NesPollCycles)
+          NesInstructions=NesInstructions+NesPollCount*2
+          NesIdleBatched=NesIdleBatched+NesPollCount*2
+          Ea=(Ea-NesPollCount)&255
+          If Tmp=$CA
+            X=Ea
+          Else
+            Y=Ea
+          EndIf
+          FN=Ea : FZ=Ea : NesOpenBus=$FD
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  EndIf
+"""
+a=s.index('OpD0: ; $D0 BNE rel'); b=s.index('OpD1:',a)
+s=s[:a]+s[a:b].replace('  NextOp(2)',body+'  NextOp(2)')+s[b:]
 # Forward declarations: bus includes the CPU memory and is defined after it.
 s=s.replace('; NMOS 6502, documented opcodes. Flat 64 KiB writable guest memory.', '; NES 2A03, documented opcodes; mirrored RAM, cartridge ROM and NES bus.')
 s=s.replace('; CpuRun executes whole instructions. No bus/dummy-cycle emulation.', '; CpuRun executes whole instructions; selected RMW writes, not full bus sequences.')

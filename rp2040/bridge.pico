@@ -256,10 +256,15 @@ ProcedureRAM NesWrite(addr.i, value.i)
         CompilerIf #NES_PICO_MAPPERS=1
           ; This edge is raised on the final write cycle, after interrupt polling.
           NesNmiDelay=(NesNmiDelay<>WorkerNmi)
-          PicoCpuPpuChanged()
-        CompilerEndIf
-        CompilerIf #NES_PICO_MAPPERS=1
-          If PicoMapActive And ((addr&7)=6 Or (addr&7)=7) : PicoRegisterNotice(addr&7) : EndIf
+          ; $2006/$2007 change neither PPUCTRL, PPUMASK nor OAM, so PicoCpuPpuChanged has nothing new to
+          ; see until PicoRegisterNotice's A12 notice, which runs it after: once per write, not twice
+          ; (Pinbot's CHR clears are ~50k $2007 writes a second). MMC5 keeps both calls (M5PpuWatch).
+          If PicoMapActive And ((addr&7)=6 Or (addr&7)=7) And CartMapper<>5
+            PicoRegisterNotice(addr&7)
+          Else
+            PicoCpuPpuChanged()
+            If PicoMapActive And ((addr&7)=6 Or (addr&7)=7) : PicoRegisterNotice(addr&7) : EndIf
+          EndIf
         CompilerEndIf
       Else
         ; The DMC's stalls and IRQ come from core 0's own copy of its timing (dmc_shadow.pico).

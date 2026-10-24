@@ -216,13 +216,18 @@ ProcedureRAM PicoAdvancedChrWrite(addr.i,value.i)
     If PicoChrSlots(slot)=tag
       PokeA(Chr+slot*1024+(addr&1023),value)
       PokeU(Pattern+slot*1024+(row&1023),bits)
+      ; TQROM: the RAM bank's row at each PPU address it shows at, in the tile cache
+      If CartChrRam=0 And PpuChrBank=0 : PpuForgetChrRow(slot*1024+(addr&1023)) : EndIf
     EndIf
   Next
   ; A CHR-RAM board's tile cache is flushed by CartPpuWriteNotice, deferred while the background is
   ; off: invalidating here too, per byte, ran the cache generation round every 256 bytes, and each
   ; wrap rebuilt the palette pairs and wiped the tags (Mega Man 4's intro uploads ~8000 bytes a
-  ; second: 31 rebuilds, ~200 ms hitches). TQROM's RAM half (CartChrRam=0) still invalidates here.
-  If CartChrRam=0 : PicoInvalidateChr() : Else : BgCacheAddr=-1 : EndIf
+  ; second: 31 rebuilds, ~200 ms hitches). TQROM's RAM half (CartChrRam=0) forgets just the rows
+  ; written (PpuForgetChrRow above, exact): the whole-cache generation per byte rebuilt the palette pairs
+  ; every 256 bytes - Pinbot clearing 4 KiB of CHR RAM with the background on fell to 30-40 FPS each time.
+  If CartChrRam=0 And PpuChrBank<>0 : PicoInvalidateChr() : EndIf
+  BgCacheAddr=-1
 EndProcedure
 ProcedureRAM PicoA12(addr.i,dot.i)
   Protected high.i

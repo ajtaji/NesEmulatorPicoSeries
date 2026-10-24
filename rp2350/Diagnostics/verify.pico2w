@@ -336,27 +336,51 @@ Procedure StatusPollingTests()
 EndProcedure
 Global Dim LoopExpected.i(18)
 Procedure PollLoopTests()
-  Protected kind.i, variant.i, budget.i, pass.i, base.i, savedBias.i, startBatched.i
+  Protected kind.i, variant.i, budget.i, pass.i, base.i, savedBias.i, startBatched.i, slot.i
   savedBias=PrgBias
-  For kind=0 To 2
+  ; kinds 3 and 4: the DEX/BNE and DEY/BNE countdowns. On the RP2350 a third pass runs the paged CPU.
+  For kind=0 To 4
     startBatched=NesIdleBatched
     For variant=0 To 11
       base=$8000
       If variant&1
         base=$80FC
+        If kind>=3
+          base=$80FD
+        EndIf
       EndIf
       For budget=1 To 300
-        For pass=0 To 1
+        For pass=0 To 1+#PICO_ADVANCED
           If kind=0
             PrgBias=?PollAndData-base
           ElseIf kind=1
             PrgBias=?PollRamData-base
-          Else
+          ElseIf kind=2
             PrgBias=?PollCountData-base
+          ElseIf kind=3
+            PrgBias=?CountXData-base
+          Else
+            PrgBias=?CountYData-base
           EndIf
+          CompilerIf #PICO_ADVANCED=1
+            PicoPrgPaged=Bool(pass=2)
+            For slot=0 To 3 : PicoPrgBiases(slot)=PrgBias : Next
+            ; paged, PrgBias is not the mapped bank: aim it at the other countdown, so a batch that read
+            ; its code through PrgBias would count the wrong register
+            If pass=2 And kind=3
+              PrgBias=?CountYData-base
+            ElseIf pass=2 And kind=4
+              PrgBias=?CountXData-base
+            EndIf
+          CompilerEndIf
           PC=base : A=$55 : X=((variant>>1)&1)*254 : Y=$12 : S=$FD : CpuSetStatus($24)
+          If kind=3
+            X=(variant*23)&255
+          ElseIf kind=4
+            Y=(variant*23)&255
+          EndIf
           CpuCycles=0 : NesInstructions=0 : Stopped=0 : BadOpcode=0 : NesStall=0
-          NesOpenBus=0 : NesIdleEnabled=pass : M($20)=0
+          NesOpenBus=0 : NesIdleEnabled=Bool(pass>0) : M($20)=0
           PpuClock=0 : PpuStatusDeadline=0 : PpuLine=100 : PpuDot=50
           PpuOdd=0 : PpuV=0 : PpuT=0 : PpuFineX=0 : PpuWarmup=0
           PpuStatus=$80 : PpuBus=$1B : PpuW=1 : PpuCtrl=0 : PpuMask=0
@@ -412,6 +436,9 @@ Procedure PollLoopTests()
     Check(NesIdleBatched>startBatched,1)
   Next
   PrgBias=savedBias : NesIdleEnabled=1 : Stopped=0 : BadOpcode=0
+  CompilerIf #PICO_ADVANCED=1
+    PicoPrgPaged=0
+  CompilerEndIf
 EndProcedure
 DataSection
 PollAndData:
@@ -420,6 +447,10 @@ PollRamData:
   Data.a $A5,$20,$F0,$FC,2
 PollCountData:
   Data.a $AD,2,$20,$E8,$D0,$FA,2
+CountXData:
+  Data.a $CA,$D0,$FD,2
+CountYData:
+  Data.a $88,$D0,$FD,2
 EndDataSection
 Procedure ZpVectorTests()
   Protected n.i, p.i, i.i, op.i, target.i, ptr.i, mode.i

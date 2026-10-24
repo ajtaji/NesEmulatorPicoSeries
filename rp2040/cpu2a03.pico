@@ -4793,6 +4793,41 @@ __cpu_ifd_101:
     EndIf
   EndIf
   EndIf
+  If Res=-3
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And Left>8 And PC>=$8000 And PC<=$FFFD
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr+1)=$D0 And PeekA(NesPollPtr+2)=$FD
+      Tmp=PeekA(NesPollPtr)
+      If Tmp=$CA Or Tmp=$88
+        NesPollCycles=5
+        If (Base&$FF00)<>(PC&$FF00)
+          NesPollCycles=6
+        EndIf
+        NesPollCount=NesDiv(Left-3,NesPollCycles)
+        If Tmp=$CA
+          Ea=X
+        Else
+          Ea=Y
+        EndIf
+        If NesPollCount>((Ea-1)&255)
+          NesPollCount=(Ea-1)&255
+        EndIf
+        If NesPollCount>0
+          Tick(NesPollCount*NesPollCycles)
+          NesInstructions=NesInstructions+NesPollCount*2
+          NesIdleBatched=NesIdleBatched+NesPollCount*2
+          Ea=(Ea-NesPollCount)&255
+          If Tmp=$CA
+            X=Ea
+          Else
+            Y=Ea
+          EndIf
+          FN=Ea : FZ=Ea : NesOpenBus=$FD
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  EndIf
   NextOp(2)
 OpD1: ; $D1 CMP iny
   AccessPhase = 4

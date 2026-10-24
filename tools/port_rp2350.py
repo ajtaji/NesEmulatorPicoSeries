@@ -65,10 +65,11 @@ EndProcedure
         # hash mask is 11 bits in tools/m33/ppu_render_tile.s, the RP2350's only form of that loop.
         for old, new in (('Global Dim RgbCache.i(4096)', 'Global Dim RgbCache.i(8192)'),
                          ('Global Dim RgbTags.i(1024)', 'Global Dim RgbTags.i(2048)'),
+                         ('Global RgbTagMask.i=1023', 'Global RgbTagMask.i=2047'),
                          ('  For i=0 To 1023'+chr(10), '  For i=0 To 2047'+chr(10)),
                          ('  For i=0 To 1023'+chr(13)+chr(10), '  For i=0 To 2047'+chr(13)+chr(10))):
             text = text.replace(old, new)
-        if 'RgbTags.i(2048)' not in text or 'For i=0 To 2047' not in text:
+        if 'RgbTags.i(2048)' not in text or 'For i=0 To 2047' not in text or 'RgbTagMask.i=2047' not in text:
             raise SystemExit('ppu.pico: the tile cache size lines were not found')
     if name == 'ppu.pico':
         # CHR-RAM uploads decode every byte (Mega Man 4's intro: ~8000 a second).
@@ -96,6 +97,7 @@ EndProcedure
         text = text.replace('#ROMSTORE_BTKEY = $1FF000', '#ROMSTORE_BTKEY = $3FF000')
         text = text.replace('; $100000 up is the Bluetooth radio firmware',
                             '; $200000 up is the Bluetooth radio firmware')
+        text = text.replace('#ROMSTORE_RADIO = $100000', '#ROMSTORE_RADIO = $200000')
     if name == 'runtime.pico':
         text = text.replace('ClockInitKhz(200000)', 'ClockInitKhz(150000)')
         text = 'XIncludeFile "RP2350/Lib/multicore_smp.pico2"\n' + text

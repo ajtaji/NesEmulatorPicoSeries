@@ -20,6 +20,17 @@ def dual_cpu(text):
     paged=paged.replace('bl picoprgfetchbias', 'lsrs r3, r0, #11\n    movs r1, #12\n    ands r3, r1\n    ldr r1, =global_picoprgbiases\n    ldr r1, [r1, r3]')
     paged=paged.replace('CpuRun(n.i)','CpuRunPaged(n.i)').replace('__ul_cpurun_', '__ul_cpurunpaged_')
     paged=paged.replace('__cpu_', '__pg_cpu_')
+    # The batched loops (status polls, countdowns) read their own code from ROM. Paged, PrgBias is
+    # the flat cartridge base, not the bank mapped at PC: take the slot's bias, as the fetches do
+    # (PicoPrgBiases is declared after the CPU, so in assembly), and keep every byte the batch reads
+    # inside PC's 8 KiB page.
+    rom_ptr=('    ASM Uses PC\n      mov r0, r8\n      lsrs r3, r0, #11\n      movs r1, #12\n      ands r3, r1\n'
+             '      ldr r1, =global_picoprgbiases\n      ldr r1, [r1, r3]\n      adds r1, r1, r0\n'
+             '      ldr r2, =global_nespollptr\n      str r1, [r2]\n    EndASM\n')
+    count=paged.count('    NesPollPtr=PrgBias+PC\n')
+    assert count>=4, count
+    paged=paged.replace('    NesPollPtr=PrgBias+PC\n', rom_ptr)
+    paged=re.sub(r'And PC<=\$FFF([0-9A-F])\b', r'And PC<=$FFF\1 And (PC&$1FFF)<=$1FF\1', paged)
     paged=re.sub(r'\bDispatch\b','DispatchPaged',paged).replace('global_dispatch','global_dispatchpaged')
     paged=re.sub(r'\bReady\b','PagedReady',paged)
     for macro in ['DispatchNext','NextOp']:
