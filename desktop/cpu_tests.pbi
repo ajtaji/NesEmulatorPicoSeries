@@ -2,6 +2,7 @@
 ;   * Anvil's own (anvil/Tests, ported to core/tests/ by tools/port_desktop.py), as the Pi runs them:
 ;     the core tests - the boards' 220 zero-page vectors, then the PPU's packed tile fetch against its
 ;     reference form - and the mapper tests, synthetic cartridges through every mapper.
+;   * Both controllers through $4016/$4017.
 ;   * The desktop's 1200 opcode vectors (desktop/cpu_vectors.pbi, every documented opcode from random
 ;     states, py65 as the oracle). Each instruction runs alone (CpuRun(1)) at $0400.
 EnableExplicit
@@ -9,7 +10,7 @@ XIncludeFile "core/tests/core.pbi"
 XIncludeFile "core/tests/mappers.pbi"
 XIncludeFile "cpu_vectors.pbi"
 
-Global CpuTestChecks.i, CpuTestFailures.i, CpuTestCore.i, CpuTestMapper.i, CpuTestAll.i
+Global CpuTestChecks.i, CpuTestFailures.i, CpuTestCore.i, CpuTestMapper.i, CpuTestAll.i, CpuTestPads.i
 Global NewList CpuTestFailLines.s()
 
 Procedure CpuTestCheck(actual.i,expected.i,what$)
@@ -51,7 +52,27 @@ Procedure CpuOpcodeVectorTests()
   Next
 EndProcedure
 
-; All three suites, each from a clean machine; the caller restarts the machine afterwards.
+; Both controllers through the bus, as a game reads them: strobe $4016, then eight reads of $4016 and
+; $4017, A first; after eight, 1s (open bus bit 6 set on $4017). While strobed, each reads its A button.
+Procedure ControllerTests()
+  Protected pad1.i, pad2.i, i.i, n.i
+  For n=0 To 15
+    pad1=(n*$35+$5A)&255 : pad2=(n*$C3+$27)&255
+    NesController=pad1 : NesController2=pad2
+    NesWrite($4016,1)
+    CpuTestCheck(NesRead($4016)&1,pad1&1,"controller 1 strobed")
+    CpuTestCheck(NesRead($4017)&1,pad2&1,"controller 2 strobed")
+    NesWrite($4016,0)
+    For i=0 To 7
+      CpuTestCheck(NesRead($4016)&1,(pad1>>i)&1,"controller 1 bit "+Str(i))
+      CpuTestCheck(NesRead($4017)&1,(pad2>>i)&1,"controller 2 bit "+Str(i))
+    Next
+    CpuTestCheck(NesRead($4017)&1,1,"controller 2 after eight")
+  Next
+  NesController=0 : NesController2=0
+EndProcedure
+
+; All four suites, each from a clean machine; the caller restarts the machine afterwards.
 Procedure.i CpuTestsRun()
   Protected keepIdle.i, before.i
   CpuTestChecks=0 : CpuTestFailures=0 : ClearList(CpuTestFailLines())
@@ -70,6 +91,7 @@ Procedure.i CpuTestsRun()
   EndIf
   MachineStart("") : NesIdleEnabled=0
   before=CpuTestChecks : CpuOpcodeVectorTests() : CpuTestAll=CpuTestChecks-before
+  MachineStart("") : before=CpuTestChecks : ControllerTests() : CpuTestPads=CpuTestChecks-before
   NesIdleEnabled=keepIdle
   ProcedureReturn Bool(CpuTestFailures=0)
 EndProcedure

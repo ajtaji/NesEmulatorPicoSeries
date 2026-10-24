@@ -406,6 +406,15 @@ MAPPER_PATCHES = {
     'mapper_adapters': [('Procedure ApuMixSample()\n  ApuMixSampleBase()\n',
                          'Procedure ApuMixSample()\n  If ExpChip : ExpMix() : EndIf\n  ApuMixSampleBase()\n', 1)],
 }
+# The second controller, as rp2350/bridge.pico2 has it (Anvil reads $4017 with no pad behind it):
+# NesController2 is the pad's state, latched by the $4016 strobe and read through $4017.
+CONTROLLER_PATCHES = {
+    'bridge': [('Global NesLatch2.i\n', 'Global NesLatch2.i, NesController2.i\n', 1),
+               ('    If NesStrobe=0\n      v=v|(NesLatch2&1) : NesLatch2=(NesLatch2>>1)|$80\n',
+                '    If NesStrobe\n      v=v|(NesController2&1)\n    Else\n'
+                '      v=v|(NesLatch2&1) : NesLatch2=(NesLatch2>>1)|$80\n', 1),
+               ('NesLatch=NesController : NesLatch2=0', 'NesLatch=NesController : NesLatch2=NesController2', 1)],
+}
 HAND = ['mapper_konami_namco']     # desktop/*.pbi files the core includes and declares like its own
 
 # Anvil's own test suites (anvil/Tests), which the Pi runs from its menu: the core tests (the boards'
@@ -435,7 +444,7 @@ def port_tests():
 
 def pal_patch(text, name):
     text = text.replace('\r\n', '\n')
-    for old, new, count in PAL_PATCHES.get(name, []) + MAPPER_PATCHES.get(name, []):
+    for old, new, count in PAL_PATCHES.get(name, []) + MAPPER_PATCHES.get(name, []) + CONTROLLER_PATCHES.get(name, []):
         if text.count(old) != count:
             raise SystemExit(f'PAL patch: {name}: {old!r} found {text.count(old)} times, expected {count}')
         text = text.replace(old, new)

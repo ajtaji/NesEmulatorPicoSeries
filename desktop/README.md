@@ -62,9 +62,11 @@ The engine is found at `C:/Embedded Compiler/Neon-Arcade-Dispay-Engine/` unless
 
 `PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S]`
 
-- **Keys:** arrows are the D-pad; X is A, Z is B; Enter is Start; Shift, Tab or Space is Select.
+- **Keys, player 1:** arrows are the D-pad; X is A, Z is B; Enter is Start; Shift, Tab or Space is Select.
+- **Keys, player 2:** I/J/K/L are the D-pad; H is A, G is B; Y is Start; T is Select. The second
+  gamepad is player 2's; the first, player 1's.
 - **Debugging:** F5 runs or pauses, F6 steps one instruction, F7 steps one frame, F8 resets.
-- **Display and sound:** F11 is full screen, M is mute. A gamepad works too.
+- **Display and sound:** F11 is full screen, M is mute.
 - **TV system:** the toolbar's TV button cycles auto / NTSC / PAL. Auto follows the Pico's rule: the
   header's TV system, else a PAL-only region tag in the file name — "(E)", "(Europe)", "(PAL)" — and
   never one that also names an NTSC region.
@@ -74,13 +76,14 @@ The engine is found at `C:/Embedded Compiler/Neon-Arcade-Dispay-Engine/` unless
 
 ## Results (2026-10-23, Windows 11, x64, /OPTIMIZER)
 
-**Tests:** 390,689 checks, 0 failures.
+**Tests:** 390,993 checks, 0 failures.
 
 | Suite | Checks |
 |---|---|
 | Anvil core | 132,612 — the Pi's own count |
 | Anvil mappers | 206,477 |
 | Opcode vectors | 51,600 |
+| Both controllers through $4016/$4017 | 304 |
 
 **Games:** 1800 frames each, unthrottled; none stopped.
 
@@ -127,8 +130,12 @@ the time. `/OPTIMIZER` roughly doubles everything.
 
 - **Undocumented opcodes stop the CPU**, as on the boards. Aladdin (E) stops at $07 (SLO).
 - Kaiketsu Yanchamaru 3 [hM19], a hack re-pointed to mapper 19, stops on opcode $02 after 25
-  instructions. Not investigated.
+  instructions. It calls $C75C before it ever writes $F000, so it relies on $C000 powering on as the
+  second-to-last bank, as on the original Irem board. Real N163 hardware leaves that register
+  undefined; this core and the Pico start it at bank 2. With it started at the second-to-last bank,
+  the hack runs, and the other four N163 games give the same frames.
 - **Not drawn yet:** N163 CHR-RAM patterns, and VRC6's CHR-ROM nametable modes. As on the Pico, the
   log says so.
-- **Not in Anvil yet**, so not here: the Pico's second controller and its core-0 DMC/APU shadow.
+- **Not in Anvil yet**, so not here: the Pico's core-0 DMC/APU shadow. (The second controller is
+  patched in, as the Pico has it.)
 - Sound is Windows only for now. The gamepad code is in, but has not been tried with a real pad.

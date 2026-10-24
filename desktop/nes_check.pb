@@ -1,4 +1,4 @@
-﻿; Console checks of the desktop core. Build from the repository root (PowerShell):
+; Console checks of the desktop core. Build from the repository root (PowerShell):
 ;   & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_check.pb /CONSOLE /OUTPUT desktop\nes_check.exe
 ; Run:  desktop\nes_check.exe [rom.nes [frames]]
 EnableExplicit
@@ -14,9 +14,9 @@ OpenConsole()
 DisInit()
 MachineStart("")
 If CpuTestsRun()
-  PrintN("tests: "+Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", Anvil mappers "+Str(CpuTestMapper)+", opcode vectors "+Str(CpuTestAll)+"), 0 failures PASS")
+  PrintN("tests: "+Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", Anvil mappers "+Str(CpuTestMapper)+", opcode vectors "+Str(CpuTestAll)+", controllers "+Str(CpuTestPads)+"), 0 failures PASS")
 Else
-  PrintN("tests: "+Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", Anvil mappers "+Str(CpuTestMapper)+", opcode vectors "+Str(CpuTestAll)+"), "+Str(CpuTestFailures)+" failures FAIL")
+  PrintN("tests: "+Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", Anvil mappers "+Str(CpuTestMapper)+", opcode vectors "+Str(CpuTestAll)+", controllers "+Str(CpuTestPads)+"), "+Str(CpuTestFailures)+" failures FAIL")
   ForEach CpuTestFailLines() : PrintN("  "+CpuTestFailLines()) : Next
 EndIf
 ; positional arguments (rom, frames, png); --pal / --ntsc anywhere

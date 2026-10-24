@@ -1,4 +1,4 @@
-﻿; PureMetal NES for the desktop: the same emulation as the boards (desktop/core, generated from Anvil's
+; PureMetal NES for the desktop: the same emulation as the boards (desktop/core, generated from Anvil's
 ; portable core by tools/port_desktop.py), drawn with the Neon Arcade Display Engine.
 ;
 ; Build (PowerShell, from the repository root):
@@ -9,6 +9,7 @@
 ;       (--shot saves the window after S seconds, default 5, and closes: for checks without a person)
 ;
 ; Keys: arrows = D-pad, X = A, Z = B, Enter = Start, Shift, Tab or Space = Select. A gamepad works too.
+;       Player 2: I/J/K/L = D-pad, H = A, G = B, Y = Start, T = Select, or the second gamepad.
 ;       F5 run/pause, F6 step one instruction, F7 step one frame, F8 reset, F11 full screen, M mute.
 EnableExplicit
 
@@ -87,9 +88,32 @@ Procedure LoadRom(path$)
   ViewRomsRefresh(LastRomFolder$)
 EndProcedure
 
-; The controller: keyboard and the first gamepad, NES bit order (A B Select Start Up Down Left Right).
-Procedure ReadController()
+; One gamepad's buttons, NES bit order (A B Select Start Up Down Left Right).
+Procedure.i ReadPad(pad.i)
   Protected m.i, ax.i, ay.i
+  If PadCount>pad And ExamineJoystick(pad)
+    ax=JoystickAxisX(pad) : ay=JoystickAxisY(pad)
+    If ax<0 : m|64 : ElseIf ax>0 : m|128 : EndIf
+    If ay<0 : m|16 : ElseIf ay>0 : m|32 : EndIf
+    If JoystickButton(pad,1) : m|1 : EndIf
+    If JoystickButton(pad,2) Or JoystickButton(pad,3) : m|2 : EndIf
+    If JoystickButton(pad,7) : m|4 : EndIf
+    If JoystickButton(pad,8) : m|8 : EndIf
+  EndIf
+  ProcedureReturn m
+EndProcedure
+
+; A real pad cannot press both opposite directions; several games misbehave if it does.
+Procedure.i PadClean(m.i)
+  If (m&48)=48 : m&~48 : EndIf
+  If (m&192)=192 : m&~192 : EndIf
+  ProcedureReturn m
+EndProcedure
+
+; The two controllers. Player 1: X = A, Z = B, Tab/Shift/Space = Select, Enter = Start, arrows, the first
+; gamepad. Player 2: H = A, G = B, T = Select, Y = Start, I/J/K/L, the second gamepad.
+Procedure ReadController()
+  Protected m.i
   If KeyHeld(#PB_Shortcut_X) : m|1 : EndIf
   If KeyHeld(#PB_Shortcut_Z) : m|2 : EndIf
   If KeyHeld(#PB_Shortcut_Tab) Or KeyHeld(#PB_Shortcut_Shift) Or KeyHeld(#PB_Shortcut_Space) : m|4 : EndIf
@@ -98,19 +122,17 @@ Procedure ReadController()
   If KeyHeld(#PB_Shortcut_Down) : m|32 : EndIf
   If KeyHeld(#PB_Shortcut_Left) : m|64 : EndIf
   If KeyHeld(#PB_Shortcut_Right) : m|128 : EndIf
-  If PadCount>0 And ExamineJoystick(0)
-    ax=JoystickAxisX(0) : ay=JoystickAxisY(0)
-    If ax<0 : m|64 : ElseIf ax>0 : m|128 : EndIf
-    If ay<0 : m|16 : ElseIf ay>0 : m|32 : EndIf
-    If JoystickButton(0,1) : m|1 : EndIf
-    If JoystickButton(0,2) Or JoystickButton(0,3) : m|2 : EndIf
-    If JoystickButton(0,7) : m|4 : EndIf
-    If JoystickButton(0,8) : m|8 : EndIf
-  EndIf
-  ; a real pad cannot press both opposite directions; several games misbehave if it does
-  If (m&48)=48 : m&~48 : EndIf
-  If (m&192)=192 : m&~192 : EndIf
-  NesController=m
+  NesController=PadClean(m|ReadPad(0))
+  m=0
+  If KeyHeld(#PB_Shortcut_H) : m|1 : EndIf
+  If KeyHeld(#PB_Shortcut_G) : m|2 : EndIf
+  If KeyHeld(#PB_Shortcut_T) : m|4 : EndIf
+  If KeyHeld(#PB_Shortcut_Y) : m|8 : EndIf
+  If KeyHeld(#PB_Shortcut_I) : m|16 : EndIf
+  If KeyHeld(#PB_Shortcut_K) : m|32 : EndIf
+  If KeyHeld(#PB_Shortcut_J) : m|64 : EndIf
+  If KeyHeld(#PB_Shortcut_L) : m|128 : EndIf
+  NesController2=PadClean(m|ReadPad(1))
 EndProcedure
 
 ; Run whole frames to keep pace with real time (NTSC 60.0988 Hz, PAL 50.0070 Hz); never more than three per pass.
