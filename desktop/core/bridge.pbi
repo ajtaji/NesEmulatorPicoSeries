@@ -12,7 +12,7 @@ Global WorkerPpuUs.i, WorkerApuUs.i
 Global WorkerBusyUs.i, WorkerDisplayUs.i, WorkerDisplayed.i
 Global WorkerDisplay.i=1, WorkerFrameDivider.i=2, WorkerPaused.i
 Global NesBridgeError.i, NesController.i, NesLatch.i, NesStrobe.i
-Global NesLatch2.i
+Global NesLatch2.i, NesController2.i
 Global ExpChip.i, ExpSample.i   ; a cartridge sound chip (desktop/mapper_konami_namco.pbi) and its part of the next sample
 ; The TV system (machine.pbi's NesTiming sets them from CartPal, as rp2040/runtime.pico does). NTSC: 262
 ; lines, 3 dots a CPU cycle, an odd frame's pre-render line one dot short, 1.789773 MHz. PAL: 312 lines,
@@ -134,7 +134,9 @@ Procedure.i NesReadSlow(addr.i)
     EndIf
   ElseIf addr=$4017
     v=$40
-    If NesStrobe=0
+    If NesStrobe
+      v=v|(NesController2&1)
+    Else
       v=v|(NesLatch2&1) : NesLatch2=(NesLatch2>>1)|$80
     EndIf
   ElseIf addr<$4000 Or addr=$4015
@@ -186,7 +188,7 @@ Procedure NesWrite(addr.i, value.i)
     CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)
     M5Write(addr,value) : CpuEndWindow()
   ElseIf addr=$4016
-    NesStrobe=value&1 : NesLatch=NesController : NesLatch2=0
+    NesStrobe=value&1 : NesLatch=NesController : NesLatch2=NesController2
   ElseIf addr=$4014
     CpuNow()
     NesPost(3,0,value,CpuCycles+AccessPhase)

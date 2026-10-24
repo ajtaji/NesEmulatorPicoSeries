@@ -123,7 +123,7 @@ Procedure ViewRunCpuTests()
   Protected t.q=ElapsedMilliseconds()
   MachineStart("")
   If CpuTestsRun()
-    ViewCpuTestResult$=Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", mappers "+Str(CpuTestMapper)+", opcodes "+Str(CpuTestAll)+"), 0 failures: PASS"
+    ViewCpuTestResult$=Str(CpuTestChecks)+" checks (Anvil core "+Str(CpuTestCore)+", mappers "+Str(CpuTestMapper)+", opcodes "+Str(CpuTestAll)+", pads "+Str(CpuTestPads)+"), 0 failures: PASS"
     ViewCpuTestFailed=0
   Else
     ViewCpuTestResult$=Str(CpuTestChecks)+" checks, "+Str(CpuTestFailures)+" failures: FAIL"
