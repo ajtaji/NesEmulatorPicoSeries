@@ -17,3 +17,5 @@ demo/preview/
 my-*.picow
 my-*.pico2w
 *.board.log
+# The desktop build (desktop/README.md says how to make it); not a release
+desktop/*.exe
