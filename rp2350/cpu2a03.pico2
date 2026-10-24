@@ -4795,6 +4795,41 @@ __cpu_ifd_101:
     EndIf
   EndIf
   EndIf
+  If Res=-3
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And Left>8 And PC>=$8000 And PC<=$FFFD
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr+1)=$D0 And PeekA(NesPollPtr+2)=$FD
+      Tmp=PeekA(NesPollPtr)
+      If Tmp=$CA Or Tmp=$88
+        NesPollCycles=5
+        If (Base&$FF00)<>(PC&$FF00)
+          NesPollCycles=6
+        EndIf
+        NesPollCount=NesDiv(Left-3,NesPollCycles)
+        If Tmp=$CA
+          Ea=X
+        Else
+          Ea=Y
+        EndIf
+        If NesPollCount>((Ea-1)&255)
+          NesPollCount=(Ea-1)&255
+        EndIf
+        If NesPollCount>0
+          Tick(NesPollCount*NesPollCycles)
+          NesInstructions=NesInstructions+NesPollCount*2
+          NesIdleBatched=NesIdleBatched+NesPollCount*2
+          Ea=(Ea-NesPollCount)&255
+          If Tmp=$CA
+            X=Ea
+          Else
+            Y=Ea
+          EndIf
+          FN=Ea : FZ=Ea : NesOpenBus=$FD
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  EndIf
   NextOp(2)
 OpD1: ; $D1 CMP iny
   AccessPhase = 4
@@ -11087,8 +11122,18 @@ __pg_cpu_ifd_101:
     PC = (PC + 1) & $FFFF
   EndIf
   If Res=-6
-  If NesIdleEnabled<>0 And (FZ&255)<>0 And X>0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFFA
-    NesPollPtr=PrgBias+PC
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And X>0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFFA And (PC&$1FFF)<=$1FFA
+    ASM Uses PC
+      mov r0, r8
+      lsrs r3, r0, #11
+      movs r1, #12
+      ands r3, r1
+      ldr r1, =global_picoprgbiases
+      ldr r1, [r1, r3]
+      adds r1, r1, r0
+      ldr r2, =global_nespollptr
+      str r1, [r2]
+    EndASM
     If PeekA(NesPollPtr)=$AD And PeekA(NesPollPtr+1)=2 And PeekA(NesPollPtr+2)=$20 And PeekA(NesPollPtr+3)=$E8 And PeekA(NesPollPtr+4)=$D0 And PeekA(NesPollPtr+5)=$FA
       NesPollCycles=9
       If (Base&$FF00)<>(PC&$FF00)
@@ -11108,6 +11153,51 @@ __pg_cpu_ifd_101:
         NesIdleBatched=NesIdleBatched+NesPollCount*3
         A=NesPollStatusDone()
         X=X+NesPollCount : FN=X : FZ=X : NesOpenBus=$FA
+      EndIf
+    EndIf
+  EndIf
+  EndIf
+  If Res=-3
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And Left>8 And PC>=$8000 And PC<=$FFFD And (PC&$1FFF)<=$1FFD
+    ASM Uses PC
+      mov r0, r8
+      lsrs r3, r0, #11
+      movs r1, #12
+      ands r3, r1
+      ldr r1, =global_picoprgbiases
+      ldr r1, [r1, r3]
+      adds r1, r1, r0
+      ldr r2, =global_nespollptr
+      str r1, [r2]
+    EndASM
+    If PeekA(NesPollPtr+1)=$D0 And PeekA(NesPollPtr+2)=$FD
+      Tmp=PeekA(NesPollPtr)
+      If Tmp=$CA Or Tmp=$88
+        NesPollCycles=5
+        If (Base&$FF00)<>(PC&$FF00)
+          NesPollCycles=6
+        EndIf
+        NesPollCount=NesDiv(Left-3,NesPollCycles)
+        If Tmp=$CA
+          Ea=X
+        Else
+          Ea=Y
+        EndIf
+        If NesPollCount>((Ea-1)&255)
+          NesPollCount=(Ea-1)&255
+        EndIf
+        If NesPollCount>0
+          Tick(NesPollCount*NesPollCycles)
+          NesInstructions=NesInstructions+NesPollCount*2
+          NesIdleBatched=NesIdleBatched+NesPollCount*2
+          Ea=(Ea-NesPollCount)&255
+          If Tmp=$CA
+            X=Ea
+          Else
+            Y=Ea
+          EndIf
+          FN=Ea : FZ=Ea : NesOpenBus=$FD
+        EndIf
       EndIf
     EndIf
   EndIf
@@ -11942,8 +12032,18 @@ __pg_cpu_ifd_117:
     PC = (PC + 1) & $FFFF
   EndIf
   If Res=-7
-  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And (PpuStatusBits&$40)=0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFF9
-    NesPollPtr=PrgBias+PC
+  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And (PpuStatusBits&$40)=0 And Left>12 And PpuStatusDeadline>NesRunStart+Budget-Left And PC>=$8000 And PC<=$FFF9 And (PC&$1FFF)<=$1FF9
+    ASM Uses PC
+      mov r0, r8
+      lsrs r3, r0, #11
+      movs r1, #12
+      ands r3, r1
+      ldr r1, =global_picoprgbiases
+      ldr r1, [r1, r3]
+      adds r1, r1, r0
+      ldr r2, =global_nespollptr
+      str r1, [r2]
+    EndASM
     If PeekA(NesPollPtr)=$AD And PeekA(NesPollPtr+1)=2 And PeekA(NesPollPtr+2)=$20 And PeekA(NesPollPtr+3)=$29 And PeekA(NesPollPtr+4)=$40 And PeekA(NesPollPtr+5)=$F0 And PeekA(NesPollPtr+6)=$F9
       NesPollCycles=9
       If (Base&$FF00)<>(PC&$FF00)
@@ -11965,8 +12065,18 @@ __pg_cpu_ifd_117:
   EndIf
   EndIf
   If Res=-4
-  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And Left>9 And PC>=$8000 And PC<=$FFFC
-    NesPollPtr=PrgBias+PC
+  If NesIdleEnabled<>0 And A=0 And (FZ&255)=0 And Left>9 And PC>=$8000 And PC<=$FFFC And (PC&$1FFF)<=$1FFC
+    ASM Uses PC
+      mov r0, r8
+      lsrs r3, r0, #11
+      movs r1, #12
+      ands r3, r1
+      ldr r1, =global_picoprgbiases
+      ldr r1, [r1, r3]
+      adds r1, r1, r0
+      ldr r2, =global_nespollptr
+      str r1, [r2]
+    EndASM
     If PeekA(NesPollPtr)=$A5 And PeekA(NesPollPtr+2)=$F0 And PeekA(NesPollPtr+3)=$FC And M(PeekA(NesPollPtr+1))=0
       NesPollCycles=6
       If (Base&$FF00)<>(PC&$FF00)

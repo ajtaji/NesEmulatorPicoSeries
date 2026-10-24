@@ -64,3 +64,46 @@ startup; compare their first and last values to identify new playback underruns.
 The current mapper/interrupt revision passes 1,928,288 full checks and 59,923
 focused checks. See [current results](../PICO-MMC3-NMI-RESULTS.md); the
 verification-board.txt file above is an earlier baseline.
+
+## Pinbot speed (2026-10-24)
+
+Measured on COM6 (Pico 2 W, LAFVIN panel), silent build. The silent build is `rp2350/demo.pico2w` with
+`#NES_AUDIO_BACKEND=0`; the APU still runs. The figures are frames per second from the board's own
+per-second line, over 62 s of Pinbot's attract mode with no input.
+
+| Stretch | Before | After |
+|---|---|---|
+| s1-15 | 60 | 60 |
+| s21-24 | 55-56 | 68-69 (catching up after the dip) |
+| s27-35 and s44-52 | 57-58 | 63-64 (catching up) |
+| Scene changes (s16-17, s23-24, s33, s40-41, s50, s57-58) | 31-52 | 32-52 |
+
+The emulator paces to real time and catches up after a slow second. So 63-64 FPS means core 0 now has
+time to spare where it had none.
+
+**The lever.** Profiled with a 10 kHz SysTick sampler on core 0, plus the guest PC (r8) while core 0 was
+in `CpuRunPaged`. Three quarters of the 6502's time in the slow stretch went to two timing loops: the
+`DEX/BNE` delay at `$FD80` and the per-scanline `LDY #9 / DEY / BNE` wait at `$FDCC`. The CPU now runs
+such a countdown in one step. In `rp2040/generate_cpu.py`, a ROM `DEX` or `DEY` followed by `BNE` back to
+itself is taken as many passes at once as the cycle budget allows. Each pass is 5 cycles (6 across a
+page) and 2 instructions; the batch stops one pass short of zero. Emulated timing is exact: checked in
+`PollLoopTests` against the same loops run one instruction at a time, flat and paged (612,005 checks).
+Two planted faults, a 4-cycle pass and the paged CPU reading its loop code through `PrgBias`, were
+caught (20,728 and 17,555 failures).
+
+**Also in this change.**
+- The paged CPU's batches read their code from ROM through the 8 KiB slot's own bias. Through `PrgBias`,
+  a status poll in a switched bank could have matched another bank's bytes.
+- A CHR-RAM byte on TQROM forgets just its four cached tile rows (`PpuForgetChrRow`, exact) instead of
+  moving the whole tile cache on a generation. That cut palette-pair rebuilds in a scene change from
+  ~140 to 1 a second. `ChrRowForgetTests` (51,200 checks) caught a planted fault (4,207 failures).
+- `$2006`/`$2007` writes run `PicoCpuPpuChanged` once, not twice.
+
+Full verify on COM6: 2,640,801 checks, 0 failures.
+
+**Unchanged.** The PureMetal demo, Mario / Duck Hunt, Contra and Mega Man 3 hold 60 FPS, second for second
+the same as before. Castlevania III dips to 57-58 at s18-19 in both builds.
+
+**Still slow: the scene changes.** Pinbot clears 4 KiB of CHR RAM through `$2007` with the background on.
+That is ~50,000 writes a second, each a full PPU sync and register write: about 13 us of core 0 per byte.
+Reaching 60 there needs roughly twice that path's speed.
