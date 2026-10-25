@@ -724,7 +724,10 @@ Procedure CpuBench()
   For i=0 To 20 : BenchRom(i)=PeekA(?BenchProgram+i) : Next
   BenchRom($FC)=0 : BenchRom($FD)=$80
   savedBase=PrgBase : PrgBase=@BenchRom(0) : PrgBias=@BenchRom(0)-$8000
-  CpuReset() : PC=$8000 : NesIdleEnabled=1
+  ; BenchRom is 513 bytes, not a 32 KB ROM: the reset vector at $FFFC must be read from BenchRom($FC).
+  ; Read through the $8000 window it is BenchRom+$7FFC - past the end of SRAM once the array sits high
+  ; (the Pico W reset into BOOTSEL here: Open bugs 2026-10-24).
+  PrgBias=@BenchRom(0)-$FF00 : CpuReset() : PrgBias=@BenchRom(0)-$8000 : PC=$8000 : NesIdleEnabled=1
   t=Micros() : cycles=0
   While cycles<2000000
     cycles=cycles+CpuRun(256)
@@ -736,7 +739,7 @@ Procedure CpuBench()
   ; Second loop: absolute reads from ROM and RAM (LDA $8100,X / ORA $0300,X /
   ; STA $10 / INX / BNE / JMP).
   For i=0 To 15 : BenchRom(i)=PeekA(?BenchProgram2+i) : Next
-  CpuReset() : PC=$8000
+  PrgBias=@BenchRom(0)-$FF00 : CpuReset() : PrgBias=@BenchRom(0)-$8000 : PC=$8000
   t=Micros() : cycles=0
   While cycles<2000000
     cycles=cycles+CpuRun(256)
