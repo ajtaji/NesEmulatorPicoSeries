@@ -48,17 +48,27 @@ Then regenerate the procedure-table CPU, which is built from the generated CPU:
 py tools/gen_desktop_cpu_procs.py
 ```
 
-## Build and run
+## Building the desktop version
 
-From PowerShell, in the repository root, with PureBasic 6.41's C backend, x64:
+You need PureBasic 6.41 (x64, the C back end: `pbcompilerc.exe`) and two public repositories, cloned side
+by side: this one and the [Neon Arcade Display Engine](https://github.com/ajtaji/Neon-Arcade-Dispay-Engine).
+The engine's name really is spelled "Dispay".
 
 ```powershell
+git clone https://github.com/ajtaji/NesEmulatorPicoSeries.git
+git clone https://github.com/ajtaji/Neon-Arcade-Dispay-Engine.git
+cd NesEmulatorPicoSeries
 & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
 & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_check.pb /CONSOLE /OPTIMIZER /OUTPUT desktop\nes_check.exe
 ```
 
-The engine is found at `C:/Embedded Compiler/Neon-Arcade-Dispay-Engine/` unless
-`/CONSTANT GL_ENGINE_DIR$=<path>/` names another place.
+Then run `desktop\PureMetalNES.exe`. It opens on the built-in demo, and **Open ROM...** picks a game.
+Or name the game: `desktop\PureMetalNES.exe demo\PureMetalDemo.nes`. `nes_check.exe` does not use the
+engine.
+
+`nes_desktop.pb` looks for the engine at `../../Neon-Arcade-Dispay-Engine/`, relative to itself: the clone
+beside this repository. For an engine elsewhere, add `/CONSTANT GL_ENGINE_DIR$=<path>/` (the trailing slash
+matters).
 
 `PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S]`
 

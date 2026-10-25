@@ -3,8 +3,8 @@
 ;
 ; Build (PowerShell, from the repository root):
 ;   & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
-;   (the engine is found at C:/Embedded Compiler/Neon-Arcade-Dispay-Engine/ unless
-;    /CONSTANT GL_ENGINE_DIR$=<path>/ says otherwise; the trailing slash matters)
+;   (the engine, https://github.com/ajtaji/Neon-Arcade-Dispay-Engine, is found cloned beside this
+;    repository unless /CONSTANT GL_ENGINE_DIR$=<path>/ says otherwise; the trailing slash matters)
 ; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S]
 ;       (--shot saves the window after S seconds, default 5, and closes: for checks without a person)
 ;
@@ -14,7 +14,7 @@
 EnableExplicit
 
 CompilerIf Not Defined(GL_ENGINE_DIR$, #PB_Constant)
-  #GL_ENGINE_DIR$ = "C:/Embedded Compiler/Neon-Arcade-Dispay-Engine/"
+  #GL_ENGINE_DIR$ = "../../Neon-Arcade-Dispay-Engine/"   ; a clone beside this repository
 CompilerEndIf
 XIncludeFile #GL_ENGINE_DIR$ + "GlTypes.pbi"
 XIncludeFile #GL_ENGINE_DIR$ + "GlUtilities.pbi"
