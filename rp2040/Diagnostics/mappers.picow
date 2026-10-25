@@ -61,6 +61,55 @@ Procedure SerialRegister(addr.i,value.i)
 EndProcedure
 
 CompilerIf #PICO_ADVANCED=1
+; NesWrite's $2007 short way (PicoChrWriteFast) against the ordinary path: the same seeded stream of
+; $2006/$2007 writes on TQROM (RAM banks in three slots, ROM in the rest, MMC3 IRQ on, rendering on, +1
+; and +32 increments, V sometimes outside the pattern tables) run twice from the same start, and a digest
+; of everything the writes reach must agree: CHR RAM and its decoded rows, the pattern window, the tile
+; cache tags, V, the bus latch, the A12 filter and IRQ counter, the prediction.
+Procedure.i ChrFastDigest()
+  Protected i.i, h.i
+  For i=0 To 16383 : h=(h*31+PicoChrRam(i)+PicoChrRamDecoded(i)*7)&$FFFFFFF : Next
+  For i=0 To 8191 : h=(h*31+PeekA(Pattern+i)+PeekA(Chr+i)*3)&$FFFFFFF : Next
+  For i=0 To RgbTagMask : h=(h*31+(RgbTags(i)&$FFFF))&$FFFFFFF : Next
+  h=(h*31+PpuV)&$FFFFFFF : h=(h*31+PpuBus)&$FFFFFFF : h=(h*31+PicoA12High)&$FFFFFFF
+  h=(h*31+PicoLowSince)&$FFFFFFF : h=(h*31+PicoIrqClocks)&$FFFFFFF : h=(h*31+PicoIrqCount)&$FFFFFFF
+  h=(h*31+PicoIrq)&$FFFFFFF : h=(h*31+PicoPredictValid)&$FFFFFFF : h=(h*31+PpuLine*341+PpuDot)&$FFFFFFF
+  ProcedureReturn h
+EndProcedure
+Procedure.i ChrFastRun(fast.i)
+  Protected i.i, r.i, hi.i
+  InitMapper(119,0)
+  WriteMapper($8000,0) : WriteMapper($8001,64) : WriteMapper($8000,2) : WriteMapper($8001,66)
+  WriteMapper($8000,3) : WriteMapper($8001,67) : WriteMapper($C000,7) : WriteMapper($C001,0) : WriteMapper($E001,0)
+  For i=0 To 16383 : PicoChrRam(i)=0 : PicoChrRamDecoded(i)=0 : Next
+  For i=0 To RgbTagMask : RgbTags(i)=i+1 : Next
+  ; both runs from the same PPU position and A12 filter state (Stamp only moves on: core 1 sees it)
+  PpuClock=Stamp : PpuLine=0 : PpuDot=0 : PpuOdd=0 : PpuV=0 : PpuT=0 : PpuW=0 : PpuStatus=0 : PpuFineX=0
+  PpuDotFrac=0 : PicoDots=0 : PicoA12High=0 : PicoLowSince=0 : PicoIrqClocks=0 : PicoIrq=0 : PicoPredictValid=0 : RgbTagGen=0
+  PicoChrFastOn=fast : PpuMask=$18 : PpuCtrl=$08 : FI=1 : CpuInWindow=0 : r=12345
+  For i=0 To 2999
+    r=(r*1103515245+12345)&$7FFFFFFF
+    Stamp=Stamp+3+((r>>20)&15) : CpuCycles=Stamp : AccessPhase=0
+    If (i&63)=0
+      hi=(r>>8)&$1F : If ((r>>14)&7)=0 : hi=$20+((r>>8)&$1F) : EndIf
+      NesWrite($2006,hi) : Stamp=Stamp+4 : CpuCycles=Stamp
+      NesWrite($2006,(r>>3)&255) : Stamp=Stamp+4 : CpuCycles=Stamp
+      PpuCtrl=$08|((r>>5)&4)
+    EndIf
+    NesWrite($2007,(r>>11)&255)
+  Next
+  PicoChrFastOn=1 : PpuMask=0 : PpuCtrl=0
+  ProcedureReturn ChrFastDigest()
+EndProcedure
+Procedure ChrFastTests()
+  Protected fast.i, slow.i
+  ; one run first: the earlier tests leave state the setup does not reset, and every run after the
+  ; first starts from the same end state
+  ChrFastRun(1) : fast=ChrFastRun(1) : slow=ChrFastRun(0)
+  Check(fast,slow) : Check(Bool(fast<>0),1)
+EndProcedure
+CompilerEndIf
+CompilerIf #PICO_ADVANCED=1
 Procedure QuickWriteTests()
   Protected clock.i,sent.i
   InitMapper(4,0) : clock=PpuClock : sent=QSent
@@ -192,7 +241,10 @@ Procedure MapperTests()
     WriteMapper($8000,0) : Check(PeekA(Chr+$1000),85)
     WriteMapper($8000,1) : Check(PeekA(Chr+$1000),33)
     InitMapper(119,0) : WriteMapper($8000,2) : WriteMapper($8001,64)
-    gen=RgbTagGen : PicoChrWrite($1000,77) : Check(PeekA(Chr+$1000),77) : Check(RgbTagGen<>gen,1)
+    ; a CHR-RAM byte forgets just its row's four cached tiles (PpuForgetChrRow), not the whole cache
+    gen=RgbTagGen : For i=0 To RgbTagMask : RgbTags(i)= -1 : Next
+    PicoChrWrite($1000,77) : Check(PeekA(Chr+$1000),77) : Check(RgbTagGen,gen)
+    bank=0 : For i=0 To RgbTagMask : If RgbTags(i)=0 : bank=bank+1 : EndIf : Next : Check(bank,4)
     WriteMapper($8001,5) : Check(PeekA(Chr+$1000),5)
     WriteMapper($8001,64) : Check(PeekA(Chr+$1000),77)
     WriteMapper($8000,3) : WriteMapper($8001,64)
@@ -219,7 +271,7 @@ Procedure MapperTests()
     InitMapper(47,0) : WriteMapper($6000,1) : Check(PicoOuter,1)
   CompilerEndIf
   CompilerIf #PICO_ADVANCED=1
-    QuickWriteTests() : NametablePageTests()
+    QuickWriteTests() : NametablePageTests() : ChrFastTests()
   CompilerEndIf
   Check(WorkerError,0) : Check(NesBridgeError,0)
   Say("MAPPER checks=") : Num(Checks) : Say(" failures=") : Num(Failures) : Eol()

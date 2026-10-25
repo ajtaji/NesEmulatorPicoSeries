@@ -209,6 +209,12 @@ ProcedureRAM.i NesReadSlow(addr.i)
 EndProcedure
 ProcedureRAM NesWrite(addr.i, value.i)
   addr=addr&$FFFF : value=value&255 : NesOpenBus=value
+  CompilerIf #PICO_ADVANCED=1
+    ; $2007 into CHR RAM on a Pico 2 W cartridge board (mapper_advanced.pico): the short way
+    If (addr&$E007)=$2007 And PicoIsAdvanced<>0 And PicoChrFastOn<>0
+      If PicoChrWriteFast(value) : ProcedureReturn : EndIf
+    EndIf
+  CompilerEndIf
   If addr<$2000
     M(addr&$7FF)=value
   ElseIf addr>=$6000
