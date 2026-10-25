@@ -26,6 +26,8 @@ Global PicoIrqDot.i,PicoPredictCalls.i,PicoPredictUs.i
 Global PicoPredictCtrl.i,PicoPredictMask.i
 ; PicoMmc3(CartMapper) / PicoAdvancedSupported(CartMapper), fixed per game: set by PicoMapperInit
 Global PicoIsMmc3.i,PicoIsAdvanced.i
+; NesWrite's $2007 short way into CHR RAM (PicoChrWriteFast); 0 only in the mappers diagnostic's comparison
+Global PicoChrFastOn.i=1
 Global PicoPredictValid.i,PicoPredictIrqDot.i,PicoPredictEnd.i,PicoPredictReuse.i,PicoPredictDrift.i
 
 Global Dim PicoNtDesc.u(6144)

@@ -107,3 +107,26 @@ the same as before. Castlevania III dips to 57-58 at s18-19 in both builds.
 **Still slow: the scene changes.** Pinbot clears 4 KiB of CHR RAM through `$2007` with the background on.
 That is ~50,000 writes a second, each a full PPU sync and register write: about 13 us of core 0 per byte.
 Reaching 60 there needs roughly twice that path's speed.
+
+### The $2007 CHR-RAM writes (2026-10-25)
+
+In a scene change Pinbot makes 42,643 `$2007` writes a second, against 1,920 in normal play. Each one
+went the long way, about 14 us of core 0. Changes:
+- **`PicoChrWriteFast`:** `NesWrite` sends `$2007` into CHR RAM on the Pico 2 W cartridge boards
+  straight there. It takes the same steps, in the same order, as the PPU-register path it replaces.
+- **`PicoPpuNotice`:** returns at once when the A12 level does not change.
+
+`ChrFastTests` (mappers diagnostic) runs a seeded stream of 3,000 `$2006`/`$2007` writes on TQROM both
+ways and compares a digest of everything they reach. A planted fault, the fast path missing the A12
+notice for the new V, was caught. Full verify: 2,640,801 checks, 0 failures.
+
+Pinbot, 62 s, frames per second in each scene change:
+
+| Scene change | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| Before | 32 45 | 47 46 | 35 | 48 45 | 35 | 52 42 |
+| After | 35 58 | 48 53 | 43 | 50 52 | 42 | 53 49 |
+
+**Both cores (the board's per-second idle counters):**
+- Normal play: core 0 53-59% busy, core 1 33-35%.
+- In the dips: core 0 is 100%. Core 1 (the APU) is idle two thirds of the time.

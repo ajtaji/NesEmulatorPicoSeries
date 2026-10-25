@@ -272,6 +272,8 @@ ProcedureRAM PicoPpuNotice(addr.i)
   CompilerIf #PICO_ADVANCED=1
     Protected high.i,low.i,clocks.i
     If PicoIsMmc3
+      ; PicoA12 acts only on a change of level: most accesses ($2007 runs, the same pattern table) have none
+      If Bool((addr&$1000)<>0)=PicoA12High : ProcedureReturn : EndIf
       high=PicoA12High : low=PicoLowSince : clocks=PicoIrqClocks
       PicoA12(addr,PicoDots)
       If high<>PicoA12High Or low<>PicoLowSince Or clocks<>PicoIrqClocks : PicoPredictValid=0 : EndIf

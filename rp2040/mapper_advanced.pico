@@ -204,6 +204,30 @@ ProcedureRAM PicoAdvancedWrite(addr.i,value.i,stamp.i)
     CpuEndWindow()
   EndIf
 EndProcedure
+; $2007 into the pattern tables on a PicoAdvancedChrWrite board (TQROM, the CHR-RAM MMC3 boards): NesWrite's
+; PPU-register branch with PpuRegWrite, PpuWrite and PicoChrWrite, step for step and in their order, without
+; the dispatch between them. Pinbot clears 4 KiB of CHR RAM with the background on: ~43,000 writes a second,
+; ~14 us each the long way. The PPU is brought to the write first (rendering moves V); a V outside the
+; pattern tables returns 0 and the ordinary path finishes the write (its PpuSync is then a no-op).
+ProcedureRAM.i PicoChrWriteFast(value.i)
+  Protected addr.i
+  If ChrWritable=0 Or CartMapper=5 : ProcedureReturn 0 : EndIf
+  CpuNow() : PpuSync(CpuCycles+AccessPhase)
+  If (PpuV&$3FFF)>=$2000 : ProcedureReturn 0 : EndIf
+  If CartChrRam<>0 : CartPpuWriteNotice(7,value) : EndIf
+  PpuBus=value : BgCacheAddr= -1 : RgbLastKey= -1
+  addr=PpuV&$3FFF
+  PicoPpuNotice(addr)
+  PicoAdvancedChrWrite(addr,value)
+  If PpuCtrl&4
+    PpuV=(PpuV+32)&$7FFF
+  Else
+    PpuV=(PpuV+1)&$7FFF
+  EndIf
+  NesNmiDelay=0
+  PicoPpuNotice(PpuV&$3FFF) : PicoCpuPpuChanged()
+  ProcedureReturn 1
+EndProcedure
 ProcedureRAM PicoAdvancedChrWrite(addr.i,value.i)
   Protected tag.i,offset.i,row.i,bits.i,slot.i
   tag=PicoChrSlots(addr>>10)
