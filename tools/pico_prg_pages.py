@@ -10,6 +10,28 @@ def paged_fetch(text,name):
     return re.sub(r"(?m)^([ \t]*)ldr r1, =global_prgbias\n[ \t]*ldr r1, \[r1\]",patch,text)
 
 
+def thumb2_dispatch(text,kind):
+    """The opcode fetch and dispatch at the end of every instruction, in the Cortex-M33's Thumb-2 (the RP2350
+    only; the RP2040 keeps the Thumb-1 form): compare and index the high register r8 (the guest PC)
+    directly, wrap it with uxth, extract the PRG slot with ubfx, and jump with ldr pc from the scaled
+    table entry - 10 instructions where Thumb-1 takes 18 (mov through low registers, two shifts for the
+    16-bit wrap, ldr then bx)."""
+    old=re.compile(r'(?m)^      mov r0, r8\n      ldr r1, =\$8000\n      cmp r0, r1\n      blo (__ul_cpurun\w+_slowfetch)\n'
+                   r'(?:.*\n)*?      ldr r1, \[r1, r2\]\n      bx r1\n')
+    found=old.findall(text)
+    assert len(found)==1,(kind,len(found))
+    if kind=='flat':
+        bias='      ldr r1, =global_prgbias\n      ldr r1, [r1]\n'
+        table='global_dispatch'
+    else:
+        bias='      ubfx r3, r8, #13, #2\n      ldr r1, =global_picoprgbiases\n      ldr r1, [r1, r3, lsl #2]\n'
+        table='global_dispatchpaged'
+    new=('      cmp r8, #$8000\n      blo '+found[0]+'\n'+bias+
+         '      ldrb r2, [r1, r8]\n      add r8, r8, #1\n      uxth r8, r8\n'
+         '      ldr r1, ='+table+'\n      ldr pc, [r1, r2, lsl #2]\n')
+    return old.sub(lambda m:new,text,count=1)
+
+
 def dual_cpu(text):
     """Select flat/paged computed dispatch once per window, not per fetch."""
     begin=text.index('ProcedureRAM.i CpuRun(n.i)')
@@ -35,6 +57,7 @@ def dual_cpu(text):
     paged=re.sub(r'\bReady\b','PagedReady',paged)
     for macro in ['DispatchNext','NextOp']:
         paged=re.sub(r'\b'+macro+r'\b','Paged'+macro,paged)
+    prefix,flat,paged=prefix,thumb2_dispatch(flat,'flat'),thumb2_dispatch(paged,'paged')
     wrapper="""\nProcedureRAM.i CpuRun(n.i)
   If PicoPrgPaged : ProcedureReturn CpuRunPaged(n) : EndIf
   ProcedureReturn CpuRunFlat(n)
