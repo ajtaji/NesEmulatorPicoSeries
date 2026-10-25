@@ -149,6 +149,11 @@ Procedure LoadCartridge()
   PpuSpreadInit()
   CartSelect(CartIndex) : PicoPrgFlat()
   CartChrDirty=0 : PicoMapActive=0 : PicoIrq=0 : NesNmiDelay=0 : CpuIrqDelay=0
+  CompilerIf #PICO_ADVANCED=1
+    ; PicoMapperInit sets these only for a map-active board: a game picked after one (the boot menu
+    ; loads store slot 0 first) must not keep them
+    PicoIsAdvanced=0 : PicoIsMmc3=0
+  CompilerEndIf
   PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase : CartPrgSelected=0 : CartChrSelected=0 : PpuChrBank=0
   If CartMapper<>0 And CartMapper<>2 And CartMapper<>66
     ChrWritable=0

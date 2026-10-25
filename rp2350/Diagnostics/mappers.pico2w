@@ -108,6 +108,13 @@ Procedure ChrFastTests()
   ; first starts from the same end state
   ChrFastRun(1) : fast=ChrFastRun(1) : slow=ChrFastRun(0)
   Check(fast,slow) : Check(Bool(fast<>0),1)
+  ; a board PpuWrite writes directly (UxROM CHR RAM, not map-active) never takes the short way, even
+  ; with the previous game's PicoIsAdvanced still set (Contra after Pinbot lost every tile it uploaded)
+  InitMapper(119,0) : PicoMapActive=0 : PicoIsAdvanced=1 : ChrWritable=1
+  Chr=@Decoded(0)+8192 : Pattern=@Decoded(0) : PpuV=$0123 : PpuCtrl=0 : PpuMask=0
+  Stamp=Stamp+20 : CpuCycles=Stamp : AccessPhase=0 : CpuInWindow=0
+  NesWrite($2007,$5A) : Check(PeekA(Chr+$0123),$5A) : Check(PpuV,$0124)
+  PicoMapActive=1
 EndProcedure
 CompilerEndIf
 CompilerIf #PICO_ADVANCED=1
