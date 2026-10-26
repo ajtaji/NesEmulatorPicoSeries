@@ -103,6 +103,28 @@ Procedure ViewDrawGame(x.f,y.f,scale.f)
   ViewTextureDraw(@ViewGame,x,y,scale)
 EndProcedure
 
+; The picture into any rectangle (x, y, w, h in canvas pixels, from the top left) at any aspect: the GL
+; viewport is set to the rectangle and the engine's scaled drawing maps a 256 x 240 base onto it (full screen
+; draws the NES's 8:7 pixels this way). The texture is the one ViewDrawGame uploaded this frame.
+Procedure ViewDrawGameRect(x.f,y.f,w.f,h.f)
+  Protected baseW.i=Util_BaseWidth, baseH.i=Util_BaseHeight
+  glViewport_(Int(x),Int(GL_ViewportH-y-h),Int(w),Int(h))
+  Util_BaseWidth=256 : Util_BaseHeight=240
+  DrawGLSprite(@ViewGame\sprite,0,0,0.0,1.0,1.0,1.0,1.0,1.0,#True,-1,-1,-1,-1,#True)
+  Util_BaseWidth=baseW : Util_BaseHeight=baseH
+  glViewport_(GL_ViewportX,GL_ViewportY,GL_ViewportW,GL_ViewportH)
+EndProcedure
+Procedure ViewUploadGame()
+  Protected *dst.Long, yy.i, xx.i
+  For yy=0 To 239
+    *dst=ViewRow(@ViewGame,yy)
+    For xx=0 To 255
+      *dst\l=View565(DisplayFrame565(yy*256+xx)) : *dst+4
+    Next
+  Next
+  ViewTextureUpload(@ViewGame)
+EndProcedure
+
 ; ---------------------------------------------------------------- panes
 Procedure.f ViewLine(x.f,y.f,t$,r.f=-1,g.f=0,b.f=0)
   If r<0 : r=Neon_C_TextR : g=Neon_C_TextG : b=Neon_C_TextB : EndIf
@@ -414,5 +436,6 @@ Procedure ViewDrawPanel(tab.i,x.f,y.f,w.f,h.f)
     Case 3 : ViewApu(x,y,w,h)
     Case 4 : ViewMapper(x,y,w,h)
     Case 5 : ViewRoms(x,y,w,h)
+    Case 6 : ViewControls(x,y,w,h)
   EndSelect
 EndProcedure
