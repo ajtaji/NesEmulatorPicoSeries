@@ -70,7 +70,12 @@ engine.
 beside this repository. For an engine elsewhere, add `/CONSTANT GL_ENGINE_DIR$=<path>/` (the trailing slash
 matters).
 
-`PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S]`
+`PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt]`
+
+`--pointer-test` checks that the mouse and the controls agree at the desktop's scale, without moving the real
+pointer. It drives the chrome with pointer positions in the window's physical pixels. It clicks just inside
+and just outside a button near the top (Pause), one near the bottom (Run tests) and the ROMs tab, writes
+the results to `log.txt`, and closes.
 
 - **Keys, player 1:** arrows are the D-pad; X is A, Z is B; Enter is Start; Shift, Tab or Space is Select.
 - **Keys, player 2:** I/J/K/L are the D-pad; H is A, G is B; Y is Start; T is Select. The second

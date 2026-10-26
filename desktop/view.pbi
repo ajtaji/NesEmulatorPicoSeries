@@ -13,6 +13,7 @@ Global Dim View565.l(65536)          ; RGB565 -> RGBA
 Global ViewCurrentRom$, ViewMemPage.i, ViewPatPalette.i, ViewRomsTop.i, ViewRomsFolder$
 Global NewList ViewRomFiles.s()
 Global ViewCpuTestResult$, ViewCpuTestFailed.i
+Global ViewRunTestsX.f, ViewRunTestsY.f, ViewRunTestsW.f, ViewRunTestsH.f   ; where Run tests was last drawn (--pointer-test)
 
 ; ---------------------------------------------------------------- textures
 Procedure ViewTextureMake(*t.ViewTexture,w.i,h.i)
@@ -179,7 +180,8 @@ Procedure ViewCpu(x.f,y.f,w.f,h.f)
   ; the CPU test suites (desktop/cpu_tests.pbi), the same ones desktop/nes_check.exe prints
   y+8*s
   Neon_Text(*Neon_FontSmall,x,y,"TESTS",Neon_C_AmbR,Neon_C_AmbG,Neon_C_AmbB)
-  If Neon_Button(x+200*s,y-2*s,120*s,20*s,"Run tests") : ViewRunCpuTests() : EndIf
+  ViewRunTestsX=x+200*s : ViewRunTestsY=y-2*s : ViewRunTestsW=120*s : ViewRunTestsH=20*s
+  If Neon_Button(ViewRunTestsX,ViewRunTestsY,ViewRunTestsW,ViewRunTestsH,"Run tests") : ViewRunCpuTests() : EndIf
   y+lh+4*s
   If ViewCpuTestResult$<>""
     If ViewCpuTestFailed

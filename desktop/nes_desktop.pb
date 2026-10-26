@@ -5,7 +5,7 @@
 ;   & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
 ;   (the engine, https://github.com/ajtaji/Neon-Arcade-Dispay-Engine, is found cloned beside this
 ;    repository unless /CONSTANT GL_ENGINE_DIR$=<path>/ says otherwise; the trailing slash matters)
-; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S]
+; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt]
 ;       (--shot saves the window after S seconds, default 5, and closes: for checks without a person)
 ;
 ; Keys: arrows = D-pad, X = A, Z = B, Enter = Start, Shift, Tab or Space = Select. A gamepad works too.
@@ -192,6 +192,70 @@ Procedure SaveWindowShot(file$)
   FreeImage(img) : FreeMemory(*buf)
 EndProcedure
 
+
+; ---------------------------------------------------------------- --pointer-test
+; The mouse and the controls at the desktop's scale, without the real pointer (it is shared): the chrome is
+; driven with synthetic pointer positions in the units WindowMouseX/Y give a DPI-aware window (physical
+; pixels, GlUIChrome.pbi 5a). For each point: move there, press, release, then check the click landed (or,
+; outside a control, that nothing happened) and that Neon_MX/Neon_MY read the point back unbent.
+Global SynthOn.i, SynthX.f, SynthY.f, SynthDown.i, SynthCase.i, SynthFrame.i, SynthFails.i, SynthLog$, SynthFile$
+Global SynthBefore.i
+Procedure.i SynthTarget(c.i, *x.Float, *y.Float)
+  Protected s.f=Neon_UIScale, toolH.f, x0.f, y0.f, w.f, h.f, *row.Neon_TabRowLayout
+  toolH=Round(40*s,#PB_Round_Nearest)
+  If c<=3
+    ; Pause, near the top: its top-left and bottom-right corners inside, then just right of it and just below
+    x0=110*s : y0=6*s : w=72*s : h=toolH-12*s
+  ElseIf c<=7
+    ; Run tests, near the bottom of the CPU pane: the same four points
+    x0=ViewRunTestsX : y0=ViewRunTestsY : w=ViewRunTestsW : h=ViewRunTestsH
+  ElseIf c<=9
+    ; the ROMs tab: its right-hand bottom inside (the row's last pixel is not the tab's), then right of it
+    If FindMapElement(Neon_TabLayout(),"1")=0 : ProcedureReturn 0 : EndIf
+    *row=@Neon_TabLayout()
+    If c=8 : *x\f=*row\X(5)+*row\W(5)-2 : Else : *x\f=*row\X(5)+*row\W(5)+2 : EndIf
+    *y\f=*row\Y+*row\H-3
+    ProcedureReturn 1
+  Else
+    ProcedureReturn 0
+  EndIf
+  Select c%4
+    Case 0 : *x\f=x0+2 : *y\f=y0+2
+    Case 1 : *x\f=x0+w-2 : *y\f=y0+h-2
+    Case 2 : *x\f=x0+w+2 : *y\f=y0+h-2
+    Case 3 : *x\f=x0+w-2 : *y\f=y0+h+2
+  EndSelect
+  ProcedureReturn 1
+EndProcedure
+Procedure SynthStep()
+  Protected x.f, y.f, hit.i, expect.i, what$, f.i
+  If SynthTarget(SynthCase,@x,@y)=0
+    SynthLog$+"pointer-test: "+Str(SynthCase)+" points, "+Str(SynthFails)+" failures, scale "+StrF(Neon_UIScale,2)+#LF$
+    f=CreateFile(#PB_Any,SynthFile$) : If f : WriteString(f,SynthLog$) : CloseFile(f) : EndIf
+    Quit=1 : ProcedureReturn
+  EndIf
+  SynthFrame+1
+  Select SynthFrame
+    Case 1 : SynthX=x : SynthY=y : SynthDown=0 : ActiveTab=0 : ViewCpuTestResult$="" : SynthBefore=Paused
+    Case 2 : SynthDown=1
+    Case 3 : SynthDown=0
+    Case 4
+      expect=Bool(SynthCase=0 Or SynthCase=1 Or SynthCase=4 Or SynthCase=5 Or SynthCase=8)
+      If SynthCase<=3
+        hit=Bool(Paused<>SynthBefore) : what$="Pause" : Paused=SynthBefore
+      ElseIf SynthCase<=7
+        hit=Bool(ViewCpuTestResult$<>"") : what$="Run tests"
+      Else
+        hit=Bool(ActiveTab=5) : what$="ROMs tab"
+      EndIf
+      ; the window keeps the pointer in whole pixels, as WindowMouseX/Y give it: read back within half a pixel
+      If hit<>expect Or Abs(Neon_MX-x)>0.5 Or Abs(Neon_MY-y)>0.5 : SynthFails+1 : EndIf
+      SynthLog$+what$+" at ("+StrF(x,1)+","+StrF(y,1)+"): clicked "+Str(hit)+", expected "+Str(expect)
+      SynthLog$+", read back ("+StrF(Neon_MX,1)+","+StrF(Neon_MY,1)+")"+#LF$
+      SynthCase+1 : SynthFrame=0
+  EndSelect
+EndProcedure
+
 ; ---------------------------------------------------------------- one frame of the window
 Procedure Tick()
   Protected now.q, dt.f, mx.i, my.i, down.b, s.f, toolH.f, x.f, gx.f, gy.f, gw.f, gh.f, scale.f, side.f
@@ -212,6 +276,7 @@ Procedure Tick()
   CompilerElse
     down=Bool(GetGadgetAttribute(Gl,#PB_OpenGL_Buttons)&#PB_OpenGL_LeftButton)
   CompilerEndIf
+  If SynthOn : mx=SynthX : my=SynthY : down=SynthDown : EndIf
   Neon_ChromeBeginFrame(mx,my,down,Wheel,KeyCode,KeyChar,dt)
   Wheel=0 : KeyCode=0 : KeyChar=0
 
@@ -256,6 +321,7 @@ Procedure Tick()
 
   Neon_ChromeEndFrame()
   If ShotFile$<>"" And now>=ShotAtMs : SaveWindowShot(ShotFile$) : Quit=1 : EndIf
+  If SynthOn And DisplayFrames>30 : SynthStep() : EndIf
   SetGadgetAttribute(Gl,#PB_OpenGL_FlipBuffers,#True)
 EndProcedure
 
@@ -265,6 +331,9 @@ Procedure Main()
   Gl=OpenGLWindow("PureMetal NES",1280,800,#PB_Window_SystemMenu|#PB_Window_ScreenCentered|#PB_Window_SizeGadget|#PB_Window_MinimizeGadget|#PB_Window_MaximizeGadget)
   If Gl=0 : MessageRequester("PureMetal NES","OpenGL could not be started.") : End 1 : EndIf
   Win=Util_MainWindowID
+  ; The frame is drawn 1:1, not through DrawRetroCRT: the pointer must not be bent by the CRT curve
+  ; (the engine's default is on; GlUIChrome.pbi 5a)
+  UI_UseCRT=#False
   MeasureWindow()     ; and the fonts, at the window's scale
   GL_SetVSync(1)
   DisInit()
@@ -274,6 +343,7 @@ Procedure Main()
   For k=0 To CountProgramParameters()-1
     Select LCase(ProgramParameter(k))
       Case "--mute" : SoundMuted=1
+      Case "--pointer-test" : k+1 : SynthOn=1 : SynthFile$=ProgramParameter(k)
       Case "--cpu-tests" : runTests=1
       Case "--pal" : MachineTv=2
       Case "--ntsc" : MachineTv=1
