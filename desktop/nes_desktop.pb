@@ -5,16 +5,17 @@
 ;   & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
 ;   (the engine, https://github.com/ajtaji/Neon-Arcade-Dispay-Engine, is found cloned beside this
 ;    repository unless /CONSTANT GL_ENGINE_DIR$=<path>/ says otherwise; the trailing slash matters)
-; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt]
+; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt] [--fullscreen-test log.txt [--fullscreen-shot f.png]]
 ;       (--shot saves the window after S seconds, default 5, and closes: for checks without a person)
 ;
 ; Keys: arrows = D-pad, X = A, Z = B, Enter = Start, Shift, Tab or Space = Select. A gamepad works too.
 ;       Player 2: I/J/K/L = D-pad, H = A, G = B, Y = Start, T = Select, or the second gamepad.
-;       F5 run/pause, F6 step one instruction, F7 step one frame, F8 reset, F11 full screen, M mute.
+;       F5 run/pause, F6 step one instruction, F7 step one frame, F8 reset, F11 full screen (Esc leaves it), M mute.
+;       Every binding is in controls.pbi's table; the Controls tab shows it.
 EnableExplicit
 
 CompilerIf Not Defined(GL_ENGINE_DIR$, #PB_Constant)
-  #GL_ENGINE_DIR$ = "../../Neon-Arcade-Dispay-Engine/"   ; a clone beside this repository
+  #GL_ENGINE_DIR$ = "C:\Users\ajtaj\Desktop\Neon-Arcade-Dispay-Engine/"   ; a clone beside this repository
 CompilerEndIf
 XIncludeFile #GL_ENGINE_DIR$ + "GlTypes.pbi"
 XIncludeFile #GL_ENGINE_DIR$ + "GlUtilities.pbi"
@@ -29,6 +30,7 @@ XIncludeFile "machine.pbi"
 XIncludeFile "sound.pbi"
 XIncludeFile "disasm.pbi"
 XIncludeFile "cpu_tests.pbi"
+XIncludeFile "controls.pbi"
 XIncludeFile "view.pbi"
 
 ; ---------------------------------------------------------------- state
@@ -102,10 +104,11 @@ Procedure.i ReadPad(pad.i)
     ax=JoystickAxisX(pad) : ay=JoystickAxisY(pad)
     If ax<0 : m|64 : ElseIf ax>0 : m|128 : EndIf
     If ay<0 : m|16 : ElseIf ay>0 : m|32 : EndIf
-    If JoystickButton(pad,1) : m|1 : EndIf
-    If JoystickButton(pad,2) Or JoystickButton(pad,3) : m|2 : EndIf
-    If JoystickButton(pad,7) : m|4 : EndIf
-    If JoystickButton(pad,8) : m|8 : EndIf
+    ForEach CtlPads()
+      If CtlPads()\player=pad+1 And CtlPads()\button>0
+        If JoystickButton(pad,CtlPads()\button) : m|CtlPads()\bit : EndIf
+      EndIf
+    Next
   EndIf
   ProcedureReturn m
 EndProcedure
@@ -117,34 +120,10 @@ Procedure.i PadClean(m.i)
   ProcedureReturn m
 EndProcedure
 
-; The two controllers. Player 1: X = A, Z = B, Tab/Shift/Space = Select, Enter = Start, arrows, the first
-; gamepad. Player 2: H = A, G = B, T = Select, Y = Start, I/J/K/L, the second gamepad.
+; The two controllers, from the key table in controls.pbi (the Controls pane shows the same table).
 Procedure ReadController()
-  Protected m.i
-  If KeyHeld(#PB_Shortcut_X) : m|1 : EndIf
-  If KeyHeld(#PB_Shortcut_Z) : m|2 : EndIf
-  If KeyHeld(#PB_Shortcut_Tab) Or KeyHeld(#PB_Shortcut_Space) : m|4 : EndIf
-  ; #PB_Shortcut_Shift is a modifier FLAG ($10000), not a key code: indexing KeyHeld() with it read past the
-  ; array. The Shift key on its own arrives as its virtual-key code.
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    If KeyHeld(#VK_SHIFT) : m|4 : EndIf
-  CompilerEndIf
-  If KeyHeld(#PB_Shortcut_Return) : m|8 : EndIf
-  If KeyHeld(#PB_Shortcut_Up) : m|16 : EndIf
-  If KeyHeld(#PB_Shortcut_Down) : m|32 : EndIf
-  If KeyHeld(#PB_Shortcut_Left) : m|64 : EndIf
-  If KeyHeld(#PB_Shortcut_Right) : m|128 : EndIf
-  NesController=PadClean(m|ReadPad(0))
-  m=0
-  If KeyHeld(#PB_Shortcut_H) : m|1 : EndIf
-  If KeyHeld(#PB_Shortcut_G) : m|2 : EndIf
-  If KeyHeld(#PB_Shortcut_T) : m|4 : EndIf
-  If KeyHeld(#PB_Shortcut_Y) : m|8 : EndIf
-  If KeyHeld(#PB_Shortcut_I) : m|16 : EndIf
-  If KeyHeld(#PB_Shortcut_K) : m|32 : EndIf
-  If KeyHeld(#PB_Shortcut_J) : m|64 : EndIf
-  If KeyHeld(#PB_Shortcut_L) : m|128 : EndIf
-  NesController2=PadClean(m|ReadPad(1))
+  NesController=PadClean(CtlKeysHeld(1,KeyHeld())|ReadPad(0))
+  NesController2=PadClean(CtlKeysHeld(2,KeyHeld())|ReadPad(1))
 EndProcedure
 
 ; Run whole frames to keep pace with real time (NTSC 60.0988 Hz, PAL 50.0070 Hz); never more than three per pass.
@@ -256,6 +235,124 @@ Procedure SynthStep()
   EndSelect
 EndProcedure
 
+
+; ---------------------------------------------------------------- full screen
+; A borderless window over the monitor the window is on (no display-mode change): the windowed placement and
+; style are kept and put back exactly on leaving. F11 or the Full screen button toggles it; Esc leaves it (the
+; NES has no Esc of its own, so nothing the game uses is taken). In full screen only the picture is drawn, at the
+; NES's own pixel aspect, centred, black around it; the pointer hides after two idle seconds.
+Global FullScreen.i, FsStyle.i, FsCursorHidden.i, FsMouseX.i, FsMouseY.i, FsMouseMs.q
+Global FsGameX.f, FsGameY.f, FsGameW.f, FsGameH.f
+CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+  Global FsPlacement.WINDOWPLACEMENT
+CompilerEndIf
+Procedure FsShowCursor(show.i)
+  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+    If show And FsCursorHidden : ShowCursor_(#True) : FsCursorHidden=0 : EndIf
+    If show=0 And FsCursorHidden=0 : ShowCursor_(#False) : FsCursorHidden=1 : EndIf
+  CompilerEndIf
+EndProcedure
+Procedure EnterFullScreen()
+  If FullScreen : ProcedureReturn : EndIf
+  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+    Protected hwnd.i=WindowID(Win), mi.MONITORINFO
+    FsPlacement\length=SizeOf(WINDOWPLACEMENT) : GetWindowPlacement_(hwnd,@FsPlacement)
+    FsStyle=GetWindowLongPtr_(hwnd,#GWL_STYLE)
+    mi\cbSize=SizeOf(MONITORINFO) : GetMonitorInfo_(MonitorFromWindow_(hwnd,2),@mi)   ; 2: the nearest monitor
+    SetWindowLongPtr_(hwnd,#GWL_STYLE,FsStyle&~(#WS_CAPTION|#WS_THICKFRAME|#WS_MINIMIZEBOX|#WS_MAXIMIZEBOX|#WS_SYSMENU))
+    SetWindowPos_(hwnd,#HWND_TOP,mi\rcMonitor\left,mi\rcMonitor\top,mi\rcMonitor\right-mi\rcMonitor\left,mi\rcMonitor\bottom-mi\rcMonitor\top,#SWP_FRAMECHANGED|#SWP_NOOWNERZORDER|#SWP_SHOWWINDOW)
+  CompilerElse
+    GL_ToggleFullscreen()
+  CompilerEndIf
+  FullScreen=1 : FsMouseMs=ElapsedMilliseconds()
+  MeasureWindow()
+EndProcedure
+Procedure LeaveFullScreen()
+  If FullScreen=0 : ProcedureReturn : EndIf
+  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+    Protected hwnd.i=WindowID(Win)
+    SetWindowLongPtr_(hwnd,#GWL_STYLE,FsStyle)
+    SetWindowPlacement_(hwnd,@FsPlacement)
+    SetWindowPos_(hwnd,0,0,0,0,0,#SWP_FRAMECHANGED|#SWP_NOMOVE|#SWP_NOSIZE|#SWP_NOZORDER|#SWP_NOOWNERZORDER)
+  CompilerElse
+    GL_ToggleFullscreen()
+  CompilerEndIf
+  FullScreen=0 : FsShowCursor(1)
+  MeasureWindow()
+EndProcedure
+; The picture's rectangle in full screen: the NES's pixel aspect (8:7 NTSC, about 1.386 PAL), a whole-number
+; height scale when that loses less than a tenth of the screen's height, centred.
+Procedure FsLayout()
+  Protected par.f=8.0/7.0, sy.f, iy.i, w.f
+  If MachinePal : par=1.3862 : EndIf
+  w=256*par
+  sy=PhysH/240.0 : If w*sy>PhysW : sy=PhysW/w : EndIf
+  iy=Int(sy) : If iy>=1 And iy*240>=sy*240*0.9 : sy=iy : EndIf
+  FsGameW=w*sy : FsGameH=240*sy
+  FsGameX=(PhysW-FsGameW)/2 : FsGameY=(PhysH-FsGameH)/2
+EndProcedure
+
+; The window's actions, by the key table (controls.pbi): F5-F8, F11, Esc and M.
+Procedure DoAction(action.i)
+  Select action
+    Case #CTL_RUNPAUSE : Paused=1-Paused : EmuLastUs=NesHostUs()
+    Case #CTL_STEP : StepInstruction()
+    Case #CTL_FRAME : StepFrame()
+    Case #CTL_RESET : LoadRom(ViewCurrentRom$)
+    Case #CTL_FULLSCREEN : If FullScreen : LeaveFullScreen() : Else : EnterFullScreen() : EndIf
+    Case #CTL_LEAVEFULL : LeaveFullScreen()
+    Case #CTL_MUTE : SoundMuted=1-SoundMuted
+  EndSelect
+EndProcedure
+
+; ---------------------------------------------------------------- --fullscreen-test
+; Full screen by its own keys, without the real pointer: F11 is posted to the window's own GL gadget and Esc to
+; the window (where the engine's Esc shortcut catches it). Checked: the window covers its monitor, the picture
+; has the NES's aspect and is centred, the window's own frame is saved, Esc leaves, and the windowed placement
+; and style come back exactly.
+Global FsTestOn.i, FsTestFile$, FsTestStep.i, FsTestWait.i, FsTestFails.i, FsTestLog$, FsTestShot$
+CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+  Global FsTestRect.RECT, FsTestStyle.i
+CompilerEndIf
+Procedure FsTestCheck(ok.i, what$)
+  If ok=0 : FsTestFails+1 : FsTestLog$+"FAIL " : Else : FsTestLog$+"ok   " : EndIf
+  FsTestLog$+what$+#LF$
+EndProcedure
+Procedure FsTestTick()
+  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
+    Protected r.RECT, mi.MONITORINFO, hwnd.i=WindowID(Win), f.i, aspect.f, want.f
+    FsTestWait+1 : If FsTestWait<30 : ProcedureReturn : EndIf
+    FsTestWait=0 : FsTestStep+1
+    Select FsTestStep
+      Case 1
+        GetWindowRect_(hwnd,@FsTestRect) : FsTestStyle=GetWindowLongPtr_(hwnd,#GWL_STYLE)
+        FsTestLog$+"windowed: "+Str(FsTestRect\left)+","+Str(FsTestRect\top)+" "+Str(FsTestRect\right-FsTestRect\left)+"x"+Str(FsTestRect\bottom-FsTestRect\top)+", scale "+StrF(Neon_UIScale,2)+#LF$
+        PostMessage_(GadgetID(Gl),#WM_KEYDOWN,#VK_F11,0) : PostMessage_(GadgetID(Gl),#WM_KEYUP,#VK_F11,0)
+      Case 2
+        GetWindowRect_(hwnd,@r) : mi\cbSize=SizeOf(MONITORINFO) : GetMonitorInfo_(MonitorFromWindow_(hwnd,2),@mi)
+        FsTestCheck(FullScreen,"F11 entered full screen")
+        FsTestCheck(Bool(r\left=mi\rcMonitor\left And r\top=mi\rcMonitor\top And r\right=mi\rcMonitor\right And r\bottom=mi\rcMonitor\bottom),"the window covers its monitor "+Str(mi\rcMonitor\right-mi\rcMonitor\left)+"x"+Str(mi\rcMonitor\bottom-mi\rcMonitor\top))
+        FsTestCheck(Bool(PhysW=mi\rcMonitor\right-mi\rcMonitor\left And PhysH=mi\rcMonitor\bottom-mi\rcMonitor\top),"the canvas is the whole monitor ("+Str(PhysW)+"x"+Str(PhysH)+")")
+        want=256*(8.0/7.0)/240 : If MachinePal : want=256*1.3862/240 : EndIf
+        aspect=FsGameW/FsGameH
+        FsTestCheck(Bool(Abs(aspect-want)<0.002),"the picture "+StrF(FsGameW,1)+"x"+StrF(FsGameH,1)+" has the NES aspect "+StrF(want,4)+" ("+StrF(aspect,4)+")")
+        FsTestCheck(Bool(Abs(FsGameX*2+FsGameW-PhysW)<=1 And Abs(FsGameY*2+FsGameH-PhysH)<=1),"the picture is centred at "+StrF(FsGameX,1)+","+StrF(FsGameY,1))
+        If FsTestShot$<>"" : SaveWindowShot(FsTestShot$) : EndIf
+        PostMessage_(hwnd,#WM_KEYDOWN,#VK_ESCAPE,0) : PostMessage_(hwnd,#WM_KEYUP,#VK_ESCAPE,0)
+      Case 3
+        GetWindowRect_(hwnd,@r)
+        FsTestCheck(Bool(FullScreen=0),"Esc left full screen")
+        FsTestCheck(Bool(r\left=FsTestRect\left And r\top=FsTestRect\top And r\right=FsTestRect\right And r\bottom=FsTestRect\bottom),"the windowed rectangle came back: "+Str(r\left)+","+Str(r\top)+" "+Str(r\right-r\left)+"x"+Str(r\bottom-r\top))
+        FsTestCheck(Bool(GetWindowLongPtr_(hwnd,#GWL_STYLE)=FsTestStyle),"the window's frame and style came back")
+        FsTestLog$+"fullscreen-test: "+Str(FsTestFails)+" failures"+#LF$
+        f=CreateFile(#PB_Any,FsTestFile$) : If f : WriteString(f,FsTestLog$) : CloseFile(f) : EndIf
+        Quit=1
+    EndSelect
+  CompilerElse
+    Quit=1
+  CompilerEndIf
+EndProcedure
+
 ; ---------------------------------------------------------------- one frame of the window
 Procedure Tick()
   Protected now.q, dt.f, mx.i, my.i, down.b, s.f, toolH.f, x.f, gx.f, gy.f, gw.f, gh.f, scale.f, side.f
@@ -277,6 +374,8 @@ Procedure Tick()
     down=Bool(GetGadgetAttribute(Gl,#PB_OpenGL_Buttons)&#PB_OpenGL_LeftButton)
   CompilerEndIf
   If SynthOn : mx=SynthX : my=SynthY : down=SynthDown : EndIf
+  If mx<>FsMouseX Or my<>FsMouseY : FsMouseX=mx : FsMouseY=my : FsMouseMs=now : FsShowCursor(1) : EndIf
+  If FullScreen And now-FsMouseMs>2000 : FsShowCursor(0) : EndIf
   Neon_ChromeBeginFrame(mx,my,down,Wheel,KeyCode,KeyChar,dt)
   Wheel=0 : KeyCode=0 : KeyChar=0
 
@@ -287,6 +386,16 @@ Procedure Tick()
   glClearColor_(Neon_C_BgR,Neon_C_BgG,Neon_C_BgB,1.0)
   glClear_(#GL_COLOR_BUFFER_BIT)
   glEnable_(#GL_BLEND) : glBlendFunc_(#GL_SRC_ALPHA,#GL_ONE_MINUS_SRC_ALPHA)
+
+  If FullScreen
+    ; only the picture, black around it
+    glClearColor_(0,0,0,1.0) : glClear_(#GL_COLOR_BUFFER_BIT)
+    FsLayout() : ViewUploadGame() : ViewDrawGameRect(FsGameX,FsGameY,FsGameW,FsGameH)
+    Neon_ChromeEndFrame()
+    If FsTestOn : FsTestTick() : EndIf
+    SetGadgetAttribute(Gl,#PB_OpenGL_FlipBuffers,#True)
+    ProcedureReturn
+  EndIf
 
   s=Neon_UIScale : toolH=Round(40*s,#PB_Round_Nearest)
   ; toolbar
@@ -302,6 +411,7 @@ Procedure Tick()
   If Neon_Button(x,6*s,70*s,toolH-12*s,label$,SoundMuted) : SoundMuted=1-SoundMuted : EndIf : x+76*s
   label$=StringField("TV auto|NTSC|PAL",MachineTv+1,"|")
   If Neon_Button(x,6*s,76*s,toolH-12*s,label$,Bool(MachineTv<>0)) : MachineTv=(MachineTv+1)%3 : LoadRom(ViewCurrentRom$) : EndIf : x+82*s
+  If Neon_Button(x,6*s,120*s,toolH-12*s,"Full screen  F11") : EnterFullScreen() : EndIf : x+126*s
   Neon_Text(*Neon_FontMono,x+8*s,toolH/2-8*s,StrD(FpsShown,1)+" fps   "+Str(IpsShown/1000)+"k instr/s   "+RomStatusLine$,Neon_C_DimR,Neon_C_DimG,Neon_C_DimB)
 
   ; the game, as large as fits beside the debug panel, square pixels, integer steps when it can
@@ -316,12 +426,13 @@ Procedure Tick()
 
   ; the debug panel
   panelX=PhysW-side-6*s
-  ActiveTab=Neon_TabStrip(1,panelX,toolH+6*s,side,30*s,"CPU|PPU|OAM|APU|Mapper|ROMs",ActiveTab)
+  ActiveTab=Neon_TabStrip(1,panelX,toolH+6*s,side,30*s,"CPU|PPU|OAM|APU|Mapper|ROMs|Controls",ActiveTab)
   ViewDrawPanel(ActiveTab,panelX,toolH+40*s,side,PhysH-toolH-46*s)
 
   Neon_ChromeEndFrame()
   If ShotFile$<>"" And now>=ShotAtMs : SaveWindowShot(ShotFile$) : Quit=1 : EndIf
   If SynthOn And DisplayFrames>30 : SynthStep() : EndIf
+  If FsTestOn And DisplayFrames>30 : FsTestTick() : EndIf
   SetGadgetAttribute(Gl,#PB_OpenGL_FlipBuffers,#True)
 EndProcedure
 
@@ -336,13 +447,15 @@ Procedure Main()
   UI_UseCRT=#False
   MeasureWindow()     ; and the fonts, at the window's scale
   GL_SetVSync(1)
-  DisInit()
+  DisInit() : CtlInit()
   ViewInit()
   SoundBegin()
   PadCount=InitJoystick()
   For k=0 To CountProgramParameters()-1
     Select LCase(ProgramParameter(k))
       Case "--mute" : SoundMuted=1
+      Case "--fullscreen-test" : k+1 : FsTestOn=1 : FsTestFile$=ProgramParameter(k)
+      Case "--fullscreen-shot" : k+1 : FsTestShot$=ProgramParameter(k)
       Case "--pointer-test" : k+1 : SynthOn=1 : SynthFile$=ProgramParameter(k)
       Case "--cpu-tests" : runTests=1
       Case "--pal" : MachineTv=2
@@ -366,7 +479,7 @@ Procedure Main()
         Case #PB_Event_CloseWindow : Quit=1
         Case #PB_Event_SizeWindow, #PB_Event_MaximizeWindow, #PB_Event_RestoreWindow, #PB_Event_MoveWindow : MeasureWindow()
         Case #PB_Event_Menu
-          If EventMenu()=1001 : KeyCode=#PB_Shortcut_Escape : EndIf
+          If EventMenu()=1001 : KeyCode=#PB_Shortcut_Escape : DoAction(CtlAction(#PB_Shortcut_Escape)) : EndIf
         Case #PB_Event_Gadget
           If EventGadget()=Gl
             et=EventType()
@@ -374,14 +487,7 @@ Procedure Main()
               Case #PB_EventType_KeyDown
                 k=GetGadgetAttribute(Gl,#PB_OpenGL_Key) : KeyCode=k
                 If k>=0 And k<256 : KeyHeld(k)=1 : EndIf
-                Select k
-                  Case #PB_Shortcut_F5 : Paused=1-Paused : EmuLastUs=NesHostUs()
-                  Case #PB_Shortcut_F6 : StepInstruction()
-                  Case #PB_Shortcut_F7 : StepFrame()
-                  Case #PB_Shortcut_F8 : LoadRom(ViewCurrentRom$)
-                  Case #PB_Shortcut_F11 : GL_ToggleFullscreen() : MeasureWindow()
-                  Case #PB_Shortcut_M : SoundMuted=1-SoundMuted
-                EndSelect
+                DoAction(CtlAction(k))
               Case #PB_EventType_KeyUp
                 k=GetGadgetAttribute(Gl,#PB_OpenGL_Key)
                 If k>=0 And k<256 : KeyHeld(k)=0 : EndIf
@@ -400,7 +506,9 @@ EndProcedure
 Main()
 
 ; IDE Options = PureBasic 6.41 (Windows - x64)
-; Folding = ---
+; CursorPosition = 16
+; FirstLine = 14
+; Folding = ----
 ; EnableXP
 ; DPIAware
 ; DisableDebugger

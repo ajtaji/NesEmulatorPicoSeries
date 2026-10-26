@@ -70,18 +70,51 @@ engine.
 beside this repository. For an engine elsewhere, add `/CONSTANT GL_ENGINE_DIR$=<path>/` (the trailing slash
 matters).
 
-`PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt]`
+`PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt] [--fullscreen-test log.txt [--fullscreen-shot f.png]]`
 
-`--pointer-test` checks that the mouse and the controls agree at the desktop's scale, without moving the real
-pointer. It drives the chrome with pointer positions in the window's physical pixels. It clicks just inside
-and just outside a button near the top (Pause), one near the bottom (Run tests) and the ROMs tab, writes
-the results to `log.txt`, and closes.
+## Controls
 
-- **Keys, player 1:** arrows are the D-pad; X is A, Z is B; Enter is Start; Shift, Tab or Space is Select.
-- **Keys, player 2:** I/J/K/L are the D-pad; H is A, G is B; Y is Start; T is Select. The second
-  gamepad is player 2's; the first, player 1's.
-- **Debugging:** F5 runs or pauses, F6 steps one instruction, F7 steps one frame, F8 resets.
-- **Display and sound:** F11 is full screen, M is mute.
+The window's **Controls** tab shows these. Both it and the input code read one table (`desktop/controls.pbi`),
+so they cannot disagree.
+
+| NES button | Player 1 keys | Gamepad 1 | Player 2 keys | Gamepad 2 |
+|---|---|---|---|---|
+| A | X | button 1 | H | button 1 |
+| B | Z | button 2 / 3 | G | button 2 / 3 |
+| Select | Tab / Shift / Space | button 7 | T | button 7 |
+| Start | Enter | button 8 | Y | button 8 |
+| Up | Up | stick | I | stick |
+| Down | Down | stick | K | stick |
+| Left | Left | stick | J | stick |
+| Right | Right | stick | L | stick |
+
+| Key | The window |
+|---|---|
+| F5 | run / pause |
+| F6 | step one instruction |
+| F7 | run one frame |
+| F8 | reset |
+| F11 | full screen on / off (also the **Full screen** button) |
+| Esc | leave full screen |
+| M | sound off / on |
+
+**Full screen** is a borderless window over the monitor the window is on; the display mode does not change.
+- It shows only the NES picture, at the NES's own pixel aspect (8:7, or about 1.386 for PAL), centred,
+  with black around it. The height scale is a whole number when that loses less than a tenth of the screen.
+- The pointer hides after two idle seconds.
+- Esc, or F11 again, brings back the window exactly where and how big it was.
+- The NES has no Esc key of its own, so taking Esc costs the games nothing.
+
+**Tests that need no person and no real pointer:**
+- `--pointer-test` checks that the mouse and the controls agree at the desktop's scale. It drives the chrome
+  with pointer positions in the window's physical pixels, clicking just inside and just outside a button near
+  the top (Pause), one near the bottom (Run tests) and the ROMs tab.
+- `--fullscreen-test` enters full screen with F11 and leaves with Esc, both sent to the window itself. It
+  checks the window covers its monitor, the picture's aspect and centring, and that the windowed rectangle
+  and frame come back. `--fullscreen-shot` saves the full-screen frame.
+
+Both write their results to `log.txt` and close.
+
 - **TV system:** the toolbar's TV button cycles auto / NTSC / PAL. Auto follows the Pico's rule: the
   header's TV system, else a PAL-only region tag in the file name — "(E)", "(Europe)", "(PAL)" — and
   never one that also names an NTSC region.

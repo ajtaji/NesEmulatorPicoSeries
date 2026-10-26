@@ -322,6 +322,26 @@ Select the ST7789 display plugin on either Pico with
 See [DISPLAY-PACK2.md](DISPLAY-PACK2.md) for wiring, the separate UF2 downloads,
 FPS counter placement and hardware validation status. LAFVIN remains the default.
 
+## The desktop version
+
+The same emulator runs as a Windows program (PureBasic, drawn with the Neon Arcade Display Engine). It has the
+CPU, PPU, OAM, APU, mapper, ROM and Controls panes, and full screen. See [desktop/README.md](desktop/README.md)
+for building it from this repository and https://github.com/ajtaji/Neon-Arcade-Dispay-Engine.
+
+### Controls
+
+| NES button | Player 1 keys | Gamepad 1 | Player 2 keys | Gamepad 2 |
+|---|---|---|---|---|
+| A | X | button 1 | H | button 1 |
+| B | Z | button 2 / 3 | G | button 2 / 3 |
+| Select | Tab / Shift / Space | button 7 | T | button 7 |
+| Start | Enter | button 8 | Y | button 8 |
+| Up / Down / Left / Right | the arrow keys | stick | I / K / J / L | stick |
+
+F5 run / pause, F6 step one instruction, F7 run one frame, F8 reset, F11 full screen on / off (also the
+Full screen button), Esc leave full screen, M sound off / on. The window's Controls tab shows the same table,
+read from the one the input code uses (`desktop/controls.pbi`).
+
 ## Licence
 
 MIT (see `LICENSE`). The CYW43439 Bluetooth firmware is included under its own
