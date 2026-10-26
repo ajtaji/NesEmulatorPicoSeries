@@ -45,15 +45,16 @@ Global ShotFile$, ShotAtMs.q
 
 ; ---------------------------------------------------------------- fonts and size
 Procedure BuildFonts()
-  *Neon_FontUI    = Neon_CreateFontPx("Segoe UI", Round(14*UiScale,#PB_Round_Nearest))
-  *Neon_FontSmall = Neon_CreateFontPx("Segoe UI", Round(12*UiScale,#PB_Round_Nearest))
-  *Neon_FontBold  = Neon_CreateFontPx("Segoe UI", Round(15*UiScale,#PB_Round_Nearest), #PB_Font_Bold)
-  *Neon_FontMono  = Neon_CreateFontPx("Consolas", Round(13*UiScale,#PB_Round_Nearest))
+  *Neon_FontUI    = Neon_CreateFontPx("Segoe UI", Round(14*Neon_UIScale,#PB_Round_Nearest))
+  *Neon_FontSmall = Neon_CreateFontPx("Segoe UI", Round(12*Neon_UIScale,#PB_Round_Nearest))
+  *Neon_FontBold  = Neon_CreateFontPx("Segoe UI", Round(15*Neon_UIScale,#PB_Round_Nearest), #PB_Font_Bold)
+  *Neon_FontMono  = Neon_CreateFontPx("Consolas", Round(13*Neon_UIScale,#PB_Round_Nearest))
   GLFontSetSnapToPixel(*Neon_FontUI,#True) : GLFontSetSnapToPixel(*Neon_FontSmall,#True)
   GLFontSetSnapToPixel(*Neon_FontBold,#True) : GLFontSetSnapToPixel(*Neon_FontMono,#True)
 EndProcedure
 
 Procedure MeasureWindow()
+  Protected scale.f
   CompilerIf #PB_Compiler_OS=#PB_OS_Windows
     Protected client.RECT
     GetClientRect_(WindowID(Win),@client)
@@ -68,6 +69,12 @@ Procedure MeasureWindow()
   GL_ViewportX=0 : GL_ViewportY=0 : GL_ViewportW=PhysW : GL_ViewportH=PhysH
   Util_BaseWidth=PhysW : Util_BaseHeight=PhysH
   Util_WinWidth=WindowWidth(Win,#PB_Window_InnerCoordinate) : Util_WinHeight=WindowHeight(Win,#PB_Window_InnerCoordinate)
+  ; The engine's hosting rule (GlUIChrome.pbi 5a): the window draws 1:1 on its physical pixels, so the scale is
+  ; physical / logical, Neon_UIScale carries it (the chrome's own tabs, rows and buttons are sized by it) and
+  ; the fonts are built at it - again whenever it changes (another monitor).
+  scale=1.0 : If Util_WinWidth>0 : scale=PhysW/Util_WinWidth : EndIf
+  If scale<1 : scale=1 : EndIf
+  If scale<>Neon_UIScale Or *Neon_FontUI=0 : Neon_UIScale=scale : BuildFonts() : EndIf
 EndProcedure
 
 ; ---------------------------------------------------------------- the machine
@@ -201,7 +208,6 @@ Procedure Tick()
 
   mx=WindowMouseX(Win) : my=WindowMouseY(Win)
   CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    mx=mx*PhysW/Util_WinWidth : my=my*PhysH/Util_WinHeight
     If GetActiveWindow()=Win : down=Bool(GetAsyncKeyState_(#VK_LBUTTON)&$8000) : EndIf
   CompilerElse
     down=Bool(GetGadgetAttribute(Gl,#PB_OpenGL_Buttons)&#PB_OpenGL_LeftButton)
@@ -217,7 +223,7 @@ Procedure Tick()
   glClear_(#GL_COLOR_BUFFER_BIT)
   glEnable_(#GL_BLEND) : glBlendFunc_(#GL_SRC_ALPHA,#GL_ONE_MINUS_SRC_ALPHA)
 
-  s=UiScale : toolH=Round(40*s,#PB_Round_Nearest)
+  s=Neon_UIScale : toolH=Round(40*s,#PB_Round_Nearest)
   ; toolbar
   Neon_Box(0,0,PhysW,toolH,Neon_C_HeadR,Neon_C_HeadG,Neon_C_HeadB)
   x=8*s
@@ -256,12 +262,10 @@ EndProcedure
 ; ---------------------------------------------------------------- main
 Procedure Main()
   Protected ev.i, rom$, et.i, k.i, runTests.i
-  UiScale=DesktopResolutionX() : If UiScale<1 : UiScale=1 : EndIf
   Gl=OpenGLWindow("PureMetal NES",1280,800,#PB_Window_SystemMenu|#PB_Window_ScreenCentered|#PB_Window_SizeGadget|#PB_Window_MinimizeGadget|#PB_Window_MaximizeGadget)
   If Gl=0 : MessageRequester("PureMetal NES","OpenGL could not be started.") : End 1 : EndIf
   Win=Util_MainWindowID
-  BuildFonts()
-  MeasureWindow()
+  MeasureWindow()     ; and the fonts, at the window's scale
   GL_SetVSync(1)
   DisInit()
   ViewInit()
@@ -290,7 +294,7 @@ Procedure Main()
       ev=WindowEvent()
       Select ev
         Case #PB_Event_CloseWindow : Quit=1
-        Case #PB_Event_SizeWindow, #PB_Event_MaximizeWindow, #PB_Event_RestoreWindow : MeasureWindow()
+        Case #PB_Event_SizeWindow, #PB_Event_MaximizeWindow, #PB_Event_RestoreWindow, #PB_Event_MoveWindow : MeasureWindow()
         Case #PB_Event_Menu
           If EventMenu()=1001 : KeyCode=#PB_Shortcut_Escape : EndIf
         Case #PB_Event_Gadget

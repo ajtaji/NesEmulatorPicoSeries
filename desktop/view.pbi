@@ -8,7 +8,6 @@ Structure ViewTexture
   *pixels                      ; RGBA, w*h*4
 EndStructure
 
-Global UiScale.f=1.0                 ; the desktop's scale (DPI), set by the program
 Global ViewGame.ViewTexture, ViewNames.ViewTexture, ViewPatterns.ViewTexture, ViewSprites.ViewTexture, ViewSprites16.ViewTexture
 Global Dim View565.l(65536)          ; RGB565 -> RGBA
 Global ViewCurrentRom$, ViewMemPage.i, ViewPatPalette.i, ViewRomsTop.i, ViewRomsFolder$
@@ -134,7 +133,7 @@ Procedure ViewRunCpuTests()
 EndProcedure
 
 Procedure ViewCpu(x.f,y.f,w.f,h.f)
-  Protected p.i, f$, i.i, a.i, row$, v.i, lh.f, s.f=UiScale, bottom.f
+  Protected p.i, f$, i.i, a.i, row$, v.i, lh.f, s.f=Neon_UIScale, bottom.f
   lh=GLFontLineHeight(*Neon_FontMono)
   p=CpuStatus()
   f$=Mid("NV-BDIZC",1,8) : row$=""
@@ -196,7 +195,7 @@ Procedure ViewCpu(x.f,y.f,w.f,h.f)
 EndProcedure
 
 Procedure ViewPpu(x.f,y.f,w.f,h.f)
-  Protected y0.f=y, s.f=UiScale, t.i, row.i, col.i, ty.i, tx.i, tile.i, attr.i, pal.i, lo.i, hi.i, px.i, py.i, c.i
+  Protected y0.f=y, s.f=Neon_UIScale, t.i, row.i, col.i, ty.i, tx.i, tile.i, attr.i, pal.i, lo.i, hi.i, px.i, py.i, c.i
   Protected base.i, *dst.Long, sc.f, i.i, lh.f, bgTable.i, sz.f
   lh=GLFontLineHeight(*Neon_FontMono)
   Neon_Panel(x,y,w,h,"PPU",Neon_C_VioR,Neon_C_VioG,Neon_C_VioB)
@@ -262,7 +261,7 @@ Procedure ViewPpu(x.f,y.f,w.f,h.f)
 EndProcedure
 
 Procedure ViewOam(x.f,y.f,w.f,h.f)
-  Protected s.f=UiScale, i.i, row$, lh.f, t.i, tile.i, attr.i, base.i, row.i, col.i, lo.i, hi.i, c.i, *dst.Long, tall.i, r.i
+  Protected s.f=Neon_UIScale, i.i, row$, lh.f, t.i, tile.i, attr.i, base.i, row.i, col.i, lo.i, hi.i, c.i, *dst.Long, tall.i, r.i
   Protected *tex.ViewTexture, sc.f
   lh=GLFontLineHeight(*Neon_FontMono)
   Neon_Panel(x,y,w,h,"Sprites (OAM)",Neon_C_GrnR,Neon_C_GrnG,Neon_C_GrnB)
@@ -299,7 +298,7 @@ Procedure ViewOam(x.f,y.f,w.f,h.f)
 EndProcedure
 
 Procedure ViewApu(x.f,y.f,w.f,h.f)
-  Protected s.f=UiScale, lh.f, c.i, i.i, v.i, mid.f, ph.f, x0.f, n.i
+  Protected s.f=Neon_UIScale, lh.f, c.i, i.i, v.i, mid.f, ph.f, x0.f, n.i
   Protected Dim nm$(3)
   nm$(0)="Pulse 1" : nm$(1)="Pulse 2" : nm$(2)="Triangle" : nm$(3)="Noise"
   lh=GLFontLineHeight(*Neon_FontMono)
@@ -334,7 +333,7 @@ Procedure ViewApu(x.f,y.f,w.f,h.f)
 EndProcedure
 
 Procedure ViewMapper(x.f,y.f,w.f,h.f)
-  Protected s.f=UiScale, lh.f, i.i, row$
+  Protected s.f=Neon_UIScale, lh.f, i.i, row$
   lh=GLFontLineHeight(*Neon_FontMono)
   Neon_Panel(x,y,w,h,"Cartridge / mapper",Neon_C_RedR,Neon_C_RedG,Neon_C_RedB)
   y+32*s : x+10*s
@@ -385,7 +384,7 @@ Procedure ViewOpenRomDialog()
   If f$<>"" : ViewCurrentRom$=f$ : LoadRom(f$) : EndIf
 EndProcedure
 Procedure ViewRoms(x.f,y.f,w.f,h.f)
-  Protected s.f=UiScale, f$, sel.i
+  Protected s.f=Neon_UIScale, f$, sel.i
   Neon_Panel(x,y,w,h,"Games",Neon_C_AccR,Neon_C_AccG,Neon_C_AccB)
   y+32*s : x+10*s
   If Neon_Button(x,y,110*s,24*s,"Open file...") : ViewOpenRomDialog() : EndIf
