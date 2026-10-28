@@ -1,0 +1,20 @@
+#CLOCK_KHZ=150000
+#NES_VIDEO_BACKEND=3
+#NES_AUDIO_BACKEND=0
+#PPU_PROFILE=0
+#CPU_TIMING=1
+#CPU_ASM_TAIL=1
+#NES_SPLIT=2
+#CART_MAPPER=0
+#CART_PRG_BANKS=1
+#CART_CHR_BANKS=2
+#CART_MIRROR=1
+EnableExplicit
+XIncludeFile "runtime.pico2"
+XIncludeFile "cartridge.pico2"
+; Pimoroni Pico Plus 2 W with the Pico Display Pack 2.8 (ST7789, the Display Pack pins) and a Qw/ST Pad
+; on the board's own Qw/ST connector (I2C0, SDA GP4, SCL GP5). The pad is the only controller: the LAFVIN
+; carrier's buttons and joystick are not there (the Display Pack's own buttons sit on GP12-15).
+InputPhysicalEnabled=0
+QwstSda=4 : QwstScl=5 : QwstUnit=0
+Main()

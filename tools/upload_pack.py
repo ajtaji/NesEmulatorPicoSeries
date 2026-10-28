@@ -15,18 +15,28 @@ def check_pack(path, expected_family=None):
     end = 0
     seen = set()
     image_family = None
+    blocks = []
     for offset in range(0, len(data), 512):
         block = data[offset:offset+512]
         magic0, magic1, flags, target, size, number, count, family = struct.unpack_from('<8I', block)
         if (magic0, magic1, struct.unpack_from('<I',block,508)[0]) != (0x0A324655,0x9E5D5157,0x0AB16F30):
             raise ValueError('Invalid UF2 block')
+        # The RP2350-E10 workaround (PureMetal Forge, as picotool): absolute-family blocks with their own
+        # numbering ahead of the image, written into a reserved sector the image does not use.
+        if family == 0xE48BFF57 and flags & 0x2000 and size == 256:
+            if target < 0x10000000 or target+size > FIRMWARE_END:
+                raise ValueError(f'RP2350-E10 block at {target:08X} lies outside the firmware area')
+            continue
+        blocks.append(block)
+    for block in blocks:
+        magic0, magic1, flags, target, size, number, count, family = struct.unpack_from('<8I', block)
         if flags != 0x2000 or family not in (0xE48BFF56, 0xE48BFF59) or size != 256:
             raise ValueError('Expected RP2040 or RP2350 Arm secure flash blocks')
         if image_family is None:
             image_family = family
         if family != image_family or (expected_family is not None and family != expected_family):
             raise ValueError('UF2 family does not match the selected target')
-        if count != len(data)//512 or number in seen or number >= count:
+        if count != len(blocks) or number in seen or number >= count:
             raise ValueError('Invalid UF2 block numbering')
         seen.add(number)
         if target < 0x10000000 or target+size > FIRMWARE_END:

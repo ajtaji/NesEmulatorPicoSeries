@@ -71,6 +71,7 @@ Procedure InputPoll()
   Protected now.i, buttons.i
   If InputPhysicalEnabled=0
     InputMask=QwstMask(0) : NesController=InputMask|InputHost : NesController2=QwstMask(1)
+    NesController3=QwstMask(2) : NesController4=QwstMask(3) : NesFourScore=Bool(QwstPads>2)
     ProcedureReturn
   EndIf
   now=Micros()
@@ -86,8 +87,10 @@ Procedure InputPoll()
   Else
     InputUpdate(InputX,4095-InputY,buttons,now)
   EndIf
-  ; A Qw/ST Pad adds to the carrier controls; a second pad is player 2.
+  ; A Qw/ST Pad adds to the carrier controls; a second pad is player 2, a third and fourth players 3
+  ; and 4 through the Four Score (bridge.pico).
   InputMask=InputMask|QwstMask(0)
   NesController=InputMask|InputHost : NesController2=QwstMask(1)
+  NesController3=QwstMask(2) : NesController4=QwstMask(3) : NesFourScore=Bool(QwstPads>2)
   InputPolls=InputPolls+1 : InputBusyUs=InputBusyUs+Micros()-now
 EndProcedure

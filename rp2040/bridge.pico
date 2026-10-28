@@ -12,6 +12,10 @@ Global WorkerBusyUs.i, WorkerDisplayUs.i, WorkerDisplayed.i
 Global WorkerDisplay.i=1, WorkerFrameDivider.i=2, WorkerPaused.i
 Global NesBridgeError.i, NesController.i, NesLatch.i, NesStrobe.i
 Global NesLatch2.i, NesController2.i
+; The Four Score (on while three or more Qw/ST Pads answer, qwstpad.pico): each port's strobe latches 24 bits,
+; player 1 (or 2), then player 3 (or 4), then the adapter's signature - $4016 reads 0,0,0,1,0,0,0,0 ($08),
+; $4017 0,0,1,0,0,0,0,0 ($04) - and 1 after that. NesLatchFill is the bit shifted in at the top.
+Global NesController3.i, NesController4.i, NesFourScore.i, NesLatchFill.i=$80
 CompilerIf #NES_PICO_MAPPERS=1
 Global NesNmiDelay.i
 CompilerEndIf
@@ -165,14 +169,14 @@ ProcedureRAM.i NesReadSlow(addr.i)
       v=(NesController&1)|$40
     Else
       v=(NesLatch&1)|$40
-      NesLatch=(NesLatch>>1)|$80
+      NesLatch=(NesLatch>>1)|NesLatchFill
     EndIf
   ElseIf addr=$4017
     v=$40
     If NesStrobe
       v=v|(NesController2&1)
     Else
-      v=v|(NesLatch2&1) : NesLatch2=(NesLatch2>>1)|$80
+      v=v|(NesLatch2&1) : NesLatch2=(NesLatch2>>1)|NesLatchFill
     EndIf
   ElseIf addr<$4000 Or addr=$4015
     CpuNow()
@@ -236,7 +240,13 @@ ProcedureRAM NesWrite(addr.i, value.i)
     CpuNow() : PicoMapperWrite(addr,value,CpuCycles+AccessPhase)
   CompilerEndIf
   ElseIf addr=$4016
-    NesStrobe=value&1 : NesLatch=NesController : NesLatch2=NesController2
+    NesStrobe=value&1
+    If NesFourScore
+      NesLatch=NesController|(NesController3<<8)|$80000 : NesLatch2=NesController2|(NesController4<<8)|$40000
+      NesLatchFill=$800000
+    Else
+      NesLatch=NesController : NesLatch2=NesController2 : NesLatchFill=$80
+    EndIf
   ElseIf addr=$4014
     CpuNow()
     CompilerIf #PICO_ADVANCED=1
