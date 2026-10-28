@@ -804,6 +804,28 @@ Procedure TestMain()
     Check(NesRead($4016)&1,v) : Check(NesRead($4017)&1,0)
   Next
   Check(NesRead($4016)&1,1) : Check(NesRead($4017)&1,1)
+  ; The Four Score (three or more Qw/ST Pads): 24 bits a port - player 1/2, player 3/4, the signature
+  ; ($4016 0,0,0,1,0,0,0,0; $4017 0,0,1,0,0,0,0,0), then 1s. Off again, a port is 8 bits as before.
+  NesController=$A5 : NesController2=$3C : NesController3=$96 : NesController4=$0F : NesFourScore=1
+  NesWrite($4016,1) : NesWrite($4016,0)
+  For i=0 To 27
+    If i<8 : v=($A5>>i)&1 : ElseIf i<16 : v=($96>>(i-8))&1 : ElseIf i<24 : v=Bool(i=19) : Else : v=1 : EndIf
+    Check(NesRead($4016)&1,v)
+    If i<8 : v=($3C>>i)&1 : ElseIf i<16 : v=($0F>>(i-8))&1 : ElseIf i<24 : v=Bool(i=18) : Else : v=1 : EndIf
+    Check(NesRead($4017)&1,v)
+  Next
+  NesFourScore=0 : NesWrite($4016,1) : NesWrite($4016,0)
+  For i=0 To 9
+    v=1 : If i<8 : v=($A5>>i)&1 : EndIf
+    Check(NesRead($4016)&1,v)
+  Next
+  NesController=0 : NesController2=0 : NesController3=0 : NesController4=0
+  ; The Qw/ST Pad's pins (Pimoroni's map) to NES buttons; X and Y are turbo A and B.
+  Check(QwstNesButtons($4000,0),1) : Check(QwstNesButtons($1000,0),2) : Check(QwstNesButtons($0020,0),4)
+  Check(QwstNesButtons($0800,0),8) : Check(QwstNesButtons($0002,0),$10) : Check(QwstNesButtons($0010,0),$20)
+  Check(QwstNesButtons($0004,0),$40) : Check(QwstNesButtons($0008,0),$80)
+  Check(QwstNesButtons($8000,1),1) : Check(QwstNesButtons($8000,0),0) : Check(QwstNesButtons($2000,1),2)
+  Check(QwstNesButtons($2000,0),0) : Check(QwstNesButtons($0781,1),0)
   ; PPU mirroring, palette aliases, buffered reads and latch reset.
   PpuWarmup=0
   PpuWrite($2000,17) : Check(PpuRead($2800),17) : Check(Nt($800),17)

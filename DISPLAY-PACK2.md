@@ -18,6 +18,11 @@ carrier. `-Port COM7` / `-Port COM6` optionally uploads to the appropriate board
 `-Source` selects a custom wrapper instead of `-Display`. The loader and ROM
 store work the same way for either display.
 
+**Pimoroni Pico Plus 2 W:** `rp2350/display_pack2.picoplus2w` is the same output on that board, silent,
+with a Qw/ST Pad on the board's own Qw/ST socket (I2C0, GP4/GP5) as the controller ([QWSTPAD.md](QWSTPAD.md)).
+Run 2026-10-28 with a Pico Display Pack 2.8 (the same ST7789 pins): the PureMetal demo at 60 frames a second, every
+frame presented, all ten pad buttons read.
+
 For a private speaker/DAC wrapper, copy `rp2040/display_pack2.picow` or
 `rp2350/display_pack2.pico2w` and keep `#NES_VIDEO_BACKEND=3`. Audio settings stay
 independent: 0=silent, 1=Bluetooth, 2=your audio plugin. Private speaker configuration

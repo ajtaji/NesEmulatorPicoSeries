@@ -315,6 +315,8 @@ Procedure Main()
       Say(" busy_us=") : Num(InputBusyUs)
       Say(" starts=") : Num(InputStartCount) : Say(" selects=") : Num(InputSelectCount)
       Say(" pads=") : Num(QwstPads) : Say(" pad1=") : Num(QwstMask(0)) : Say(" pad2=") : Num(QwstMask(1))
+      Say(" pad3=") : Num(QwstMask(2)) : Say(" pad4=") : Num(QwstMask(3)) : Say(" four_score=") : Num(NesFourScore)
+      Say(" raw1=") : Num(QwstRaw(0))
       Say(" pad_reads=") : Num(QwstReads) : Say(" pad_errors=") : Num(QwstErrors) : Say(" pad_busy_us=") : Num(QwstBusyUs) : Eol()
     ElseIf key=109
       Say("MAPPER pc=") : Num(PC) : Say(" ctrl=") : Num(PpuCtrl) : Say(" mask=") : Num(PpuMask)
