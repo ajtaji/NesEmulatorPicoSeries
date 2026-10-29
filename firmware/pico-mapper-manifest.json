@@ -1,14 +1,14 @@
 {
   "rp2040": {
-    "public_uf2_sha256": "12610b7de088a4d85e0cc8c51e58da3b8413e2f8179ff9064bd6698db92e6d7d",
+    "public_uf2_sha256": "98bc5d242f1342a1271d29510e22a582792274f061807296a8429b9cc689eabd",
     "board_test_private_uf2_sha256": "f17267c27c15d204810bb8289529f604b9133b8c18e35e2f60115de8ebd5d126",
     "private_config": "Speaker peer only; not included in Git or public artifacts",
-    "public_uf2_source": "1e7017b (built 2026-10-22)"
+    "public_uf2_source": "37af1e6 (built 2026-10-28)"
   },
   "rp2350": {
-    "public_uf2_sha256": "772b81b2db6bff66a8c1c84415c59d3df28c0cf049502acd0106b0b928f8c40e",
+    "public_uf2_sha256": "95d2072a7ff74fe86eaa8ffa1be8efc52544391465117f81285034618d944138",
     "board_test_private_uf2_sha256": "a901a5cbdd8ea4123e3c56b0b1b1bc35fba83877ca12ceb0e21a9252d35798e6",
     "private_config": "Speaker peer only; not included in Git or public artifacts",
-    "public_uf2_source": "1e7017b (built 2026-10-22)"
+    "public_uf2_source": "37af1e6 (built 2026-10-28)"
   }
 }
