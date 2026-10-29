@@ -61,8 +61,12 @@ What the pad can and cannot be set up as (Pimoroni's schematic, TI's TCA9555 dat
 
 ## How it works
 
-`rp2040/qwstpad.pico` (generated into `rp2350/qwstpad.pico2`) uses the
-compiler's I2C library at 400 kHz. Core 0 sets each pad up before the second core
+The pad itself is driven by PureMetal Forge's shared Qw/ST Pad library,
+`Shared/Qwst/qwstpad.pmi` (the same file on the Picos, the Uno R4, the Black Pill and
+the Due), over the compiler's I2C library at 400 kHz; building this firmware needs a
+PureMetal Forge with that library (compiler commit 1873c939c or later).
+`rp2040/qwstpad.pico` (generated into `rp2350/qwstpad.pico2`) is only the NES part:
+players, the NES byte, turbo, debounce and the core-1 polling. Core 0 sets each pad up before the second core
 starts: inputs inverted (pressed reads 1), LED pins as outputs, the same register
 values as Pimoroni's own library. From then on only core 1 uses the bus. Every
 4 ms it reads each pad's input register and publishes one NES button byte per

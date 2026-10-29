@@ -51,6 +51,7 @@ XIncludeFile "display.pico"
 XIncludeFile "worker.pico"
 XIncludeFile "io.pico"
 XIncludeFile "RP2040/Lib/i2c.pico"
+XIncludeFile "Shared/Qwst/qwstpad.pmi"     ; PureMetal Forge's Qw/ST Pad library
 XIncludeFile "qwstpad.pico"
 XIncludeFile "input.pico"
 Global Dim FrameBottomStore.u(30720)

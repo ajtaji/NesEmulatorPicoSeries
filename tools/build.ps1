@@ -29,12 +29,12 @@ if (!$Source) {
 } elseif ($PSBoundParameters.ContainsKey('Display')) {
     throw '-Display selects the standard wrapper; use -Source alone for custom wrappers.'
 }
-$sourceTarget = if ($Source -match '\.pico2w?$') { 'rp2350' } else { 'rp2040' }
+$sourceTarget = if ($Source -match '\.(pico2w?|picoplus2w?)$') { 'rp2350' } else { 'rp2040' }
 if ($PSBoundParameters.ContainsKey('Target') -and $Target -ne $sourceTarget) {
     throw '-Target does not match the source wrapper extension.'
 }
 if (!$Output) {
-    $boardName = if ($sourceTarget -eq 'rp2350') { 'pico2-w' } else { 'pico-w' }
+    $boardName = if ($Source -match '\.picoplus2w?$') { 'pico-plus2-w' } elseif ($sourceTarget -eq 'rp2350') { 'pico2-w' } else { 'pico-w' }
     $displayName = if ($Display -eq 'display-pack2' -or $Source -match 'display_pack2\.') { '-display-pack2' } elseif ($Display -eq 'hx8357d' -or $Source -match 'hx8357d\.') { '-hx8357d' } elseif ($Display -eq 'ili9341' -or $Source -match 'ili9341\.') { '-ili9341' } else { '' }
     $Output = "firmware/nes-$boardName$displayName.uf2"
 }
@@ -73,7 +73,7 @@ if ($VerifyNes) {
     if (!$Port) { throw '-VerifyNes requires -Port; compilation alone cannot pass verification.' }
 }
 if ($Port) {
-    $target = if ($sourcePath -match '\.pico2w?$') { 'rp2350' } else { 'rp2040' }
+    $target = $sourceTarget
     & py -3 (Join-Path $PSScriptRoot 'upload_pack.py') $outputPath --compiler $Compiler --port $Port --target $target
     if ($LASTEXITCODE -ne 0) { throw 'Validated firmware upload failed.' }
     $capturePath = $outputPath + '.board.log'
