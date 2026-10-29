@@ -21,6 +21,16 @@
 #ROMSTORE_FLASH = $10000000
 #ROMSTORE_BTKEY = $3FF000          ; the Bluetooth speaker's link key: the chip's last sector
 #ROMSTORE_MAX = 63
+
+; THE SAME LAYOUT, AS NAMED REGIONS (FlashRegion): the PureMetal Forge IDE's Board Storage panel
+; shows the flash map from these and adds and removes games in the store; the build refuses an
+; image that grows into one. They emit nothing into the firmware.
+#ROMSTORE_SIZE = #ROMSTORE_END - #ROMSTORE_DIR
+#ROMSTORE_RADIO = $200000          ; the Bluetooth radio's firmware (cyw43, about 227 KB)
+FlashRegion "games", #ROMSTORE_DIR, #ROMSTORE_SIZE, "nes"
+FlashRegion "board check", #ROMSTORE_TEST, $1000, "reserved"
+FlashRegion "radio firmware", #ROMSTORE_RADIO, $40000, "reserved"
+FlashRegion "speaker link key", #ROMSTORE_BTKEY, $1000, "reserved"
 Global RomCount.i, RomScanned.i, RomStoreEnabled.i=1
 Global Dim RomEntry.i(#ROMSTORE_MAX)
 ; PureMetal dimensions are element counts: CRC indices cover 0..255.
