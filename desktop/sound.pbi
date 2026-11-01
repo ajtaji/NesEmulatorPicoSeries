@@ -1,91 +1,45 @@
-; Sound on the PC: the APU's 48 kHz mono PCM (Anvil's AudioRead takes it from the ring) to the sound card.
-; Windows: waveOut with four 1024-sample buffers (~85 ms queued at most). Other systems: silent for now.
+; Sound on the PC: the APU's 48 kHz mono PCM (Anvil's AudioRead takes it from the ring) to the sound card,
+; through the engine (GL_AudioOpen / Next / Play: waveOut on Windows, ALSA on Linux), four 1024-sample
+; buffers (~85 ms queued at most). The engine plays 16-bit stereo: each sample goes to both sides.
 EnableExplicit
 
 #SOUND_BUFFERS=4
 #SOUND_SAMPLES=1024
+#SOUND_RATE=48000
 
-CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-  Structure SoundWaveFormat
-    wFormatTag.w : nChannels.w : nSamplesPerSec.l : nAvgBytesPerSec.l : nBlockAlign.w : wBitsPerSample.w : cbSize.w
-  EndStructure
-  Structure SoundWaveHeader
-    *lpData : dwBufferLength.l : dwBytesRecorded.l : *dwUser : dwFlags.l : dwLoops.l : *lpNext : *reserved
-  EndStructure
-  Import "winmm.lib"
-    waveOutOpen_(*handle,device.l,*format,callback.i,instance.i,flags.l) As "waveOutOpen"
-    waveOutPrepareHeader_(handle.i,*header,size.l) As "waveOutPrepareHeader"
-    waveOutUnprepareHeader_(handle.i,*header,size.l) As "waveOutUnprepareHeader"
-    waveOutWrite_(handle.i,*header,size.l) As "waveOutWrite"
-    waveOutReset_(handle.i) As "waveOutReset"
-    waveOutClose_(handle.i) As "waveOutClose"
-  EndImport
-  #SOUND_WHDR_DONE=1
-  Global SoundHandle.i
-  Global Dim SoundHeaders.SoundWaveHeader(#SOUND_BUFFERS)
-  Global Dim SoundData.w(#SOUND_BUFFERS*#SOUND_SAMPLES)
-CompilerEndIf
 Global SoundOn.i, SoundMuted.i, SoundUnderruns.i, SoundQueued.i, SoundLast.w
+Global Dim SoundMono.w(#SOUND_SAMPLES)
 
 Procedure.i SoundBegin()
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected fmt.SoundWaveFormat, i.i
-    fmt\wFormatTag=1 : fmt\nChannels=1 : fmt\nSamplesPerSec=48000 : fmt\wBitsPerSample=16
-    fmt\nBlockAlign=2 : fmt\nAvgBytesPerSec=96000
-    If waveOutOpen_(@SoundHandle,-1,@fmt,0,0,0)<>0 : SoundHandle=0 : ProcedureReturn 0 : EndIf
-    For i=0 To #SOUND_BUFFERS-1
-      SoundHeaders(i)\lpData=@SoundData(i*#SOUND_SAMPLES)
-      SoundHeaders(i)\dwBufferLength=#SOUND_SAMPLES*2
-      SoundHeaders(i)\dwFlags=#SOUND_WHDR_DONE           ; free to fill
-    Next
-    SoundOn=1 : AudioReset()
-    ProcedureReturn 1
-  CompilerElse
-    ProcedureReturn 0
-  CompilerEndIf
+  If GL_AudioOpen(#SOUND_RATE,#SOUND_SAMPLES,#SOUND_BUFFERS)=0 : ProcedureReturn 0 : EndIf
+  SoundOn=1 : AudioReset()
+  ProcedureReturn 1
 EndProcedure
 
-; Fill every finished buffer from the APU's ring. Returns the number of samples the card still has queued.
+; Hand the card every buffer it has room for while the APU's ring holds one. Returns the samples it still has queued.
 Procedure.i SoundPump()
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected i.i, n.i, k.i, *dst, queued.i
-    If SoundOn=0 : AudioReset() : ProcedureReturn 0 : EndIf
-    For i=0 To #SOUND_BUFFERS-1
-      If SoundHeaders(i)\dwFlags & #SOUND_WHDR_DONE
-        If SoundHeaders(i)\dwFlags & 2 : waveOutUnprepareHeader_(SoundHandle,@SoundHeaders(i),SizeOf(SoundWaveHeader)) : EndIf
-        If ApuSamples-AudioReadCursor<#SOUND_SAMPLES : Continue : EndIf
-        *dst=@SoundData(i*#SOUND_SAMPLES)
-        n=AudioRead(*dst,#SOUND_SAMPLES)
-        If n<#SOUND_SAMPLES
-          SoundUnderruns+1
-          For k=n To #SOUND_SAMPLES-1 : PokeW(*dst+k*2,SoundLast) : Next
-        EndIf
-        SoundLast=PeekW(*dst+(#SOUND_SAMPLES-1)*2)
-        If SoundMuted : FillMemory(*dst,#SOUND_SAMPLES*2,0) : EndIf
-        SoundHeaders(i)\dwFlags=0
-        waveOutPrepareHeader_(SoundHandle,@SoundHeaders(i),SizeOf(SoundWaveHeader))
-        waveOutWrite_(SoundHandle,@SoundHeaders(i),SizeOf(SoundWaveHeader))
-      EndIf
+  Protected *dst, n.i, k.i, v.w
+  If SoundOn=0 : AudioReset() : ProcedureReturn 0 : EndIf
+  While ApuSamples-AudioReadCursor>=#SOUND_SAMPLES
+    *dst=GL_AudioNext()
+    If *dst=0 : Break : EndIf
+    n=AudioRead(@SoundMono(0),#SOUND_SAMPLES)
+    If n<#SOUND_SAMPLES
+      SoundUnderruns+1
+      For k=n To #SOUND_SAMPLES-1 : SoundMono(k)=SoundLast : Next
+    EndIf
+    SoundLast=SoundMono(#SOUND_SAMPLES-1)
+    For k=0 To #SOUND_SAMPLES-1
+      v=SoundMono(k) : If SoundMuted : v=0 : EndIf
+      PokeW(*dst+k*4,v) : PokeW(*dst+k*4+2,v)
     Next
-    For i=0 To #SOUND_BUFFERS-1
-      If (SoundHeaders(i)\dwFlags & #SOUND_WHDR_DONE)=0 : queued+#SOUND_SAMPLES : EndIf
-    Next
-    SoundQueued=queued
-    ProcedureReturn queued
-  CompilerElse
-    AudioReset()
-    ProcedureReturn 0
-  CompilerEndIf
+    GL_AudioPlay(*dst)
+  Wend
+  SoundQueued=GL_AudioQueued()                     ; (one sample a pair)
+  ProcedureReturn SoundQueued
 EndProcedure
 
 Procedure SoundEnd()
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected i.i
-    If SoundHandle
-      waveOutReset_(SoundHandle)
-      For i=0 To #SOUND_BUFFERS-1 : waveOutUnprepareHeader_(SoundHandle,@SoundHeaders(i),SizeOf(SoundWaveHeader)) : Next
-      waveOutClose_(SoundHandle) : SoundHandle=0
-    EndIf
-  CompilerEndIf
+  GL_AudioClose()
   SoundOn=0
 EndProcedure
