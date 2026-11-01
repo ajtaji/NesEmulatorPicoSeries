@@ -324,9 +324,25 @@ FPS counter placement and hardware validation status. LAFVIN remains the default
 
 ## The desktop version
 
-The same emulator runs as a Windows program (PureBasic, drawn with the Neon Arcade Display Engine). It has the
-CPU, PPU, OAM, APU, mapper, ROM and Controls panes, and full screen. See [desktop/README.md](desktop/README.md)
-for building it from this repository and https://github.com/ajtaji/Neon-Arcade-Dispay-Engine.
+The same emulator runs on Windows and Linux from one source (PureBasic). Everything it needs from the
+operating system (window, drawing, sound, keys, gamepads, clock, full screen) comes through the Neon Arcade
+Display Engine, so the desktop code makes no OS calls of its own. It has the CPU, PPU, OAM, APU, mapper, ROM
+and Controls panes, and full screen.
+
+Windows (from the repository root):
+
+```
+pbcompilerc.exe desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
+```
+
+Linux (from `desktop/`):
+
+```
+$PUREBASIC_HOME/compilers/pbcompilerc nes_desktop.pb -t -z -o PureMetalNES
+```
+
+See [desktop/README.md](desktop/README.md) for the full steps, the test program, and where the
+engine (https://github.com/ajtaji/Neon-Arcade-Dispay-Engine) must sit.
 
 ### Controls
 
