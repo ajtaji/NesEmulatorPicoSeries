@@ -451,8 +451,9 @@ Procedure Main()
           If EventGadget()=Gl
             et=EventType()
             Select et
-              Case #PB_EventType_KeyDown : KeyPress(GetGadgetAttribute(Gl,#PB_OpenGL_Key))
-              Case #PB_EventType_KeyUp : KeyHeld(Str(GetGadgetAttribute(Gl,#PB_OpenGL_Key)))=0
+              ; (GL_KeyEventCode: the same code on KeyDown and KeyUp on both OSes - Linux gives a letter's KeyUp in lower case)
+              Case #PB_EventType_KeyDown : KeyPress(GL_KeyEventCode(GetGadgetAttribute(Gl,#PB_OpenGL_Key)))
+              Case #PB_EventType_KeyUp : KeyHeld(Str(GL_KeyEventCode(GetGadgetAttribute(Gl,#PB_OpenGL_Key))))=0
               Case #PB_EventType_LeftButtonDown : MouseDown=1
               Case #PB_EventType_LeftButtonUp : MouseDown=0
               Case #PB_EventType_Input : KeyChar=GetGadgetAttribute(Gl,#PB_OpenGL_Input)
