@@ -26,14 +26,11 @@ Procedure ViewTextureMake(*t.ViewTexture,w.i,h.i)
   glTexParameteri_(#GL_TEXTURE_2D,#GL_TEXTURE_WRAP_T,#GL_CLAMP_TO_EDGE)
   glTexImage2D_(#GL_TEXTURE_2D,0,#GL_RGBA,w,h,0,#GL_RGBA,#GL_UNSIGNED_BYTE,*t\pixels)
 EndProcedure
-; The engine's sprite draw samples a Windows texture bottom-up (its images come from DIBs), so rows are
-; written in that order there; Linux reads them top-down.
+; The engine's sprite draw puts row 0 of a texture filled from memory at the bottom where
+; #GL_SpriteRowsBottomUp says so (Windows) and at the top where it does not (Linux): rows are written to match.
 Procedure.i ViewRow(*t.ViewTexture,y.i)
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    ProcedureReturn *t\pixels+(*t\sprite\Height-1-y)**t\sprite\Width*4
-  CompilerElse
-    ProcedureReturn *t\pixels+y**t\sprite\Width*4
-  CompilerEndIf
+  If #GL_SpriteRowsBottomUp : ProcedureReturn *t\pixels+(*t\sprite\Height-1-y)**t\sprite\Width*4 : EndIf
+  ProcedureReturn *t\pixels+y**t\sprite\Width*4
 EndProcedure
 Procedure ViewTextureUpload(*t.ViewTexture)
   glBindTexture_(#GL_TEXTURE_2D,*t\sprite\TextureID)
@@ -346,14 +343,12 @@ Procedure ViewApu(x.f,y.f,w.f,h.f)
     Neon_Box(x0+i*(w-20*s)/n,mid-v*(ph/2)/32768.0,2*s,2*s,Neon_C_AccR,Neon_C_AccG,Neon_C_AccB)
   Next
   y+ph+8*s
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    If ExpChip=1
-      y=ViewLine(x,y,"VRC6:  pulse "+Str(V6Volume(0))+"/"+Str(V6Duty(0))+" on "+Str(V6Enable(0))+"   pulse "+Str(V6Volume(1))+"/"+Str(V6Duty(1))+" on "+Str(V6Enable(1))+"   saw rate "+Str(V6Rate)+" on "+Str(V6Enable(2))+"   sample "+Str(ExpSample))
-    ElseIf ExpChip=2
-      y=ViewLine(x,y,"N163:  channels "+Str(((N1Sound($7F)>>4)&7)+1)+"   muted "+Str(N1Mute)+"   sample "+Str(ExpSample)+"   peak "+Str(ExpPeak))
-    EndIf
-    y=ViewLine(x,y,"sound card: "+StringField("off|on",1+SoundOn,"|")+"   queued "+Str(SoundQueued)+"   underruns "+Str(SoundUnderruns)+"   muted "+Str(SoundMuted),Neon_C_DimR,Neon_C_DimG,Neon_C_DimB)
-  CompilerEndIf
+  If ExpChip=1
+    y=ViewLine(x,y,"VRC6:  pulse "+Str(V6Volume(0))+"/"+Str(V6Duty(0))+" on "+Str(V6Enable(0))+"   pulse "+Str(V6Volume(1))+"/"+Str(V6Duty(1))+" on "+Str(V6Enable(1))+"   saw rate "+Str(V6Rate)+" on "+Str(V6Enable(2))+"   sample "+Str(ExpSample))
+  ElseIf ExpChip=2
+    y=ViewLine(x,y,"N163:  channels "+Str(((N1Sound($7F)>>4)&7)+1)+"   muted "+Str(N1Mute)+"   sample "+Str(ExpSample)+"   peak "+Str(ExpPeak))
+  EndIf
+  y=ViewLine(x,y,"sound card: "+StringField("off|on",1+SoundOn,"|")+"   queued "+Str(SoundQueued)+"   underruns "+Str(SoundUnderruns)+"   muted "+Str(SoundMuted),Neon_C_DimR,Neon_C_DimG,Neon_C_DimB)
 EndProcedure
 
 Procedure ViewMapper(x.f,y.f,w.f,h.f)

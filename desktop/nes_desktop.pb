@@ -1,10 +1,11 @@
 ; PureMetal NES for the desktop: the same emulation as the boards (desktop/core, generated from Anvil's
-; portable core by tools/port_desktop.py), drawn with the Neon Arcade Display Engine.
+; portable core by tools/port_desktop.py), drawn with the Neon Arcade Display Engine. Everything the OS gives
+; (window, input, clock, sound, full screen, gamepads) comes through the engine, so this one source builds on
+; Windows and Linux; see engine.pbi for where the engine is found, and README.md for both builds.
 ;
-; Build (PowerShell, from the repository root):
-;   & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
-;   (the engine, https://github.com/ajtaji/Neon-Arcade-Dispay-Engine, is found cloned beside this
-;    repository unless /CONSTANT GL_ENGINE_DIR$=<path>/ says otherwise; the trailing slash matters)
+; Build (Windows, PowerShell, from the repository root):
+;   & <PureBasic>\Compilers\pbcompilerc.exe desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
+; Build (Linux, in desktop/):  pbcompilerc nes_desktop.pb -t -z -o PureMetalNES
 ; Run:  desktop\PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt] [--fullscreen-test log.txt [--fullscreen-shot f.png]]
 ;       (--shot saves the window after S seconds, default 5, and closes: for checks without a person)
 ;
@@ -14,16 +15,7 @@
 ;       Every binding is in controls.pbi's table; the Controls tab shows it.
 EnableExplicit
 
-CompilerIf Not Defined(GL_ENGINE_DIR$, #PB_Constant)
-  #GL_ENGINE_DIR$ = "C:\Users\ajtaj\Desktop\Neon-Arcade-Dispay-Engine/"   ; a clone beside this repository
-CompilerEndIf
-XIncludeFile #GL_ENGINE_DIR$ + "GlTypes.pbi"
-XIncludeFile #GL_ENGINE_DIR$ + "GlUtilities.pbi"
-XIncludeFile #GL_ENGINE_DIR$ + "GlMath.pbi"
-XIncludeFile #GL_ENGINE_DIR$ + "GlSpriteFunctions.pbi"
-XIncludeFile #GL_ENGINE_DIR$ + "GlUI.pbi"
-XIncludeFile #GL_ENGINE_DIR$ + "GlUIChrome.pbi"
-
+XIncludeFile "engine.pbi"
 XIncludeFile "host.pbi"
 XIncludeFile "core/core.pbi"
 XIncludeFile "machine.pbi"
@@ -36,9 +28,9 @@ XIncludeFile "view.pbi"
 ; ---------------------------------------------------------------- state
 Global Win.i, Gl.i, PhysW.i, PhysH.i
 Global Running.i, Quit.i, Paused.i=1
-Global KeyCode.i, KeyChar.i, Wheel.i
-Global Dim KeyHeld.i(256)
-Global PadCount.i, PadMask.i
+Global KeyCode.i, KeyChar.i, Wheel.i, MouseDown.i
+Global NewMap KeyHeld.i()          ; by key code (#PB_Shortcut_: Windows virtual keys, Linux X keysyms)
+Global PadMask.i
 Global EmuAccum.d, EmuLastUs.q, EmuFrameUs.d=1000000.0/60.0988
 Global FpsShown.d, FpsFrames.i, FpsSince.q, IpsShown.i, IpsInstr.i
 Global ActiveTab.i, RomStatusLine$, LastRomFolder$
@@ -57,14 +49,7 @@ EndProcedure
 
 Procedure MeasureWindow()
   Protected scale.f
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected client.RECT
-    GetClientRect_(WindowID(Win),@client)
-    PhysW=client\right-client\left : PhysH=client\bottom-client\top
-  CompilerElse
-    PhysW=WindowWidth(Win,#PB_Window_InnerCoordinate)*Linux_DPIScale
-    PhysH=WindowHeight(Win,#PB_Window_InnerCoordinate)*Linux_DPIScale
-  CompilerEndIf
+  GL_ClientPixels(Win,@PhysW,@PhysH)
   If PhysW<1 : PhysW=1 : EndIf
   If PhysH<1 : PhysH=1 : EndIf
   ResizeGadget(Gl,0,0,WindowWidth(Win,#PB_Window_InnerCoordinate),WindowHeight(Win,#PB_Window_InnerCoordinate))
@@ -97,16 +82,24 @@ Procedure LoadRom(path$)
   ViewRomsRefresh(LastRomFolder$)
 EndProcedure
 
-; One gamepad's buttons, NES bit order (A B Select Start Up Down Left Right).
+; One gamepad's buttons, NES bit order (A B Select Start Up Down Left Right). The engine's GL_JoyRead reads
+; any game controller (Windows' joystick API, Linux's /dev/input/jsN): buttons 1-32 in bits 0-31, the stick
+; 0-65535 (a direction past half way), the d-pad as the hat (hundredths of a degree, $FFFF centred).
 Procedure.i ReadPad(pad.i)
-  Protected m.i, ax.i, ay.i
-  If PadCount>pad And ExamineJoystick(pad)
-    ax=JoystickAxisX(pad) : ay=JoystickAxisY(pad)
-    If ax<0 : m|64 : ElseIf ax>0 : m|128 : EndIf
-    If ay<0 : m|16 : ElseIf ay>0 : m|32 : EndIf
+  Protected m.i, j.GLJoyState, pov.i
+  If GL_JoyRead(pad,@j)
+    If j\Axis[0]<16384 : m|64 : ElseIf j\Axis[0]>49151 : m|128 : EndIf
+    If j\Axis[1]<16384 : m|16 : ElseIf j\Axis[1]>49151 : m|32 : EndIf
+    pov=j\POV
+    If pov<>$FFFF
+      If pov>=31500 Or pov<=4500 : m|16 : EndIf
+      If pov>=4500 And pov<=13500 : m|128 : EndIf
+      If pov>=13500 And pov<=22500 : m|32 : EndIf
+      If pov>=22500 And pov<=31500 : m|64 : EndIf
+    EndIf
     ForEach CtlPads()
       If CtlPads()\player=pad+1 And CtlPads()\button>0
-        If JoystickButton(pad,CtlPads()\button) : m|CtlPads()\bit : EndIf
+        If j\Buttons&(1<<(CtlPads()\button-1)) : m|CtlPads()\bit : EndIf
       EndIf
     Next
   EndIf
@@ -237,46 +230,25 @@ EndProcedure
 
 
 ; ---------------------------------------------------------------- full screen
-; A borderless window over the monitor the window is on (no display-mode change): the windowed placement and
-; style are kept and put back exactly on leaving. F11 or the Full screen button toggles it; Esc leaves it (the
-; NES has no Esc of its own, so nothing the game uses is taken). In full screen only the picture is drawn, at the
-; NES's own pixel aspect, centred, black around it; the pointer hides after two idle seconds.
-Global FullScreen.i, FsStyle.i, FsCursorHidden.i, FsMouseX.i, FsMouseY.i, FsMouseMs.q
+; A borderless window over the monitor the window is on (no display-mode change), by the engine
+; (GL_FullscreenEnter / Leave): the windowed placement is kept and put back exactly on leaving. F11 or the Full
+; screen button toggles it; Esc leaves it (the NES has no Esc of its own, so nothing the game uses is taken). In
+; full screen only the picture is drawn, at the NES's own pixel aspect, centred, black around it; the pointer
+; hides after two idle seconds.
+Global FullScreen.i, FsMouseX.i, FsMouseY.i, FsMouseMs.q
 Global FsGameX.f, FsGameY.f, FsGameW.f, FsGameH.f
-CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-  Global FsPlacement.WINDOWPLACEMENT
-CompilerEndIf
 Procedure FsShowCursor(show.i)
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    If show And FsCursorHidden : ShowCursor_(#True) : FsCursorHidden=0 : EndIf
-    If show=0 And FsCursorHidden=0 : ShowCursor_(#False) : FsCursorHidden=1 : EndIf
-  CompilerEndIf
+  GL_CursorShow(Win,Gl,show)
 EndProcedure
 Procedure EnterFullScreen()
   If FullScreen : ProcedureReturn : EndIf
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected hwnd.i=WindowID(Win), mi.MONITORINFO
-    FsPlacement\length=SizeOf(WINDOWPLACEMENT) : GetWindowPlacement_(hwnd,@FsPlacement)
-    FsStyle=GetWindowLongPtr_(hwnd,#GWL_STYLE)
-    mi\cbSize=SizeOf(MONITORINFO) : GetMonitorInfo_(MonitorFromWindow_(hwnd,2),@mi)   ; 2: the nearest monitor
-    SetWindowLongPtr_(hwnd,#GWL_STYLE,FsStyle&~(#WS_CAPTION|#WS_THICKFRAME|#WS_MINIMIZEBOX|#WS_MAXIMIZEBOX|#WS_SYSMENU))
-    SetWindowPos_(hwnd,#HWND_TOP,mi\rcMonitor\left,mi\rcMonitor\top,mi\rcMonitor\right-mi\rcMonitor\left,mi\rcMonitor\bottom-mi\rcMonitor\top,#SWP_FRAMECHANGED|#SWP_NOOWNERZORDER|#SWP_SHOWWINDOW)
-  CompilerElse
-    GL_ToggleFullscreen()
-  CompilerEndIf
+  GL_FullscreenEnter(Win)
   FullScreen=1 : FsMouseMs=ElapsedMilliseconds()
   MeasureWindow()
 EndProcedure
 Procedure LeaveFullScreen()
   If FullScreen=0 : ProcedureReturn : EndIf
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected hwnd.i=WindowID(Win)
-    SetWindowLongPtr_(hwnd,#GWL_STYLE,FsStyle)
-    SetWindowPlacement_(hwnd,@FsPlacement)
-    SetWindowPos_(hwnd,0,0,0,0,0,#SWP_FRAMECHANGED|#SWP_NOMOVE|#SWP_NOSIZE|#SWP_NOZORDER|#SWP_NOOWNERZORDER)
-  CompilerElse
-    GL_ToggleFullscreen()
-  CompilerEndIf
+  GL_FullscreenLeave(Win)
   FullScreen=0 : FsShowCursor(1)
   MeasureWindow()
 EndProcedure
@@ -305,52 +277,51 @@ Procedure DoAction(action.i)
   EndSelect
 EndProcedure
 
+; A key pressed in the window: what the GL gadget's key-down event does, and what the tests press.
+Procedure KeyPress(k.i)
+  KeyCode=k : KeyHeld(Str(k))=1
+  DoAction(CtlAction(k))
+EndProcedure
+
 ; ---------------------------------------------------------------- --fullscreen-test
-; Full screen by its own keys, without the real pointer: F11 is posted to the window's own GL gadget and Esc to
-; the window (where the engine's Esc shortcut catches it). Checked: the window covers its monitor, the picture
-; has the NES's aspect and is centred, the window's own frame is saved, Esc leaves, and the windowed placement
-; and style come back exactly.
+; Full screen by its own keys, without the real pointer: F11 and then Esc pressed through the window's key
+; handler (KeyPress). Checked: the window covers its monitor, the picture has the NES's aspect and is centred,
+; the window's own frame is saved, Esc leaves, and the windowed rectangle and canvas size come back exactly.
 Global FsTestOn.i, FsTestFile$, FsTestStep.i, FsTestWait.i, FsTestFails.i, FsTestLog$, FsTestShot$
-CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-  Global FsTestRect.RECT, FsTestStyle.i
-CompilerEndIf
+Global FsTestRect.GLHostRect, FsTestW.i, FsTestH.i
 Procedure FsTestCheck(ok.i, what$)
   If ok=0 : FsTestFails+1 : FsTestLog$+"FAIL " : Else : FsTestLog$+"ok   " : EndIf
   FsTestLog$+what$+#LF$
 EndProcedure
 Procedure FsTestTick()
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    Protected r.RECT, mi.MONITORINFO, hwnd.i=WindowID(Win), f.i, aspect.f, want.f
-    FsTestWait+1 : If FsTestWait<30 : ProcedureReturn : EndIf
-    FsTestWait=0 : FsTestStep+1
-    Select FsTestStep
-      Case 1
-        GetWindowRect_(hwnd,@FsTestRect) : FsTestStyle=GetWindowLongPtr_(hwnd,#GWL_STYLE)
-        FsTestLog$+"windowed: "+Str(FsTestRect\left)+","+Str(FsTestRect\top)+" "+Str(FsTestRect\right-FsTestRect\left)+"x"+Str(FsTestRect\bottom-FsTestRect\top)+", scale "+StrF(Neon_UIScale,2)+#LF$
-        PostMessage_(GadgetID(Gl),#WM_KEYDOWN,#VK_F11,0) : PostMessage_(GadgetID(Gl),#WM_KEYUP,#VK_F11,0)
-      Case 2
-        GetWindowRect_(hwnd,@r) : mi\cbSize=SizeOf(MONITORINFO) : GetMonitorInfo_(MonitorFromWindow_(hwnd,2),@mi)
-        FsTestCheck(FullScreen,"F11 entered full screen")
-        FsTestCheck(Bool(r\left=mi\rcMonitor\left And r\top=mi\rcMonitor\top And r\right=mi\rcMonitor\right And r\bottom=mi\rcMonitor\bottom),"the window covers its monitor "+Str(mi\rcMonitor\right-mi\rcMonitor\left)+"x"+Str(mi\rcMonitor\bottom-mi\rcMonitor\top))
-        FsTestCheck(Bool(PhysW=mi\rcMonitor\right-mi\rcMonitor\left And PhysH=mi\rcMonitor\bottom-mi\rcMonitor\top),"the canvas is the whole monitor ("+Str(PhysW)+"x"+Str(PhysH)+")")
-        want=256*(8.0/7.0)/240 : If MachinePal : want=256*1.3862/240 : EndIf
-        aspect=FsGameW/FsGameH
-        FsTestCheck(Bool(Abs(aspect-want)<0.002),"the picture "+StrF(FsGameW,1)+"x"+StrF(FsGameH,1)+" has the NES aspect "+StrF(want,4)+" ("+StrF(aspect,4)+")")
-        FsTestCheck(Bool(Abs(FsGameX*2+FsGameW-PhysW)<=1 And Abs(FsGameY*2+FsGameH-PhysH)<=1),"the picture is centred at "+StrF(FsGameX,1)+","+StrF(FsGameY,1))
-        If FsTestShot$<>"" : SaveWindowShot(FsTestShot$) : EndIf
-        PostMessage_(hwnd,#WM_KEYDOWN,#VK_ESCAPE,0) : PostMessage_(hwnd,#WM_KEYUP,#VK_ESCAPE,0)
-      Case 3
-        GetWindowRect_(hwnd,@r)
-        FsTestCheck(Bool(FullScreen=0),"Esc left full screen")
-        FsTestCheck(Bool(r\left=FsTestRect\left And r\top=FsTestRect\top And r\right=FsTestRect\right And r\bottom=FsTestRect\bottom),"the windowed rectangle came back: "+Str(r\left)+","+Str(r\top)+" "+Str(r\right-r\left)+"x"+Str(r\bottom-r\top))
-        FsTestCheck(Bool(GetWindowLongPtr_(hwnd,#GWL_STYLE)=FsTestStyle),"the window's frame and style came back")
-        FsTestLog$+"fullscreen-test: "+Str(FsTestFails)+" failures"+#LF$
-        f=CreateFile(#PB_Any,FsTestFile$) : If f : WriteString(f,FsTestLog$) : CloseFile(f) : EndIf
-        Quit=1
-    EndSelect
-  CompilerElse
-    Quit=1
-  CompilerEndIf
+  Protected r.GLHostRect, m.GLHostRect, f.i, aspect.f, want.f
+  FsTestWait+1 : If FsTestWait<30 : ProcedureReturn : EndIf
+  FsTestWait=0 : FsTestStep+1
+  Select FsTestStep
+    Case 1
+      GL_WindowRect(Win,@FsTestRect) : FsTestW=PhysW : FsTestH=PhysH
+      FsTestLog$+"windowed: "+Str(FsTestRect\X)+","+Str(FsTestRect\Y)+" "+Str(FsTestRect\W)+"x"+Str(FsTestRect\H)+", canvas "+Str(PhysW)+"x"+Str(PhysH)+", scale "+StrF(Neon_UIScale,2)+#LF$
+      KeyPress(#PB_Shortcut_F11) : KeyHeld(Str(#PB_Shortcut_F11))=0
+    Case 2
+      GL_WindowRect(Win,@r) : GL_FullscreenRect(@m)
+      FsTestCheck(FullScreen,"F11 entered full screen")
+      FsTestCheck(Bool(r\X=m\X And r\Y=m\Y And r\W=m\W And r\H=m\H),"the window covers its monitor "+Str(m\W)+"x"+Str(m\H)+" (window "+Str(r\X)+","+Str(r\Y)+" "+Str(r\W)+"x"+Str(r\H)+")")
+      FsTestCheck(Bool(PhysW=m\W And PhysH=m\H),"the canvas is the whole monitor ("+Str(PhysW)+"x"+Str(PhysH)+")")
+      want=256*(8.0/7.0)/240 : If MachinePal : want=256*1.3862/240 : EndIf
+      aspect=FsGameW/FsGameH
+      FsTestCheck(Bool(Abs(aspect-want)<0.002),"the picture "+StrF(FsGameW,1)+"x"+StrF(FsGameH,1)+" has the NES aspect "+StrF(want,4)+" ("+StrF(aspect,4)+")")
+      FsTestCheck(Bool(Abs(FsGameX*2+FsGameW-PhysW)<=1 And Abs(FsGameY*2+FsGameH-PhysH)<=1),"the picture is centred at "+StrF(FsGameX,1)+","+StrF(FsGameY,1))
+      If FsTestShot$<>"" : SaveWindowShot(FsTestShot$) : EndIf
+      KeyPress(#PB_Shortcut_Escape) : KeyHeld(Str(#PB_Shortcut_Escape))=0
+    Case 3
+      GL_WindowRect(Win,@r)
+      FsTestCheck(Bool(FullScreen=0),"Esc left full screen")
+      FsTestCheck(Bool(r\X=FsTestRect\X And r\Y=FsTestRect\Y And r\W=FsTestRect\W And r\H=FsTestRect\H),"the windowed rectangle came back: "+Str(r\X)+","+Str(r\Y)+" "+Str(r\W)+"x"+Str(r\H))
+      FsTestCheck(Bool(PhysW=FsTestW And PhysH=FsTestH),"the canvas size came back: "+Str(PhysW)+"x"+Str(PhysH))
+      FsTestLog$+"fullscreen-test: "+Str(FsTestFails)+" failures"+#LF$
+      f=CreateFile(#PB_Any,FsTestFile$) : If f : WriteString(f,FsTestLog$) : CloseFile(f) : EndIf
+      Quit=1
+  EndSelect
 EndProcedure
 
 ; ---------------------------------------------------------------- one frame of the window
@@ -367,12 +338,7 @@ Procedure Tick()
     FpsSince=now
   EndIf
 
-  mx=WindowMouseX(Win) : my=WindowMouseY(Win)
-  CompilerIf #PB_Compiler_OS=#PB_OS_Windows
-    If GetActiveWindow()=Win : down=Bool(GetAsyncKeyState_(#VK_LBUTTON)&$8000) : EndIf
-  CompilerElse
-    down=Bool(GetGadgetAttribute(Gl,#PB_OpenGL_Buttons)&#PB_OpenGL_LeftButton)
-  CompilerEndIf
+  mx=WindowMouseX(Win) : my=WindowMouseY(Win) : down=MouseDown
   If SynthOn : mx=SynthX : my=SynthY : down=SynthDown : EndIf
   If mx<>FsMouseX Or my<>FsMouseY : FsMouseX=mx : FsMouseY=my : FsMouseMs=now : FsShowCursor(1) : EndIf
   If FullScreen And now-FsMouseMs>2000 : FsShowCursor(0) : EndIf
@@ -439,9 +405,11 @@ EndProcedure
 ; ---------------------------------------------------------------- main
 Procedure Main()
   Protected ev.i, rom$, et.i, k.i, runTests.i
+  GL_HostPrepare()    ; the engine's: before any window (Linux's X11 shield)
   Gl=OpenGLWindow("PureMetal NES",1280,800,#PB_Window_SystemMenu|#PB_Window_ScreenCentered|#PB_Window_SizeGadget|#PB_Window_MinimizeGadget|#PB_Window_MaximizeGadget)
   If Gl=0 : MessageRequester("PureMetal NES","OpenGL could not be started.") : End 1 : EndIf
   Win=Util_MainWindowID
+  GL_HostScaleRead(Gl)
   ; The frame is drawn 1:1, not through DrawRetroCRT: the pointer must not be bent by the CRT curve
   ; (the engine's default is on; GlUIChrome.pbi 5a)
   UI_UseCRT=#False
@@ -450,7 +418,6 @@ Procedure Main()
   DisInit() : CtlInit()
   ViewInit()
   SoundBegin()
-  PadCount=InitJoystick()
   For k=0 To CountProgramParameters()-1
     Select LCase(ProgramParameter(k))
       Case "--mute" : SoundMuted=1
@@ -479,18 +446,15 @@ Procedure Main()
         Case #PB_Event_CloseWindow : Quit=1
         Case #PB_Event_SizeWindow, #PB_Event_MaximizeWindow, #PB_Event_RestoreWindow, #PB_Event_MoveWindow : MeasureWindow()
         Case #PB_Event_Menu
-          If EventMenu()=1001 : KeyCode=#PB_Shortcut_Escape : DoAction(CtlAction(#PB_Shortcut_Escape)) : EndIf
+          If EventMenu()=1001 : KeyPress(#PB_Shortcut_Escape) : KeyHeld(Str(#PB_Shortcut_Escape))=0 : EndIf
         Case #PB_Event_Gadget
           If EventGadget()=Gl
             et=EventType()
             Select et
-              Case #PB_EventType_KeyDown
-                k=GetGadgetAttribute(Gl,#PB_OpenGL_Key) : KeyCode=k
-                If k>=0 And k<256 : KeyHeld(k)=1 : EndIf
-                DoAction(CtlAction(k))
-              Case #PB_EventType_KeyUp
-                k=GetGadgetAttribute(Gl,#PB_OpenGL_Key)
-                If k>=0 And k<256 : KeyHeld(k)=0 : EndIf
+              Case #PB_EventType_KeyDown : KeyPress(GetGadgetAttribute(Gl,#PB_OpenGL_Key))
+              Case #PB_EventType_KeyUp : KeyHeld(Str(GetGadgetAttribute(Gl,#PB_OpenGL_Key)))=0
+              Case #PB_EventType_LeftButtonDown : MouseDown=1
+              Case #PB_EventType_LeftButtonUp : MouseDown=0
               Case #PB_EventType_Input : KeyChar=GetGadgetAttribute(Gl,#PB_OpenGL_Input)
               Case #PB_EventType_MouseWheel : Wheel+GetGadgetAttribute(Gl,#PB_OpenGL_WheelDelta)
             EndSelect

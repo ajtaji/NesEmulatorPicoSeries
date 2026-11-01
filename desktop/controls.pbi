@@ -15,13 +15,13 @@ EnableExplicit
 Structure CtlBinding
   player.i      ; 1 or 2: an NES controller; 0: the window's own shortcut
   bit.i         ; NES button bit (A 1, B 2, Select 4, Start 8, Up 16, Down 32, Left 64, Right 128) or #CTL_ action
-  key.i         ; the key code KeyHeld() is indexed by (#PB_Shortcut_*, the Windows virtual-key code)
+  key.i         ; the key code KeyHeld() is keyed by (#PB_Shortcut_*: Windows virtual keys, Linux X keysyms)
   name$         ; the key as the pane shows it
 EndStructure
 Structure CtlPadBinding
   player.i      ; 1 or 2: gamepad 1 is player 1's, gamepad 2 player 2's
   bit.i         ; NES button bit
-  button.i      ; JoystickButton number; 0 = the stick / d-pad (the directions)
+  button.i      ; the controller's button number (1-32, GL_JoyRead); 0 = the stick / d-pad (the directions)
 EndStructure
 Global NewList CtlKeys.CtlBinding()
 Global NewList CtlPads.CtlPadBinding()
@@ -53,11 +53,11 @@ Procedure CtlInit()
 EndProcedure
 
 ; The NES buttons a player's keys hold now (keyboard only; the gamepad is ReadPad's).
-Procedure.i CtlKeysHeld(player.i, Array held.i(1))
+Procedure.i CtlKeysHeld(player.i, Map held.i())
   Protected m.i
   ForEach CtlKeys()
-    If CtlKeys()\player=player And CtlKeys()\key>=0 And CtlKeys()\key<=ArraySize(held())
-      If held(CtlKeys()\key) : m|CtlKeys()\bit : EndIf
+    If CtlKeys()\player=player And FindMapElement(held(),Str(CtlKeys()\key))
+      If held() : m|CtlKeys()\bit : EndIf
     EndIf
   Next
   ProcedureReturn m
@@ -136,7 +136,7 @@ DataSection
   Data.i 1, 1, #PB_Shortcut_X : Data.s "X"
   Data.i 1, 2, #PB_Shortcut_Z : Data.s "Z"
   Data.i 1, 4, #PB_Shortcut_Tab : Data.s "Tab"
-  Data.i 1, 4, $10 : Data.s "Shift"            ; VK_SHIFT: the Shift key alone (#PB_Shortcut_Shift is a modifier flag)
+  Data.i 1, 4, #GL_Key_Shift : Data.s "Shift"  ; the Shift key alone (#PB_Shortcut_Shift is a modifier flag)
   Data.i 1, 4, #PB_Shortcut_Space : Data.s "Space"
   Data.i 1, 8, #PB_Shortcut_Return : Data.s "Enter"
   Data.i 1, 16, #PB_Shortcut_Up : Data.s "Up"

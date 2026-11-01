@@ -1,7 +1,7 @@
 # PureMetal NES on the desktop
 
-The boards' NES emulator as a Windows program, written in PureBasic and drawn with the Neon Arcade
-Display Engine. It runs the same CPU, PPU and APU as the boards, with the same mappers. The game is
+The boards' NES emulator as a desktop program for Windows and Linux, from one source, written in PureBasic
+and drawn with the Neon Arcade Display Engine. Everything the OS provides comes through the engine. It runs the same CPU, PPU and APU as the boards, with the same mappers. The game is
 in the window at 60 Hz (50 Hz for PAL games), with sound, a keyboard or gamepad, a ROM picker, and
 debug panes: CPU, PPU, OAM, APU, mapper and ROMs.
 
@@ -26,9 +26,10 @@ look, not to guess.
 
 | File | What it is |
 |---|---|
-| `host.pbi` | the services Anvil's monitor gives the core on the Pi: timer, log, stubs |
+| `engine.pbi` | where the engine is found, and its files (every program here includes it) |
+| `host.pbi` | the services Anvil's monitor gives the core on the Pi: timer (the engine's `GL_Micros`), log, stubs |
 | `machine.pbi` | loading a `.nes` file through Anvil's own header checks and mapper database; PAL detection (`NesTiming`); the frame loop |
-| `sound.pbi` | Windows waveOut, 48 kHz, fed from the APU's sample ring |
+| `sound.pbi` | the sound card through the engine (`GL_AudioOpen` / `Next` / `Play`: waveOut on Windows, ALSA on Linux), 48 kHz, fed from the APU's sample ring |
 | `view.pbi` | the debug panes |
 | `nes_desktop.pb` | the window |
 | `nes_check.pb` | the console check: every test suite, then a game for N frames |
@@ -59,16 +60,30 @@ git clone https://github.com/ajtaji/NesEmulatorPicoSeries.git
 git clone https://github.com/ajtaji/Neon-Arcade-Dispay-Engine.git
 cd NesEmulatorPicoSeries
 & "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_desktop.pb /EXE desktop\PureMetalNES.exe /THREAD /DPIAWARE /OPTIMIZER
-& "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_check.pb /CONSOLE /OPTIMIZER /OUTPUT desktop\nes_check.exe
+& "C:\Program Files\PureBasic\Compilers\pbcompilerc.exe" desktop\nes_check.pb /CONSOLE /THREAD /OPTIMIZER /OUTPUT desktop\nes_check.exe
 ```
 
 Then run `desktop\PureMetalNES.exe`. It opens on the built-in demo, and **Open ROM...** picks a game.
-Or name the game: `desktop\PureMetalNES.exe demo\PureMetalDemo.nes`. `nes_check.exe` does not use the
-engine.
+Or name the game: `desktop\PureMetalNES.exe demo\PureMetalDemo.nes`. `nes_check.exe` opens no window,
+but takes its clock from the engine too.
 
-`nes_desktop.pb` looks for the engine at `../../Neon-Arcade-Dispay-Engine/`, relative to itself: the clone
-beside this repository. For an engine elsewhere, add `/CONSTANT GL_ENGINE_DIR$=<path>/` (the trailing slash
-matters).
+**Linux** (PureBasic 6.41 for Linux, x64): the same source and the same two clones side by side. Under WSL,
+copy both to the Linux disk first: on `/mnt/c` the Linux compiler includes an `XIncludeFile` twice. Then:
+
+```bash
+export PUREBASIC_HOME=~/purebasic
+cd NesEmulatorPicoSeries/desktop
+$PUREBASIC_HOME/compilers/pbcompilerc nes_desktop.pb -t -z -o PureMetalNES
+$PUREBASIC_HOME/compilers/pbcompilerc nes_check.pb -t -z -o nes_check
+./PureMetalNES ../demo/PureMetalDemo.nes
+```
+
+It needs GTK 3 on X11, GLX and ALSA at run time (the engine sets `GDK_BACKEND=x11`). The keys are the same;
+the gamepads are the kernel's `/dev/input/js0` and `js1`.
+
+`engine.pbi` looks for the engine at `../../Neon-Arcade-Dispay-Engine/`, relative to itself: the clone
+beside this repository. For an engine elsewhere, add `/CONSTANT GL_ENGINE_DIR$=<path>/` (Linux:
+`--constant GL_ENGINE_DIR$=<path>/`; the trailing slash matters).
 
 `PureMetalNES.exe [game.nes] [--mute] [--pal|--ntsc] [--cpu-tests] [--tab N] [--shot window.png --seconds S] [--pointer-test log.txt] [--fullscreen-test log.txt [--fullscreen-shot f.png]]`
 
@@ -109,9 +124,9 @@ so they cannot disagree.
 - `--pointer-test` checks that the mouse and the controls agree at the desktop's scale. It drives the chrome
   with pointer positions in the window's physical pixels, clicking just inside and just outside a button near
   the top (Pause), one near the bottom (Run tests) and the ROMs tab.
-- `--fullscreen-test` enters full screen with F11 and leaves with Esc, both sent to the window itself. It
-  checks the window covers its monitor, the picture's aspect and centring, and that the windowed rectangle
-  and frame come back. `--fullscreen-shot` saves the full-screen frame.
+- `--fullscreen-test` enters full screen with F11 and leaves with Esc, both pressed through the window's own
+  key handler. It checks the window covers its monitor, the picture's aspect and centring, and that the
+  windowed rectangle and the canvas size come back. `--fullscreen-shot` saves the full-screen frame.
 
 Both write their results to `log.txt` and close.
 
@@ -186,4 +201,9 @@ the time. `/OPTIMIZER` roughly doubles everything.
   log says so.
 - **Not in Anvil yet**, so not here: the Pico's core-0 DMC/APU shadow. (The second controller is
   patched in, as the Pico has it.)
-- Sound is Windows only for now. The gamepad code is in, but has not been tried with a real pad.
+- The gamepads (the engine's `GL_JoyRead`: the Windows joystick API, Linux `/dev/input/js*`) have not been
+  tried with a real pad. A pad's buttons are numbered as the OS numbers them, which can differ between
+  Windows and Linux for the same pad.
+- Linux: the console checks give the same counts and frames as Windows (checked under WSL). The window
+  itself has not been seen on Linux yet: under WSLg, PureBasic 6.41's OpenGL gadget cannot be created at
+  all (a GLX error, also in a program with no engine), and no other Linux desktop was at hand.
