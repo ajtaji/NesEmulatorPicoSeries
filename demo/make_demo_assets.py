@@ -10,7 +10,7 @@ song. Nothing here runs on the NES.
   Logo     "PUREMETAL" rendered from Lato Regular (fonts/source/lato, SIL OFL 1.1), thickened, outlined
            and shaded into NES 2-bit tiles: colour 1 outline, 2 body, 3 the light band along the top.
   Font     the demo's own bold 7x7 capitals, drawn in this file - the marquee (background) and the
-           sine text (sprites) use it.
+           sine text (sprites) use it. The words themselves are strings in demo.nes6502.
   Stars    three small sprite tiles.
   Tables   a 256-entry sine (0..255 around 128), the 2A03's note periods for NTSC (pulse and triangle).
   Song     an original tune: four channels (two pulse, triangle, noise), 16 rows a pattern.
@@ -26,7 +26,7 @@ OUT = HERE / 'demo_assets.nes6502'
 PREVIEW = HERE / 'preview'
 
 CLOCK = 1789773           # NTSC CPU clock
-FONT_CHARS = ' ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!-:/\'?'
+FONT_CHARS = ' ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!-:/\'?'   # demo.nes6502's TileOf() follows this order
 FONT_BASE = 0xC0          # background tile number of the font's first glyph ("space")
 
 
@@ -258,10 +258,6 @@ def data_lines(label, values, per=16, kind='a'):
     return lines
 
 
-def text_codes(s):
-    return [FONT_BASE + FONT_CHARS.index(c) for c in s.upper()]
-
-
 def generate(write_previews):
     logo_pic = render_logo()
     logo_tiles, logo_nt = tiles_from_picture(logo_pic, 1)
@@ -322,12 +318,6 @@ def generate(write_previews):
     out += data_lines('TriLo', tlo)
     out += data_lines('TriHi', thi)
     out += data_lines('Song', encode_song(rows))
-    scroll = ('      PUREMETAL FORGE PRESENTS A NES DEMO WRITTEN IN PUREMETAL - '
-              'NO HAND ASSEMBLY - COMPILED FOR THE 6502 AND RUNNING ON A RASPBERRY PI PICO. '
-              'GREETINGS TO EVERYONE AT THE FORUM!      ')
-    out += data_lines('ScrollText', text_codes(scroll) + [0])
-    out += data_lines('SubText', text_codes('MADE WITH PUREMETAL') + [0])
-    out += data_lines('WaveText', text_codes('PUREMETAL NES') + [0])
     out.append('EndDataSection')
     return '\n'.join(out) + '\n'
 
