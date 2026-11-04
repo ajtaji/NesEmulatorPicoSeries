@@ -10,6 +10,11 @@ a command line for scripts.
 original synthetic demo cartridge is bundled for checks. Load games you are
 entitled to use.
 
+> **Note:** the demo cartridge source (`demo/demo.nes6502`) uses the classic string library and
+> needs a PureMetal Forge compiler newer than the 2026-10-25 release (compiler a3098475d or later).
+> It can't be built with the current public release. The next release, which is being prepared,
+> will build it. The ready `demo/PureMetalDemo.nes` needs no compiler.
+
 **[Download firmware from Releases](https://github.com/ajtaji/NesEmulatorPicoSeries/releases/latest).**
 Choose the chip and display that match your hardware. All eight builds are
 available as release assets; validation is specific to each board/display pair.
