@@ -19,14 +19,14 @@ Bluetooth speaker with the speaker builds.
 
 | File | What it is |
 |---|---|
-| `demo.nes6502` | the program |
+| `demo.nes6502` | the program, and the words on the screen as strings |
 | `demo_assets.nes6502` | the tiles, tables and song, generated - do not edit |
 | `make_demo_assets.py` | makes `demo_assets.nes6502`: `py -3 demo/make_demo_assets.py` (needs Pillow); `--check` says whether the committed file is current |
 | `PureMetalDemo.nes` | the cartridge built from `demo.nes6502` |
 
 ## Building
 
-> Needs the PureMetal Forge compiler build of 2026-10-21 or later.
+> Needs the PureMetal Forge compiler build of 2026-11-04 or later (commit a3098475d).
 
 ```
 PureMetalForge.exe --compile demo/demo.nes6502 -o demo/PureMetalDemo.hex
@@ -34,9 +34,13 @@ PureMetalForge.exe --compile demo/demo.nes6502 -o demo/PureMetalDemo.hex
 
 The `.nes6502` extension selects PureMetal Forge's Nintendo Entertainment System board: code at
 $8000, the compiler writes the vectors and calls the program's `NMI()` at every vertical blank, and a
-`.nes` cartridge is written beside the `.hex`. **Building from source needs the PureMetal Forge compiler build of 2026-10-21 or later.** That
-build adds the NES board, interrupt handlers and DataSection tables on the 6502, and the 6502 code
-optimiser the demo needs to fit its frame; an earlier compiler refuses this source. The ready
+`.nes` cartridge is written beside the `.hex`. **Building from source needs the PureMetal Forge compiler build of 2026-11-04 or later.** The
+2026-10-21 build added the NES board, interrupt handlers and DataSection tables on the 6502, and the 6502
+code optimiser the demo needs to fit its frame. The marquee, the subtitle and the sine-wave words are
+strings in `demo.nes6502`, read a character at a time with `Asc(Mid())` and turned into font tiles by
+`TileOf()`. That needs the 2026-11-04 build (a3098475d): strings on the 6502 that fit in the NES's 2 KB of
+RAM, and `Asc(Mid())` of a text in quotes at the same cost at any position. An earlier compiler refuses
+this source, runs out of RAM, or drops frames once the marquee is halfway through its text. The ready
 `PureMetalDemo.nes` needs no compiler at all.
 
 ## Credits
