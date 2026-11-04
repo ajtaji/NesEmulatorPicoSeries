@@ -3,6 +3,11 @@
 A demo for the NES - and for this emulator - written entirely in PureMetal, with no inline
 assembly, and compiled for the 6502 by PureMetal Forge.
 
+> **Note:** this demo uses the classic string library and needs a PureMetal Forge compiler newer
+> than the 2026-10-25 release (compiler a3098475d or later). It can't be built with the current
+> public release. The next release, which is being prepared, will build it. The ready
+> `PureMetalDemo.nes` needs no compiler.
+
 - "PUREMETAL" in big shaded letters, fading in from black and shimmering through a band of hues
 - three layers of stars drifting at three speeds (sprites)
 - "PUREMETAL NES" in rainbow sprite letters riding a sine wave
