@@ -20,7 +20,9 @@ The first command writes **n64/build/nes.z64** with the original demo. Boot the 
 | Start / Select | Start / Z |
 | Player 1 / Player 2 | Controller port 1 / 2 |
 
-The port reads NTSC or PAL guest timing from the NES header. The VI uses the console's TV standard. The guest PPU renders 256 × 240 in a centered 320 × 240 double buffer. The AI receives 16-bit stereo at a nominal 48 kHz, with the mono NES mix on both channels.
+The port reads NTSC or PAL guest timing from the NES header. The VI uses the console's TV standard. The guest PPU renders 256 × 240 in a centered 320 × 240 framebuffer with three VI buffers. The AI receives 16-bit stereo at a nominal 48 kHz, with the mono NES mix on both channels.
+
+The VR4300 runs the Anvil 2A03 instruction handlers compiled by PureMetal Forge. A MIPS assembly fetch routine dispatches through a 256-entry opcode table. The CPU keeps A, X, Y and arithmetic flags in locals across each execution window. The bus helpers share the guest PC and remaining cycle budget. The VR4300 also advances the PPU and APU. VI scans the finished picture and AI plays the queued PCM.
 
 ## Cartridge support
 
@@ -44,4 +46,4 @@ python n64/verify.py --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudi
 
 The check builds the bundled demo, boots it with 4 MiB RDRAM, and stops the guest after frame 60. It compares all 61,440 pixels against the desktop emulator's frame at N64 color precision, checks both borders, verifies the guest CPU and APU counters, and checks captured stereo PCM. Normal builds keep running. The same frame comparison also passed for a PAL-header copy of the demo. Synthetic tests in the N64 emulator exercised MMC1 and MMC3 PRG and CHR switching, MMC5 PCM read side effects, mapper 234 read-triggered banking, VRC6 and Namco 163 expansion audio, and large MMC5 and mapper 228 ROMs. Two controller masks verified all eight serial bits, strobe behavior and an idle second port. Across 1,500 guest frames, the optimized APU produced byte-identical audio and the same final picture as the earlier implementation. Physical-console coverage so far is the bundled UxROM demo.
 
-The original release measured 4.35 guest fps in the N64 emulator over guest frames 60 through 120. Register caching, native tile spans and oscillator updates, and overlapping controller I/O with guest vblank raised that to 8.55 in the same interval. The frame-120 screenshot and captured PCM matched the reference run byte for byte. Pass `--benchmark` to the verification command to time the continuously running demo on the 4 MiB N64 model. These measurements use the modeled CP0 Count clock.
+The original release measured 4.35 guest fps in the N64 emulator over guest frames 60 through 120. Register caching, native tile spans and oscillator updates, overlapping controller I/O with guest vblank, and a third VI buffer raised that to 8.83 in the same interval. The frame-120 screenshot and captured PCM matched the reference run byte for byte. Pass `--benchmark` to the verification command to time the continuously running demo on the 4 MiB N64 model. These measurements use the modeled CP0 Count clock.

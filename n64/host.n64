@@ -86,7 +86,8 @@ EndProcedure
 Procedure.i HostBegin()
   LpmInterruptsInit()
   LpmJoybusInit()
-  If LpmDisplayInit(#HOST_WIDTH, #HOST_HEIGHT, 16, 2, #LPM_VI_RESAMPLE, #LPM_TV_AUTO) = 0
+  ; Three 153,600-byte buffers fit below the embedded cartridge at $80280000.
+  If LpmDisplayInit(#HOST_WIDTH, #HOST_HEIGHT, 16, 3, #LPM_VI_RESAMPLE, #LPM_TV_AUTO) = 0
     ProcedureReturn 0
   EndIf
   CompilerIf #GAME_PAL

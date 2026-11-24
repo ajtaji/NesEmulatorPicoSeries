@@ -16,14 +16,20 @@ HERE = Path(__file__).resolve().parent
 DEMO_FRAME = "796fb273d3b85dbb7e7096c6e9aa87ebfdeea4c90bd872afb8bfb2b173ce71c7"
 
 
+def run_headless(sdk, emulator, *args):
+    runner = sdk / "tools" / "emu_run.py"
+    command = [sys.executable, runner, emulator] if runner.is_file() else [emulator]
+    subprocess.run([*command, *args], check=True)
+
+
 def verify(sdk, emulator):
     with tempfile.TemporaryDirectory(prefix="nes-n64-check-") as temp:
         work = Path(temp)
         cart = work / "demo.z64"
         subprocess.run([sys.executable, HERE / "build.py", "--sdk", sdk, "--check-frame", "60",
                         "--out", cart], check=True)
-        subprocess.run([emulator, cart, "--ram", "4", "--test", work / "report.txt", "--frames", "1200",
-                        "--png", work / "frame.png", "--wav", work / "sound.wav"], check=True)
+        run_headless(sdk, emulator, cart, "--ram", "4", "--test", work / "report.txt", "--frames", "1200",
+                        "--png", work / "frame.png", "--wav", work / "sound.wav")
         report = (work / "report.txt").read_text()
         if ("NES CHECKPOINT 60" not in report or "NES FRAME 60 CPU 1786882 PCM 47922 PC 40156 " not in report
                 or "NES STOP" in report or "FIRST code " in report):
@@ -53,8 +59,8 @@ def benchmark(sdk, emulator):
         work = Path(temp)
         cart = work / "demo.z64"
         subprocess.run([sys.executable, HERE / "build.py", "--sdk", sdk, "--out", cart], check=True)
-        subprocess.run([emulator, cart, "--ram", "4", "--test", work / "report.txt",
-                        "--frames", "1500"], check=True)
+        run_headless(sdk, emulator, cart, "--ram", "4", "--test", work / "report.txt",
+                        "--frames", "1500")
         report = (work / "report.txt").read_text()
         ticks = []
         for checkpoint in ("60 CPU 1786882 PCM 47922 PC 40156", "120 CPU 3573714 PCM 95843 PC 40156"):
