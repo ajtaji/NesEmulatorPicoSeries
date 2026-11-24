@@ -5,6 +5,24 @@ Global Dim NesIndexBlock.i(1024)
 Global NesDisplayBlock.i, NesLayoutChanged.i, NesIndexTicket.i
 Global Dim NesIndexPalette.i(1920)
 Global Dim NesPaletteChange.a(240)
+Procedure NesWritePalette(index.i, value.i)
+  Protected color.i, i.i
+  If Pal(index)=value : ProcedureReturn : EndIf
+  Pal(index)=value
+  ; The shared pixel mixer uses entry zero for every backdrop alias.
+  If (index&3)=0 And index<>0 : ProcedureReturn : EndIf
+  If PpuMask&1 : value=value&$30 : EndIf
+  color=Rgb64((PpuMask>>5)*64+value)
+  color=(color&$FFC0)|((color&31)<<1)|1
+  If RgbPal(index)=color : ProcedureReturn : EndIf
+  If index=0
+    For i=0 To 28 Step 4 : RgbPal(i)=color : Next
+  Else
+    RgbPal(index)=color
+  EndIf
+  RgbPairsDirty=1
+EndProcedure
+
 ProcedureNaked PpuRgbLineRaw()
   ASM
     ; A completed row is immutable until the next guest frame. Write it
@@ -88,8 +106,29 @@ Procedure NesIndexCommands()
     y=y+h
   Wend
 EndProcedure
+; Until rendering has ever been enabled, every pixel has backdrop index zero.
+; Preserve the captured scanline colors, including palette-only raster effects.
+Procedure NesShowInitialBlank(fb.i)
+  Protected y.i, firstRow.i, color.i=PeekU(@NesIndexPalette(0)), nextColor.i
+  LpmRdpAttach(fb)
+  For y=1 To 239
+    If NesPaletteChange(y)
+      nextColor=PeekU(@NesIndexPalette(y*8))
+      If nextColor<>color
+        LpmRdpModeFill(color)
+        LpmRdpFillRect(32,firstRow,288,y)
+        firstRow=y : color=nextColor
+      EndIf
+    EndIf
+  Next
+  LpmRdpModeFill(color)
+  LpmRdpFillRect(32,firstRow,288,240)
+  LpmRdpDetachShow(fb) : NesIndexTicket=lpm_rdp_frames_sent
+EndProcedure
+
 Procedure NesIndexedShow(fb.i)
   Protected i.i, count.i
+  If NesBlankUntouched : NesShowInitialBlank(fb) : ProcedureReturn : EndIf
   LpmRdpAttach(fb)
   ; Pixel and palette data change in place. Only changing the scanlines
   ; that start a palette requires a different RDP command list.

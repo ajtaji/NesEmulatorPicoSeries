@@ -26,6 +26,13 @@ class StatusLoopTests(unittest.TestCase):
             self.assertEqual(self.rule(bytes.fromhex("2c 02 20 " + body)), 0)
         self.assertEqual(self.rule(bytes.fromhex("ad 02 20 50 fb")), 0)
 
+    def test_banked_wait_may_only_follow_relative_control_flow_inside_the_slot(self):
+        page = bytearray(8192)
+        page[:6] = bytes.fromhex("ad 02 20 4c 00 80")
+        self.assertEqual(poll_rule(page, 0, 0, relocatable=True), 0)
+        page[-6:] = bytes.fromhex("ad 02 20 10 01 ea")
+        self.assertEqual(poll_rule(page, 8186, 0, relocatable=True), 0)
+
     def test_cmp_carry_and_retired_count(self):
         code = bytes.fromhex("ad 02 20 c9 40 90 f9")
         rule = self.rule(code, 32)

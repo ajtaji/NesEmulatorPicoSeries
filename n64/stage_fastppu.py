@@ -68,6 +68,15 @@ def replace_procedure(source: str, name: str, replacement: str) -> str:
     return result
 
 
+def native_chr_spread() -> str:
+    # Reverse each bitplane and spread its bits into the even output bits.
+    values = [sum(((value >> (7 - pixel)) & 1) << (2 * pixel) for pixel in range(8))
+              for value in range(256)]
+    data = "\n".join("  Data.u " + ",".join(f"${value:04X}" for value in values[i:i+16])
+                     for i in range(0, len(values), 16))
+    return "\nDataSection\nNesChrBitSpread:\n" + data + "\nEndDataSection\n"
+
+
 def native_pixel_spread() -> str:
     # Each decoded byte contains four 2-bit pixels, leftmost in bits 1:0.
     # Put that pixel in the high byte of the word for a big-endian store.
@@ -89,7 +98,7 @@ def stage_sprite_rows(source: str) -> str:
     head = source[proc:draw].replace(declarations, "j.i, flags.i, clip.i, spanFlags.i")
     # Keep OAM selection and address calculation in the shared evaluator.
     # The native path loads each selected pattern row once for all eight pixels.
-    return source[:proc] + head + """  PpuClearSprites()
+    return source[:proc] + head + """  If NesBlankUntouched=0 : PpuClearSprites() : EndIf
   If PpuMask&$10
     If (PpuMask&4)=0 : clip=8 : EndIf
     For i=SprCount-1 To 0 Step -1
@@ -104,6 +113,20 @@ def stage_sprite_rows(source: str) -> str:
 
 
 def stage_fastppu(name: str, source: str) -> str:
+    if name == "ppu_bus_write":
+        # Write notices and the address increment remain on the caller's path.
+        source = source.replace("        PokeA(Chr+addr,value) : PpuDecode(addr)", """        CompilerIf #NES_BG_EXPANDED
+          If PeekA(Chr+addr)=value : ProcedureReturn : EndIf
+        CompilerEndIf
+        PokeA(Chr+addr,value) : PpuDecode(addr)""")
+        source = source.replace("    Nt(ntAddress)=value", """    CompilerIf #NES_BG_EXPANDED
+      If Nt(ntAddress)=value : ProcedureReturn : EndIf
+    CompilerEndIf
+    Nt(ntAddress)=value""")
+        palette = "    Pal(PpuPalAddr(addr))=value&63\n    PpuColours()"
+        if source.count(palette) != 1:
+            raise ValueError("PPU palette write changed")
+        return source.replace(palette, "    NesWritePalette(PpuPalAddr(addr),value&63)")
     if name == "worker":
         copy = """    OamCacheDirty=1
     For i=0 To 255
@@ -121,11 +144,7 @@ def stage_fastppu(name: str, source: str) -> str:
     EndIf""")
     if name != "ppu":
         return source
-    decode = "  PokeU(Pattern+dest,bits)"
-    if source.count(decode) != 1:
-        raise ValueError("PPU CHR decode update changed")
-    source = source.replace(decode, decode + "\n  CompilerIf #NES_BG_EXPANDED\n"
-                            "    NesExpandBg(dest,bits)\n  CompilerEndIf")
+    source = replace_procedure(source, "PpuDecode", "") + native_chr_spread()
     # The indexed framebuffer and RDP palette replace Anvil's RGB row cache.
     # Its old buffers otherwise occupy part of the VR4300 stack on large MMC5 carts.
     source = replace_procedure(source, "PpuBuildRgbPairs", "")
@@ -135,6 +154,12 @@ def stage_fastppu(name: str, source: str) -> str:
         if source.count(declaration) != 1:
             raise ValueError(f"unexpected PPU video storage: {declaration}")
         source = source.replace(declaration + "\n", "")
+    mask = "    PpuMask=value : PpuColours()"
+    if source.count(mask) != 1:
+        raise ValueError("PPUMASK write changed")
+    source = source.replace(mask, "    previous=PpuMask : PpuMask=value\n"
+                            "    If value&$18 : NesBlankUntouched=0 : EndIf\n"
+                            "    If (previous!value)&$E1 : PpuColours() : EndIf")
     # Sprite priority is resolved before that row's indexed pixels go to RDP.
     source = source.replace("LinePixels.a(256)", "LinePixels.a(61440)")
     # The shared lookup is RGB565; VI and the texture palette use RGBA5551.
@@ -159,7 +184,11 @@ EndProcedure""")
       If startDot<256
         If startDot=0
           PpuBeginLine()
-          PpuSprites()
+          CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9
+            PpuSpritesRaw()
+          CompilerElse
+            PpuSpritesReference()
+          CompilerEndIf
         EndIf
         step=endDot
         If step>256 : step=256 : EndIf

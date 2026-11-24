@@ -6,7 +6,17 @@ same read. The host applies it only inside a device-proven stable interval.
 """
 
 
-def poll_rule(view, start, status):
+def poll_bank_size(mapper):
+    # MMC1 and CNROM expose a copied CPU window. A wait must lie wholly
+    # within a single physical 8 KiB slot, including its operand and branch.
+    if mapper in (1, 3):
+        return 8192
+    if mapper in (0, 2, 66):
+        return 32768
+    return 0
+
+
+def poll_rule(view, start, status, *, relocatable=False):
     base = 0x8000
     pc = base + start + 3
     bit_test = view[start] == 0x2c
@@ -15,7 +25,7 @@ def poll_rule(view, start, status):
     compare = None
     cycles, retired = 4, 1  # final LDA of the same status register
     visited = set()
-    while base <= pc <= 0xfffd and pc not in visited and retired < 32:
+    while base <= pc <= base + len(view) - 3 and pc not in visited and retired < 32:
         if pc == base + start:
             carry = 0 if compare is None else ((compare + 256) << 16) | (1 << 25)
             return cycles | (retired << 8) | carry
@@ -56,7 +66,7 @@ def poll_rule(view, start, status):
                 target = pc + (value if value < 128 else value - 256)
                 cycles += 1 + ((target >> 8) != (pc >> 8))
                 pc = target
-        elif op == 0x4c:
+        elif op == 0x4c and not relocatable:
             pc = value | view[i + 2] << 8
             cycles += 3
         elif op == 0xea:
@@ -70,13 +80,14 @@ def poll_rule(view, start, status):
 
 def poll_source(program, mapper):
     tables, sites = {}, []
-    if mapper in (0, 2, 66):
-        for bank in range(0, len(program), 32768):
-            view = program[bank:bank + 32768]
+    span = poll_bank_size(mapper)
+    if span:
+        for bank in range(0, len(program), span):
+            view = program[bank:bank + span]
             for i in range(len(view) - 3):
                 if view[i] not in (0xad, 0x2c) or view[i + 1] & 7 != 2 or not 0x20 <= view[i + 2] < 0x40:
                     continue
-                rules = tuple(poll_rule(view, i, value) for value in range(256))
+                rules = tuple(poll_rule(view, i, value, relocatable=span == 8192) for value in range(256))
                 if any(rules):
                     table = tables.setdefault(rules, len(tables))
                     sites.append((bank + i + 3, table))

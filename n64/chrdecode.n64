@@ -1,0 +1,38 @@
+; Interleave the two NES pattern bitplanes into one little-pixel-order row.
+ProcedureNaked PpuDecode(row.i)
+  ASM
+    andi a0, a0, 0x1FF7
+    la t0, global_neschrwindow
+    lw t0, 4(t0)
+    addu t0, t0, a0
+    lbu a1, 0(t0)
+    lbu t1, 8(t0)
+    la t0, NesChrBitSpread
+    sll a1, a1, 1
+    sll t1, t1, 1
+    addu a1, a1, t0
+    addu t1, t1, t0
+    lhu a1, 0(a1)
+    lhu t1, 0(t1)
+    sll t1, t1, 1
+    or a1, a1, t1
+    andi t1, a0, 7
+    andi a0, a0, 0x1FF0
+    sll t1, t1, 1
+    or a0, a0, t1
+    la t0, global_pattern
+    lw t0, 4(t0)
+    addu t0, t0, a0
+  EndASM
+  CompilerIf #NES_BG_EXPANDED
+    ASM
+      j nesexpandbg
+      sh a1, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+      jr ra
+      sh a1, 0(t0)
+    EndASM
+  CompilerEndIf
+EndProcedure

@@ -1,5 +1,9 @@
 """Find polling pairs in immutable 32 KiB PRG views."""
 
+from itertools import combinations
+
+from stage_poll import poll_bank_size
+
 # Actions: LDA, LDX, LDY, CMP, CPX, CPY, BIT. Addressing modes:
 # zero page, zero page indexed by X/Y, absolute, absolute indexed by X/Y.
 READS = {
@@ -11,7 +15,6 @@ READS = {
     0xC4: (6, 0), 0xCC: (6, 3),
     0x24: (7, 0), 0x2C: (7, 3),
 }
-VIEW_SIZE = 32768
 WINDOW_CYCLES = 128
 
 
@@ -31,14 +34,46 @@ def phase_period(read_cycles, branch_cycles, at_branch):
     raise ValueError("128-cycle polling window has no repeating phase")
 
 
+def wait_lookup(sites):
+    # Use a bounded, collision-free hash when the sparse PRG sites fit in
+    # a small table. Verify the full view-relative key on every lookup.
+    for size in (64, 128, 256, 512):
+        if len(sites) > size // 2:
+            continue
+        mask = size - 1
+        for first, second in combinations(range(1, 21), 2):
+            indices = {(key ^ (key >> first) ^ (key >> second)) & mask: key for key in sites}
+            if len(indices) != len(sites):
+                continue
+            lines = [
+                "Procedure.i NesRamWaitRule(site.i)",
+                "  Protected row.i",
+                f"  row=?NesRamWaitHash+(((site!(site>>{first})!(site>>{second}))&{mask})<<3)",
+                "  If PeekL(row)=site : ProcedureReturn PeekL(row+4) : EndIf",
+                "  ProcedureReturn 0",
+                "EndProcedure",
+                "DataSection",
+                "NesRamWaitHash:",
+            ]
+            for index in range(size):
+                key = indices.get(index, -1)
+                lines.append(f"  Data.l {key},{sites.get(key,0)}")
+            lines.append("EndDataSection")
+            return lines
+    lines = ["Procedure.i NesRamWaitRule(site.i)", "  Select site"]
+    lines += [f"    Case {offset} : ProcedureReturn {rule}" for offset, rule in sorted(sites.items())]
+    return lines + ["  EndSelect", "  ProcedureReturn 0", "EndProcedure"]
+
+
 def ram_wait_source(program, mapper):
     sites = {}
-    if mapper not in (0, 2, 66):
+    span = poll_bank_size(mapper)
+    if not span:
         return "", False
-    if len(program) % VIEW_SIZE:
-        raise ValueError("RAM polling requires full 32 KiB PRG views")
-    for bank in range(0, len(program), VIEW_SIZE):
-        view = program[bank:bank + VIEW_SIZE]
+    if len(program) % span:
+        raise ValueError("RAM polling requires complete PRG bank windows")
+    for bank in range(0, len(program), span):
+        view = program[bank:bank + span]
         for start, opcode in enumerate(view):
             read = READS.get(opcode)
             if read is None:
@@ -46,7 +81,7 @@ def ram_wait_source(program, mapper):
             action, mode = read
             length = 2 if mode < 3 else 3
             branch = start + length
-            if branch + 1 >= VIEW_SIZE:
+            if branch + 1 >= span:
                 continue
             if (view[branch] & 31) != 0x10 or view[branch + 1] != 256 - length - 2:
                 continue
@@ -64,9 +99,7 @@ def ram_wait_source(program, mapper):
             sites[bank + branch] = rule | (1 << 26)
     if not sites:
         return "", False
-    lines = ["Procedure.i NesRamWaitRule(site.i)", "  Select site"]
-    lines += [f"    Case {offset} : ProcedureReturn {rule}" for offset, rule in sorted(sites.items())]
-    lines += ["  EndSelect", "  ProcedureReturn 0", "EndProcedure"]
+    lines = wait_lookup(sites)
     lines += ["DataSection", "NesRamWaitPeriods:"]
     for read_cycles in range(3, 6):
         for branch_cycles in range(3, 5):

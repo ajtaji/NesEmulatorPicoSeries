@@ -33,6 +33,13 @@ ProcedureNaked NesBlankRenderTo(endDot.i)
     or t3, t3, a4
     sd t3, 0(t2)
 nes_blank_clear:
+    la t1, global_nesblankuntouched
+    ld t1, 0(t1)
+    beq t1, zero, nes_blank_write
+    nop
+    jr ra
+    sd a0, 0(t0)
+nes_blank_write:
     la t1, global_neslinerow
     lw t1, 4(t1)
     addu t2, t1, a1

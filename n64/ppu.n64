@@ -1,9 +1,13 @@
 ; Native pixel output for the shared NES PPU.
 Global NesLineRow.i
+; The zero-initialized pixel buffers need no clearing until either layer draws.
+Global NesBlankUntouched.i=1
 Declare PpuN64StoreSpan(dst.i, first.i, second.i)
 Declare PpuRgbLineRaw()
+Declare NesWritePalette(index.i,value.i)
 Declare PpuRender8Reference()
 XIncludeFile "bgcache.n64"
+XIncludeFile "chrdecode.n64"
 XIncludeFile "blank.n64"
 XIncludeFile "visible.n64"
 XIncludeFile "../anvil/ppu.pmi"

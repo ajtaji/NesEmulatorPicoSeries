@@ -35,6 +35,15 @@ Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
 XIncludeFile "../anvil/cpu2a03.pmi"
 XIncludeFile "../anvil/mapper_state.pmi"
+CompilerIf #NES_BANKED_WAITS
+  Macro NesPollOffset(addr)
+    (MapPrgSlots(((addr)-$8000)>>13)*8192+((addr)&8191))
+  EndMacro
+CompilerElse
+  Macro NesPollOffset(addr)
+    (PrgBase-CartPrg+(addr)-$8000)
+  EndMacro
+CompilerEndIf
 XIncludeFile "../anvil/bridge.pmi"
 XIncludeFile "ppu.n64"
 XIncludeFile "../anvil/mappers.pmi"
@@ -96,7 +105,7 @@ Procedure.i NesCurrentPoll(acc.i)
     ProcedureReturn 0
   EndIf
   If FI=0 And (WorkerIrq|MapIrq)<>0 : ProcedureReturn 0 : EndIf
-  ProcedureReturn NesPollRule(PrgBase-CartPrg+PC-$8000,acc)
+  ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
 EndProcedure
 
 Procedure.i LoadGame()
@@ -147,7 +156,7 @@ Procedure RunGame()
     CompilerIf #NES_HAS_RAM_WAITS
       NesRamCpuWindow(128,1)
     CompilerElse
-      CompilerIf #GAME_MAPPER=0 Or #GAME_MAPPER=2 Or #GAME_MAPPER=66
+      CompilerIf #NES_PREDICTABLE_IRQ
         CpuRun(128)
       CompilerElse
         CpuRun(MapperCpuBudget())
@@ -155,7 +164,7 @@ Procedure RunGame()
     CompilerEndIf
     If CpuCycles>NesStatusHorizon And CpuCycles>NesCpuHorizon
       WorkerAdvance(CpuCycles)
-      CompilerIf #GAME_MAPPER=0 Or #GAME_MAPPER=2 Or #GAME_MAPPER=66
+      CompilerIf #NES_PREDICTABLE_IRQ
         NesSetCpuHorizon(CpuCycles)
       CompilerEndIf
     EndIf

@@ -19,7 +19,8 @@ from stage_audio import stage_audio, stage_oscillators
 from stage_mapper import stage_mapper
 from stage_fastppu import stage_fastppu
 from stage_sync import stage_sync
-from stage_poll import poll_source, stage_poll
+from stage_input import stage_input
+from stage_poll import poll_bank_size, poll_source, stage_poll
 from stage_ramwait import ram_wait_source
 from stage_expansion import EXPANSION_MAPPERS, expansion_source, stage_expansion
 from stage_storage import check_storage_layout, stage_storage
@@ -49,6 +50,8 @@ def build(args, *, controller_trace=()):
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper)
     settings = {
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
+        "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),
+        "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(cart.mapper))),
         "NES_HAS_POLLS": int(has_polls),
         "NES_HAS_RAM_WAITS": int(has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
@@ -80,7 +83,7 @@ def build(args, *, controller_trace=()):
                         raise ValueError("controller bus source changed")
                     code = code.replace(old, new)
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
-                code = stage_bus(code, cart.mapper)
+                code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper)
             code = stage_sync(name, code)
             # Board identity is fixed for the lifetime of this cartridge.
