@@ -1,0 +1,92 @@
+; Blank background spans still clock horizontal scroll whenever either layer
+; is enabled. Sprites fetched at dot zero remain in effect until line end.
+ProcedureNaked NesBlankRenderTo(endDot.i)
+  ASM
+    la t0, global_ppudot
+    ld t1, 0(t0)
+    addiu t1, t1, 7
+    andi a1, t1, 0xfff8
+    addiu t1, a0, 7
+    andi a2, t1, 0xfff8
+    subu t1, a2, a1
+    la t2, global_ppupixels
+    ld t3, 0(t2)
+    daddu t3, t3, t1
+    sd t3, 0(t2)
+    la t2, global_ppumask
+    ld t2, 0(t2)
+    andi t2, t2, 24
+    beq t2, zero, nes_blank_clear
+    srl t1, t1, 3
+    la t2, global_ppuv
+    ld t3, 0(t2)
+    andi a3, t3, 31
+    srl a4, t3, 5
+    andi a4, a4, 32
+    or a3, a3, a4
+    addu a3, a3, t1
+    andi a4, a3, 32
+    sll a4, a4, 5
+    andi a3, a3, 31
+    andi t3, t3, 0x7be0
+    or t3, t3, a3
+    or t3, t3, a4
+    sd t3, 0(t2)
+nes_blank_clear:
+    la t1, global_neslinerow
+    lw t1, 4(t1)
+    addu t2, t1, a1
+    addu t1, t1, a2
+nes_blank_word:
+    sd zero, 0(t2)
+    addiu t2, t2, 8
+    bne t2, t1, nes_blank_word
+    nop
+    la a3, global_spritespan
+    ld t1, 0(a3)
+    ld t2, 8(a3)
+    ld t3, 16(a3)
+    or t1, t1, t2
+    ld t2, 24(a3)
+    or t1, t1, t3
+    or t1, t1, t2
+    bne t1, zero, nes_blank_sprites
+    nop
+    jr ra
+    sd a0, 0(t0)
+nes_blank_sprites:
+    addiu sp, sp, -40
+    sd ra, 32(sp)
+    sd s0, 24(sp)
+    sd s1, 16(sp)
+    sd s2, 8(sp)
+    sd s3, 0(sp)
+    or s0, a0, zero
+    or s1, a1, zero
+    or s2, a3, zero
+    or s3, t0, zero
+nes_blank_sprite:
+    srl t1, s1, 3
+    addu t1, t1, s2
+    lbu t1, 0(t1)
+    beq t1, zero, nes_blank_next
+    nop
+    sd s1, 0(s3)
+    la t2, global_woff
+    jal ppuoverlay8
+    sd s1, 0(t2)
+nes_blank_next:
+    addiu s1, s1, 8
+    sltu t1, s1, s0
+    bne t1, zero, nes_blank_sprite
+    nop
+    sd s0, 0(s3)
+    ld s3, 0(sp)
+    ld s2, 8(sp)
+    ld s1, 16(sp)
+    ld s0, 24(sp)
+    ld ra, 32(sp)
+    jr ra
+    addiu sp, sp, 40
+  EndASM
+EndProcedure

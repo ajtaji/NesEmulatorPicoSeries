@@ -1,6 +1,6 @@
 ; Advance within the visible 256 dots. An eight-dot fetch begins exactly when
 ; its first dot is consumed, including when the CPU splits a span with MMIO.
-ProcedureNaked NesRenderTo(endDot.i)
+ProcedureNaked NesRenderToRef(endDot.i)
   ASM
     addiu sp, sp, -32
     sd ra, 24(sp)
@@ -33,3 +33,174 @@ nes_render_to_done:
     addiu sp, sp, 32
   EndASM
 EndProcedure
+
+CompilerIf #NES_BG_EXPANDED
+  XIncludeFile "tiles.n64"
+CompilerElse
+CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9
+ProcedureNaked NesRenderTo(endDot.i)
+  ASM
+    j nesrendertoref
+    nop
+  EndASM
+EndProcedure
+CompilerElse
+ProcedureNaked NesRenderTo(endDot.i)
+  ; No guest event runs during this interval. Keep the scroll address and
+  ; pattern-row base in registers and write back the final dot and address.
+  ASM
+    la t0, global_ppudot
+    ld t1, 0(t0)
+    addiu t1, t1, 7
+    andi t1, t1, 0xFFF8
+    sltu t2, t1, a0
+    beq t2, zero, nes_batch_empty
+    addiu t2, t1, 8
+    sltu t2, t2, a0
+    beq t2, zero, nes_batch_one
+    nop
+    la t2, global_ppumask
+    ld t2, 0(t2)
+    andi t3, t2, 8
+    beq t3, zero, nes_batch_ref
+    nop
+
+    addiu sp, sp, -80
+    sd ra, 72(sp)
+    sd s0, 64(sp)
+    sd s1, 56(sp)
+    sd s2, 48(sp)
+    sd s3, 40(sp)
+    sd s4, 32(sp)
+    sd s5, 24(sp)
+    sd s6, 16(sp)
+    sd s7, 8(sp)
+    or s0, a0, zero
+    or s2, t1, zero
+    or s4, t2, zero
+    la s1, global_neslinerow
+    lw s1, 4(s1)
+    la s6, global_nt
+    la s7, NesBgPixelSpread
+    la t0, global_ppuv
+    ld s3, 0(t0)
+    la t0, global_ppuctrl
+    ld t0, 0(t0)
+    andi t0, t0, 16
+    sll t0, t0, 8
+    srl t1, s3, 11
+    andi t1, t1, 14
+    or t0, t0, t1
+    la t1, global_pattern
+    lw t1, 4(t1)
+    daddu s5, t1, t0
+    or a4, s5, zero
+    or a7, s6, zero
+    or t9, s7, zero
+    la t0, global_ppupixels
+    ld t1, 0(t0)
+    addiu t2, s0, 7
+    andi t2, t2, 0xFFF8
+    subu t2, t2, s2
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    ; Prime a lookahead tile only when the scroll crosses tile boundaries.
+    la t0, global_ppufinex
+    ld t1, 0(t0)
+    beq t1, zero, nes_batch_span
+    sll t1, t1, 11
+    or s4, s4, t1
+    jal nespackedbgtile
+    or t0, s3, zero
+    or a6, a5, zero
+nes_batch_span:
+    andi t1, s3, 31
+    addiu t2, zero, 31
+    addiu a0, s3, 1
+    bne t1, t2, nes_batch_step
+    or t0, s3, zero
+    andi a0, s3, 0x7FE0
+    xori a0, a0, 0x400
+nes_batch_step:
+    srl a3, s4, 8
+    beq a3, zero, nes_batch_fetch
+    or s3, a0, zero
+    or t0, s3, zero
+nes_batch_fetch:
+    jal nespackedbgtile
+    nop
+    beq a3, zero, nes_batch_store
+    subu t0, zero, a3
+    dsllv a1, a6, a3
+    dsrlv a2, a5, t0
+    or a6, a5, zero
+    or a5, a1, a2
+nes_batch_store:
+    bne s2, zero, nes_batch_bg_ready
+    andi t0, s4, 2
+    bne t0, zero, nes_batch_bg_ready
+    nop
+    or a5, zero, zero
+nes_batch_bg_ready:
+    daddu t0, s1, s2
+    sd a5, 0(t0)
+    la t0, global_spritespan
+    srl t1, s2, 3
+    daddu t0, t0, t1
+    lbu t0, 0(t0)
+    beq t0, zero, nes_batch_next
+    nop
+    ; Use the exact span dot for sprite priority and the sprite-zero hit.
+    la t0, global_ppudot
+    sd s2, 0(t0)
+    la t0, global_woff
+    sd s2, 0(t0)
+    jal ppuoverlay8
+    sd a6, 0(sp)
+    ld a6, 0(sp)
+    or a4, s5, zero
+    or a7, s6, zero
+    or t9, s7, zero
+nes_batch_next:
+    addiu s2, s2, 8
+    sltu t0, s2, s0
+    bne t0, zero, nes_batch_span
+    nop
+    la t0, global_ppuv
+    sd s3, 0(t0)
+    la t0, global_ppudot
+    sd s0, 0(t0)
+    ld s7, 8(sp)
+    ld s6, 16(sp)
+    ld s5, 24(sp)
+    ld s4, 32(sp)
+    ld s3, 40(sp)
+    ld s2, 48(sp)
+    ld s1, 56(sp)
+    ld s0, 64(sp)
+    ld ra, 72(sp)
+    jr ra
+    addiu sp, sp, 80
+nes_batch_empty:
+    jr ra
+    sd a0, 0(t0)
+nes_batch_one:
+    addiu sp, sp, -16
+    sd ra, 8(sp)
+    sd a0, 0(sp)
+    jal ppurender8reference
+    sd t1, 0(t0)
+    ld a0, 0(sp)
+    ld ra, 8(sp)
+    la t0, global_ppudot
+    sd a0, 0(t0)
+    jr ra
+    addiu sp, sp, 16
+nes_batch_ref:
+    j nesblankrenderto
+    nop
+
+  EndASM
+EndProcedure
+CompilerEndIf
+CompilerEndIf

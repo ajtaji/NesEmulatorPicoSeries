@@ -1,16 +1,19 @@
 ; Native pixel output for the shared NES PPU.
-Global PpuFrameStride.i=#NES_VIDEO_WIDTH*2
+Global NesLineRow.i
 Declare PpuN64StoreSpan(dst.i, first.i, second.i)
 Declare PpuRgbLineRaw()
 Declare PpuRender8Reference()
+XIncludeFile "bgcache.n64"
+XIncludeFile "blank.n64"
 XIncludeFile "visible.n64"
 XIncludeFile "../anvil/ppu.pmi"
+XIncludeFile "sprites.n64"
 
 CompilerIf #GAME_MAPPER<>5 And #GAME_MAPPER<>9
 ProcedureNaked PpuRender8Reference()
   ; a0 = dot, a1 = mask, a2/a3 = current/next scroll address,
-  ; a4 = fine scroll in bits, a5 = packed row. The local tile fetch leaves
-  ; a0-a4 and a6-a7 intact. MMC5 and MMC2 use the shared callback path.
+  ; a4 = pattern-row base, a5 = packed row. MMC5 and MMC2 use
+  ; the shared callback path.
   ASM
     la t0, global_ppudot
     ld a0, 0(t0)
@@ -37,24 +40,38 @@ nes_span_inc_x:
     beq t1, zero, nes_span_store
     nop
 nes_span_fetch:
-    la t0, global_ppufinex
-    ld a4, 0(t0)
-    sll a4, a4, 3
+    la t0, global_ppuctrl
+    ld t0, 0(t0)
+    andi t0, t0, 16
+    sll t0, t0, 8
+    srl t1, a2, 11
+    andi t1, t1, 14
+    or t0, t0, t1
+    la t1, global_pattern
+    lw t1, 4(t1)
+    daddu a4, t1, t0
+    la a7, global_nt
+    la t9, NesBgPixelSpread
     daddu a6, ra, zero
-    bgezal zero, nes_span_tile
+    jal nespackedbgtile
     daddu t0, a2, zero
-    beq a4, zero, nes_span_store
+    la t0, global_ppufinex
+    ld t0, 0(t0)
+    beq t0, zero, nes_span_store
     daddu ra, a6, zero
-    bgezal zero, nes_span_tile
+    sll a1, t0, 3
+    or a2, a5, zero
+    jal nespackedbgtile
     daddu t0, a3, zero
     ; Pull the first tile left and the second tile's leading pixels right.
-    subu t1, zero, a4
-    dsllv a7, a7, a4
+    subu t1, zero, a1
+    dsllv a2, a2, a1
     dsrlv a5, a5, t1
-    or a5, a5, a7
+    or a5, a5, a2
     daddu ra, a6, zero
 nes_span_store:
-    la t0, global_linepixels
+    la t0, global_neslinerow
+    lw t0, 4(t0)
     daddu t0, t0, a0
     sd a5, 0(t0)
     la t0, global_ppupixels
@@ -74,12 +91,23 @@ nes_span_done:
     jr ra
     nop
 
-nes_span_tile:
-    ; Nametable byte and the attribute quadrant selected by the scroll address.
-    la t1, global_nt
+  EndASM
+EndProcedure
+
+ProcedureNaked NesPackedBgTile()
+  ; Shared native tile fetch. t0 holds the scroll address, a4 the pattern
+  ; row base, a7 the nametable base and t9 the pixel-spread table. Returns
+  ; eight palette indices in a5 and preserves the other argument registers.
+  ASM
+    ; Fetch the decoded pattern first. Every palette aliases color zero to
+    ; the backdrop, so an empty row needs no attribute lookup.
     andi t2, t0, 0xFFF
-    daddu t2, t1, t2
+    daddu t2, a7, t2
     lbu t2, 0(t2)
+    sll t2, t2, 4
+    daddu t2, a4, t2
+    lhu a5, 0(t2)
+    beq a5, zero, nes_blank_bg_row
     srl t3, t0, 4
     srl t8, t0, 2
     andi v0, t0, 0xC00
@@ -88,7 +116,7 @@ nes_span_tile:
     andi t8, t8, 7
     or v0, v0, t8
     ori v0, v0, 0x3C0
-    daddu t1, t1, v0
+    daddu t1, a7, v0
     lbu v0, 0(t1)
     andi t3, t3, 4
     andi t8, t0, 2
@@ -102,34 +130,22 @@ nes_span_tile:
     or v0, v0, v1
     ; The decoded halfword holds the first pixel in its low bits.
     ; Expand it to two four-pixel words in framebuffer byte order.
-    la t1, global_ppuctrl
-    ld t1, 0(t1)
-    andi t1, t1, 16
-    sll t1, t1, 8
-    sll t2, t2, 4
-    srl t0, t0, 11
-    andi t0, t0, 14
-    or t2, t2, t1
-    or t2, t2, t0
-    la t0, global_pattern
-    lw t0, 4(t0)
-    daddu t0, t0, t2
-    lhu t0, 0(t0)
-    la t1, NesBgPixelSpread
-    andi t2, t0, 255
-    srl t3, t0, 8
+    andi t2, a5, 255
+    srl t3, a5, 8
     sll t2, t2, 2
     sll t3, t3, 2
-    daddu t2, t1, t2
-    daddu t3, t1, t3
+    daddu t2, t9, t2
+    daddu t3, t9, t3
     lw t2, 0(t2)
     lw t3, 0(t3)
     or t2, t2, v0
     or t3, t3, v0
     dsll32 t2, t2, 0
-    daddu a7, a5, zero
     jr ra
     or a5, t2, t3
+nes_blank_bg_row:
+    jr ra
+    nop
   EndASM
 EndProcedure
 CompilerEndIf
@@ -156,66 +172,73 @@ ProcedureNaked PpuN64StoreSpan(dst.i, first.i, second.i)
   EndASM
 EndProcedure
 
-ProcedureNaked PpuRgbLineRaw()
+ProcedureNaked PpuOverlay8()
+  ; Every byte is one pixel. Build lane masks for background opacity and
+  ; sprite visibility before selecting all eight output indices together.
   ASM
-    la t0, global_linepixels
-    la t1, global_rgbpal
-    la t2, global_framerow
-    lw t2, 4(t2)
-    daddiu t3, t0, 256
-    andi t8, t2, 7
-    bne t8, zero, nes_rgb4
-    daddu t8, t3, zero
-    ; A color-zero pixel in any palette uses RgbPal(0). Eight such pixels
-    ; can fill the span directly with two aligned stores.
-    lhu v0, 0(t1)
-    lui a7, 0x0303
-    ori a7, a7, 0x0303
-    dsll v1, v0, 16
-    or v0, v0, v1
-    dsll32 v1, v0, 0
-    dsll32 a6, a7, 0
-    or v0, v0, v1
-    or a7, a7, a6
-nes_rgb_span:
+    la t0, global_ppudot
     ld a0, 0(t0)
-    and a0, a0, a7
-    bne a0, zero, nes_rgb4
-    daddiu t8, t0, 8
-    sd v0, 0(t2)
-    sd v0, 8(t2)
-    daddu t0, t8, zero
-    bne t0, t3, nes_rgb_span
-    daddiu t2, t2, 16
-    jr ra
+    la t0, global_woff
+    ld a1, 0(t0)
+    la t0, global_spriteline
+    daddu t0, t0, a0
+    ld a2, 0(t0)
+    la t0, global_neslinerow
+    lw t0, 4(t0)
+    daddu a1, a1, t0
+    ld a3, 0(a1)
+    la t0, NesSpriteMasks
+    ld a4, 0(t0)
+    ld a5, 8(t0)
+    ld a6, 16(t0)
+    ld a7, 24(t0)
+    dsrl t0, a3, 1
+    or t0, t0, a3
+    and t0, t0, a4
+    dsll t8, t0, 7
+    and v1, t8, a2
+    ; The low seven bits plus 0x7F set bit 7 for any nonzero low bits.
+    ; The sums fit in a byte. OR restores original bit 7.
+    and t0, a2, a5
+    daddu t0, t0, a5
+    or t0, t0, a2
+    and t0, t0, a6
+    ; Behind-background sprite lanes select the sprite only through a
+    ; transparent background. Expand the surviving high bits to full bytes.
+    dsll t1, a2, 1
+    and t1, t1, t8
+    nor t1, t1, zero
+    and t0, t0, t1
+    dsrl t1, t0, 7
+    dsubu t1, t0, t1
+    or t0, t0, t1
+    and t1, a2, a7
+    and t1, t1, t0
+    nor t0, t0, zero
+    and t0, t0, a3
+    or t0, t0, t1
+    sd t0, 0(a1)
+    beq v1, zero, nes_sprite_done
+    addiu t0, zero, 248
+    bne a0, t0, nes_sprite_hit
     nop
-nes_rgb4:
-    lbu a0, 0(t0)
-    lbu a1, 1(t0)
-    sll a0, a0, 1
-    sll a1, a1, 1
-    addu a0, t1, a0
-    addu a1, t1, a1
-    lhu a0, 0(a0)
-    lhu a1, 0(a1)
-    sh a0, 0(t2)
-    sh a1, 2(t2)
-    lbu a0, 2(t0)
-    lbu a1, 3(t0)
-    sll a0, a0, 1
-    sll a1, a1, 1
-    addu a0, t1, a0
-    addu a1, t1, a1
-    lhu a0, 0(a0)
-    lhu a1, 0(a1)
-    sh a0, 4(t2)
-    sh a1, 6(t2)
-    daddiu t0, t0, 4
-    bne t0, t8, nes_rgb4
-    daddiu t2, t2, 8
-    bne t0, t3, nes_rgb_span
+    dsrl v1, v1, 8
+nes_sprite_hit:
+    beq v1, zero, nes_sprite_done
     nop
+    la t0, global_ppustatus
+    ld t1, 0(t0)
+    ori t1, t1, 64
+    sd t1, 0(t0)
+nes_sprite_done:
     jr ra
     nop
   EndASM
 EndProcedure
+
+DataSection
+NesSpriteMasks:
+  Data.q $0101010101010101,$7F7F7F7F7F7F7F7F,$8080808080808080,$1F1F1F1F1F1F1F1F
+EndDataSection
+
+XIncludeFile "indexed.n64"

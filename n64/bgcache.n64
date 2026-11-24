@@ -1,0 +1,51 @@
+; Cache eight indexed pixels for each pattern row and background palette.
+; Boards with CHR banking and fetch observers use the ordinary tile fetch.
+CompilerIf #NES_BG_EXPANDED
+Global Dim NesMapRows.u(8192)
+Global Dim NesBgRows.i(16384)
+ProcedureNaked NesExpandBg(dest.i,bits.i)
+  ASM
+    la t0, global_nesbgrows
+    andi t1, a0, 15
+    sll t1, t1, 2
+    srl t2, a0, 4
+    sll t2, t2, 8
+    addu t0, t0, t1
+    addu t0, t0, t2
+    la t2, NesBgPixelSpread
+    andi t1, a1, 255
+    sll t1, t1, 2
+    srl t3, a1, 8
+    sll t3, t3, 2
+    addu t1, t1, t2
+    addu t3, t3, t2
+    lw t1, 0(t1)
+    lwu t3, 0(t3)
+    dsll32 t1, t1, 0
+    or t1, t1, t3
+    sd t1, 0(t0)
+    beq t1, zero, nes_bg_expand_empty
+    nop
+    la t2, NesBgPalMask
+    ld t3, 0(t2)
+    or t3, t3, t1
+    sd t3, 64(t0)
+    ld t3, 8(t2)
+    or t3, t3, t1
+    sd t3, 128(t0)
+    ld t3, 16(t2)
+    or t3, t3, t1
+    jr ra
+    sd t3, 192(t0)
+nes_bg_expand_empty:
+    sd zero, 64(t0)
+    sd zero, 128(t0)
+    jr ra
+    sd zero, 192(t0)
+  EndASM
+EndProcedure
+DataSection
+NesBgPalMask:
+  Data.q $0404040404040404,$0808080808080808,$0C0C0C0C0C0C0C0C
+EndDataSection
+CompilerEndIf

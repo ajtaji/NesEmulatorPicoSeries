@@ -1,0 +1,175 @@
+; Render one stable APU span block. Oscillator tick preserves s0-s7.
+ProcedureNaked NesMixBlock(spans.i, dmc.i, count.i, volume.i, duty.i)
+  ASM
+    daddiu sp, sp, -112
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    sll s0, a0, 0
+    sll s1, a1, 0
+    or s2, a2, zero
+    or s3, a3, zero
+    or s4, a4, zero
+    sd s2, 72(sp)
+    la t0, global_apuminimum
+    ld t0, 0(t0)
+    sd t0, 80(sp)
+    la t0, global_apumaximum
+    ld t0, 0(t0)
+    sd t0, 88(sp)
+    sd zero, 96(sp)
+    la t0, global_apulastx
+    ld t0, 0(t0)
+    sd t0, 104(sp)
+    la t0, global_apulasty
+    ld s5, 0(t0)
+    la s6, global_pcm
+    la t0, global_apuproduced
+    ld s7, 0(t0)
+nes_mix_next:
+    lhu a0, 0(s0)
+    jal nesoscillatortick
+    daddiu s0, s0, 2
+
+    la a2, global_apuseq
+    lw t0, 4(a2)
+    srlv t0, s4, t0
+    andi t0, t0, 1
+    subu t0, zero, t0
+    andi a1, s3, 255
+    and t0, t0, a1
+    lw t1, 12(a2)
+    srl a1, s4, 8
+    srlv t1, a1, t1
+    andi t1, t1, 1
+    subu t1, zero, t1
+    srl a1, s3, 8
+    andi a1, a1, 255
+    and t1, t1, a1
+    addu t0, t0, t1
+    sll t0, t0, 1
+    la t1, global_pulsemix
+    addu t1, t1, t0
+    lhu t0, 0(t1)
+
+    la t1, global_noiseshift
+    lw t1, 4(t1)
+    andi t1, t1, 1
+    addiu t1, t1, -1
+    srl a1, s3, 16
+    and t1, t1, a1
+    sll t1, t1, 1
+    la t2, global_tridac
+    lw t2, 4(t2)
+    sll a1, t2, 1
+    addu t2, t2, a1
+    lbu t3, 0(s1)
+    addu t2, t2, t1
+    addu t2, t2, t3
+    sll t2, t2, 1
+    la t3, global_tndmix
+    addu t3, t3, t2
+    lhu t2, 0(t3)
+    addu v0, t0, t2
+
+    ; y * 65400 = (y << 16) - (y << 7) - (y << 3).
+    daddu t1, s5, zero
+    ld t0, 104(sp)
+    dsll t2, t1, 16
+    dsll t3, t1, 7
+    dsll t1, t1, 3
+    dsubu t2, t2, t3
+    dsubu t2, t2, t1
+    bgez t2, nes_mix_dc_positive
+    dsubu t0, v0, t0
+    ori t1, zero, 65535
+    daddu t2, t2, t1
+nes_mix_dc_positive:
+    dsra t2, t2, 16
+    daddu t0, t0, t2
+    addiu t1, zero, 32767
+    slt t2, t1, t0
+    beq t2, zero, nes_mix_check_min
+    sd v0, 104(sp)
+    or t0, t1, zero
+nes_mix_check_min:
+    addiu t1, zero, -32768
+    slt t2, t0, t1
+    beq t2, zero, nes_mix_store
+    nop
+    or t0, t1, zero
+nes_mix_store:
+    daddu s5, t0, zero
+    andi t2, s7, 4095
+    sll t2, t2, 1
+    addu t2, s6, t2
+    sh t0, 0(t2)
+    daddiu s7, s7, 1
+    ld t2, 80(sp)
+    slt t3, t0, t2
+    beq t3, zero, nes_mix_check_max
+    nop
+    sd t0, 80(sp)
+nes_mix_check_max:
+    ld t2, 88(sp)
+    slt t3, t2, t0
+    beq t3, zero, nes_mix_check_nonzero
+    nop
+    sd t0, 88(sp)
+nes_mix_check_nonzero:
+    ld t2, 96(sp)
+    sltu t3, zero, t0
+    daddu t2, t2, t3
+    sd t2, 96(sp)
+    daddiu s2, s2, -1
+    bgtz s2, nes_mix_next
+    daddiu s1, s1, 1
+    la t0, global_apuoutput
+    sd s5, 0(t0)
+    la t0, global_apulasty
+    sd s5, 0(t0)
+    la t0, global_apulastx
+    ld t1, 104(sp)
+    sd t1, 0(t0)
+    la t0, global_apuproduced
+    sd s7, 0(t0)
+    la t0, global_apuminimum
+    ld t1, 80(sp)
+    sd t1, 0(t0)
+    la t0, global_apumaximum
+    ld t1, 88(sp)
+    sd t1, 0(t0)
+    la t0, global_apunonzero
+    ld t1, 0(t0)
+    ld t2, 96(sp)
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    la t0, global_apucapture
+    ld t1, 0(t0)
+    ld t2, 72(sp)
+    daddu t1, t1, t2
+    sltiu t2, t1, 4097
+    bnez t2, nes_mix_capture
+    nop
+    addiu t1, zero, 4096
+nes_mix_capture:
+    sd t1, 0(t0)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    jr ra
+    daddiu sp, sp, 112
+  EndASM
+EndProcedure

@@ -1,0 +1,51 @@
+; Each PCM sample carries elapsed oscillator cycles and the original DMC DAC
+; level. Period, envelope, and duty stay fixed until the block is rendered.
+#NES_APU_BLOCK=16
+Global NesAudioBlockCount.i, NesOscPending.i
+Global Dim NesSpanCycles.u(#NES_APU_BLOCK)
+Global Dim NesSpanDmc.a(#NES_APU_BLOCK)
+XIncludeFile "apumix.n64"
+
+ProcedureNaked NesOscillatorFlush()
+  ASM
+    la t0, global_nesoscpending
+    ld a0, 0(t0)
+    beq a0, zero, nes_flush_osc_done
+    sd zero, 0(t0)
+    j nesoscillatortick
+    nop
+nes_flush_osc_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+Procedure NesRenderBlock()
+  Protected v0.i, v1.i, nv.i, duty0.i, duty1.i
+  If NesAudioBlockCount=0 : ProcedureReturn : EndIf
+  If ApuLength(0)>0 And ApuPeriod(0)>=8 And ApuTarget(0)<=$7FF
+    v0=ApuVolume(0)
+  EndIf
+  If ApuLength(1)>0 And ApuPeriod(1)>=8 And ApuTarget(1)<=$7FF
+    v1=ApuVolume(1)
+  EndIf
+  If ApuLength(3)>0 : nv=ApuVolume(2) : EndIf
+  duty0=($F91E0602>>((ApuReg(0)>>6)*8))&255
+  duty1=($F91E0602>>((ApuReg(4)>>6)*8))&255
+  NesMixBlock(@NesSpanCycles(0),@NesSpanDmc(0),NesAudioBlockCount,v0|(v1<<8)|(nv<<16),duty0|(duty1<<8))
+  NesAudioBlockCount=0
+  ApuSamples=ApuProduced
+EndProcedure
+
+Procedure NesQueueSample()
+  NesSpanCycles(NesAudioBlockCount)=NesOscPending
+  NesSpanDmc(NesAudioBlockCount)=DmcLevel
+  NesOscPending=0
+  NesAudioBlockCount=NesAudioBlockCount+1
+  If NesAudioBlockCount=#NES_APU_BLOCK : NesRenderBlock() : EndIf
+EndProcedure
+
+Procedure NesAudioBoundary()
+  NesRenderBlock()
+  NesOscillatorFlush()
+EndProcedure

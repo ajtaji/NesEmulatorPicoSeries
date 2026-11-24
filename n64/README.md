@@ -22,7 +22,9 @@ The first command writes **n64/build/nes.z64** with the original demo. Boot the 
 
 The port reads NTSC or PAL guest timing from the NES header. The VI uses the console's TV standard. The guest PPU renders 256 × 240 in a centered 320 × 240 framebuffer with three VI buffers. The AI receives 16-bit stereo at a nominal 48 kHz, with the mono NES mix on both channels.
 
-The VR4300 runs the Anvil 2A03 instruction handlers compiled by PureMetal Forge. A MIPS assembly fetch routine dispatches through a 256-entry opcode table. The CPU keeps A, X, Y and arithmetic flags in locals across each execution window. The bus helpers share the guest PC and remaining cycle budget. The VR4300 also advances the PPU and APU. VI scans the finished picture and AI plays the queued PCM.
+The VR4300 executes the Anvil 2A03 core. Its MIPS interpreter uses computed jumps and keeps the NES registers, flags and cycle budget in host registers across ordinary instructions. Memory-mapped operations use the shared bus handlers. The builder recognizes short read-only loops in the selected PRG banks. The CPU can batch a RAM wait within an execution window, or a PPU status wait up to the first event that could change the returned value or signal an interrupt. Timed writes, sprite-zero hits, sprite overflow, frame IRQs and DMC reads bound those intervals.
+
+The PPU produces a 256 � 240 indexed image. NROM and UxROM cartridges with 8 KiB of CHR use expanded pattern rows updated on CHR writes and tile descriptors updated on nametable writes. Scroll and sprite composition still run at guest timestamps. Banks with PPU fetch side effects retain the original callbacks. The VR4300 synthesizes audio in native blocks and supplies nominal 48 kHz stereo to the AI. The VI runs independently. A completed NES picture can be superseded if the VI still owns all three buffers and waiting would drain the audio reserve. The guest PPU renders each frame and processes its status edges.
 
 ## Cartridge support
 
@@ -32,7 +34,7 @@ Small games use base RDRAM. Larger games can use the Expansion Pak. On MMC5 and 
 
 ## Display engine integration
 
-**No change is required to the in-progress Neon Arcade Display Engine.** Its N64 port already presents through LibPureMetalN64. This emulator acquires the framebuffer with `LpmDisplayGet`, writes native RGBA5551 pixels, writes back the CPU cache, and presents with `LpmDisplayShow`. Keeping the original PPU in control of rasterization preserves mid-scanline register writes, sprite-zero hits, and mapper fetch effects. N64 controller and audio output use the existing Joybus and AI APIs. If a future cross-platform frontend needs an engine-only interface, the missing convenience would be a way to acquire a writable CPU framebuffer with its format and stride, then present it. The current cart already has that functionality through the underlying library.
+The emulator uses LibPureMetalN64 directly. It acquires a VI buffer with `LpmDisplayGet`, uploads indexed strips and scanline palettes through the RDP, and presents after the RDP interrupt with `LpmRdpDetachShow`. Joybus supplies controller input. The in-progress Neon Arcade Display Engine requires no changes for this port.
 
 ## Verification
 
@@ -46,4 +48,14 @@ python n64/verify.py --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudi
 
 The check builds the bundled demo, boots it with 4 MiB RDRAM, and stops the guest after frame 60. It compares all 61,440 pixels against the desktop emulator's frame at N64 color precision, checks both borders, verifies the guest CPU and APU counters, and checks captured stereo PCM. Normal builds keep running. The same frame comparison also passed for a PAL-header copy of the demo. Synthetic tests in the N64 emulator exercised MMC1 and MMC3 PRG and CHR switching, MMC5 PCM read side effects, mapper 234 read-triggered banking, VRC6 and Namco 163 expansion audio, and large MMC5 and mapper 228 ROMs. Two controller masks verified all eight serial bits, strobe behavior and an idle second port. Across 1,500 guest frames, the optimized APU produced byte-identical audio and the same final picture as the earlier implementation. Physical-console coverage so far is the bundled UxROM demo.
 
-The original release measured 4.35 guest fps in the N64 emulator over guest frames 60 through 120. Register caching, native tile spans and oscillator updates, overlapping controller I/O with guest vblank, and a third VI buffer raised that to 8.83 in the same interval. The frame-120 screenshot and captured PCM matched the reference run byte for byte. Pass `--benchmark` to the verification command to time the continuously running demo on the 4 MiB N64 model. These measurements use the modeled CP0 Count clock.
+For a timing run, add `--benchmark` to the verification command. It builds a continuously running cartridge and measures the difference in modeled CP0 Count between guest frames 60 and 120 at 46,875,000 ticks per second. Checkpoint builds additionally report AI buffer submissions and observed queue-empty transitions after playback starts. Comparing recorded PCM checks sample values. The queue counter measures interruptions in playback.
+
+The initial cartridge measured 4.35 guest fps on the N64 model. The first register and tile optimizations raised it to 8.83. With the threaded core, bounded polling, indexed video, native sprites and expanded tiles, the continuously running demo measured 44.79 guest fps (62,791,583 ticks). Subsequent emulator runs and the active-play benchmark are recorded in the validation directory. Console timing remains the measurement of the initial build.
+
+The controller replay uses the upstream Thwaite v0.04 cartridge. Supply the NES file locally and run the following command. It checks the game state after starting the game, advancing the tutorial, moving and firing. The report times each 60-frame interval, counts AI underruns and compares the final picture and every complete PCM block to a reference. [Thwaite v0.04 release](https://github.com/pinobatch/thwaite-nes/releases/tag/v0.04)
+
+```powershell
+python n64/verify_game.py --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudio.exe" --rom "C:\Games\thwaite.nes"
+```
+
+Thwaite sustained about 60 guest fps in active play with zero observed AI underruns in the scripted movement and firing interval. Some tutorial transitions ran slower and drained the AI queue. A 1,800-frame demo run kept audio continuous from frame 60 through 1,800 and coalesced nine presentations. The initial console capture and the subsequent model results use different cartridges. [Emulator results](validation/playability.txt)

@@ -15,10 +15,12 @@ from rom_catalog import prg_views
 from port_desktop import CONTROLLER_PATCHES
 from stage_cpu import stage_cpu
 from stage_bus import stage_bus
-from stage_audio import stage_audio
+from stage_audio import stage_audio, stage_oscillators
 from stage_mapper import stage_mapper
 from stage_fastppu import stage_fastppu
 from stage_sync import stage_sync
+from stage_poll import poll_source, stage_poll
+from stage_ramwait import ram_wait_source
 from stage_expansion import EXPANSION_MAPPERS, expansion_source, stage_expansion
 from stage_storage import check_storage_layout, stage_storage
 from stage_region import header_is_pal, render_region, stage_region
@@ -35,7 +37,7 @@ def guest_names(code):
     return re.sub(r'\bChr\b(?!\s*\()', 'NesChrWindow', code)
 
 
-def build(args):
+def build(args, *, controller_trace=()):
     sdk = args.sdk.resolve()
     compiler = sdk / "PureMetalForge.exe"
     if not compiler.is_file():
@@ -43,7 +45,13 @@ def build(args):
     cart, header = read_anvil_rom(args.rom, extra=EXPANSION_MAPPERS, pal_ok=True)
     chr_size = len(cart.chr) or {6: 32768, 13: 16384}.get(cart.mapper, 8192)
     program = prg_views(cart)
+    polling, has_polls = poll_source(program, cart.mapper)
+    ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper)
     settings = {
+        "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
+        "NES_HAS_POLLS": int(has_polls),
+        "NES_HAS_RAM_WAITS": int(has_ram_waits),
+        "VERIFY_INPUT": int(bool(controller_trace)),
         "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": cart.mapper, "GAME_SUB": cart.submapper,
         "GAME_MIRROR": cart.mirror, "GAME_RAM": cart.ram_size,
         "GAME_CONFLICT": int(cart.conflicts), "GAME_BATTERY": int(cart.battery),
@@ -63,7 +71,7 @@ def build(args):
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
-                code = stage_cpu(code, cart.mapper)
+                code = stage_cpu(stage_poll(code), cart.mapper)
             elif name.startswith("mapper"):
                 code = stage_storage(name, stage_mapper(name, code))
             elif name == "bridge":
@@ -73,7 +81,7 @@ def build(args):
                     code = code.replace(old, new)
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_bus(code, cart.mapper)
-            code = stage_audio(name, stage_fastppu(name, stage_region(name, code)))
+            code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper)
             code = stage_sync(name, code)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
@@ -82,6 +90,20 @@ def build(args):
         (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion_source()), encoding="utf-8")
         app = stage / "n64"
         shutil.copytree(ROOT / "n64", app, ignore=shutil.ignore_patterns("build", "__pycache__","*.z64"))
+        oscillator = app / "oscillators.n64"
+        oscillator.write_text(stage_oscillators(oscillator.read_text(encoding="utf-8"), cart.mapper), encoding="utf-8")
+        if controller_trace:
+            if not args.check_frame:
+                raise ValueError("controller replay requires a bounded verification run")
+            lines = ["Procedure.i NesReplayPad(frame.i)"]
+            for first, end, buttons in controller_trace:
+                if not (0 <= first < end and 0 <= buttons <= 255):
+                    raise ValueError("invalid controller replay interval")
+                lines.append(f"  If frame>={first} And frame<{end} : ProcedureReturn {buttons} : EndIf")
+            lines.extend(("  ProcedureReturn 0", "EndProcedure"))
+            (app / "replay.pmi").write_text("\n".join(lines) + "\n")
+        (app / "poll.pmi").write_text(polling)
+        (app / "ramwait.pmi").write_text(ram_wait)
         (app / "region.pmi").write_text(render_region())
         (app / "game.pmi").write_text("".join(f"#{k} = {v}\n" for k, v in settings.items()))
         (app / "game.bin").write_bytes(program + cart.chr)

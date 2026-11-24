@@ -27,12 +27,15 @@ EndProcedure
 Procedure FrameFence()
 EndProcedure
 
+Declare.i NesCurrentPoll(acc.i)
+Global NesDeliveredFrame.i, NesLoopRule.i, NesLoopCost.i
+XIncludeFile "poll.pmi"
+Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
 Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
 XIncludeFile "../anvil/cpu2a03.pmi"
 XIncludeFile "../anvil/mapper_state.pmi"
 XIncludeFile "../anvil/bridge.pmi"
-Global RenderTop.i
 XIncludeFile "ppu.n64"
 XIncludeFile "../anvil/mappers.pmi"
 XIncludeFile "../anvil/mapper_extra.pmi"
@@ -50,14 +53,50 @@ XIncludeFile "../anvil/lookup_tables.pmi"
 XIncludeFile "region.pmi"
 XIncludeFile "host.n64"
 XIncludeFile "storage.n64"
+CompilerIf #NES_HAS_RAM_WAITS
+  XIncludeFile "ramwait.pmi"
+  XIncludeFile "ramwait.n64"
+CompilerEndIf
 
+CompilerIf #NES_BG_EXPANDED
+Procedure PpuUpdateDescriptor(addr.i)
+  Protected quad.i, attr.i, slot.i, desc.i
+  quad=((addr>>4)&4)|(addr&2)
+  attr=Nt((addr&$c00)|$3c0|((addr>>4)&$38)|((addr>>2)&7))
+  desc=(Nt(addr)<<8)|(((attr>>quad)&3)<<6)
+  slot=((addr&$800)<<1)|((addr&$3e0)<<2)|((addr>>5)&32)|(addr&31)
+  NesMapRows(slot)=desc : NesMapRows(slot+64)=desc
+EndProcedure
+Procedure PpuUpdateAttribute(addr.i)
+  Protected table.i=addr&$c00, y.i, x.i, tile.i, mirror.i
+  If PpuMirroring=1 : mirror=$800 : Else : mirror=$400 : EndIf
+  PpuUpdateDescriptor(addr) : PpuUpdateDescriptor(addr!mirror)
+  tile=table|((addr&$38)<<4)|((addr&7)<<2)
+  For y=0 To 3
+    For x=0 To 3
+      PpuUpdateDescriptor(tile+x) : PpuUpdateDescriptor((tile+x)!mirror)
+    Next
+    tile+=32
+  Next
+EndProcedure
+CompilerElse
 Procedure PpuUpdateDescriptor(addr.i)
 EndProcedure
 Procedure PpuUpdateAttribute(addr.i)
 EndProcedure
+CompilerEndIf
 Procedure CartPpuWriteNotice(addr.i,value.i)
 EndProcedure
 Procedure CartSelect(number.i)
+EndProcedure
+
+Procedure.i NesCurrentPoll(acc.i)
+  If WorkerFrames<>NesDeliveredFrame : ProcedureReturn 0 : EndIf
+  If acc<>((PpuStatus&$E0)|(PpuBus&31)) Or WorkerNmi<>NesSeenNmi Or WorkerDmcCycles<>NesSeenDmc
+    ProcedureReturn 0
+  EndIf
+  If FI=0 And (WorkerIrq|MapIrq)<>0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn NesPollRule(PrgBase-CartPrg+PC-$8000,acc)
 EndProcedure
 
 Procedure.i LoadGame()
@@ -81,6 +120,9 @@ Procedure.i LoadGame()
     For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
   Next
   NesChrWindow=CartChr : Pattern=@Decoded(0)
+  CompilerIf #NES_BG_EXPANDED
+    NameDescDirty=0
+  CompilerEndIf
   NesTiming(#GAME_PAL)
   If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
   If WorkerError : ProcedureReturn 0 : EndIf
@@ -102,8 +144,21 @@ Procedure RunGame()
   LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
   start=LpmCpuCount()
   While Stopped=0 And WorkerError=0
-    CpuRun(MapperCpuBudget())
-    WorkerAdvance(CpuCycles)
+    CompilerIf #NES_HAS_RAM_WAITS
+      NesRamCpuWindow(128,1)
+    CompilerElse
+      CompilerIf #GAME_MAPPER=0 Or #GAME_MAPPER=2 Or #GAME_MAPPER=66
+        CpuRun(128)
+      CompilerElse
+        CpuRun(MapperCpuBudget())
+      CompilerEndIf
+    CompilerEndIf
+    If CpuCycles>NesStatusHorizon And CpuCycles>NesCpuHorizon
+      WorkerAdvance(CpuCycles)
+      CompilerIf #GAME_MAPPER=0 Or #GAME_MAPPER=2 Or #GAME_MAPPER=66
+        NesSetCpuHorizon(CpuCycles)
+      CompilerEndIf
+    EndIf
     stalls=WorkerDmcCycles-NesSeenDmc
     While stalls>0
       NesSeenDmc=WorkerDmcCycles : CpuCycles=CpuCycles+stalls
@@ -115,13 +170,13 @@ Procedure RunGame()
       CpuInterrupt($FFFE)
     EndIf
     If WorkerFrames<>lastFrame
-      lastFrame=WorkerFrames : HostInputPoll() : HostAudioPoll()
-      If lastFrame=1 Or lastFrame=60 Or lastFrame=120
+      lastFrame=WorkerFrames : NesDeliveredFrame=lastFrame : HostInputPoll() : HostAudioPoll()
+      If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
         elapsed=(LpmCpuCount()-start) & $FFFFFFFF
         LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))
       EndIf
       CompilerIf #VERIFY_FRAME>0
-        If lastFrame=#VERIFY_FRAME : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn : EndIf
+        If lastFrame=#VERIFY_FRAME : HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn : EndIf
       CompilerEndIf
     EndIf
   Wend

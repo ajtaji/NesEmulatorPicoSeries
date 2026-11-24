@@ -49,7 +49,7 @@ RENDER_SPAN = """Procedure PpuRender8Reference()
     EndIf
   EndIf
   If dot=0 And (mask&2)=0 : first=0 : second=0 : EndIf
-  PpuN64StoreSpan(@LinePixels(0)+dot,first,second)
+  PpuN64StoreSpan(NesLineRow+dot,first,second)
   If SpriteSpan(dot>>3)
     WOff=dot : PpuOverlay8()
   EndIf
@@ -78,46 +78,106 @@ def native_pixel_spread() -> str:
     return "\nDataSection\nNesBgPixelSpread:\n" + data + "\nEndDataSection\n"
 
 
+def stage_sprite_rows(source: str) -> str:
+    source = replace_procedure(source, "PpuBuildSpriteCache", "")
+    proc = source.index("Procedure PpuSpritesReference()")
+    draw = source.index("  PpuClearSprites()\n", proc)
+    end = source.index("\nEndProcedure", draw)
+    declarations = "j.i, sx.i, pixel.i, flags.i"
+    if source[proc:draw].count(declarations) != 1:
+        raise ValueError("PPU sprite-row declarations changed")
+    head = source[proc:draw].replace(declarations, "j.i, flags.i, clip.i, spanFlags.i")
+    # Keep OAM selection and address calculation in the shared evaluator.
+    # The native path loads each selected pattern row once for all eight pixels.
+    return source[:proc] + head + """  PpuClearSprites()
+  If PpuMask&$10
+    If (PpuMask&4)=0 : clip=8 : EndIf
+    For i=SprCount-1 To 0 Step -1
+      flags=16+((SprAttr(i)&3)*4)+((SprAttr(i)&$20)*2) : spanFlags=1
+      If SprIndex(i)=0
+        flags=flags|$80
+        If i=0 : spanFlags=3 : EndIf
+      EndIf
+      NesDrawSpriteRow(PeekU(Pattern+SprRow(i)),SprX(i),flags,spanFlags,clip,SprAttr(i))
+    Next
+  EndIf""" + source[end:]
+
+
 def stage_fastppu(name: str, source: str) -> str:
+    if name == "worker":
+        copy = """    OamCacheDirty=1
+    For i=0 To 255
+      Oam((PpuOamAddr+i)&255)=WorkerRead(value*256+i)
+    Next"""
+        if source.count(copy) != 1:
+            raise ValueError("PPU OAM DMA loop changed")
+        return source.replace(copy, """    If value<$20 And PpuOamAddr=0
+      NesOamRamDma(value)
+    Else
+      OamCacheDirty=1
+      For i=0 To 255
+        Oam((PpuOamAddr+i)&255)=WorkerRead(value*256+i)
+      Next
+    EndIf""")
     if name != "ppu":
         return source
-    # The native row converter is in ppu.n64. The shared lookup table is RGB565.
+    decode = "  PokeU(Pattern+dest,bits)"
+    if source.count(decode) != 1:
+        raise ValueError("PPU CHR decode update changed")
+    source = source.replace(decode, decode + "\n  CompilerIf #NES_BG_EXPANDED\n"
+                            "    NesExpandBg(dest,bits)\n  CompilerEndIf")
+    # The indexed framebuffer and RDP palette replace Anvil's RGB row cache.
+    # Its old buffers otherwise occupy part of the VR4300 stack on large MMC5 carts.
+    source = replace_procedure(source, "PpuBuildRgbPairs", "")
+    for declaration in ("Global Dim FrameTop.u(30720)", "Global FrameRow.i, FrameBottom.i",
+                        "Global Dim NameDesc.u(4096)", "Global Dim RgbCache.i(4096)",
+                        "Global Dim RgbTags.i(1024)", "Global Dim RgbPairs.i(64)"):
+        if source.count(declaration) != 1:
+            raise ValueError(f"unexpected PPU video storage: {declaration}")
+        source = source.replace(declaration + "\n", "")
+    # Sprite priority is resolved before that row's indexed pixels go to RDP.
+    source = source.replace("LinePixels.a(256)", "LinePixels.a(61440)")
+    # The shared lookup is RGB565; VI and the texture palette use RGBA5551.
     source = replace_procedure(source, "PpuRgbLineRaw", "")
     source = source.replace("    color=Rgb64(e+c)\n",
                             "    color=Rgb64(e+c)\n    color=(color&$FFC0)|((color&31)<<1)|1\n")
     source = replace_procedure(source, "PpuBeginLine", """Procedure PpuBeginLine()
-  DisplayWaitLine(PpuLine)
-  If PpuLine<#NES_VIDEO_HALF_ROWS
-    FrameRow=RenderTop+PpuLine*PpuFrameStride
-  Else
-    FrameRow=FrameBottom+(PpuLine-#NES_VIDEO_HALF_ROWS)*PpuFrameStride
-  EndIf
+  ; DisplayWaitLine handles frame start and the sixteen-line audio cadence.
+  If (PpuLine&15)=0 : DisplayWaitLine(PpuLine) : EndIf
+  NesLineRow=@LinePixels(0)+PpuLine*256
 EndProcedure""")
     source = replace_procedure(source, "PpuClearSprites", CLEAR_SPRITES)
+    source = replace_procedure(source, "PpuOverlay8", "")
+    source = stage_sprite_rows(source)
     source = replace_procedure(source, "PpuRender8Reference",
                                "CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9\n" + RENDER_SPAN +
                                "\nCompilerElse\n" + native_pixel_spread() + "CompilerEndIf")
-    # Visible spans have an eight-dot edge and no regional line-width changes.
-    visible = """    If PpuLine<240 And PpuDot<256
-      If PpuDot=0
-        PpuBeginLine()
-        PpuSprites()
-      EndIf
-      step=256-PpuDot
-      If step>dots : step=dots : EndIf
-      NesRenderTo(PpuDot+step)
-      dots=dots-step
-      If PpuDot=256
+    # Finish the visible row and hblank together when the interval spans
+    # both. Partial intervals keep the dot 256 and 257 edges distinct.
+    visible = """    If PpuLine<240
+      startDot=PpuDot : endDot=startDot+dots
+      If startDot<256
+        If startDot=0
+          PpuBeginLine()
+          PpuSprites()
+        EndIf
+        step=endDot
+        If step>256 : step=256 : EndIf
+        NesRenderTo(step)
+        If endDot<256 : Break : EndIf
         If PpuMask&$18 : PpuIncY() : EndIf
         PpuRgbLineRaw()
-        PpuSendLine()
+        If PpuLine=239 : DisplayFrame() : EndIf
       EndIf
+      If startDot<257 And endDot>=257 And (PpuMask&$18)<>0
+        PpuV=(PpuV&$7BE0)|(PpuT&$41F)
+      EndIf
+      If endDot<341 : PpuDot=endDot : Break : EndIf
+      PpuDot=0 : PpuLine=PpuLine+1 : dots=endDot-341
       Continue
     EndIf
     edge=341
-    If PpuLine<240
-      If PpuDot=256 : edge=257 : EndIf
-    ElseIf PpuLine=241 Or PpuLine=PpuPreLine"""
+    If PpuLine=241 Or PpuLine=PpuPreLine"""
     old_start = source.index("    edge=341\n", source.index("Procedure PpuAdvanceReference("))
     old_end = source.index("    ElseIf PpuLine=241 Or PpuLine=PpuPreLine", old_start)
     source = source[:old_start] + visible + source[old_end + len("    ElseIf PpuLine=241 Or PpuLine=PpuPreLine"):]
@@ -131,4 +191,5 @@ EndProcedure""")
     if source.count(visible_end) != 1:
         raise ValueError("PPU visible line-end site changed")
     return source.replace(visible_end, "").replace(
-        "Protected dots.i, edge.i, step.i, width.i, sample.i", "Protected dots.i, edge.i, step.i, width.i")
+        "Protected dots.i, edge.i, step.i, width.i, sample.i",
+        "Protected dots.i, edge.i, step.i, width.i, startDot.i, endDot.i")

@@ -1,0 +1,256 @@
+ProcedureNaked NesRenderTo(endDot.i)
+  ; No guest event runs during this interval. Keep the scroll address and
+  ; pattern-row base in registers and write back the final dot and address.
+  ASM
+    la t0, global_ppudot
+    ld t1, 0(t0)
+    addiu t1, t1, 7
+    andi t1, t1, 0xFFF8
+    sltu t2, t1, a0
+    beq t2, zero, nes_batch_empty
+    addiu t2, t1, 8
+    sltu t2, t2, a0
+    beq t2, zero, nes_batch_one
+    nop
+    la t2, global_ppumask
+    ld t2, 0(t2)
+    andi t3, t2, 8
+    beq t3, zero, nes_batch_ref
+    nop
+
+    addiu sp, sp, -64
+    sd ra, 56(sp)
+    sd s0, 48(sp)
+    sd s1, 40(sp)
+    sd s2, 32(sp)
+    sd s3, 24(sp)
+    sd s4, 16(sp)
+    sd s5, 8(sp)
+    or s0, a0, zero
+    or s2, t1, zero
+    or a6, t2, zero
+    la t0, global_ppuv
+    ld s3, 0(t0)
+    ; Each 64-tile horizontal map row is stored twice for contiguous wrapping.
+    andi a1, s3, 31
+    srl t2, s3, 5
+    andi t2, t2, 32
+    or a1, a1, t2
+    andi t1, s3, 0x800
+    sll t1, t1, 1
+    andi t2, s3, 0x3e0
+    sll t2, t2, 2
+    or t2, t2, t1
+    or t2, t2, a1
+    sll t2, t2, 1
+    la s5, global_nesmaprows
+    addu s5, s5, t2
+    la t1, global_ppuctrl
+    ld t1, 0(t1)
+    andi t1, t1, 16
+    sll t1, t1, 12
+    srl t2, s3, 9
+    andi t2, t2, 56
+    or t1, t1, t2
+    la s4, global_nesbgrows
+    addu s4, s4, t1
+    addiu a2, s0, 7
+    andi a2, a2, 0xfff8
+    subu a2, a2, s2
+    srl a3, a2, 3
+    addu a1, a1, a3
+    andi t1, a1, 32
+    sll t1, t1, 5
+    andi t2, a1, 31
+    andi s3, s3, 0x7be0
+    or s3, s3, t1
+    or s3, s3, t2
+    sd s3, 0(t0)
+    la t0, global_ppupixels
+    ld t1, 0(t0)
+    daddu t1, t1, a2
+    sd t1, 0(t0)
+    la t0, global_neslinerow
+    lw s1, 4(t0)
+    addu a0, s1, s2
+    addu a2, a0, a2
+    la t0, global_ppufinex
+    ld t0, 0(t0)
+    beq t0, zero, nes_linear_aligned_groups
+    sll a3, t0, 3
+    subu a4, zero, a3
+    lhu t0, 0(s5)
+    addu t0, s4, t0
+    ld t1, 0(t0)
+nes_linear_fine_groups:
+    subu t0, a2, a0
+    sltiu t0, t0, 32
+    bne t0, zero, nes_linear_fine
+    nop
+    cache 0x0d, 8(a0)
+    cache 0x0d, 16(a0)
+    lhu t0, 2(s5)
+    lhu t2, 4(s5)
+    lhu t3, 6(s5)
+    lhu a5, 8(s5)
+    addu t0, s4, t0
+    addu t2, s4, t2
+    addu t3, s4, t3
+    addu a5, s4, a5
+    ld t0, 0(t0)
+    ld t2, 0(t2)
+    ld t3, 0(t3)
+    ld a5, 0(a5)
+    dsllv t1, t1, a3
+    dsrlv t8, t0, a4
+    or t1, t1, t8
+    sd t1, 0(a0)
+    dsllv t0, t0, a3
+    dsrlv t8, t2, a4
+    or t0, t0, t8
+    sd t0, 8(a0)
+    dsllv t2, t2, a3
+    dsrlv t8, t3, a4
+    or t2, t2, t8
+    sd t2, 16(a0)
+    dsllv t3, t3, a3
+    dsrlv t8, a5, a4
+    or t3, t3, t8
+    sd t3, 24(a0)
+    or t1, a5, zero
+    addiu a0, a0, 32
+    bne a0, a2, nes_linear_fine_groups
+    addiu s5, s5, 8
+    b nes_linear_overlay
+    nop
+nes_linear_fine:
+    lhu t0, 2(s5)
+    addiu s5, s5, 2
+    addu t0, s4, t0
+    ld t2, 0(t0)
+    dsllv t1, t1, a3
+    dsrlv t3, t2, a4
+    or t1, t1, t3
+    sd t1, 0(a0)
+    addiu a0, a0, 8
+    bne a0, a2, nes_linear_fine
+    or t1, t2, zero
+    b nes_linear_overlay
+    nop
+nes_linear_aligned_groups:
+    ; Interleave independent map and CHR loads for four tiles. The tail
+    ; also handles a CPU access that interrupts the scanline between dots.
+    subu t0, a2, a0
+    sltiu t0, t0, 32
+    bne t0, zero, nes_linear_aligned
+    nop
+    ; Each selected 16-byte cache line is replaced in full, even when
+    ; the interval starts eight bytes into the first line.
+    cache 0x0d, 8(a0)
+    cache 0x0d, 16(a0)
+    lhu t0, 0(s5)
+    lhu t1, 2(s5)
+    lhu t2, 4(s5)
+    lhu t3, 6(s5)
+    addu t0, s4, t0
+    addu t1, s4, t1
+    addu t2, s4, t2
+    addu t3, s4, t3
+    ld t0, 0(t0)
+    ld t1, 0(t1)
+    ld t2, 0(t2)
+    ld t3, 0(t3)
+    sd t0, 0(a0)
+    sd t1, 8(a0)
+    sd t2, 16(a0)
+    sd t3, 24(a0)
+    addiu a0, a0, 32
+    bne a0, a2, nes_linear_aligned_groups
+    addiu s5, s5, 8
+    b nes_linear_overlay
+    nop
+nes_linear_aligned:
+    lhu t0, 0(s5)
+    addiu s5, s5, 2
+    addu t0, s4, t0
+    ld t1, 0(t0)
+    addiu a0, a0, 8
+    bne a0, a2, nes_linear_aligned
+    sd t1, -8(a0)
+nes_linear_overlay:
+    ; Chunk boundaries are CPU-visible. Composite only sprites in this interval.
+    bne s2, zero, nes_linear_scan
+    andi t0, a6, 2
+    bne t0, zero, nes_linear_scan
+    nop
+    sd zero, 0(s1)
+nes_linear_scan:
+    la s4, global_spritespan
+    la s3, global_ppudot
+    ld t0, 0(s4)
+    ld t1, 8(s4)
+    ld t2, 16(s4)
+    ld t3, 24(s4)
+    or t0, t0, t1
+    or t2, t2, t3
+    or t0, t0, t2
+    beq t0, zero, nes_linear_done
+    nop
+    la s5, global_woff
+nes_linear_scan_span:
+    andi t0, s2, 63
+    bne t0, zero, nes_linear_one
+    srl t0, s2, 3
+    addu t1, t0, s4
+    ld t1, 0(t1)
+    bne t1, zero, nes_linear_one
+    nop
+    addiu s2, s2, 64
+    b nes_linear_test
+    nop
+nes_linear_one:
+    addu t1, t0, s4
+    lbu t1, 0(t1)
+    beq t1, zero, nes_linear_next
+    nop
+    sd s2, 0(s3)
+    jal ppuoverlay8
+    sd s2, 0(s5)
+nes_linear_next:
+    addiu s2, s2, 8
+nes_linear_test:
+    sltu t1, s2, s0
+    bne t1, zero, nes_linear_scan_span
+    nop
+nes_linear_done:
+    sd s0, 0(s3)
+    ld s5, 8(sp)
+    ld s4, 16(sp)
+    ld s3, 24(sp)
+    ld s2, 32(sp)
+    ld s1, 40(sp)
+    ld s0, 48(sp)
+    ld ra, 56(sp)
+    jr ra
+    addiu sp, sp, 64
+nes_batch_empty:
+    jr ra
+    sd a0, 0(t0)
+nes_batch_one:
+    addiu sp, sp, -16
+    sd ra, 8(sp)
+    sd a0, 0(sp)
+    jal ppurender8reference
+    sd t1, 0(t0)
+    ld a0, 0(sp)
+    ld ra, 8(sp)
+    la t0, global_ppudot
+    sd a0, 0(t0)
+    jr ra
+    addiu sp, sp, 16
+nes_batch_ref:
+    j nesblankrenderto
+    nop
+
+  EndASM
+EndProcedure

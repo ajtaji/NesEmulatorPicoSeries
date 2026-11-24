@@ -1,0 +1,120 @@
+; Return the first scanline with a ninth candidate. Cached counts saturate
+; at nine. Adding $77 per byte sets its high bit exactly when the count is nine.
+ProcedureNaked.i NesNextOverflow(line.i, limit.i)
+  ASM
+    la t0, global_cachedcount
+    la t1, NesCountBias
+    ld a2, 0(t1)
+    ld a3, 8(t1)
+nes_scan_count:
+    sltu t2, a0, a1
+    beq t2, zero, nes_scan_done
+    andi t1, a0, 7
+    bne t1, zero, nes_scan_byte
+    addu t1, t0, a0
+    addiu t2, a0, 8
+    sltu t2, a1, t2
+    bne t2, zero, nes_scan_byte
+    nop
+    ld t2, 0(t1)
+    daddu t2, t2, a2
+    and t2, t2, a3
+    bne t2, zero, nes_scan_byte
+    nop
+    b nes_scan_count
+    addiu a0, a0, 8
+nes_scan_byte:
+    lbu t2, 0(t1)
+    sltiu t2, t2, 9
+    beq t2, zero, nes_scan_done
+    nop
+    b nes_scan_count
+    addiu a0, a0, 1
+nes_scan_done:
+    jr ra
+    or v0, a0, zero
+  EndASM
+EndProcedure
+DataSection
+NesCountBias:
+  Data.q $7777777777777777,$8080808080808080
+EndDataSection
+
+; Called immediately after catching up the PPU and APU at a $2002 read.
+; A second read may reuse the status up to (but excluding) the next edge
+; capable of changing the answer or interrupting the CPU. Reads still clear
+; vblank and the PPU write toggle. A write or other bus sync ends the interval.
+Procedure NesSetStatusHorizon(stamp.i)
+  Protected dots.i, cycles.i, event.i, line.i, limit.i, spriteY.i, height.i
+  If DmcBytes>0 : ProcedureReturn : EndIf
+  dots=341-PpuDot
+  If PpuLine=PpuPreLine Or PpuLine=241
+    If PpuDot=0 : ProcedureReturn : EndIf
+    If PpuLine=PpuPreLine : dots=dots-1 : EndIf
+  ElseIf PpuLine<240
+    If PpuDot=0 : ProcedureReturn : EndIf
+    If PpuDot<256 And (PpuMask&24)=24 And (PpuStatus&64)=0 And SprCount>0
+      If SprIndex(0)=0 And PpuDot<=((SprX(0)+7)&~7)
+        ; The renderer sets a hit when it consumes the first dot of the
+        ; overlapping eight-pixel span. Never pass that dot on a status read.
+        event=SprX(0)&~7
+        If PpuDot>event : event=((PpuDot+7)>>3)<<3 : EndIf
+        If event<=PpuDot : ProcedureReturn : EndIf
+        dots=event-PpuDot
+      EndIf
+    EndIf
+    If dots=341-PpuDot And OamCacheDirty=0
+      spriteY=Oam(0)+1 : height=8 : If PpuCtrl&32 : height=16 : EndIf
+      limit=240
+      If (PpuMask&24)=24 And (PpuStatus&64)=0 And spriteY+height>PpuLine+1
+        line=spriteY : If line<=PpuLine : line=PpuLine+1 : EndIf
+        If line<limit : limit=line : EndIf
+      EndIf
+      If (PpuMask&24)<>0 And (PpuStatus&32)=0 : limit=NesNextOverflow(PpuLine+1,limit) : EndIf
+      dots=(limit-PpuLine)*341-PpuDot
+      If limit=240 : dots=dots+342 : EndIf
+    EndIf
+  ElseIf PpuLine>241 And PpuLine<PpuPreLine
+    dots=(PpuPreLine-PpuLine)*341-PpuDot+1
+  EndIf
+  ; PAL advances at most four dots per CPU cycle, NTSC exactly three.
+  CompilerIf #GAME_PAL
+    cycles=(dots-1)>>2
+  CompilerElse
+    cycles=(dots-1)/3
+  CompilerEndIf
+  If ApuInhibit=0 And ApuFive=0
+    event=ApuStep4-ApuFrameClock-1
+    If event<cycles : cycles=event : EndIf
+  EndIf
+  If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+  If cycles>0 : NesStatusHorizon=stamp+cycles : EndIf
+EndProcedure
+
+; The CPU can run through ordinary raster work until a device could signal
+; an interrupt or the host could observe a frame boundary. Timestamped MMIO
+; still catches both devices up before it reads or changes either device.
+Procedure NesSetCpuHorizon(stamp.i)
+  Protected dots.i, cycles.i, event.i
+  If DmcBytes>0 : ProcedureReturn : EndIf
+  If PpuLine<241
+    dots=(241-PpuLine)*341-PpuDot+1
+  ElseIf PpuLine=241 And PpuDot=0
+    ProcedureReturn
+  Else
+    ; A rendered odd NTSC prerender line may be one dot shorter.
+    dots=(PpuPreLine+1-PpuLine)*341-PpuDot-1
+  EndIf
+  If dots>2728 : dots=2728 : EndIf
+  CompilerIf #GAME_PAL
+    cycles=(dots-1)>>2
+  CompilerElse
+    cycles=(dots-1)/3
+  CompilerEndIf
+  If ApuInhibit=0 And ApuFive=0
+    event=ApuStep4-ApuFrameClock-1
+    If event<cycles : cycles=event : EndIf
+  EndIf
+  If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+  If cycles>0 : NesCpuHorizon=stamp+cycles : EndIf
+EndProcedure

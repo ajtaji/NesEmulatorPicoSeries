@@ -1,0 +1,96 @@
+; RAM and PRG are stable during a CPU run window on these boards. The
+; scheduler still chooses the budget and handles interrupts afterwards.
+Procedure.i NesRamBranchTaken(condition.i, negative.i, zeroValue.i, carry.i, overflow.i)
+  Protected set.i
+  Select condition>>1
+    Case 0 : set=(negative&128)<>0
+    Case 1 : set=(overflow&128)<>0
+    Case 2 : set=(carry&256)<>0
+    Case 3 : set=(zeroValue&255)=0
+  EndSelect
+  ProcedureReturn set=(condition&1)
+EndProcedure
+
+Procedure.i NesRamCpuWindow(n.i, coalesce.i=0)
+  Protected rule.i, action.i, mode.i, condition.i, startPc.i, length.i=2
+  Protected addr.i, indexed.i, dataByte.i, readCycles.i=3, branchCycles.i
+  Protected nn.i, zz.i, cc.i, vv.i, result.i
+  Protected remaining.i, loops.i, count.i, spent.i, nextPc.i, bus.i
+  Protected horizon.i, repeatRow.i, repeatCycles.i, skippedCycles.i
+  If n<=0 Or Stopped Or NesStall Or NesIdleEnabled=0 Or PC<$8000
+    ProcedureReturn CpuRun(n)
+  EndIf
+  rule=NesRamWaitRule(PrgBase-CartPrg+PC-$8000)
+  If rule=0 : ProcedureReturn CpuRun(n) : EndIf
+  action=(rule>>16)&7 : mode=(rule>>19)&7 : condition=(rule>>22)&7
+  addr=rule&$FFFF
+  If mode=1 Or mode=4 : indexed=X : EndIf
+  If mode=2 Or mode=5 : indexed=Y : EndIf
+  If mode<3
+    addr=(addr+indexed)&255
+    If mode<>0 : readCycles=4 : EndIf
+  Else
+    length=3 : readCycles=4
+    result=(addr+indexed)&$FFFF
+    If ((result!addr)&$FF00)<>0 : readCycles+=1 : EndIf
+    addr=result
+    If addr>=$2000 : ProcedureReturn CpuRun(n) : EndIf
+  EndIf
+  branchCycles=3+((rule>>25)&1)
+  startPc=PC : remaining=n
+  If rule&$4000000
+    ; An interrupt may have changed RAM since the read in the last window.
+    ; The branch already in progress must use its original condition.
+    If NesRamBranchTaken(condition,FN,FZ,FC,FV)=0 : ProcedureReturn CpuRun(n) : EndIf
+    startPc-=length : spent=branchCycles : count=1 : remaining-=branchCycles
+  EndIf
+  nextPc=startPc : bus=256-length-2
+  If remaining>0
+    dataByte=M(addr&$7FF)
+    nn=dataByte : zz=dataByte : cc=FC : vv=FV
+    Select action
+      Case 4 : result=A-dataByte : nn=result : zz=result : cc=~result
+      Case 5 : result=X-dataByte : nn=result : zz=result : cc=~result
+      Case 6 : result=Y-dataByte : nn=result : zz=result : cc=~result
+      Case 7 : zz=A&dataByte : vv=dataByte<<1
+    EndSelect
+    ; Each accepted read leaves the same condition for the backward branch.
+    If NesRamBranchTaken(condition,nn,zz,cc,vv)=0 : ProcedureReturn CpuRun(n) : EndIf
+    ; The CPU would use the same budget again while both devices stay behind a proven horizon.
+    ; Skip whole periods of those scheduled windows, leaving the last window's metadata exact.
+    If coalesce And n=128
+      horizon=NesCpuHorizon : If NesStatusHorizon>horizon : horizon=NesStatusHorizon : EndIf
+      If horizon-CpuCycles>=128 And WorkerNmi=NesSeenNmi And WorkerDmcCycles=NesSeenDmc
+        If FI Or (WorkerIrq|MapIrq)=0
+          repeatRow=((readCycles-3)*4+(branchCycles-3)*2+((rule>>26)&1))*4
+          repeatCycles=PeekU(?NesRamWaitPeriods+repeatRow)
+          loops=(horizon-CpuCycles)/repeatCycles
+          skippedCycles=loops*repeatCycles
+          count+=loops*PeekU(?NesRamWaitPeriods+repeatRow+2)
+          CpuCycles+=skippedCycles
+        EndIf
+      EndIf
+    EndIf
+    ; Leave at least one cycle for the last pair, so its read or branch
+    ; ends the window at the same instruction boundary as CpuRun.
+    loops=(remaining-1)/(readCycles+branchCycles)
+    remaining-=loops*(readCycles+branchCycles)
+    spent+=loops*(readCycles+branchCycles)+readCycles : count+=loops*2+1
+    If remaining<=readCycles
+      nextPc=startPc+length : bus=dataByte
+    Else
+      spent+=branchCycles : count+=1
+    EndIf
+    Select action
+      Case 1 : A=dataByte
+      Case 2 : X=dataByte
+      Case 3 : Y=dataByte
+    EndSelect
+    FN=nn : FZ=zz : FC=cc : FV=vv
+    If mode>=3 : AccessPhase=3 : EndIf
+  EndIf
+  PC=nextPc : NesOpenBus=bus
+  NesRunStart=CpuCycles : Budget=n : Left=n-spent : CpuInWindow=0
+  CpuCycles+=spent : NesInstructions+=count : NesIdleBatched+=count
+  ProcedureReturn spent+skippedCycles
+EndProcedure

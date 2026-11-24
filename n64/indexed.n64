@@ -1,0 +1,108 @@
+; The guest PPU writes one indexed frame in CPU cache. Keep the effective
+; RGBA5551 palette at each scanline where it changes. The RDP expands CI8
+; strips into the VI back buffer after the last visible scanline.
+Global Dim NesIndexBlock.i(1024)
+Global NesDisplayBlock.i, NesLayoutChanged.i, NesIndexTicket.i
+Global Dim NesIndexPalette.i(1920)
+Global Dim NesPaletteChange.a(240)
+ProcedureNaked PpuRgbLineRaw()
+  ASM
+    ; A completed row is immutable until the next guest frame. Write it
+    ; back while resident, including the final line of an unaligned row.
+    la t0, global_neslinerow
+    lw a2, 4(t0)
+    cache 0x19, 0(a2)
+    cache 0x19, 16(a2)
+    cache 0x19, 32(a2)
+    cache 0x19, 48(a2)
+    cache 0x19, 64(a2)
+    cache 0x19, 80(a2)
+    cache 0x19, 96(a2)
+    cache 0x19, 112(a2)
+    cache 0x19, 128(a2)
+    cache 0x19, 144(a2)
+    cache 0x19, 160(a2)
+    cache 0x19, 176(a2)
+    cache 0x19, 192(a2)
+    cache 0x19, 208(a2)
+    cache 0x19, 224(a2)
+    cache 0x19, 240(a2)
+    cache 0x19, 255(a2)
+    la t0, global_ppuline
+    ld a0, 0(t0)
+    la t0, global_rgbpairsdirty
+    ld t1, 0(t0)
+    sltiu a1, a0, 1
+    or t1, t1, a1
+    la t2, global_nespalettechange
+    addu t2, t2, a0
+    lbu a3, 0(t2)
+    xor a3, a3, t1
+    beq a3, zero, nes_index_layout_same
+    sb t1, 0(t2)
+    la a3, global_neslayoutchanged
+    addiu a4, zero, 1
+    sd a4, 0(a3)
+nes_index_layout_same:
+    beq t1, zero, nes_index_row_done
+    nop
+    sd zero, 0(t0)
+    la t0, global_rgbpal
+    la t1, global_nesindexpalette
+    sll a0, a0, 6
+    addu t1, t1, a0
+    or a3, t1, zero
+    addiu t2, t0, 64
+nes_index_palette_copy:
+    ld a1, 0(t0)
+    ld a2, 8(t0)
+    sd a1, 0(t1)
+    sd a2, 8(t1)
+    addiu t0, t0, 16
+    bne t0, t2, nes_index_palette_copy
+    addiu t1, t1, 16
+    cache 0x19, 0(a3)
+    cache 0x19, 16(a3)
+    cache 0x19, 32(a3)
+    cache 0x19, 48(a3)
+    cache 0x19, 63(a3)
+nes_index_row_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+Procedure NesIndexCommands()
+  Protected y.i, h.i
+  ; A CI8 strip fits eight 256-pixel rows in the 2 KiB below the TLUT.
+  LpmRdpTmemReset()
+  LpmRdpModeCopy(0)
+  While y<240
+    If NesPaletteChange(y) : LpmRdpLoadPalette(@NesIndexPalette(y*8),0,32) : EndIf
+    h=1
+    While h<8 And y+h<240
+      If NesPaletteChange(y+h) : Break : EndIf
+      h=h+1
+    Wend
+    LpmRdpLoadTexture(@LinePixels(y*256),256,h,#LPM_TEX_CI8)
+    LpmRdpTextureRect(32,y,288,y+h,0,0,1024,1024)
+    y=y+h
+  Wend
+EndProcedure
+Procedure NesIndexedShow(fb.i)
+  Protected i.i, count.i
+  LpmRdpAttach(fb)
+  ; Pixel and palette data change in place. Only changing the scanlines
+  ; that start a palette requires a different RDP command list.
+  If NesLayoutChanged Or NesDisplayBlock=0
+    NesLayoutChanged=0 : NesDisplayBlock=0
+    For i=0 To 239 : count=count+NesPaletteChange(i) : Next
+    If count<20
+      If LpmRdpBlockBegin(@NesIndexBlock(0),8192)
+        NesIndexCommands()
+        NesDisplayBlock=LpmRdpBlockEnd()
+      EndIf
+    EndIf
+  EndIf
+  If NesDisplayBlock : LpmRdpBlockRun(NesDisplayBlock) : Else : NesIndexCommands() : EndIf
+  LpmRdpDetachShow(fb) : NesIndexTicket=lpm_rdp_frames_sent
+EndProcedure

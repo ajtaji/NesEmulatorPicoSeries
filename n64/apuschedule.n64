@@ -1,0 +1,180 @@
+; Advance guest APU time to the same ordered deadlines as the shared core.
+ProcedureNaked ApuAdvance(dt.i)
+  ASM
+    blez a0, nes_apu_publish
+    nop
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    daddu s0, a0, zero
+    la s3, global_apusampleleft
+    la s4, global_apuframeclock
+    la s5, global_apuresetdelay
+    la s6, global_apuframestep
+    la s7, global_apufive
+nes_apu_next:
+    ld t0, 0(s3)
+    daddu s1, s0, zero
+    slt t1, t0, s1
+    beq t1, zero, nes_apu_reset_bound
+    ld t2, 0(s5)
+    daddu s1, t0, zero
+nes_apu_reset_bound:
+    blez t2, nes_apu_event_bound
+    ld t0, 0(s6)
+    slt t1, t2, s1
+    beq t1, zero, nes_apu_event_bound
+    nop
+    daddu s1, t2, zero
+nes_apu_event_bound:
+    beq t0, zero, nes_apu_frame_1
+    addiu t1, t0, -1
+    beq t1, zero, nes_apu_frame_2
+    addiu t1, t0, -2
+    beq t1, zero, nes_apu_frame_3
+    ld t1, 0(s7)
+    beq t1, zero, nes_apu_frame_4
+    nop
+    la t1, global_apustep5
+    b nes_apu_frame_selected
+    nop
+nes_apu_frame_1:
+    la t1, global_apustep1
+    b nes_apu_frame_selected
+    nop
+nes_apu_frame_2:
+    la t1, global_apustep2
+    b nes_apu_frame_selected
+    nop
+nes_apu_frame_3:
+    la t1, global_apustep3
+    b nes_apu_frame_selected
+    nop
+nes_apu_frame_4:
+    la t1, global_apustep4
+nes_apu_frame_selected:
+    ld s2, 0(t1)
+    ld t2, 0(s4)
+    dsubu t2, s2, t2
+    slt t1, t2, s1
+    beq t1, zero, nes_apu_tick_segment
+    nop
+    daddu s1, t2, zero
+nes_apu_tick_segment:
+    jal aputick
+    daddu a0, s1, zero
+    ld t0, 0(s4)
+    ld t1, 0(s5)
+    daddu t0, t0, s1
+    blez t1, nes_apu_check_event
+    sd t0, 0(s4)
+    dsubu t1, t1, s1
+    bnez t1, nes_apu_check_event
+    sd t1, 0(s5)
+    sd zero, 0(s4)
+    sd zero, 0(s6)
+    ld t0, 0(s7)
+    beq t0, zero, nes_apu_check_event
+    nop
+    jal nesaudioboundary
+    nop
+    jal apuquarter
+    nop
+    jal apuhalf
+    nop
+nes_apu_check_event:
+    ld t0, 0(s4)
+    slt t1, t0, s2
+    bnez t1, nes_apu_check_sample
+    nop
+    jal nesaudioboundary
+    nop
+    jal apuquarter
+    nop
+    ld t0, 0(s6)
+    andi t1, t0, 1
+    beq t1, zero, nes_apu_advance_event
+    nop
+    jal apuhalf
+    nop
+nes_apu_advance_event:
+    ld t0, 0(s6)
+    addiu t0, t0, 1
+    addiu t1, t0, -4
+    bnez t1, nes_apu_check_sample
+    sd t0, 0(s6)
+    ld t0, 0(s7)
+    la t1, global_apuinhibit
+    ld t1, 0(t1)
+    or t0, t0, t1
+    bnez t0, nes_apu_end_sequence
+    nop
+    la t1, global_apuframeirq
+    addiu t0, zero, 1
+    sd t0, 0(t1)
+nes_apu_end_sequence:
+    ld t0, 0(s4)
+    dsubu t0, t0, s2
+    daddiu t0, t0, -1
+    sd t0, 0(s4)
+    sd zero, 0(s6)
+nes_apu_check_sample:
+    ld t0, 0(s3)
+    dsubu s0, s0, s1
+    dsubu t0, t0, s1
+    bnez t0, nes_apu_continue
+    sd t0, 0(s3)
+    jal nesqueuesample
+    nop
+    la t0, global_apusamplefrac
+    la t1, global_apufracstep
+    la t2, global_apufracden
+    la t3, global_apusamplebase
+    ld a0, 0(t0)
+    ld a1, 0(t1)
+    ld a2, 0(t2)
+    ld a3, 0(t3)
+    daddu a0, a0, a1
+    slt a1, a0, a2
+    bnez a1, nes_apu_save_fraction
+    nop
+    dsubu a0, a0, a2
+    daddiu a3, a3, 1
+nes_apu_save_fraction:
+    sd a0, 0(t0)
+    sd a3, 0(s3)
+nes_apu_continue:
+    bgtz s0, nes_apu_next
+    nop
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    daddiu sp, sp, 80
+nes_apu_publish:
+    la t0, global_apuframeirq
+    la t1, global_dmcirq
+    la t2, global_workerirq
+    ld t0, 0(t0)
+    ld t1, 0(t1)
+    or t0, t0, t1
+    sd t0, 0(t2)
+    la t0, global_apuproduced
+    la t1, global_apusamples
+    ld t0, 0(t0)
+    jr ra
+    sd t0, 0(t1)
+  EndASM
+EndProcedure

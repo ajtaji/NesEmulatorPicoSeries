@@ -3,6 +3,7 @@
 import re
 
 from stage_bus import read_direct
+from stage_thread import stage_thread
 
 
 def cache_window_registers(source: str) -> str:
@@ -107,4 +108,7 @@ NesOpcodeSlow:
         "; Each opcode owns its tail. Assembly only implements computed dispatch;\n"
         "; operands and instruction semantics remain in checked PureMetal source.",
         "; The VR4300 dispatch table points to the existing PureMetal opcode handlers.")
-    return cache_window_registers(source)
+    # MMC5 and mapper 234 can attach read side effects to the PRG window.
+    if mapper in (5, 234):
+        return cache_window_registers(source)
+    return stage_thread(source)

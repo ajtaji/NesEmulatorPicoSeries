@@ -7,39 +7,75 @@
 #HOST_AUDIO_BYTES = #HOST_AUDIO_FRAMES * 4
 #HOST_AUDIO_SLOTS = 3
 
-Global HostPadPending.i
-Global HostFrame.i, HostPcmRead.i, HostAiSlot.i, HostAiBase.i
+Global HostPadPending.i, HostAudioReady.i
+Global HostPendingVideo.i, HostCoalesced.i, HostPcmRead.i, HostAiSlot.i, HostAiBase.i
 ; Leave room to align each stereo block inside a 4 KiB page. No AI transfer
 ; ends on the 8 KiB boundary affected by the AI address carry erratum.
 Global Dim HostAiMemory.a((#HOST_AUDIO_SLOTS + 1) * 4096)
+CompilerIf #VERIFY_FRAME>0
+  Global HostAiQueued.i, HostAiEmpty.i, HostAiUnderruns.i, HostAiReported.i, HostAiReadyOnEmpty.i
+CompilerEndIf
 
-Procedure HostSetFrame(fb.i)
-  Protected cached.i = (fb & $1FFFFFFF) | $80000000
-  HostFrame = fb
-  PpuFrameStride = #HOST_ROW_BYTES
-  RenderTop = cached + (#HOST_WIDTH - #HOST_NES_WIDTH)
-  FrameBottom = RenderTop + 120 * #HOST_ROW_BYTES
-EndProcedure
+XIncludeFile "stereo.n64"
 
-Procedure HostAudioPoll()
-  Protected produced.i = ApuProduced
-  Protected frame.i, sample.i, dst.i
+Procedure HostQueueAudio(produced.i)
+  Protected dst.i
   If HostAiBase = 0 : ProcedureReturn : EndIf
-  If produced < HostPcmRead : HostPcmRead = 0 : EndIf ; guest reset
-  If produced - HostPcmRead > 4096 : HostPcmRead = produced - 4096 : EndIf
+  ; Fill both hardware descriptors at startup, keeping one block in software
+  ; to absorb variation between busy guest scanlines and controller polls.
+  If HostAudioReady=0
+    If produced-HostPcmRead < 3*#HOST_AUDIO_FRAMES : ProcedureReturn : EndIf
+    HostAudioReady=1
+  EndIf
+  CompilerIf #VERIFY_FRAME>0
+    If HostAiQueued>=2
+      If PeekL(#LPM_AI+$0C)&$40000000
+        HostAiEmpty=0
+      ElseIf HostAiEmpty=0
+        HostAiUnderruns+=1 : HostAiEmpty=1
+        If produced-HostPcmRead>=#HOST_AUDIO_FRAMES : HostAiReadyOnEmpty+=1 : EndIf
+      EndIf
+    EndIf
+  CompilerEndIf
+  If produced < HostPcmRead : HostPcmRead = 0 : EndIf
+  If produced - HostPcmRead > 4096 : HostPcmRead = (produced - 4096 + #HOST_AUDIO_FRAMES - 1) & ~(#HOST_AUDIO_FRAMES - 1) : EndIf
   While produced - HostPcmRead >= #HOST_AUDIO_FRAMES And LpmAiFull() = 0
     dst = HostAiBase + HostAiSlot * 4096
-    For frame = 0 To #HOST_AUDIO_FRAMES - 1
-      sample = Pcm[(HostPcmRead + frame) & 4095] & $FFFF
-      PokeL(dst + frame * 4, (sample << 16) | sample)
-    Next
+    HostCopyStereo(dst, @Pcm[HostPcmRead & 4095])
     LpmCacheWritebackData(dst, #HOST_AUDIO_BYTES)
     LpmAiQueue(dst, #HOST_AUDIO_BYTES)
     HostPcmRead += #HOST_AUDIO_FRAMES
     HostAiSlot += 1
     If HostAiSlot = #HOST_AUDIO_SLOTS : HostAiSlot = 0 : EndIf
+    CompilerIf #VERIFY_FRAME>0
+      HostAiQueued+=1 : HostAiEmpty=0
+    CompilerEndIf
   Wend
 EndProcedure
+
+Procedure HostAudioPoll()
+  CompilerIf #NES_APU_BLOCKED
+    NesRenderBlock()
+  CompilerEndIf
+  HostQueueAudio(ApuProduced)
+  CompilerIf #VERIFY_FRAME>0
+    If WorkerFrames>HostAiReported And (WorkerFrames%60=0 Or WorkerFrames=#VERIFY_FRAME)
+      HostAiReported=WorkerFrames
+      LpmDebugPrint("NES AI QUEUED "+Str(HostAiQueued)+" UNDERRUNS "+Str(HostAiUnderruns)+" FRAME "+Str(WorkerFrames))
+      LpmDebugPrint("NES AI READY ON EMPTY "+Str(HostAiReadyOnEmpty)+" COALESCED "+Str(HostCoalesced)+" FRAME "+Str(WorkerFrames))
+    EndIf
+  CompilerEndIf
+EndProcedure
+
+CompilerIf #VERIFY_FRAME>0
+Procedure HostDrainCapture()
+  ; The guest has stopped. Submit complete blocks still in the software ring.
+  HostAudioReady=1
+  While ApuProduced-HostPcmRead>=#HOST_AUDIO_FRAMES
+    HostQueueAudio(ApuProduced)
+  Wend
+EndProcedure
+CompilerEndIf
 
 Procedure.i HostPad(port.i)
   Protected buttons.i = LpmPadButtons(port), keys.i
@@ -55,6 +91,9 @@ Procedure.i HostPad(port.i)
   ProcedureReturn keys
 EndProcedure
 
+CompilerIf #VERIFY_INPUT
+  XIncludeFile "replay.pmi"
+CompilerEndIf
 Procedure HostInputPoll()
   If HostPadPending
     If LpmPadReadDone() = 0 : ProcedureReturn : EndIf
@@ -62,25 +101,53 @@ Procedure HostInputPoll()
   Else
     LpmPadRead()
   EndIf
-  NesController = HostPad(0)
+  CompilerIf #VERIFY_INPUT
+    NesController = NesReplayPad(WorkerFrames)
+  CompilerElse
+    NesController = HostPad(0)
+  CompilerEndIf
   NesController2 = HostPad(1)
 EndProcedure
 
+Procedure HostPresent(waitMode.i)
+  Protected seen.i, fb.i
+  If HostPendingVideo=0 : ProcedureReturn : EndIf
+  seen=LpmIrqSeen(#LPM_WAKE_VI|#LPM_WAKE_AI)
+  Repeat
+    fb=LpmDisplayTryGet()
+    If fb
+      NesIndexedShow(fb) : HostPendingVideo=0 : ProcedureReturn
+    EndIf
+    ; Offer the completed picture again during vblank, before the next
+    ; line zero reuses it. The VI and NES have different physical rates.
+    If waitMode=0 : ProcedureReturn : EndIf
+    If waitMode=1 And HostAudioReady And ApuProduced-HostPcmRead<3*#HOST_AUDIO_FRAMES
+      HostPendingVideo=0 : HostCoalesced+=1 : ProcedureReturn
+    EndIf
+    seen=LpmIrqSleep(#LPM_WAKE_VI|#LPM_WAKE_AI,seen,#LPM_WAIT_TICK,0,0)
+    HostQueueAudio(ApuProduced)
+  ForEver
+EndProcedure
+
 Procedure DisplayWaitLine(line.i)
-  ; The PPU owns the back buffer for its entire frame. Poll audio during
-  ; rasterization without locking any guest scanline to the VI beam.
-  If line = 0 And HostFrame = 0 : HostSetFrame(LpmDisplayGet()) : EndIf
-  If (line & 15) = 0 : HostAudioPoll() : EndIf
+  HostAudioPoll()
+  If line=0
+    HostPresent(1)
+    ; The previous RDP transfer must release the indexed pixels before reuse.
+    While LpmRdpFramesDone()<NesIndexTicket : Wend
+  EndIf
 EndProcedure
 
 Procedure DisplayFrame()
-  If HostFrame = 0 : ProcedureReturn : EndIf
-  LpmCacheWritebackData((HostFrame & $1FFFFFFF) | $80000000, #HOST_ROW_BYTES * #HOST_HEIGHT)
-  LpmDisplayShow(HostFrame)
-  If HostPadPending = 0 : HostPadPending = LpmPadReadAsync() : EndIf
-  ; Let VI release the buffer while the guest executes its vblank.
-  HostFrame = 0
   HostAudioPoll()
+  HostPendingVideo=1
+  CompilerIf #VERIFY_FRAME>0
+    ; A screenshot checkpoint must present its requested guest frame.
+    If WorkerFrames+1=#VERIFY_FRAME : HostPresent(2) : Else : HostPresent(0) : EndIf
+  CompilerElse
+    HostPresent(0)
+  CompilerEndIf
+  If HostPadPending=0 : HostPadPending=LpmPadReadAsync() : EndIf
 EndProcedure
 
 Procedure.i HostBegin()
@@ -93,6 +160,7 @@ Procedure.i HostBegin()
   CompilerIf #GAME_PAL
     LpmDisplayFpsLimit(5000)
   CompilerEndIf
+  LpmRdpInit()
   LpmInterruptsOn()
   LpmPadScan()
   HostInputPoll()
@@ -100,6 +168,5 @@ Procedure.i HostBegin()
   HostPcmRead = ApuProduced
   HostAiSlot = 0
   LpmAiInit(48000)
-  HostSetFrame(LpmDisplayGet())
   ProcedureReturn 1
 EndProcedure

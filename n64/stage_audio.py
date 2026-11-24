@@ -3,6 +3,9 @@
 import re
 
 
+IMMEDIATE_MIXERS = frozenset((5, 19, 24, 26, 69))
+
+
 SYNCHRONOUS_BRIDGE = """Procedure.i NesPost(command.i, addr.i, value.i, stamp.i)
   WorkerCommand(command,addr,value,stamp)
   QSent=QSent+1 : QComplete=QSent
@@ -21,7 +24,7 @@ def replace(source: str, old: str, new: str) -> str:
     return source.replace(old, new)
 
 
-def stage_audio(name: str, source: str) -> str:
+def stage_audio(name: str, source: str, mapper: int) -> str:
     if name == "bridge":
         shared = re.search(r"^Procedure\.i NesPost\(.*?^Procedure\.i NesRpc\(.*?^EndProcedure",
                            source, re.M | re.S)
@@ -50,4 +53,36 @@ def stage_audio(name: str, source: str) -> str:
         dmc = source.index("  While DmcTimer<=0", begin)
         source = source[:begin] + ('XIncludeFile "../n64/oscillators.n64"\n'
                                    'Procedure NesDmcEdge()\n') + source[dmc:]
+        blocked = mapper not in IMMEDIATE_MIXERS
+        source = f"#NES_APU_BLOCKED={int(blocked)}\n" + source
+        if not blocked:
+            return source
+
+        # Mixer and event scheduler preserve old oscillator parameters until
+        # register/clock boundaries. DMC bus work stays in the shared code.
+        source = replace(source, "  r=addr-$4000\n", "  NesAudioBoundary()\n  r=addr-$4000\n")
+        scheduler = re.search(r"^Procedure ApuAdvance\(dt\.i\)\n.*?^EndProcedure$", source, re.M | re.S)
+        if not scheduler:
+            raise ValueError("N64 audio staging expected ApuAdvance")
+        source = replace(source, scheduler[0], 'XIncludeFile "../n64/apublock.n64"\n'
+                         'XIncludeFile "../n64/apuschedule.n64"')
     return source
+
+
+def stage_oscillators(source: str, mapper: int) -> str:
+    if mapper in IMMEDIATE_MIXERS:
+        return source
+    source = replace(source, "ProcedureNaked ApuTick(dt.i)", "ProcedureNaked NesOscillatorTick(dt.i)")
+    # DMC stays synchronous for cartridge reads, cycle steals, and IRQs.
+    return replace(source, "    sd t3, 8(t0)\n    la t0, global_dmctimer", """    jr ra
+    sd t3, 8(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked ApuTick(dt.i)
+  ASM
+    la t0, global_nesoscpending
+    ld t1, 0(t0)
+    addu t1, t1, a0
+    sd t1, 0(t0)
+    la t0, global_dmctimer""")
