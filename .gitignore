@@ -19,3 +19,6 @@ my-*.pico2w
 *.board.log
 # The desktop build (desktop/README.md says how to make it); not a release
 desktop/*.exe
+
+# Local Nintendo 64 cartridge builds
+/n64/build/

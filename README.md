@@ -54,6 +54,7 @@ and [current Pico compatibility/performance results](PICO-MMC3-NMI-RESULTS.md).
 | Raspberry Pi Pico 2 W | RP2350 Arm | Runs; diagnostics and three-game board tests pass |
 | Raspberry Pi Pico 2 | RP2350 Arm | Same port; not yet run on a board here (no Bluetooth audio) |
 | Raspberry Pi 4 / Anvil | BCM2711 AArch64 | [Returning application, Neon/Vulkan, touch and Bluetooth](anvil/README.md) |
+| Nintendo 64 | VR4300 | [PureMetal cartridge port, hardware demo timings and build instructions](n64/README.md) |
 | Pimoroni Pico Plus 2 / Pico Plus 2 W | RP2350B + 8 MB PSRAM | Runs on a board without a display (no published wrapper yet); MMC5's largest PRG-RAM uses the PSRAM |
 | Pimoroni Pico 2 W with a PSRAM kit | RP2350A + PSRAM | Planned; not ported yet |
 

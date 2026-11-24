@@ -1,0 +1,131 @@
+; Nintendo 64 cartridge entry. The shared guest core runs synchronously on the VR4300.
+#CPU_TIMING=1
+#CPU_ASM_TAIL=0
+#NES_SPLIT=0
+#PPU_PROFILE=0
+#NES_VIDEO_BACKEND=2
+#NES_AUDIO_BACKEND=2
+XIncludeFile "game.pmi"
+XIncludeFile "Mips/Lib/LibPureMetalN64/lpm.n64"
+ASM
+  .cartfile "game.bin"
+EndASM
+
+Procedure.i NesHostUs()
+  ProcedureReturn (LpmCpuCount() & $FFFFFFFF)*8/375
+EndProcedure
+Procedure.i NesDiv(a.i,b.i)
+  ProcedureReturn a/b
+EndProcedure
+Procedure GuestClear(p.i,n.i)
+  Protected i.i
+  For i=0 To n-1 : PokeA(p+i,0) : Next
+EndProcedure
+Procedure UsbSerialTask()
+EndProcedure
+Procedure SafetyPet()
+EndProcedure
+Procedure FrameFence()
+EndProcedure
+
+XIncludeFile "../anvil/state.pmi"
+XIncludeFile "../anvil/cpu2a03.pmi"
+XIncludeFile "../anvil/mapper_state.pmi"
+XIncludeFile "../anvil/bridge.pmi"
+Global RenderTop.i
+XIncludeFile "ppu.n64"
+XIncludeFile "../anvil/mappers.pmi"
+XIncludeFile "../anvil/mapper_extra.pmi"
+XIncludeFile "../anvil/mapper_extra_bus.pmi"
+XIncludeFile "../anvil/mapper5.pmi"
+XIncludeFile "../anvil/mapper5_video.pmi"
+XIncludeFile "../anvil/apu.pmi"
+XIncludeFile "../anvil/mapper5_audio.pmi"
+XIncludeFile "../anvil/mapper69_audio.pmi"
+XIncludeFile "../anvil/mapper9_video.pmi"
+XIncludeFile "../anvil/mapper_adapters.pmi"
+XIncludeFile "../anvil/worker.pmi"
+XIncludeFile "../anvil/mapper_konami_namco.pmi"
+XIncludeFile "../anvil/lookup_tables.pmi"
+XIncludeFile "region.pmi"
+XIncludeFile "host.n64"
+XIncludeFile "storage.n64"
+
+; The renderer decodes tiles directly. The Thumb-only descriptor hooks have no work here.
+Procedure PpuUpdateDescriptor(addr.i)
+EndProcedure
+Procedure PpuUpdateAttribute(addr.i)
+EndProcedure
+Procedure CartPpuWriteNotice(addr.i,value.i)
+EndProcedure
+Procedure CartSelect(number.i)
+EndProcedure
+
+Procedure.i LoadGame()
+  Protected i.i, bank.i
+  If NesStorageLoad()=0 : ProcedureReturn 0 : EndIf
+  CartMapper=#GAME_MAPPER : CartSubmapper=#GAME_SUB
+  CartPrgBanks=#GAME_VIEWS/32768 : CartChrBanks=#GAME_CHR/8192
+  CartConflicts=#GAME_CONFLICT : CartChrRam=#GAME_CHR_RAM
+  MapBattery=#GAME_BATTERY : MapFourScreen=#GAME_FOUR_SCREEN
+  MapRamBytes=#GAME_RAM : MapChrRam=CartChrRam
+  MapPrgBytes=#GAME_PRG : MapChrBytes=#GAME_CHR
+  PpuMirroring=#GAME_MIRROR : ChrWritable=CartChrRam
+  If CartChrRam : For i=0 To MapChrBytes-1 : PokeA(CartChr+i,0) : Next : EndIf
+  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  For i=0 To 255
+    PixelSpread(i)=(i&3)|(((i>>2)&3)<<8)|(((i>>4)&3)<<16)|(((i>>6)&3)<<24)
+  Next
+  For bank=0 To CartChrBanks-1
+    NesChrWindow=CartChr+bank*8192 : Pattern=@Decoded(bank*8192)
+    For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
+  Next
+  NesChrWindow=CartChr : Pattern=@Decoded(0)
+  NesTiming(#GAME_PAL)
+  If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
+  If WorkerError : ProcedureReturn 0 : EndIf
+  For i=0 To 31 : LengthTable(i)=PeekA(?LengthData+i) : Next
+
+  For i=0 To 30 : PulseMix(i)=PeekU(?PulseData+i*2) : Next
+  For i=0 To 202 : TndMix(i)=PeekU(?TndData+i*2) : Next
+  For i=0 To 511 : Rgb64(i)=PeekU(?RgbData+i*2) : Next
+  PpuColours()
+  ProcedureReturn 1
+EndProcedure
+
+Procedure RunGame()
+  Protected stalls.i, lastFrame.i, start.i, elapsed.i
+  If HostBegin()=0 : LpmDebugPrint("NES display init failed") : ProcedureReturn : EndIf
+  LpmDmaInit()
+  If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf
+  CpuReset()
+  LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
+  start=LpmCpuCount()
+  While Stopped=0 And WorkerError=0
+    CpuRun(MapperCpuBudget())
+    NesRpc(0,0,0,CpuCycles)
+    stalls=WorkerDmcCycles-NesSeenDmc
+    While stalls>0
+      NesSeenDmc=WorkerDmcCycles : CpuCycles=CpuCycles+stalls
+      NesRpc(0,0,0,CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
+    Wend
+    If WorkerNmi<>NesSeenNmi
+      NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
+    ElseIf (WorkerIrq|MapIrq)<>0 And FI=0
+      CpuInterrupt($FFFE)
+    EndIf
+    If WorkerFrames<>lastFrame
+      lastFrame=WorkerFrames : HostInputPoll() : HostAudioPoll()
+      If lastFrame=1 Or lastFrame=60 Or lastFrame=120
+        elapsed=(LpmCpuCount()-start) & $FFFFFFFF
+        LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))
+      EndIf
+      CompilerIf #VERIFY_FRAME>0
+        If lastFrame=#VERIFY_FRAME : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn : EndIf
+      CompilerEndIf
+    EndIf
+  Wend
+  LpmDebugPrint("NES STOP "+Str(BadOpcode)+" PC "+Str(PC)+" WORKER "+Str(WorkerError))
+EndProcedure
+RunGame()
+Repeat : ForEver

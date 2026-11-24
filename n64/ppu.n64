@@ -1,0 +1,63 @@
+; Native pixel output for the shared NES PPU.
+Global PpuFrameStride.i=#NES_VIDEO_WIDTH*2
+Declare PpuN64StoreSpan(dst.i, first.i, second.i)
+Declare PpuRgbLineRaw()
+XIncludeFile "../anvil/ppu.pmi"
+
+ProcedureNaked PpuN64StoreSpan(dst.i, first.i, second.i)
+  ; The words contain the leftmost pixel in their low byte. Store bytes in
+  ; pixel order on the big-endian VR4300 without changing the mapper ABI.
+  ASM
+    sb a1, 0(a0)
+    sb a2, 4(a0)
+    srl a1, a1, 8
+    srl a2, a2, 8
+    sb a1, 1(a0)
+    sb a2, 5(a0)
+    srl a1, a1, 8
+    srl a2, a2, 8
+    sb a1, 2(a0)
+    sb a2, 6(a0)
+    srl a1, a1, 8
+    srl a2, a2, 8
+    sb a1, 3(a0)
+    jr ra
+    sb a2, 7(a0)
+  EndASM
+EndProcedure
+
+ProcedureNaked PpuRgbLineRaw()
+  ASM
+    la t0, global_linepixels
+    la t1, global_rgbpal
+    la t2, global_framerow
+    lw t2, 4(t2)
+    daddiu t3, t0, 256
+nes_rgb4:
+    lbu a0, 0(t0)
+    lbu a1, 1(t0)
+    sll a0, a0, 1
+    sll a1, a1, 1
+    addu a0, t1, a0
+    addu a1, t1, a1
+    lhu a0, 0(a0)
+    lhu a1, 0(a1)
+    sh a0, 0(t2)
+    sh a1, 2(t2)
+    lbu a0, 2(t0)
+    lbu a1, 3(t0)
+    sll a0, a0, 1
+    sll a1, a1, 1
+    addu a0, t1, a0
+    addu a1, t1, a1
+    lhu a0, 0(a0)
+    lhu a1, 0(a1)
+    sh a0, 4(t2)
+    sh a1, 6(t2)
+    daddiu t0, t0, 4
+    bne t0, t3, nes_rgb4
+    daddiu t2, t2, 8
+    jr ra
+    nop
+  EndASM
+EndProcedure

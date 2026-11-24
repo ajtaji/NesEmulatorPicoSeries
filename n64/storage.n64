@@ -1,0 +1,56 @@
+; RDRAM from $80200000 starts with the VI buffers. Preserve their fixed pool
+; and the crash display above $803C0000. The Expansion Pak is optional.
+#NES_CART_LOW = $FFFFFFFF80280000
+#NES_CART_LOW_END = $FFFFFFFF803B0000
+#NES_CART_HIGH = $FFFFFFFF80400000
+#NES_CART_HIGH_END = $FFFFFFFF807C0000
+#NES_PRG_SLOT_BYTES = 8192
+
+Global NesPrgOnCart.i
+
+Procedure.i NesCartRead(cartAddress.i, target.i, bytes.i)
+  Protected ticket.i
+  If bytes=0 : ProcedureReturn 1 : EndIf
+  ticket=LpmPiRead(cartAddress,target,bytes)
+  If ticket<=0 : ProcedureReturn 0 : EndIf
+  LpmPiWait(ticket)
+  ProcedureReturn 1
+EndProcedure
+
+Procedure.i NesStorageLoad()
+  Protected file.i=LpmCartFile(0), stored.i=LpmCartFileLen(0)
+  Protected chrRomBytes.i, total.i, base.i=#NES_CART_LOW
+  If #GAME_CHR_RAM=0 : chrRomBytes=#GAME_CHR : EndIf
+  If file=0 Or stored<>#GAME_VIEWS+chrRomBytes : ProcedureReturn 0 : EndIf
+  total=#GAME_VIEWS+#GAME_CHR
+  NesPrgOnCart=0
+  If total<=#NES_CART_LOW_END-#NES_CART_LOW
+    CartPrg=base
+  ElseIf total<=#NES_CART_HIGH_END-#NES_CART_HIGH And LpmMemorySize()>=$800000
+    base=#NES_CART_HIGH
+    CartPrg=base
+  Else
+    CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=228
+      ; Both boards map PRG through MapperPrg's four cached 8 KiB windows.
+      ; Load CHR once, and let slot changes read just the PRG bank they need.
+      If #GAME_CHR>#NES_CART_LOW_END-#NES_CART_LOW : ProcedureReturn 0 : EndIf
+      If NesCartRead(file+#GAME_VIEWS,base,chrRomBytes)=0 : ProcedureReturn 0 : EndIf
+      CartChr=base : CartPrg=0 : NesPrgOnCart=file
+      ProcedureReturn 1
+    CompilerElse
+      ProcedureReturn 0
+    CompilerEndIf
+  EndIf
+  If NesCartRead(file,base,stored)=0 : ProcedureReturn 0 : EndIf
+  CartChr=base+#GAME_VIEWS
+  ProcedureReturn 1
+EndProcedure
+
+Procedure.i NesPrgBankLoad(dst.i, bank.i)
+  Protected offset.i=bank*#NES_PRG_SLOT_BYTES
+  If NesPrgOnCart
+    ProcedureReturn NesCartRead(NesPrgOnCart+offset,dst,#NES_PRG_SLOT_BYTES)
+  EndIf
+  MapCopy(dst,CartPrg+offset,#NES_PRG_SLOT_BYTES)
+  ProcedureReturn 1
+EndProcedure
