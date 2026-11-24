@@ -1,6 +1,5 @@
 ; Nintendo 64 cartridge entry. The shared guest core runs synchronously on the VR4300.
 #CPU_TIMING=1
-#CPU_ASM_TAIL=0
 #NES_SPLIT=0
 #PPU_PROFILE=0
 #NES_VIDEO_BACKEND=2
@@ -28,6 +27,7 @@ EndProcedure
 Procedure FrameFence()
 EndProcedure
 
+Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
 XIncludeFile "../anvil/cpu2a03.pmi"
 XIncludeFile "../anvil/mapper_state.pmi"
@@ -51,7 +51,6 @@ XIncludeFile "region.pmi"
 XIncludeFile "host.n64"
 XIncludeFile "storage.n64"
 
-; The renderer decodes tiles directly. The Thumb-only descriptor hooks have no work here.
 Procedure PpuUpdateDescriptor(addr.i)
 EndProcedure
 Procedure PpuUpdateAttribute(addr.i)
@@ -66,6 +65,7 @@ Procedure.i LoadGame()
   If NesStorageLoad()=0 : ProcedureReturn 0 : EndIf
   CartMapper=#GAME_MAPPER : CartSubmapper=#GAME_SUB
   CartPrgBanks=#GAME_VIEWS/32768 : CartChrBanks=#GAME_CHR/8192
+  NesExtraBoard=ExtraManaged(CartMapper) : NesA12Board=ExtraA12(CartMapper)
   CartConflicts=#GAME_CONFLICT : CartChrRam=#GAME_CHR_RAM
   MapBattery=#GAME_BATTERY : MapFourScreen=#GAME_FOUR_SCREEN
   MapRamBytes=#GAME_RAM : MapChrRam=CartChrRam
@@ -103,11 +103,11 @@ Procedure RunGame()
   start=LpmCpuCount()
   While Stopped=0 And WorkerError=0
     CpuRun(MapperCpuBudget())
-    NesRpc(0,0,0,CpuCycles)
+    WorkerAdvance(CpuCycles)
     stalls=WorkerDmcCycles-NesSeenDmc
     While stalls>0
       NesSeenDmc=WorkerDmcCycles : CpuCycles=CpuCycles+stalls
-      NesRpc(0,0,0,CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
+      WorkerAdvance(CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
     Wend
     If WorkerNmi<>NesSeenNmi
       NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)

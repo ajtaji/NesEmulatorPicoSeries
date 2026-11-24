@@ -44,50 +44,10 @@ def stage_audio(name: str, source: str) -> str:
                          "      WorkerPpuUs=WorkerPpuUs+NesHostUs()-timer\n", "      PpuAdvance(dt)\n")
         return replace(source, "  QResult=0\n  If command=1", "  QResult=0\n  If command=0 : ProcedureReturn : EndIf\n  If command=1")
     if name == "apu":
-        source = replace(source, "  Protected c.i, feedback.i, period.i, ticks.i",
-                         "  Protected c.i, feedback.i, period.i, ticks.i, timer.i, tap.i, lfsr.i")
-        source = replace(source, "    ApuTimer(c)=ApuTimer(c)-dt\n"
-                         "    If ApuTimer(c)<=0\n"
-                         "      period=2*(ApuPeriod(c)+1) : ticks=1+NesDiv(0-ApuTimer(c),period)\n"
-                         "      ApuTimer(c)=ApuTimer(c)+ticks*period\n"
-                         "      ApuSeq(c)=(ApuSeq(c)+ticks)&7\n"
-                         "    EndIf",
-                         "    timer=ApuTimer(c)-dt\n"
-                         "    If timer<=0\n"
-                         "      period=2*(ApuPeriod(c)+1) : ticks=1\n"
-                         "      If period=2\n"
-                         "        ticks=1+((0-timer)>>1)\n"
-                         "      ElseIf timer+period<=0\n"
-                         "        ticks=1+(0-timer)/period\n"
-                         "      EndIf\n"
-                         "      timer=timer+ticks*period : ApuSeq(c)=(ApuSeq(c)+ticks)&7\n"
-                         "    EndIf\n"
-                         "    ApuTimer(c)=timer")
-        source = replace(source, "    period=ApuPeriod(2)+1 : ticks=1+NesDiv(0-ApuTimer(2),period)\n"
-                         "    ApuTimer(2)=ApuTimer(2)+ticks*period",
-                         "    period=ApuPeriod(2)+1 : timer=ApuTimer(2) : ticks=1\n"
-                         "    If period=1\n"
-                         "      ticks=1-timer\n"
-                         "    ElseIf timer+period<=0\n"
-                         "      ticks=1+(0-timer)/period\n"
-                         "    EndIf\n"
-                         "    ApuTimer(2)=timer+ticks*period")
-        source = replace(source, "  While ApuTimer(3)<=0\n"
-                         "    ApuTimer(3)=ApuTimer(3)+NoiseTable(ApuReg(14)&15)\n"
-                         "    If ApuReg(14)&$80\n"
-                         "      feedback=(NoiseShift!(NoiseShift>>6))&1\n"
-                         "    Else\n"
-                         "      feedback=(NoiseShift!(NoiseShift>>1))&1\n"
-                         "    EndIf\n"
-                         "    NoiseShift=(NoiseShift>>1)|(feedback<<14)\n"
-                         "  Wend",
-                         "  If ApuTimer(3)<=0\n"
-                         "    timer=ApuTimer(3) : period=NoiseTable(ApuReg(14)&15) : lfsr=NoiseShift\n"
-                         "    tap=1 : If ApuReg(14)&$80 : tap=6 : EndIf\n"
-                         "    Repeat\n"
-                         "      timer=timer+period : feedback=(lfsr!(lfsr>>tap))&1\n"
-                         "      lfsr=(lfsr>>1)|(feedback<<14)\n"
-                         "    Until timer>0\n"
-                         "    ApuTimer(3)=timer : NoiseShift=lfsr\n"
-                         "  EndIf")
+        # The native oscillator path returns before the less frequent DMC edge.
+        # Keep DMC fetch, looping and IRQ side effects in the shared implementation.
+        begin = source.index("Procedure ApuTick(dt.i)")
+        dmc = source.index("  While DmcTimer<=0", begin)
+        source = source[:begin] + ('XIncludeFile "../n64/oscillators.n64"\n'
+                                   'Procedure NesDmcEdge()\n') + source[dmc:]
     return source

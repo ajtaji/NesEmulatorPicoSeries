@@ -68,6 +68,16 @@ def replace_procedure(source: str, name: str, replacement: str) -> str:
     return result
 
 
+def native_pixel_spread() -> str:
+    # Each decoded byte contains four 2-bit pixels, leftmost in bits 1:0.
+    # Put that pixel in the high byte of the word for a big-endian store.
+    values = [sum(((value >> (2 * pixel)) & 3) << (24 - 8 * pixel) for pixel in range(4))
+              for value in range(256)]
+    data = "\n".join("  Data.l " + ",".join(f"${value:08X}" for value in values[i:i+8])
+                     for i in range(0, len(values), 8))
+    return "\nDataSection\nNesBgPixelSpread:\n" + data + "\nEndDataSection\n"
+
+
 def stage_fastppu(name: str, source: str) -> str:
     if name != "ppu":
         return source
@@ -84,19 +94,19 @@ def stage_fastppu(name: str, source: str) -> str:
   EndIf
 EndProcedure""")
     source = replace_procedure(source, "PpuClearSprites", CLEAR_SPRITES)
-    source = replace_procedure(source, "PpuRender8Reference", RENDER_SPAN)
+    source = replace_procedure(source, "PpuRender8Reference",
+                               "CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9\n" + RENDER_SPAN +
+                               "\nCompilerElse\n" + native_pixel_spread() + "CompilerEndIf")
     # Visible spans have an eight-dot edge and no regional line-width changes.
     visible = """    If PpuLine<240 And PpuDot<256
-      If (PpuDot&7)=0
-        If PpuDot=0
-          PpuBeginLine()
-          PpuSprites()
-        EndIf
-        PpuRender8Reference()
+      If PpuDot=0
+        PpuBeginLine()
+        PpuSprites()
       EndIf
-      step=8-(PpuDot&7)
+      step=256-PpuDot
       If step>dots : step=dots : EndIf
-      PpuDot=PpuDot+step : dots=dots-step
+      NesRenderTo(PpuDot+step)
+      dots=dots-step
       If PpuDot=256
         If PpuMask&$18 : PpuIncY() : EndIf
         PpuRgbLineRaw()

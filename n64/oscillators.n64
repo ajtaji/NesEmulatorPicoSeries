@@ -1,0 +1,132 @@
+; dt is a nonnegative segment ending at or before the next APU sample.
+; Preserve phase even for muted channels. DMC edges use the shared bus path.
+Declare NesDmcEdge()
+ProcedureNaked ApuTick(dt.i)
+  ASM
+    la t0, global_aputimer
+    la t1, global_apuperiod
+    la t2, global_apuseq
+    addiu a1, zero, 2
+nes_pulse_timer:
+    ld t3, 0(t0)
+    subu t3, t3, a0
+    bgtz t3, nes_pulse_done
+    ld a2, 0(t1)
+    addiu a2, a2, 1
+    sll a2, a2, 1
+    addu t3, t3, a2
+    bgtz t3, nes_pulse_phase
+    addiu a3, zero, 1
+    ; One edge has elapsed. For a period of two the quotient is a shift.
+    addiu a4, zero, 2
+    bne a2, a4, nes_pulse_div
+    subu a4, zero, t3
+    srl a4, a4, 1
+    addiu a3, a4, 2
+    andi t3, t3, 1
+    bne t3, zero, nes_pulse_phase
+    nop
+    b nes_pulse_phase
+    addiu t3, zero, 2
+nes_pulse_div:
+    divu a4, a2
+    mflo a3
+    mfhi a4
+    addiu a3, a3, 2
+    subu t3, a2, a4
+nes_pulse_phase:
+    ld a4, 0(t2)
+    addu a4, a4, a3
+    andi a4, a4, 7
+    sd a4, 0(t2)
+nes_pulse_done:
+    sd t3, 0(t0)
+    addiu t0, t0, 8
+    addiu t1, t1, 8
+    addiu t2, t2, 8
+    addiu a1, a1, -1
+    bne a1, zero, nes_pulse_timer
+    nop
+
+    ld t3, 0(t0)
+    subu t3, t3, a0
+    bgtz t3, nes_triangle_done
+    ld a2, 0(t1)
+    addiu a2, a2, 1
+    addu t3, t3, a2
+    bgtz t3, nes_triangle_phase
+    addiu a3, zero, 1
+    beq a2, a3, nes_triangle_unit
+    subu a4, zero, t3
+    divu a4, a2
+    mflo a3
+    mfhi a4
+    addiu a3, a3, 2
+    b nes_triangle_phase
+    subu t3, a2, a4
+nes_triangle_unit:
+    addiu a3, a4, 2
+    addiu t3, zero, 1
+nes_triangle_phase:
+    la a4, global_apulength
+    ld a4, 16(a4)
+    beq a4, zero, nes_triangle_done
+    nop
+    la a4, global_apulinear
+    ld a4, 0(a4)
+    beq a4, zero, nes_triangle_done
+    nop
+    ld a4, 0(t2)
+    addu a4, a4, a3
+    andi a4, a4, 31
+    sd a4, 0(t2)
+    ; Fold the 32-step phase into the 16-level triangle.
+    srl a3, a4, 4
+    addiu a3, a3, -1
+    xor a4, a4, a3
+    andi a4, a4, 15
+    la a3, global_tridac
+    sd a4, 0(a3)
+nes_triangle_done:
+    sd t3, 0(t0)
+    ld t3, 8(t0)
+    subu t3, t3, a0
+    bgtz t3, nes_noise_done
+    nop
+    la t1, global_apureg
+    lbu t2, 14(t1)
+    andi a2, t2, 15
+    sll a2, a2, 1
+    la t1, global_noisetable
+    addu t1, t1, a2
+    lhu a2, 0(t1)
+    la t1, global_noiseshift
+    ld a3, 0(t1)
+    andi t2, t2, 128
+    beq t2, zero, nes_noise_clock
+    addiu t2, zero, 1
+    addiu t2, zero, 6
+nes_noise_clock:
+    srlv a4, a3, t2
+    xor a4, a4, a3
+    andi a4, a4, 1
+    sll a4, a4, 14
+    srl a3, a3, 1
+    addu t3, t3, a2
+    blez t3, nes_noise_clock
+    or a3, a3, a4
+    sd a3, 0(t1)
+nes_noise_done:
+    sd t3, 8(t0)
+    la t0, global_dmctimer
+    ld t3, 0(t0)
+    subu t3, t3, a0
+    blez t3, nes_dmc_edge
+    sd t3, 0(t0)
+    jr ra
+    nop
+nes_dmc_edge:
+    j nesdmcedge
+    nop
+  EndASM
+EndProcedure

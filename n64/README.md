@@ -1,6 +1,6 @@
 # NES on Nintendo 64
 
-Build a Nintendo 64 cartridge that boots directly into one NES game. The included PureMetal NES demo ran on a physical N64 with SummerCart64. Its animated scene ran at **4.60 NES frames per second** between guest frames 60 and 120. This is a working hardware port with a substantial performance gap. At that speed the AI runs out of samples between submissions and music plays intermittently.
+Build a Nintendo 64 cartridge that boots directly into one NES game. The included PureMetal NES demo ran on a physical N64 with SummerCart64. The initial hardware build ran its animated scene at **4.60 NES frames per second** between guest frames 60 and 120. At that speed the AI runs out of samples between submissions and music plays intermittently. Real-time NTSC gameplay requires roughly 60 guest frames per second.
 
 ## Build and run
 
@@ -34,7 +34,7 @@ Small games use base RDRAM. Larger games can use the Expansion Pak. On MMC5 and 
 
 ## Verification
 
-The physical-console log records the build hash, reset vector, CPU cycles, sample counts and program counter. At guest frame 120 the console reported 3,573,714 NES CPU cycles and 95,843 produced audio samples. The same image gave identical guest checkpoints in the N64 emulator. The console run preceded the final large-ROM storage and PAL frame-limit changes. [Hardware capture](validation/demo-console.txt)
+The physical-console log records the build hash, reset vector, CPU cycles, sample counts and program counter. At guest frame 120 the console reported 3,573,714 NES CPU cycles and 95,843 produced audio samples. The same image gave identical guest checkpoints in the N64 emulator. That console measurement predates the VR4300 interpreter, PPU and APU optimizations. [Hardware capture](validation/demo-console.txt)
 
 For a reproducible end-to-end check, install Pillow and run:
 
@@ -43,3 +43,5 @@ python n64/verify.py --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudi
 ```
 
 The check builds the bundled demo, boots it with 4 MiB RDRAM, and stops the guest after frame 60. It compares all 61,440 pixels against the desktop emulator's frame at N64 color precision, checks both borders, verifies the guest CPU and APU counters, and checks captured stereo PCM. Normal builds keep running. The same frame comparison also passed for a PAL-header copy of the demo. Synthetic tests in the N64 emulator exercised MMC1 and MMC3 PRG and CHR switching, MMC5 PCM read side effects, mapper 234 read-triggered banking, VRC6 and Namco 163 expansion audio, and large MMC5 and mapper 228 ROMs. Two controller masks verified all eight serial bits, strobe behavior and an idle second port. Across 1,500 guest frames, the optimized APU produced byte-identical audio and the same final picture as the earlier implementation. Physical-console coverage so far is the bundled UxROM demo.
+
+The original release measured 4.35 guest fps in the N64 emulator over guest frames 60–120. Register caching, native tile spans and oscillator updates, and overlapping controller I/O with guest vblank raised that to 8.55 in the same interval. The frame-120 screenshot and captured PCM matched the reference run byte for byte. Pass `--benchmark` to the verification command to time the continuously running demo on the 4 MiB N64 model. These measurements use the modeled CP0 Count clock.

@@ -18,6 +18,7 @@ from stage_bus import stage_bus
 from stage_audio import stage_audio
 from stage_mapper import stage_mapper
 from stage_fastppu import stage_fastppu
+from stage_sync import stage_sync
 from stage_expansion import EXPANSION_MAPPERS, expansion_source, stage_expansion
 from stage_storage import check_storage_layout, stage_storage
 from stage_region import header_is_pal, render_region, stage_region
@@ -73,6 +74,10 @@ def build(args):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_bus(code, cart.mapper)
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)))
+            code = stage_sync(name, code)
+            # Board identity is fixed for the lifetime of this cartridge.
+            code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
+            code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
             (guest / (name + ".pmi")).write_text(guest_names(code).replace('.pi4"', '.pmi"'), encoding="utf-8")
         (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion_source()), encoding="utf-8")
         app = stage / "n64"

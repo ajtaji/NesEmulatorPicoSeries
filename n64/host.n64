@@ -7,6 +7,7 @@
 #HOST_AUDIO_BYTES = #HOST_AUDIO_FRAMES * 4
 #HOST_AUDIO_SLOTS = 3
 
+Global HostPadPending.i
 Global HostFrame.i, HostPcmRead.i, HostAiSlot.i, HostAiBase.i
 ; Leave room to align each stereo block inside a 4 KiB page. No AI transfer
 ; ends on the 8 KiB boundary affected by the AI address carry erratum.
@@ -55,7 +56,12 @@ Procedure.i HostPad(port.i)
 EndProcedure
 
 Procedure HostInputPoll()
-  LpmPadRead()
+  If HostPadPending
+    If LpmPadReadDone() = 0 : ProcedureReturn : EndIf
+    HostPadPending = 0
+  Else
+    LpmPadRead()
+  EndIf
   NesController = HostPad(0)
   NesController2 = HostPad(1)
 EndProcedure
@@ -63,6 +69,7 @@ EndProcedure
 Procedure DisplayWaitLine(line.i)
   ; The PPU owns the back buffer for its entire frame. Poll audio during
   ; rasterization without locking any guest scanline to the VI beam.
+  If line = 0 And HostFrame = 0 : HostSetFrame(LpmDisplayGet()) : EndIf
   If (line & 15) = 0 : HostAudioPoll() : EndIf
 EndProcedure
 
@@ -70,8 +77,10 @@ Procedure DisplayFrame()
   If HostFrame = 0 : ProcedureReturn : EndIf
   LpmCacheWritebackData((HostFrame & $1FFFFFFF) | $80000000, #HOST_ROW_BYTES * #HOST_HEIGHT)
   LpmDisplayShow(HostFrame)
+  If HostPadPending = 0 : HostPadPending = LpmPadReadAsync() : EndIf
+  ; Let VI release the buffer while the guest executes its vblank.
+  HostFrame = 0
   HostAudioPoll()
-  HostSetFrame(LpmDisplayGet())
 EndProcedure
 
 Procedure.i HostBegin()

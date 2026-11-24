@@ -5,6 +5,48 @@ import re
 from stage_bus import read_direct
 
 
+def cache_window_registers(source: str) -> str:
+    """Keep private 2A03 state in the VR4300 backend's register locals."""
+    # The bus and operand fetchers still need the live PC, address state,
+    # open bus and cycle budget during a CPU window.
+    state = ("A", "X", "Y", "FN", "FZ", "FC", "FV", "NesInstructions")
+    flags = state[3:7]
+    local = {name: "Window" + name for name in state}
+    names = re.compile(r"(?<![$#?])\b(" + "|".join(state) + r")\b")
+
+    def local_names(text: str) -> str:
+        return names.sub(lambda match: local[match[0]], text)
+
+    def copy_state(fields: tuple[str, ...], *, to_locals: bool) -> str:
+        pairs = ((local[name], name) if to_locals else (name, local[name]) for name in fields)
+        return "".join(f"  {dst} = {src}\n" for dst, src in pairs)
+
+    signature = "Procedure.i CpuRun(n.i)\n"
+    head, found, body = source.partition(signature)
+    if not found or body.count("Done:\n") != 1 or body.count("  NesRunStart = CpuCycles\n") != 1:
+        raise ValueError("2A03 execution window boundaries are missing")
+
+    # CpuNZ is only called from CpuRun. Interrupt entry and the status
+    # procedures keep their original globals for use between run windows.
+    head, count = re.subn(r"^Macro CpuNZ\(v\)\n.*?^EndMacro",
+                          lambda match: local_names(match[0]), head, flags=re.M | re.S)
+    if count != 1:
+        raise ValueError("2A03 NZ flag macro is missing")
+    body = local_names(body)
+    body, reads = re.subn(r"^  Tmp = CpuStatus\(\).*\n",
+                          lambda match: copy_state(flags, to_locals=False) + match[0],
+                          body, flags=re.M)
+    set_status = "  CpuSetStatus(Tmp)\n"
+    if reads != body.count("CpuStatus(") or body.count(set_status) != body.count("CpuSetStatus("):
+        raise ValueError("2A03 status access needs synchronization with the register cache")
+    body = body.replace(set_status, set_status + copy_state(flags, to_locals=True))
+    body = body.replace("  NesRunStart = CpuCycles\n",
+                        copy_state(state, to_locals=True) + "  NesRunStart = CpuCycles\n")
+    body = body.replace("Done:\n", "Done:\n" + copy_state(state, to_locals=False))
+    declarations = "  Protected " + ", ".join(local[name] + ".i" for name in state) + "\n"
+    return head + signature + declarations + body
+
+
 def stage_cpu(source: str, mapper: int) -> str:
     # Keep the opcode bodies and the set of legal opcodes in the guest core.
     # Forge has no .Label or computed Goto lowering on VR4300.
@@ -61,7 +103,8 @@ NesOpcodeSlow:
     source = (source[:old_tail.start()] + "Macro CpuDispatchNext()\n  Goto SlowFetch\nEndMacro"
               + source[old_tail.end():])
     source = source.replace("Global Dim Dispatch.Label(256)\n", "")
-    return source.replace(
+    source = source.replace(
         "; Each opcode owns its tail. Assembly only implements computed dispatch;\n"
         "; operands and instruction semantics remain in checked PureMetal source.",
         "; The VR4300 dispatch table points to the existing PureMetal opcode handlers.")
+    return cache_window_registers(source)

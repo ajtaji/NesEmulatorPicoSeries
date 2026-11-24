@@ -2,6 +2,7 @@
 import argparse
 import array
 import hashlib
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -46,9 +47,32 @@ def verify(sdk, emulator):
         print("PASS: guest cycles and PC, all 61,440 pixels, borders and stereo PCM at frame 60")
 
 
+def benchmark(sdk, emulator):
+    """Time two fixed guest checkpoints in a normal continuously running cart."""
+    with tempfile.TemporaryDirectory(prefix="nes-speed-") as temp:
+        work = Path(temp)
+        cart = work / "demo.z64"
+        subprocess.run([sys.executable, HERE / "build.py", "--sdk", sdk, "--out", cart], check=True)
+        subprocess.run([emulator, cart, "--ram", "4", "--test", work / "report.txt",
+                        "--frames", "1500"], check=True)
+        report = (work / "report.txt").read_text()
+        ticks = []
+        for checkpoint in ("60 CPU 1786882 PCM 47922 PC 40156", "120 CPU 3573714 PCM 95843 PC 40156"):
+            match = re.search(r"^NES FRAME " + checkpoint + r" COUNT ([0-9]+)$", report, re.M)
+            if match is None:
+                raise ValueError("missing benchmark checkpoint: " + checkpoint)
+            ticks.append(int(match[1]))
+        delta = (ticks[1] - ticks[0]) & 0xffffffff
+        print(f"Guest frames 60 to 120: {delta:,} modeled Count ticks, "
+              f"{60 * 46_875_000 / delta:.2f} guest fps")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--emulator", type=Path, required=True)
+    parser.add_argument("--benchmark", action="store_true", help="also measure guest frames 60 to 120")
     args = parser.parse_args()
     verify(args.sdk.resolve(), args.emulator.resolve())
+    if args.benchmark:
+        benchmark(args.sdk.resolve(), args.emulator.resolve())

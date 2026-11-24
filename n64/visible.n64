@@ -1,0 +1,35 @@
+; Advance within the visible 256 dots. An eight-dot fetch begins exactly when
+; its first dot is consumed, including when the CPU splits a span with MMIO.
+ProcedureNaked NesRenderTo(endDot.i)
+  ASM
+    addiu sp, sp, -32
+    sd ra, 24(sp)
+    sd s0, 16(sp)
+    sd s1, 8(sp)
+    sd s2, 0(sp)
+    or s0, a0, zero
+    la s1, global_ppudot
+    ld s2, 0(s1)
+    addiu s2, s2, 7
+    srl s2, s2, 3
+    sll s2, s2, 3
+    sltu t0, s2, s0
+    beq t0, zero, nes_render_to_done
+    nop
+nes_render_to_span:
+    jal ppurender8reference
+    sd s2, 0(s1)
+    addiu s2, s2, 8
+    sltu t0, s2, s0
+    bne t0, zero, nes_render_to_span
+    nop
+nes_render_to_done:
+    sd s0, 0(s1)
+    ld s2, 0(sp)
+    ld s1, 8(sp)
+    ld s0, 16(sp)
+    ld ra, 24(sp)
+    jr ra
+    addiu sp, sp, 32
+  EndASM
+EndProcedure

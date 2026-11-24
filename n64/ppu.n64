@@ -2,7 +2,137 @@
 Global PpuFrameStride.i=#NES_VIDEO_WIDTH*2
 Declare PpuN64StoreSpan(dst.i, first.i, second.i)
 Declare PpuRgbLineRaw()
+Declare PpuRender8Reference()
+XIncludeFile "visible.n64"
 XIncludeFile "../anvil/ppu.pmi"
+
+CompilerIf #GAME_MAPPER<>5 And #GAME_MAPPER<>9
+ProcedureNaked PpuRender8Reference()
+  ; a0 = dot, a1 = mask, a2/a3 = current/next scroll address,
+  ; a4 = fine scroll in bits, a5 = packed row. The local tile fetch leaves
+  ; a0-a4 and a6-a7 intact. MMC5 and MMC2 use the shared callback path.
+  ASM
+    la t0, global_ppudot
+    ld a0, 0(t0)
+    la t0, global_ppumask
+    ld a1, 0(t0)
+    la t0, global_ppuv
+    ld a2, 0(t0)
+    andi t1, a1, 0x18
+    beq t1, zero, nes_span_store
+    daddu a5, zero, zero
+    andi t1, a2, 31
+    addiu t2, zero, 31
+    bne t1, t2, nes_span_inc_x
+    daddiu a3, a2, 1
+    andi a3, a2, 0x7FE0
+    xori a3, a3, 0x400
+nes_span_inc_x:
+    sd a3, 0(t0)
+    andi t1, a1, 8
+    beq t1, zero, nes_span_store
+    andi t1, a1, 2
+    bne a0, zero, nes_span_fetch
+    nop
+    beq t1, zero, nes_span_store
+    nop
+nes_span_fetch:
+    la t0, global_ppufinex
+    ld a4, 0(t0)
+    sll a4, a4, 3
+    daddu a6, ra, zero
+    bgezal zero, nes_span_tile
+    daddu t0, a2, zero
+    beq a4, zero, nes_span_store
+    daddu ra, a6, zero
+    bgezal zero, nes_span_tile
+    daddu t0, a3, zero
+    ; Pull the first tile left and the second tile's leading pixels right.
+    subu t1, zero, a4
+    dsllv a7, a7, a4
+    dsrlv a5, a5, t1
+    or a5, a5, a7
+    daddu ra, a6, zero
+nes_span_store:
+    la t0, global_linepixels
+    daddu t0, t0, a0
+    sd a5, 0(t0)
+    la t0, global_ppupixels
+    ld t1, 0(t0)
+    daddiu t1, t1, 8
+    sd t1, 0(t0)
+    la t0, global_spritespan
+    srl t1, a0, 3
+    daddu t0, t0, t1
+    lbu t1, 0(t0)
+    beq t1, zero, nes_span_done
+    nop
+    la t0, global_woff
+    j ppuoverlay8
+    sd a0, 0(t0)
+nes_span_done:
+    jr ra
+    nop
+
+nes_span_tile:
+    ; Nametable byte and the attribute quadrant selected by the scroll address.
+    la t1, global_nt
+    andi t2, t0, 0xFFF
+    daddu t2, t1, t2
+    lbu t2, 0(t2)
+    srl t3, t0, 4
+    srl t8, t0, 2
+    andi v0, t0, 0xC00
+    andi v1, t3, 0x38
+    or v0, v0, v1
+    andi t8, t8, 7
+    or v0, v0, t8
+    ori v0, v0, 0x3C0
+    daddu t1, t1, v0
+    lbu v0, 0(t1)
+    andi t3, t3, 4
+    andi t8, t0, 2
+    or t3, t3, t8
+    srlv v0, v0, t3
+    andi v0, v0, 3
+    sll v0, v0, 2
+    sll v1, v0, 8
+    or v0, v0, v1
+    sll v1, v0, 16
+    or v0, v0, v1
+    ; The decoded halfword holds the first pixel in its low bits.
+    ; Expand it to two four-pixel words in framebuffer byte order.
+    la t1, global_ppuctrl
+    ld t1, 0(t1)
+    andi t1, t1, 16
+    sll t1, t1, 8
+    sll t2, t2, 4
+    srl t0, t0, 11
+    andi t0, t0, 14
+    or t2, t2, t1
+    or t2, t2, t0
+    la t0, global_pattern
+    lw t0, 4(t0)
+    daddu t0, t0, t2
+    lhu t0, 0(t0)
+    la t1, NesBgPixelSpread
+    andi t2, t0, 255
+    srl t3, t0, 8
+    sll t2, t2, 2
+    sll t3, t3, 2
+    daddu t2, t1, t2
+    daddu t3, t1, t3
+    lw t2, 0(t2)
+    lw t3, 0(t3)
+    or t2, t2, v0
+    or t3, t3, v0
+    dsll32 t2, t2, 0
+    daddu a7, a5, zero
+    jr ra
+    or a5, t2, t3
+  EndASM
+EndProcedure
+CompilerEndIf
 
 ProcedureNaked PpuN64StoreSpan(dst.i, first.i, second.i)
   ; The words contain the leftmost pixel in their low byte. Store bytes in
@@ -33,6 +163,32 @@ ProcedureNaked PpuRgbLineRaw()
     la t2, global_framerow
     lw t2, 4(t2)
     daddiu t3, t0, 256
+    andi t8, t2, 7
+    bne t8, zero, nes_rgb4
+    daddu t8, t3, zero
+    ; A color-zero pixel in any palette uses RgbPal(0). Eight such pixels
+    ; can fill the span directly with two aligned stores.
+    lhu v0, 0(t1)
+    lui a7, 0x0303
+    ori a7, a7, 0x0303
+    dsll v1, v0, 16
+    or v0, v0, v1
+    dsll32 v1, v0, 0
+    dsll32 a6, a7, 0
+    or v0, v0, v1
+    or a7, a7, a6
+nes_rgb_span:
+    ld a0, 0(t0)
+    and a0, a0, a7
+    bne a0, zero, nes_rgb4
+    daddiu t8, t0, 8
+    sd v0, 0(t2)
+    sd v0, 8(t2)
+    daddu t0, t8, zero
+    bne t0, t3, nes_rgb_span
+    daddiu t2, t2, 16
+    jr ra
+    nop
 nes_rgb4:
     lbu a0, 0(t0)
     lbu a1, 1(t0)
@@ -55,8 +211,10 @@ nes_rgb4:
     sh a0, 4(t2)
     sh a1, 6(t2)
     daddiu t0, t0, 4
-    bne t0, t3, nes_rgb4
+    bne t0, t8, nes_rgb4
     daddiu t2, t2, 8
+    bne t0, t3, nes_rgb_span
+    nop
     jr ra
     nop
   EndASM
