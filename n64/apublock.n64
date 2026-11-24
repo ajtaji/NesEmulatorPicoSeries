@@ -21,7 +21,7 @@ nes_flush_osc_done:
 EndProcedure
 
 Procedure NesRenderBlock()
-  Protected v0.i, v1.i, nv.i, duty0.i, duty1.i
+  Protected v0.i, v1.i, nv.i, duty0.i, duty1.i, completed.i
   If NesAudioBlockCount=0 : ProcedureReturn : EndIf
   If ApuLength(0)>0 And ApuPeriod(0)>=8 And ApuTarget(0)<=$7FF
     v0=ApuVolume(0)
@@ -32,9 +32,12 @@ Procedure NesRenderBlock()
   If ApuLength(3)>0 : nv=ApuVolume(2) : EndIf
   duty0=($F91E0602>>((ApuReg(0)>>6)*8))&255
   duty1=($F91E0602>>((ApuReg(4)>>6)*8))&255
-  NesMixBlock(@NesSpanCycles(0),@NesSpanDmc(0),NesAudioBlockCount,v0|(v1<<8)|(nv<<16),duty0|(duty1<<8))
+  completed=NesAudioBlockCount
+  NesMixBlock(@NesSpanCycles(0),@NesSpanDmc(0),completed,v0|(v1<<8)|(nv<<16),duty0|(duty1<<8))
   NesAudioBlockCount=0
   ApuSamples=ApuProduced
+  ; Submit a newly completed DMA block before another guest interval runs.
+  If (ApuProduced & (#HOST_AUDIO_FRAMES-1))<completed : HostQueueAudio(ApuProduced) : EndIf
 EndProcedure
 
 Procedure NesQueueSample()
