@@ -39,4 +39,3 @@ def stage_sync(name: str, source: str) -> str:
             raise ValueError("worker command procedure changed")
         source = source.replace(worker, REGISTER_READ + worker)
     return source
-
