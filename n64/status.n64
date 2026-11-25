@@ -105,7 +105,17 @@ Procedure NesSetCpuHorizon(stamp.i)
     ; A rendered odd NTSC prerender line may be one dot shorter.
     dots=(PpuPreLine+1-PpuLine)*341-PpuDot-1
   EndIf
-  If dots>2728 : dots=2728 : EndIf
+  ; Bound CPU run-ahead to roughly 4 ms on visible lines. Offset the
+  ; 64-line boundaries so line 224 still starts the controller transfer.
+  ; Timestamped MMIO, vblank, frame IRQ and APU reset can end the run sooner.
+  CompilerIf #NES_CHAIN_WINDOWS And #NES_AUDIO_RATE=20000
+    If PpuLine<240
+      event=(64-((PpuLine+32)&63))*341-PpuDot
+      If event<dots : dots=event : EndIf
+    EndIf
+  CompilerElse
+    If dots>2728 : dots=2728 : EndIf
+  CompilerEndIf
   CompilerIf #GAME_PAL
     cycles=(dots-1)>>2
   CompilerElse

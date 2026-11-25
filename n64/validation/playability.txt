@@ -145,3 +145,18 @@ The --endurance Mario route plays World 1-1 through guest frame 1140. At frames 
 Interactive Mario cart SHA-256: 4f8d197f306b5df31176df16c5a3c18d4625d4d9fc4c97fce9ea995023321d57. The timings above use deterministic controller replay on the emulator.
 An NROM differential fixture passed 616 scheduler cases, 14 bounded CPU runs, four worker revocations, 262 RAM-wait boundaries and the NMI and IRQ vector/stack checks.
 The 20 kHz short replay (240-360) also passed at 60.293 fps with zero observed underruns. The same scheduler experiment at 48 kHz introduced three events on this short replay, so the original NROM scheduler is retained at 48 kHz. The rebuilt default 48 kHz Mario replay is byte-identical to its previously validated cartridge (SHA-256 6a81683a4cf3e0d921c8f74ed16521947f40a12c42fe40da92ea0c3f792af939).
+
+Visible-line scheduling, Mega Man 2 interactive cart, 20 kHz, 4 MiB N64 emulator
+The host can run ordinary CPU instructions for up to 64 visible scanlines between worker service deadlines, aligned to lines 32, 96, 160 and 224. The line-224 deadline preserves the controller request. Timestamped I/O, active DMC, interrupt, reset and frame deadlines still take precedence. On the same continuing Wood Man Joybus route through guest frame 3060:
+                                         Original 12d7c2c         64-line service
+Interactive frames 1080-3060             55.641 fps               60.094 fps
+Actual AI FIFO empty/restart intervals   1,613                    0
+Time between those DMA transfers          2,956.424 ms             0 ms
+The lowest rolling 60-guest-frame rate in the interactive 64-line run was 58.816 fps at frames 1949-2009.
+The probe observed the emulator's Audio Interface directly while running the unmodified interactive ROM. Both sides used LLE boot and the same Joybus controller schedule. All 3,219 common input samples and 1,069,824 common stereo PCM pairs agreed. The separately built bounded replay also passed all guest timing checkpoints, final RGB and complete captured PCM through frame 3060 at 60.097 fps, zero reported underruns and nine coalesced VI presentations. On the bounded reference replay the same interval contained twelve coalesced presentations.
+The interactive indexed display and the palettes used by it matched byte for byte on the original and optimized cartridges at guest frames 1200, 1560, 1800 and 1860. Each comparison covered 61,744 bytes.
+The interactive 64-line image has SHA-256 27cbaf86daf4869ea90cc194a8f6b211fecddba1facbd8aa442ddde3654efa0d. These results are from emulation.
+
+Mario interactive control, World 1-1 guest frames 360-1140, emulated Joybus, LLE boot
+The pre-change 12d7c2c interactive cart already sustained 60.056 fps with zero FIFO gaps on this route. The intermediate native NROM window build (4f8d197f...) passed the bounded replay but regressed interactive playback to 58.249 fps with 334 FIFO gaps totaling 472.734 ms. Aligning service to 32 visible lines restored the interactive result to 60.051 fps with zero FIFO gaps. All 1,300 shared Joybus mask samples and all 431,104 common stereo PCM pairs agreed between the original and 32-line interactive carts. Bounded and interactive ROMs need separate performance checks.
+The 64-line deadline fixtures passed for MMC1 and NROM, including 31,440 NTSC and 37,440 PAL horizon vectors per mapper and 28 paired register, PCM, controller and worker synchronization scenarios in each of the four runs.
