@@ -211,9 +211,11 @@ Mega Man 2, Wood Man     1080-3060        60.095    0              1,105,408
 Zelda, sword and combat   540-2940        60.100    0              1,051,904
 All shared controller requests matched (2486, 3326 and 3165 respectively). Before those windows, actual modeled AI empty time changed from 9.212 to 0 ms for Mario, 1543.326 to 1517.559 ms for Wood Man, and 380.287 to 354.805 ms for Zelda. All three bounded replays matched their reference guest cycles, PCM sample counts, program counters, final RGB and complete stereo streams.
 
-In Zelda frames 1920-1979, the minimum modeled time to drain the hardware FIFO rose from 9.756 ms to 22.801 ms. During frame 1950 it rose from 11.163 ms to 24.789 ms. Both timing traces kept AI fed. A separate experiment that packed an optional second block increased headroom too, but its controller-driven Zelda stream diverged at sample pair 76967. The fixed 512-pair release matched all shared samples. The physical result in gameplay-console.txt is from the earlier 256-pair build. A hardware run is still needed to test the larger transfers on the console.
+In Zelda frames 1920-1979, the minimum modeled time to drain the hardware FIFO rose from 9.756 ms to 22.801 ms. During frame 1950 it rose from 11.163 ms to 24.789 ms. Both timing traces kept AI fed. A separate experiment that packed an optional second block increased headroom too, but its controller-driven Zelda stream diverged at sample pair 76967. The fixed 512-pair release matched all shared samples. The physical result in gameplay-console.txt is from the earlier 256-pair build. The subsequent physical comparison is recorded in gameplay-console-512.txt.
 
 20 kHz controller-driven production ROM SHA-256:
 Mario      28c68702f6b342cb28196e30e566a3f9e6f71a19835eccc435f72c01c6dcb07a
 Mega Man 2 5c49464a9d149695b8253bce55e97d64c6dbae2600e7102cfe4aba4ff8786a8e
 Zelda      a486e92501e1cc6b0ca57f9f3083577e92aa86518c9243c020e1ae961154614a
+
+The 512-pair console build held 60.129 fps in Mario (frames 360-1140), 60.126 in Wood Man (1080-3060) and 60.101 in Zelda (540-2940), with zero observed active-play underruns in each. Before the measured windows the updated builds recorded 0, 19 and 11 underruns respectively. The Wood Man control recorded one active-play underrun at frame 1548. Both Zelda controls passed frame 1950 in this boot, so this comparison cannot attribute elimination of the earlier intermittent event to the transfer size. All 294 guest checkpoints matched across seven benchmark stages, then the updated controller-driven Zelda booted.
