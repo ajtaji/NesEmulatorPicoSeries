@@ -70,21 +70,33 @@ AUDIO_20K = {
         "46d12970b9fc7fa7c48eb1c69948cbf7ee1a65a0275bbf14052a8a71255a4d39"),
 }
 
-WOOD_MAN_EXTENDED = replace(
-    GAMES["MegaMan2"],
-    controls=GAMES["MegaMan2"].controls + tuple(
+def wood_man_controls(stop):
+    return GAMES["MegaMan2"].controls + tuple(
         (frame + first, frame + end, buttons)
-        for frame in range(1260, 1860, 120)
+        for frame in range(1260, stop, 120)
         for first, end, buttons in (
             (0, 20, 128), (20, 35, 129), (35, 42, 130), (42, 66, 128),
             (70, 78, 2), (80, 93, 64), (96, 120, 128),
         )
-    ),
+    )
+
+
+WOOD_MAN_EXTENDED = replace(
+    GAMES["MegaMan2"],
+    controls=wood_man_controls(1860),
     last=1860,
     stop=1860,
     state_hash="e244535315c4c59e2939d22b59c9277163764bc97d0ed9e0dce5f26a467de4b2",
     rgb_hash="e80b4eb884e772a999933301190161f78abcce7cb260ef3b429952b637e218da",
     pcm_hash="ac0c943192ef77910c9be2d83d854f14e8a22d20fba85d9a07f6a6e9c633daf9",
+)
+
+
+WOOD_MAN_ENDURANCE = replace(
+    WOOD_MAN_EXTENDED, controls=wood_man_controls(3060), last=3060, stop=3060,
+    state_hash="c3ed5478a22195f730720d11adb587b4c6680213c58e22719701750cbcea4366",
+    rgb_hash="5ddbbb816533a4908d42d8ccd2832ac4b6dfd9b740c63e14e1d6680f9412385d",
+    pcm_hash="fa56bfecebf730434cfe778453ba3abff5f4d82ca67d58dc7216250077674854",
 )
 
 
@@ -95,6 +107,9 @@ def digest(data):
 def verify(args):
     extended = getattr(args, "extended", False)
     game = WOOD_MAN_EXTENDED if extended else GAMES[args.game]
+    if getattr(args, "endurance", False):
+        extended = True
+        game = WOOD_MAN_ENDURANCE
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
     state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000 and not extended
@@ -142,12 +157,14 @@ if __name__ == "__main__":
     parser.add_argument("game", choices=GAMES)
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000),
                         help="default 48000, or 20000 for the extended replay")
-    parser.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
+    length = parser.add_mutually_exclusive_group()
+    length.add_argument("--endurance", action="store_true", help="continue MegaMan2 through frame 3060 at 20 kHz")
+    length.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
     for option in ("sdk", "emulator", "rom", "results"):
         parser.add_argument("--" + option, type=Path, required=True)
     args = parser.parse_args()
-    if args.extended and (args.game != "MegaMan2" or args.audio_rate == 48000):
-        parser.error("--extended requires MegaMan2 at 20 kHz")
+    if (args.extended or args.endurance) and (args.game != "MegaMan2" or args.audio_rate == 48000):
+        parser.error("long replays require MegaMan2 at 20 kHz")
     if args.audio_rate is None:
-        args.audio_rate = 20000 if args.extended else 48000
+        args.audio_rate = 20000 if args.extended or args.endurance else 48000
     verify(args)
