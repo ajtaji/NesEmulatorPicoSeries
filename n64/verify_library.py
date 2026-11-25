@@ -1,0 +1,104 @@
+"""Replay three NTSC games in the N64 emulator using locally supplied NES ROMs."""
+import argparse
+from dataclasses import dataclass
+import hashlib
+from pathlib import Path
+import re
+import wave
+
+from PIL import Image
+
+from build import build
+from verify import run_headless
+
+
+@dataclass(frozen=True)
+class Replay:
+    rom_hash: str
+    controls: tuple
+    first: int
+    last: int
+    stop: int
+    state_hash: str
+    rgb_hash: str
+    pcm_hash: str
+
+
+# The reference is the port before the gameplay optimizations. Hash the
+# guest-frame checkpoints separately from the modeled N64 Count register.
+GAMES = {
+    "Mario": Replay(
+        "f61548fdf1670cffefcc4f0b7bdcdd9eaba0c226e3b74f8666071496988248de",
+        ((100,106,8), (175,222,128), (222,248,129), (248,274,128),
+         (274,300,129), (300,319,128), (319,342,129), (342,400,128)),
+        240, 360, 360,
+        "782877377e5cc0f687fd0abe4880106a2a0e3fdef9ae04252d3b1f9187ea6c68",
+        "e009aaf88d1daca411b38c819ab674e58cd391d675a1b1e34b18912a2d9bde04",
+        "52c3b28ce1497d8486a73bc1fac9bef4f8f7a22b065a4d92f0837825f3470be7"),
+    "Zelda": Replay(
+        "8f72dc2e98572eb4ba7c3a902bca5f69c448fc4391837e5f8f0d4556280440ac",
+        ((100,104,8), (150,154,8), (210,214,1), (230,234,4), (245,249,4),
+         (260,264,4), (280,284,8), (330,334,8), (395,425,16), (460,490,128), (500,510,1)),
+        480, 540, 550,
+        "87824ef57f5c7d6af8935fc2cdd6d36fb6376017781824d5928945a544f45ec4",
+        "84a8d0e1158c9289529e483d645b071bd63564b4b1a38554581ead40ac5d0e1d",
+        "64eef0fec30d68581ce674b5f0745133bd9d450783264a285605f47e1b8cd5f4"),
+    "MegaMan2": Replay(
+        "27b5a635df33ed57ed339dfc7fd62fc603b39c1d1603adb5cdc3562a0b0d555b",
+        ((100,104,8), (150,154,8), (225,229,8), (300,304,8), (410,414,128),
+         (420,424,8), (1100,1118,128), (1118,1134,129), (1134,1140,130),
+         (1140,1155,128), (1160,1166,2), (1174,1188,64), (1200,1214,128),
+         (1214,1230,129), (1230,1236,130), (1236,1260,128)),
+        1080, 1260, 1260,
+        "566af03c002638c8a6df4987b69affadbb84819db18116275f3292ed825a1a1f",
+        "a4b96b481006c04d443cbfe85a18368b35f429b512843c113a1eaf67d707cc84",
+        "01a25809c4699e274843797ef1af97ef5e0eb51ecd7c725475f7e56925403104"),
+}
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def verify(args):
+    game = GAMES[args.game]
+    if digest(args.rom.read_bytes()) != game.rom_hash:
+        raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
+    work = args.results.resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    args.out = work / "replay.z64"
+    args.check_frame = game.stop
+    build(args, controller_trace=game.controls)
+    report, frame, pcm = [work / name for name in ("report.txt", "frame.png", "sound.wav")]
+    run_headless(args.sdk, args.emulator, args.out, "--ram", "4", "--frames", str(game.stop * 3),
+                 "--test", report, "--png", frame, "--wav", pcm)
+    log = report.read_text()
+    if f"NES CHECKPOINT {game.stop}" not in log or "NES STOP" in log or "FIRST code " in log:
+        raise ValueError(f"cartridge did not finish cleanly. See {report}")
+    states = re.findall(r"^NES FRAME (\d+) CPU (\d+) PCM (\d+) PC (\d+) COUNT (\d+)", log, re.M)
+    if digest("\n".join(" ".join(state[:4]) for state in states).encode()) != game.state_hash:
+        raise ValueError("guest CPU cycles, sample clock or PC changed")
+    with Image.open(frame) as image:
+        if image.size != (320, 240) or digest(image.convert("RGB").tobytes()) != game.rgb_hash:
+            raise ValueError("gameplay framebuffer changed")
+    with wave.open(str(pcm)) as sound:
+        if (sound.getnchannels() != 2 or sound.getsampwidth() != 2
+                or digest(sound.readframes(sound.getnframes())) != game.pcm_hash):
+            raise ValueError("captured stereo stream changed")
+    clocks = {int(row[0]): int(row[-1]) for row in states}
+    gaps = {int(f): int(n) for n, f in re.findall(r"^NES AI QUEUED \d+ UNDERRUNS (\d+) FRAME (\d+)", log, re.M)}
+    ticks = (clocks[game.last] - clocks[game.first]) & 0xffffffff
+    rate = (game.last - game.first) * 46_875_000 / ticks
+    underruns = gaps[game.last] - gaps[game.first]
+    summary = (f"{args.game} guest frames {game.first} to {game.last}: {rate:.3f} fps, "
+               f"{underruns} audio underruns; reference state, picture and PCM match.")
+    (work / "metrics.txt").write_text(summary + "\n")
+    print(summary)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("game", choices=GAMES)
+    for option in ("sdk", "emulator", "rom", "results"):
+        parser.add_argument("--" + option, type=Path, required=True)
+    verify(parser.parse_args())

@@ -148,3 +148,166 @@ nes_oam_dma_done:
     nop
   EndASM
 EndProcedure
+
+ProcedureNaked PpuSpritesReference()
+  ; Materialize the eight selected sprites for the current visible scanline.
+  ASM
+    la t0, global_oamcachedirty
+    ld t1, 0(t0)
+    bne t1, zero, nes_sprite_eval_rebuild
+    nop
+nes_sprite_eval_cached:
+    la t0, global_ppuline
+    ld a0, 0(t0)
+    la t0, global_cachedcount
+    addu t0, t0, a0
+    lbu a1, 0(t0)
+    la t0, global_sprcount
+    bne a1, zero, nes_sprite_eval_count
+    sd a1, 0(t0)
+    j ppuclearsprites
+    nop
+
+nes_sprite_eval_rebuild:
+    addiu sp, sp, -16
+    sd ra, 8(sp)
+    jal ppubuildspritecache
+    nop
+    ld ra, 8(sp)
+    b nes_sprite_eval_cached
+    addiu sp, sp, 16
+
+nes_sprite_eval_count:
+    la t1, global_ppumask
+    ld a2, 0(t1)
+    sltiu t1, a1, 9
+    bne t1, zero, nes_sprite_eval_enter
+    andi t1, a2, 24
+    addiu a1, zero, 8
+    beq t1, zero, nes_sprite_eval_enter
+    sd a1, 0(t0)
+    la t1, global_ppustatus
+    ld t2, 0(t1)
+    ori t2, t2, 32
+    sd t2, 0(t1)
+
+nes_sprite_eval_enter:
+    addiu sp, sp, -56
+    sd ra, 48(sp)
+    sd s0, 40(sp)
+    sd s1, 32(sp)
+    sd s2, 24(sp)
+    sd s3, 16(sp)
+    sd s4, 8(sp)
+    sd s5, 0(sp)
+    or s0, a1, zero
+    or s1, a2, zero
+    sll t0, a0, 3
+    la t1, global_cachedsprite
+    addu a1, t1, t0
+    la t1, global_ppuctrl
+    ld a2, 0(t1)
+    andi a3, a2, 32
+    srl a3, a3, 2
+    addiu a3, a3, 8
+    andi a2, a2, 8
+    sll a2, a2, 9
+    la a4, global_oam
+    la s2, global_sprindex
+    la s3, global_sprx
+    la s4, global_sprattr
+    la s5, global_sprrow
+    addu a5, a1, s0
+    or a6, zero, zero
+nes_sprite_eval_roster:
+    lbu t0, 0(a1)
+    sll t1, t0, 2
+    addu t1, t1, a4
+    lbu t2, 0(t1)
+    lbu t3, 1(t1)
+    lbu t8, 2(t1)
+    lbu t9, 3(t1)
+    subu t2, a0, t2
+    addiu t2, t2, -1
+    andi v0, t8, 128
+    beq v0, zero, nes_sprite_eval_height
+    addiu v0, a3, -1
+    subu t2, v0, t2
+nes_sprite_eval_height:
+    addiu v0, zero, 16
+    bne a3, v0, nes_sprite_eval_address
+    or v1, a2, zero
+    andi v1, t3, 1
+    sll v1, v1, 12
+    andi t3, t3, 254
+    srl v0, t2, 3
+    addu t3, t3, v0
+    andi t2, t2, 7
+nes_sprite_eval_address:
+    sll t3, t3, 4
+    sll t2, t2, 1
+    addu t3, t3, v1
+    addu t2, t2, t3
+    addu v0, s2, a6
+    sd t0, 0(v0)
+    addu v0, s3, a6
+    sd t9, 0(v0)
+    addu v0, s4, a6
+    sd t8, 0(v0)
+    addu v0, s5, a6
+    sd t2, 0(v0)
+    addiu a1, a1, 1
+    bne a1, a5, nes_sprite_eval_roster
+    addiu a6, a6, 8
+
+    jal ppuclearsprites
+    nop
+    andi t0, s1, 16
+    beq t0, zero, nes_sprite_eval_done
+    andi t1, s1, 4
+    sltiu s1, t1, 1
+    sll s1, s1, 3
+    sll s0, s0, 3
+nes_sprite_eval_draw:
+    addiu s0, s0, -8
+    addu t0, s4, s0
+    ld a5, 0(t0)
+    addu t0, s2, s0
+    ld t1, 0(t0)
+    andi a2, a5, 3
+    sll a2, a2, 2
+    andi t0, a5, 32
+    sll t0, t0, 1
+    or a2, a2, t0
+    ori a2, a2, 16
+    bne t1, zero, nes_sprite_eval_draw_args
+    addiu a3, zero, 1
+    ori a2, a2, 128
+    bne s0, zero, nes_sprite_eval_draw_args
+    nop
+    addiu a3, zero, 3
+nes_sprite_eval_draw_args:
+    addu t0, s5, s0
+    ld t1, 0(t0)
+    la t0, global_pattern
+    lw t0, 4(t0)
+    addu t0, t0, t1
+    lhu a0, 0(t0)
+    addu t0, s3, s0
+    ld a1, 0(t0)
+    jal nesdrawspriterow
+    or a4, s1, zero
+    bne s0, zero, nes_sprite_eval_draw
+    nop
+nes_sprite_eval_done:
+    ld s5, 0(sp)
+    ld s4, 8(sp)
+    ld s3, 16(sp)
+    ld s2, 24(sp)
+    ld s1, 32(sp)
+    ld s0, 40(sp)
+    ld ra, 48(sp)
+    jr ra
+    addiu sp, sp, 56
+  EndASM
+EndProcedure

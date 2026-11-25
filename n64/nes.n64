@@ -28,12 +28,21 @@ EndProcedure
 Procedure FrameFence()
 EndProcedure
 
+CompilerIf #GAME_MAPPER=1
+  Declare.i NesReaderActive()
+CompilerEndIf
 Declare.i NesCurrentPoll(acc.i)
 Global NesDeliveredFrame.i, NesLoopRule.i, NesLoopCost.i
 XIncludeFile "poll.pmi"
 Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
 Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
+CompilerIf #GAME_MAPPER=1
+  Global Dim NesMmc1Bias.i(2)
+  Macro NesMmc1Pointer(addr)
+    (NesMmc1Bias(((addr)>>14)&1)+(addr))
+  EndMacro
+CompilerEndIf
 XIncludeFile "../anvil/cpu2a03.pmi"
 XIncludeFile "../anvil/mapper_state.pmi"
 CompilerIf #NES_BANKED_WAITS
@@ -81,6 +90,11 @@ EndProcedure
 Procedure CartSelect(number.i)
 EndProcedure
 
+CompilerIf #GAME_MAPPER=1
+Procedure.i NesReaderActive()
+  ProcedureReturn DmcBytes>0
+EndProcedure
+CompilerEndIf
 Procedure.i NesCurrentPoll(acc.i)
   If WorkerFrames<>NesDeliveredFrame : ProcedureReturn 0 : EndIf
   If acc<>((PpuStatus&$E0)|(PpuBus&31)) Or WorkerNmi<>NesSeenNmi Or WorkerDmcCycles<>NesSeenDmc

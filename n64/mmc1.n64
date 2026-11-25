@@ -1,0 +1,67 @@
+; Both 16 KiB PRG halves are resident in RDRAM. Every PRG access,
+; including DMC reads, shares the biases and physical slot numbers.
+Procedure NesMapMmc1Prg()
+  Protected mode.i, bank.i, lo.i, hi.i, mask.i=(#GAME_PRG/8192)-1
+  mode=(MapControl>>2)&3 : bank=(MapPrgReg&15)*2
+  lo=bank : hi=mask-1
+  If mode<2 : lo=bank&(~3) : hi=lo+2
+  ElseIf mode=2 : lo=0 : hi=bank : EndIf
+  lo=lo&mask : hi=hi&mask
+  NesMmc1Bias(0)=CartPrg+lo*8192-$8000
+  NesMmc1Bias(1)=CartPrg+hi*8192-$C000
+  MapPrgSlots(0)=lo : MapPrgSlots(1)=lo+1 : MapPrgSlots(2)=hi : MapPrgSlots(3)=hi+1
+  MapRamEnable=(MapPrgReg&16)=0 : MapRamProtect=0
+EndProcedure
+
+Procedure MapperUpdate()
+  Protected mode.i, i.i, lo.i, hi.i, mask.i
+  NesMapMmc1Prg()
+  lo=(MapChr0&30)*4 : hi=lo+4
+  If MapControl&16 : lo=MapChr0*4 : hi=MapChr1*4 : EndIf
+  mask=#GAME_CHR/1024-1 : lo=lo&mask : hi=hi&mask
+  If MapChrSlots(0)<>lo
+    For i=0 To 3 : MapperChr(i,lo+i) : Next
+  EndIf
+  If MapChrSlots(4)<>hi
+    For i=0 To 3 : MapperChr(4+i,hi+i) : Next
+  EndIf
+  mode=MapControl&3
+  If mode<2 : mode+=2 : Else : mode=3-mode : EndIf
+  MapperMirror(mode)
+  PrgBase=@NesMapPrg(0) : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  NesChrWindow=@NesMapChr(0) : Pattern=@NesMapPattern(0) : ChrWritable=MapChrRam<>0
+EndProcedure
+
+Procedure MapperWrite(addr.i,value.i,stamp.i)
+  Protected previous.i, value5.i
+  If addr<$8000
+    If MapRamEnable And MapRamProtect=0 : MapRam(addr&8191)=value : EndIf
+    ProcedureReturn
+  EndIf
+  previous=MapLastWrite : MapLastWrite=stamp
+  If value&128
+    MapShift=$10
+    If (MapControl&12)=12 : ProcedureReturn : EndIf
+    MapControl|12
+  Else
+    If stamp-previous=1 : ProcedureReturn : EndIf
+    previous=MapShift : MapShift=(previous>>1)|((value&1)<<4)
+    If (previous&1)=0 : ProcedureReturn : EndIf
+    value5=MapShift : MapShift=$10
+    Select (addr>>13)&3
+      Case 0
+        If MapControl=value5 : ProcedureReturn : EndIf
+        MapControl=value5
+      Case 1
+        If MapChr0=value5 : ProcedureReturn : EndIf
+        MapChr0=value5
+      Case 2
+        If MapChr1=value5 : ProcedureReturn : EndIf
+        MapChr1=value5
+      Case 3
+        If MapPrgReg=value5 : ProcedureReturn : EndIf
+        MapPrgReg=value5 : NesMapMmc1Prg() : ProcedureReturn
+    EndSelect
+  EndIf
+  MapperUpdate()
+EndProcedure

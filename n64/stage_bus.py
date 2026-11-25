@@ -13,6 +13,17 @@ def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -
     ]
     if mapper == 5:
         instructions += [f"b {fallback}", "nop"]
+    elif mapper == 1:
+        if pair:
+            instructions += ["andi $t2, $a1, 0x3FFF", "xori $t2, $t2, 0x3FFF",
+                             f"beq $t2, $zero, {fallback}", "nop"]
+        instructions += ["andi $t1, $a1, 0x4000", "srl $t1, $t1, 11",
+                         "la $t2, global_nesmmc1bias", "addu $t1, $t1, $t2",
+                         "ld $t1, 0($t1)", "addu $t1, $t1, $a1"]
+        if pair:
+            instructions += ["lbu $t2, 0($t1)", f"b {label}_finish", "lbu $a0, 1($t1)"]
+        else:
+            instructions += [f"b {label}_finish", "lbu $a0, 0($t1)"]
     else:
         # Mapper 234 can switch the ROM bank on reads starting at $FF80.
         # A two-byte $FFFF fetch crosses over to CPU RAM.
@@ -63,6 +74,9 @@ def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -
 
 
 def stage_bus(source: str, mapper: int) -> str:
+    if mapper == 1:
+        source = source.replace("PeekA(PrgBase+addr-$8000)", "PeekA(NesMmc1Pointer(addr))")
+        source = source.replace("PeekA(WorkerPrgBase+addr-$8000)", "PeekA(NesMmc1Pointer(addr))")
     reads = [
         ("NesRead", ".i", "addr.i", """    andi $a1, $a0, 0xFFFF""",
          """    jr $ra

@@ -10,7 +10,11 @@ def stage_storage(name: str, source: str) -> str:
     if name != "mappers":
         return source
     resident = "    MapCopy(@NesMapPrg(0)+slot*8192,CartPrg+bank*8192,8192)\n"
-    banked = """    CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=228
+    banked = """    CompilerIf #GAME_MAPPER=1
+      If (slot&1)=0
+        NesMmc1Bias(slot>>1)=CartPrg+(bank-slot)*8192-$8000
+      EndIf
+    CompilerElseIf #GAME_MAPPER=5 Or #GAME_MAPPER=228
       If NesPrgBankLoad(@NesMapPrg(0)+slot*8192,bank)=0
         WorkerError=22
         ProcedureReturn

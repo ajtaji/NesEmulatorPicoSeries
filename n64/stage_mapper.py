@@ -47,7 +47,7 @@ nes_map_copy_done:
 EndProcedure"""
 
 
-def stage_mapper(name: str, source: str) -> str:
+def stage_mapper(name: str, source: str, mapper: int = 0) -> str:
     for constant, (array, size) in WINDOWS.items():
         source = re.sub(rf"^#{constant}=\$[0-9A-F]+$",
                         f"Global Dim {array}.a({size})", source, flags=re.M)
@@ -55,6 +55,24 @@ def stage_mapper(name: str, source: str) -> str:
     if name == "mappers":
         source, count = re.subn(r"^Procedure MapCopy\([^\n]+\n.*?^EndProcedure",
                                 MAP_COPY, source, count=1, flags=re.M | re.S)
+        mirror = "  MapMirrorMode=mode"
+        if source.count(mirror) != 1:
+            raise ValueError("mapper mirror update changed")
+        source = source.replace(mirror, mirror + "\n  CompilerIf #NES_MMC1_ROWS\n    NesInvalidateMap()\n  CompilerEndIf")
+        if mapper == 1:
+            for procedure in ("MapperUpdate", "MapperWrite"):
+                start = source.index(f"Procedure {procedure}(")
+                end = source.index("EndProcedure", start) + len("EndProcedure")
+                include = 'XIncludeFile "../n64/mmc1.n64"' if procedure == "MapperUpdate" else ""
+                source = source[:start] + include + source[end:]
+        chr_write = "  PokeA(CartChr+physical,value)"
+        if source.count(chr_write) != 1:
+            raise ValueError("mapper CHR write changed")
+        source = source.replace(chr_write, """  CompilerIf #NES_MMC1_ROWS
+    If PeekA(CartChr+physical)=value : ProcedureReturn : EndIf
+    NesVideoSerial+=1 : NesVideoReset=NesVideoSerial
+  CompilerEndIf
+""" + chr_write)
         if count != 1:
             raise ValueError("Anvil mapper copy procedure is missing")
     return source

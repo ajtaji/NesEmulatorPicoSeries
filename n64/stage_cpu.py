@@ -3,6 +3,7 @@
 import re
 
 from stage_bus import read_direct
+from stage_fill import stage_fill
 from stage_thread import stage_thread
 
 
@@ -48,7 +49,7 @@ def cache_window_registers(source: str) -> str:
     return head + signature + declarations + body
 
 
-def stage_cpu(source: str, mapper: int) -> str:
+def stage_cpu(source: str, mapper: int, program: bytes = b"") -> str:
     # Keep the opcode bodies and the set of legal opcodes in the guest core.
     # Forge has no .Label or computed Goto lowering on VR4300.
     initialize = re.search(r"^  If Ready = 0\n.*?^  EndIf\n", source, re.M | re.S)
@@ -125,4 +126,7 @@ NesOpcodeSlow:
     # MMC5 and mapper 234 can attach read side effects to the PRG window.
     if mapper in (5, 234):
         return cache_window_registers(source)
-    return stage_thread(source)
+    if mapper == 1:
+        source = source.replace("NesPollPtr=PrgBias+PC", "NesPollPtr=PC")
+        source = re.sub(r"PeekA\((NesPollPtr(?:\+\d+)?)\)", r"PeekA(NesMmc1Pointer(\1))", source)
+    return stage_fill(stage_thread(source, mapper), program)

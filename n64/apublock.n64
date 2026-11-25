@@ -1,6 +1,12 @@
 ; Each PCM sample carries elapsed oscillator cycles and the original DMC DAC
 ; level. Period, envelope, and duty stay fixed until the block is rendered.
-#NES_APU_BLOCK=16
+; MMC1 synchronizes often at mapper commits and PPU ports. Accumulate
+; stable oscillator spans between those writes before entering the mixer.
+CompilerIf #GAME_MAPPER=1
+  #NES_APU_BLOCK=64
+CompilerElse
+  #NES_APU_BLOCK=16
+CompilerEndIf
 Global NesAudioBlockCount.i, NesOscPending.i
 Global Dim NesSpanCycles.u(#NES_APU_BLOCK)
 Global Dim NesSpanDmc.a(#NES_APU_BLOCK)

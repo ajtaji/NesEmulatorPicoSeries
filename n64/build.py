@@ -49,6 +49,7 @@ def build(args, *, controller_trace=()):
     polling, has_polls = poll_source(program, cart.mapper)
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper)
     settings = {
+        "NES_MMC1_ROWS": int(cart.mapper == 1 and not cart.chr and chr_size == 8192),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),
         "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(cart.mapper))),
@@ -74,9 +75,9 @@ def build(args, *, controller_trace=()):
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
-                code = stage_cpu(stage_poll(code), cart.mapper)
+                code = stage_cpu(stage_poll(code), cart.mapper, program)
             elif name.startswith("mapper"):
-                code = stage_storage(name, stage_mapper(name, code))
+                code = stage_storage(name, stage_mapper(name, code, cart.mapper))
             elif name == "bridge":
                 for old, new, count in CONTROLLER_PATCHES["bridge"]:
                     if code.count(old) != count:
@@ -85,7 +86,7 @@ def build(args, *, controller_trace=()):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper)
-            code = stage_sync(name, code)
+            code = stage_sync(name, code, cart.mapper)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")

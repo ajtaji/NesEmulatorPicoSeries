@@ -11,6 +11,7 @@ Procedure.i NesRamBranchTaken(condition.i, negative.i, zeroValue.i, carry.i, ove
   ProcedureReturn set=(condition&1)
 EndProcedure
 
+CompilerIf #NES_NATIVE_RAM_WAIT=0
 Procedure.i NesRamCpuWindow(n.i, coalesce.i=0)
   Protected rule.i
   If n<=0 Or Stopped Or NesStall Or NesIdleEnabled=0 Or PC<$8000
@@ -20,6 +21,7 @@ Procedure.i NesRamCpuWindow(n.i, coalesce.i=0)
   If rule=0 : ProcedureReturn CpuRun(n) : EndIf
   ProcedureReturn NesRamWaitBatch(n,coalesce,rule)
 EndProcedure
+CompilerEndIf
 
 Procedure.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
   Protected action.i, mode.i, condition.i, startPc.i, length.i=2

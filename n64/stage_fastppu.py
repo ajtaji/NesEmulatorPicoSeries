@@ -7,6 +7,16 @@ CLEAR_SPRITES = """ProcedureNaked PpuClearSprites()
   ASM
     la t0, global_spriteline
     la t1, global_spritespan
+    ; Every populated sprite pixel sets its span flag.
+    ld t2, 0(t1)
+    ld t3, 8(t1)
+    or t2, t2, t3
+    ld t3, 16(t1)
+    or t2, t2, t3
+    ld t3, 24(t1)
+    or t2, t2, t3
+    beq t2, zero, nes_clear_sprite_done
+    nop
     daddiu t2, t0, 256
 nes_clear_sprite_line:
     sd zero, 0(t0)
@@ -19,8 +29,10 @@ nes_clear_sprite_line:
     sd zero, 0(t1)
     sd zero, 8(t1)
     sd zero, 16(t1)
-    jr ra
     sd zero, 24(t1)
+nes_clear_sprite_done:
+    jr ra
+    nop
   EndASM
 EndProcedure"""
 
@@ -87,31 +99,6 @@ def native_pixel_spread() -> str:
     return "\nDataSection\nNesBgPixelSpread:\n" + data + "\nEndDataSection\n"
 
 
-def stage_sprite_rows(source: str) -> str:
-    source = replace_procedure(source, "PpuBuildSpriteCache", "")
-    proc = source.index("Procedure PpuSpritesReference()")
-    draw = source.index("  PpuClearSprites()\n", proc)
-    end = source.index("\nEndProcedure", draw)
-    declarations = "j.i, sx.i, pixel.i, flags.i"
-    if source[proc:draw].count(declarations) != 1:
-        raise ValueError("PPU sprite-row declarations changed")
-    head = source[proc:draw].replace(declarations, "j.i, flags.i, clip.i, spanFlags.i")
-    # Keep OAM selection and address calculation in the shared evaluator.
-    # The native path loads each selected pattern row once for all eight pixels.
-    return source[:proc] + head + """  If NesBlankUntouched=0 : PpuClearSprites() : EndIf
-  If PpuMask&$10
-    If (PpuMask&4)=0 : clip=8 : EndIf
-    For i=SprCount-1 To 0 Step -1
-      flags=16+((SprAttr(i)&3)*4)+((SprAttr(i)&$20)*2) : spanFlags=1
-      If SprIndex(i)=0
-        flags=flags|$80
-        If i=0 : spanFlags=3 : EndIf
-      EndIf
-      NesDrawSpriteRow(PeekU(Pattern+SprRow(i)),SprX(i),flags,spanFlags,clip,SprAttr(i))
-    Next
-  EndIf""" + source[end:]
-
-
 def stage_fastppu(name: str, source: str) -> str:
     if name == "ppu_bus_write":
         # Write notices and the address increment remain on the caller's path.
@@ -128,6 +115,14 @@ def stage_fastppu(name: str, source: str) -> str:
                   "      NesWriteExpandedNt(addr,value)\n"
                   "    CompilerElse\n" + source[start:end] +
                   "    CompilerEndIf\n" + source[end:])
+        mapped = "      MapCiram(ntAddress)=value : offset=addr&1023"
+        if source.count(mapped) != 1:
+            raise ValueError("PPU CIRAM write changed")
+        source = source.replace(mapped, """      CompilerIf #NES_MMC1_ROWS
+        If MapCiram(ntAddress)=value : ProcedureReturn : EndIf
+        NesInvalidateTileRow(ntAddress)
+      CompilerEndIf
+""" + mapped)
         palette = "    Pal(PpuPalAddr(addr))=value&63\n    PpuColours()"
         if source.count(palette) != 1:
             raise ValueError("PPU palette write changed")
@@ -178,7 +173,8 @@ def stage_fastppu(name: str, source: str) -> str:
 EndProcedure""")
     source = replace_procedure(source, "PpuClearSprites", CLEAR_SPRITES)
     source = replace_procedure(source, "PpuOverlay8", "")
-    source = stage_sprite_rows(source)
+    source = replace_procedure(source, "PpuBuildSpriteCache", "")
+    source = replace_procedure(source, "PpuSpritesReference", "")
     source = replace_procedure(source, "PpuRender8Reference",
                                "CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9\n" + RENDER_SPAN +
                                "\nCompilerElse\n" + native_pixel_spread() + "CompilerEndIf")
@@ -197,7 +193,11 @@ EndProcedure""")
         EndIf
         step=endDot
         If step>256 : step=256 : EndIf
-        NesRenderTo(step)
+        CompilerIf #NES_MMC1_ROWS
+          NesReuseLine(step)
+        CompilerElse
+          NesRenderTo(step)
+        CompilerEndIf
         If endDot<256 : Break : EndIf
         If PpuMask&$18 : PpuIncY() : EndIf
         PpuRgbLineRaw()

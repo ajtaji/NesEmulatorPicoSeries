@@ -31,6 +31,28 @@ ProcedureNaked NesRenderTo(endDot.i)
     or a6, t2, zero
     la t0, global_ppuv
     ld s3, 0(t0)
+  EndASM
+  CompilerIf #NES_MMC1_ROWS
+    ASM
+      srl a0, s3, 5
+      andi a0, a0, 31
+      srl t1, s3, 6
+      andi t1, t1, 32
+      or a0, a0, t1
+      la t1, global_nesdirtyrows
+      addu t1, t1, a0
+      lbu t2, 0(t1)
+      beq t2, zero, nes_mmc1_row_valid
+      nop
+      sb zero, 0(t1)
+      jal nesbuildmappedrow
+      sd a6, 0(sp)
+      ld a6, 0(sp)
+      la t0, global_ppuv
+nes_mmc1_row_valid:
+    EndASM
+  CompilerEndIf
+  ASM
     ; Each 64-tile horizontal map row is stored twice for contiguous wrapping.
     andi a1, s3, 31
     srl t2, s3, 5
@@ -48,7 +70,22 @@ ProcedureNaked NesRenderTo(endDot.i)
     la t1, global_ppuctrl
     ld t1, 0(t1)
     andi t1, t1, 16
-    sll t1, t1, 12
+  EndASM
+  CompilerIf #NES_MMC1_ROWS
+    ASM
+      ; Each MMC1 pattern-table half maps four consecutive 1 KiB slots.
+      sll t1, t1, 1
+      la t2, global_mapchrslots
+      addu t1, t1, t2
+      ld t1, 0(t1)
+      sll t1, t1, 14
+    EndASM
+  CompilerElse
+    ASM
+      sll t1, t1, 12
+    EndASM
+  CompilerEndIf
+  ASM
     srl t2, s3, 9
     andi t2, t2, 56
     or t1, t1, t2

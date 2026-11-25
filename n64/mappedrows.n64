@@ -1,0 +1,136 @@
+; MMC1 owns two physical nametables and can change their logical aliases
+; between PPU fetches. Recreate a horizontal row only when its tiles,
+; attributes or mapping have changed. The repeated half covers wraparound.
+; A line is stale if its nametable row or the shared CHR/mirroring changed.
+Global NesVideoSerial.i=1, NesVideoReset.i=1
+Global Dim NesNameSerial.i(32)
+Global Dim NesLineSerial.i(240)
+Global Dim NesLineTag.i(240)
+Global Dim NesDirtyRows.a(64)
+
+Procedure NesInvalidateMap()
+  Protected i.i
+  NesVideoSerial+=1 : NesVideoReset=NesVideoSerial
+  For i=0 To 7 : PokeI(@NesDirtyRows(0)+i*8,-1) : Next
+EndProcedure
+
+Procedure NesInvalidateTileRow(addr.i)
+  Protected row.i=(addr&1023)>>5
+  NesVideoSerial+=1 : NesNameSerial(row)=NesVideoSerial
+  NesDirtyRows(row)=1 : NesDirtyRows(row+32)=1
+  If (addr&1023)>=$3C0
+    row=((addr>>3)&7)*4
+    NesNameSerial(row)=NesVideoSerial : NesNameSerial(row+1)=NesVideoSerial
+    NesNameSerial(row+2)=NesVideoSerial : NesNameSerial(row+3)=NesVideoSerial
+    PokeL(@NesDirtyRows(0)+row,$01010101)
+    PokeL(@NesDirtyRows(0)+32+row,$01010101)
+  EndIf
+EndProcedure
+
+Procedure NesBuildMappedRow(row.i)
+  Protected side.i, x.i, tile.i, attr.i, palette.i, slot.i
+  For side=0 To 1
+    tile=((row&32)<<6)+(side<<10)+((row&31)<<5)
+    attr=(tile&$C00)+$3C0+((row&28)<<1)
+    slot=(row<<7)+(side<<5)
+    For x=0 To 31
+      palette=(Nt(attr+(x>>2))>>(((row&2)<<1)|(x&2)))&3
+      NesMapRows(slot+x)=(Nt(tile+x)<<8)|(palette<<6)
+      NesMapRows(slot+x+64)=NesMapRows(slot+x)
+    Next
+  Next
+EndProcedure
+
+ProcedureNaked NesReuseLine(endDot.i)
+  ; A whole background line is reusable only if no sprite span drew pixels.
+  ASM
+    la a7, global_ppudot
+    ld t0, 0(a7)
+    ; The first fragment already invalidated this line.
+    bne t0, zero, nes_retained_render
+    addiu t0, zero, 256
+    bne a0, t0, nes_retained_invalidate
+    nop
+    la t0, global_ppumask
+    ld a1, 0(t0)
+    andi t0, a1, 8
+    beq t0, zero, nes_retained_invalidate
+    andi a1, a1, 2
+    la t0, global_spritespan
+    ld t1, 0(t0)
+    ld t2, 8(t0)
+    ld t3, 16(t0)
+    or t1, t1, t2
+    ld t2, 24(t0)
+    or t1, t1, t3
+    or t1, t1, t2
+    bne t1, zero, nes_retained_invalidate
+    nop
+    la a6, global_ppuv
+    ld a2, 0(a6)
+    la t0, global_ppufinex
+    ld t0, 0(t0)
+    sll t0, t0, 16
+    sll a1, a1, 19
+    or a1, a1, t0
+    or a1, a1, a2
+    la t0, global_ppuctrl
+    ld t0, 0(t0)
+    andi t0, t0, 16
+    sll t0, t0, 1
+    la t1, global_mapchrslots
+    addu t0, t0, t1
+    ld t0, 0(t0)
+    sll t0, t0, 21
+    or a1, a1, t0
+    ; One serial per coarse Y covers both vertical nametables conservatively.
+    srl t0, a2, 2
+    andi t0, t0, 248
+    la t1, global_nesnameserial
+    addu t0, t0, t1
+    ld a3, 0(t0)
+    la t0, global_nesvideoreset
+    ld a4, 0(t0)
+    sltu t0, a3, a4
+    beq t0, zero, nes_retained_compare
+    nop
+    or a3, a4, zero
+nes_retained_compare:
+    la t0, global_ppuline
+    ld t0, 0(t0)
+    sll t0, t0, 3
+    la t1, global_neslinetag
+    la t2, global_neslineserial
+    addu t1, t1, t0
+    addu t2, t2, t0
+    ld t3, 0(t1)
+    bne t3, a1, nes_retained_replace
+    ld t3, 0(t2)
+    bne t3, a3, nes_retained_replace
+    nop
+    sd a0, 0(a7)
+    la t0, global_ppupixels
+    ld t1, 0(t0)
+    daddiu t1, t1, 256
+    sd t1, 0(t0)
+    ; 32 coarse X increments preserve X and toggle the horizontal nametable.
+    xori a2, a2, 0x400
+    sd a2, 0(a6)
+    jr ra
+    nop
+nes_retained_replace:
+    sd a1, 0(t1)
+    b nes_retained_render
+    sd a3, 0(t2)
+nes_retained_invalidate:
+    la t0, global_ppuline
+    ld t0, 0(t0)
+    sll t0, t0, 3
+    la t1, global_neslineserial
+    addu t0, t0, t1
+    sd zero, 0(t0)
+nes_retained_render:
+    j nesrenderto
+    nop
+  EndASM
+EndProcedure

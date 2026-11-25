@@ -1,6 +1,6 @@
 ; Cache eight indexed pixels for each pattern row and background palette.
-; Boards with CHR banking and fetch observers use the ordinary tile fetch.
-CompilerIf #NES_BG_EXPANDED
+; MMC1 uses physical CHR rows. Boards with fetch observers use the ordinary fetch.
+CompilerIf #NES_BG_EXPANDED Or #NES_MMC1_ROWS
 Global Dim NesMapRows.u(8192)
 Global Dim NesBgRows.i(16384)
 ProcedureNaked NesExpandBg(dest.i,bits.i)

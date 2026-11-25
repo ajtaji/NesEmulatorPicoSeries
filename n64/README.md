@@ -59,3 +59,13 @@ python n64/verify_game.py --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSP
 ```
 
 Thwaite sustained about 60 guest fps during movement and firing with zero observed AI underruns. The optimized tutorial interval from guest frames 180 to 240 averaged 60.76 fps. The entire 450-frame replay recorded zero underruns, and all 61 tutorial pictures matched the earlier renderer's frame fingerprints. During the busiest frame the guest uploads 3,199 nametable bytes. The CPU batches identical PPUDATA stores in counted loops only while rendering is disabled and the next device event is beyond the batch. The PPU updates the mirrored tile bytes and their cached rendering data together. In the optimized demo's 1,800-frame run, the last queue-empty event occurred at guest frame 41 during silent initialization. Playback stayed fed from the first audible sample onward. Nova the Squirrel v1.0.3 also reached its MMC1 title screen with identical guest state and pixels before and after banked wait batching. The current v1.0.6a cartridge requests 32 KiB of nonvolatile PRG RAM, beyond the port’s existing 8 KiB MMC1 work RAM. [Emulator results](validation/playability.txt)
+
+## Commercial gameplay replays
+
+Use a local NTSC ROM to replay World 1-1 in Super Mario Bros., the overworld in The Legend of Zelda, or Wood Man's stage in Mega Man 2. The verifier checks the ROM revision, applies controller input on guest frames, and compares guest CPU cycles, PC, sample counts, the final 320 by 240 framebuffer and the complete captured stereo stream with the pre-optimization build. It reports guest fps using the modeled N64 Count register and counts AI queue-empty transitions during the gameplay interval.
+
+```powershell
+python n64/verify_library.py MegaMan2 --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudio.exe" --rom "path-to-roms\Mega Man 2 (U).nes" --results n64/build/gameplay/verified/MegaMan2
+```
+
+Select `Mario` or `Zelda` and supply the corresponding ROM to run the other replays. Each results directory contains the debugger log, framebuffer, stereo WAV and bounded replay cartridge. Use `n64/build.py` without `--check-frame` to build a cartridge for unrestricted controller play.

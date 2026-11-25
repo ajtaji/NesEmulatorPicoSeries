@@ -34,6 +34,76 @@ def phase_period(read_cycles, branch_cycles, at_branch):
     raise ValueError("128-cycle polling window has no repeating phase")
 
 
+def native_wait_window(first, second, mask):
+    return f"""#NES_NATIVE_RAM_WAIT = 1
+Declare.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
+ProcedureNaked.i NesRamCpuWindow(n.i, coalesce.i=0)
+  ASM
+    blez $a0, nes_ram_window_scalar
+    nop
+    la $t0, global_stopped
+    ld $t1, 0($t0)
+    la $t0, global_nesstall
+    ld $t2, 0($t0)
+    or $t1, $t1, $t2
+    bne $t1, $zero, nes_ram_window_scalar
+    nop
+    la $t0, global_nesidleenabled
+    ld $t1, 0($t0)
+    beq $t1, $zero, nes_ram_window_scalar
+    nop
+    la $t0, global_pc
+    ld $t0, 0($t0)
+    ori $t1, $zero, 0x8000
+    slt $t1, $t0, $t1
+    bne $t1, $zero, nes_ram_window_scalar
+    nop
+  EndASM
+  CompilerIf #NES_BANKED_WAITS
+    ASM
+    andi $t1, $t0, 0x6000
+    srl $t1, $t1, 10
+    la $t2, global_mapprgslots
+    addu $t1, $t1, $t2
+    ld $t1, 0($t1)
+    dsll $t1, $t1, 13
+    andi $t0, $t0, 0x1FFF
+    daddu $t0, $t0, $t1
+    EndASM
+  CompilerElse
+    ASM
+    la $t1, global_prgbase
+    ld $t1, 0($t1)
+    la $t2, global_cartprg
+    ld $t2, 0($t2)
+    dsubu $t1, $t1, $t2
+    daddu $t0, $t0, $t1
+    daddiu $t0, $t0, -32768
+    EndASM
+  CompilerEndIf
+  ASM
+    dsrl $t1, $t0, {first}
+    dsrl $t2, $t0, {second}
+    xor $t1, $t1, $t2
+    xor $t1, $t1, $t0
+    andi $t1, $t1, {mask}
+    sll $t1, $t1, 3
+    la $t2, nesramwaithash
+    addu $t1, $t1, $t2
+    lw $t2, 0($t1)
+    bne $t2, $t0, nes_ram_window_scalar
+    lw $a2, 4($t1)
+    beq $a2, $zero, nes_ram_window_scalar
+    nop
+    j nesramwaitbatch
+    nop
+nes_ram_window_scalar:
+    j cpurun
+    nop
+  EndASM
+EndProcedure""".splitlines()
+
+
 def wait_lookup(sites):
     # Use a bounded, collision-free hash when the sparse PRG sites fit in
     # a small table. Verify the full view-relative key on every lookup.
@@ -45,22 +115,14 @@ def wait_lookup(sites):
             indices = {(key ^ (key >> first) ^ (key >> second)) & mask: key for key in sites}
             if len(indices) != len(sites):
                 continue
-            lines = [
-                "Procedure.i NesRamWaitRule(site.i)",
-                "  Protected row.i",
-                f"  row=?NesRamWaitHash+(((site!(site>>{first})!(site>>{second}))&{mask})<<3)",
-                "  If PeekL(row)=site : ProcedureReturn PeekL(row+4) : EndIf",
-                "  ProcedureReturn 0",
-                "EndProcedure",
-                "DataSection",
-                "NesRamWaitHash:",
-            ]
+            lines = native_wait_window(first, second, mask)
+            lines += ["DataSection", "NesRamWaitHash:"]
             for index in range(size):
                 key = indices.get(index, -1)
                 lines.append(f"  Data.l {key},{sites.get(key,0)}")
             lines.append("EndDataSection")
             return lines
-    lines = ["Procedure.i NesRamWaitRule(site.i)", "  Select site"]
+    lines = ["#NES_NATIVE_RAM_WAIT = 0", "Procedure.i NesRamWaitRule(site.i)", "  Select site"]
     lines += [f"    Case {offset} : ProcedureReturn {rule}" for offset, rule in sorted(sites.items())]
     return lines + ["  EndSelect", "  ProcedureReturn 0", "EndProcedure"]
 

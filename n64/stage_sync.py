@@ -31,16 +31,16 @@ CompilerEndIf
 
 Procedure NesWriteRegister(addr.i, value.i, stamp.i)
   CompilerIf #NES_PREDICTABLE_IRQ
-    ; CHR and nametable writes can advance the address immediately while
-    ; the raster has no fetches. During vblank cap the deferred interval
-    ; before prerender, where the PPU can reload its scroll registers.
-    If addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))
+    ; Blanking permits deferred CHR and nametable writes. Palette writes
+    ; can also defer during vblank, after the last visible palette capture.
+    ; Stop before prerender can reload the scroll address.
+    If {window}
       NesStatusHorizon=-1
       If stamp>NesCpuHorizon
         WorkerAdvance(stamp)
         NesSetCpuHorizon(stamp)
       EndIf
-      If (PpuMask&24)<>0 And stamp>WorkerClock
+      If {bound}
         If (stamp-WorkerClock)*(3+#GAME_PAL)>=(PpuPreLine-PpuLine)*341-PpuDot
           WorkerAdvance(stamp)
         EndIf
@@ -73,12 +73,30 @@ CompilerEndIf
 """
 
 
-def stage_sync(name: str, source: str) -> str:
+def stage_sync(name: str, source: str, mapper: int) -> str:
     if name == "bridge":
         # All existing timestamp expressions here are straight-line arithmetic.
         source, count = re.subn(r"\bNesRpc\(0,0,0,([^()\n]+)\)", r"WorkerAdvance(\1)", source)
         if count != 7:
             raise ValueError(f"{name}: single-thread tick call sites changed")
+        window = "      CpuNow() : WorkerAdvance(CpuCycles+AccessPhase)\n      MapperWrite(addr,value,CpuCycles+AccessPhase)"
+        if source.count(window) != 1:
+            raise ValueError("managed mapper write changed")
+        source = source.replace(window, """      CpuNow()
+      CompilerIf #GAME_MAPPER=1
+        ; Intermediate shift bits have no bus output. At a commit, synchronize
+        ; before CHR, mirroring or an active DMC reader can see a new mapping.
+        If addr>=$8000
+          If value&128
+            If NesReaderActive() : WorkerAdvance(CpuCycles+AccessPhase) : EndIf
+          ElseIf MapShift&1
+            If addr<$E000 Or NesReaderActive() : WorkerAdvance(CpuCycles+AccessPhase) : EndIf
+          EndIf
+        EndIf
+      CompilerElse
+        WorkerAdvance(CpuCycles+AccessPhase)
+      CompilerEndIf
+      MapperWrite(addr,value,CpuCycles+AccessPhase)""")
         declarations = "Declare WorkerCommand(command.i, addr.i, value.i, stamp.i)"
         if source.count(declarations) != 1:
             raise ValueError("worker API declarations changed")
@@ -101,5 +119,11 @@ def stage_sync(name: str, source: str) -> str:
         worker = "Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)"
         if source.count(worker) != 1:
             raise ValueError("worker command procedure changed")
-        source = source.replace(worker, REGISTER_ACCESS + worker)
+        if mapper == 1:
+            window = "addr<$4000 And (addr&7)=7 And (((PpuMask&24)=0 And (PpuV&$3FFF)<$3F00) Or (PpuLine>=240 And PpuLine<PpuPreLine))"
+            bound = "((PpuMask&24)<>0 Or (PpuV&$3FFF)>=$3F00) And stamp>WorkerClock"
+        else:
+            window = "addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))"
+            bound = "(PpuMask&24)<>0 And stamp>WorkerClock"
+        source = source.replace(worker, REGISTER_ACCESS.format(window=window, bound=bound) + worker)
     return source

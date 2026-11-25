@@ -34,7 +34,7 @@ nes_render_to_done:
   EndASM
 EndProcedure
 
-CompilerIf #NES_BG_EXPANDED
+CompilerIf #NES_BG_EXPANDED Or #NES_MMC1_ROWS
   XIncludeFile "tiles.n64"
 CompilerElse
 CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9

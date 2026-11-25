@@ -24,7 +24,24 @@ ProcedureNaked PpuDecode(row.i)
     lw t0, 4(t0)
     addu t0, t0, a0
   EndASM
-  CompilerIf #NES_BG_EXPANDED
+  CompilerIf #NES_BG_EXPANDED Or #NES_MMC1_ROWS
+    CompilerIf #NES_MMC1_ROWS
+      ASM
+        la t1, global_mapmanaged
+        ld t1, 0(t1)
+        beq t1, zero, nes_decode_physical_done
+        nop
+        srl t1, a0, 10
+        sll t1, t1, 3
+        la t2, global_mapchrslots
+        addu t1, t1, t2
+        ld t1, 0(t1)
+        sll t1, t1, 10
+        andi a0, a0, 1023
+        or a0, a0, t1
+nes_decode_physical_done:
+      EndASM
+    CompilerEndIf
     ASM
       j nesexpandbg
       sh a1, 0(t0)

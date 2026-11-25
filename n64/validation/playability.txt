@@ -102,3 +102,12 @@ Individual original/final VI framebuffer RGB and complete captured stereo PCM al
 The rebuilt interactive ROM accepted Start and A via emulated Joybus and displayed the missile-defense tutorial.
 The final demo passed the desktop frame-60 rendering check. Its regular cart measured 46,030,491 Count ticks (61.10 fps) over guest frames 60 to 120.
 Final demo through guest frame 1,800: 45 observed queue-empty transitions, last on frame 41 during silent startup, 10 pictures superseded.
+
+Local NTSC game replays, PureMetal Forge, VR4300RSPStudio with 4 MiB RDRAM
+Compared to the port at 0752b12. FPS uses guest frames divided by elapsed modeled Count ticks at 46,875,000 Hz. Underruns count observed AI queue-empty transitions between the indicated checkpoints.
+Game and route                            Guest frames   Baseline fps / underruns   Optimized fps / underruns
+Super Mario Bros. (World 1-1)             240-360         52.381 / 144               59.326 / 0
+The Legend of Zelda (overworld)           480-540         23.451 / 93                59.826 / 0
+Mega Man 2 (Wood Man movement and fire)   1080-1260       13.961 / 281               53.842 / 128
+Each replay matched all reference guest CPU-cycle, PC and sample-count checkpoints, final RGB pixels, and the full captured stereo PCM stream. Audio content parity and playback queue continuity are checked independently. Wood Man still fell below real time.
+Reproduce with n64/verify_library.py. Controller inputs, ROM revision hashes and reference hashes are in the verifier. Interactive builds omit the controller replay and stop frame.
