@@ -29,6 +29,8 @@ ProcedureNaked PpuRgbLineRaw()
     ; back while resident, including the final line of an unaligned row.
     la t0, global_neslinerow
     lw a2, 4(t0)
+    andi t1, a2, 15
+    subu a2, a2, t1
     cache 0x19, 0(a2)
     cache 0x19, 16(a2)
     cache 0x19, 32(a2)
@@ -45,7 +47,10 @@ ProcedureNaked PpuRgbLineRaw()
     cache 0x19, 208(a2)
     cache 0x19, 224(a2)
     cache 0x19, 240(a2)
-    cache 0x19, 255(a2)
+    beq t1, zero, nes_index_row_written
+    nop
+    cache 0x19, 256(a2)
+nes_index_row_written:
     la t0, global_ppuline
     ld a0, 0(t0)
     la t0, global_rgbpairsdirty
@@ -79,11 +84,15 @@ nes_index_palette_copy:
     addiu t0, t0, 16
     bne t0, t2, nes_index_palette_copy
     addiu t1, t1, 16
+    andi t1, a3, 15
+    subu a3, a3, t1
     cache 0x19, 0(a3)
     cache 0x19, 16(a3)
     cache 0x19, 32(a3)
     cache 0x19, 48(a3)
-    cache 0x19, 63(a3)
+    beq t1, zero, nes_index_row_done
+    nop
+    cache 0x19, 64(a3)
 nes_index_row_done:
     jr ra
     nop
