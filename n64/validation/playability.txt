@@ -111,3 +111,6 @@ The Legend of Zelda (overworld)           480-540         23.451 / 93           
 Mega Man 2 (Wood Man movement and fire)   1080-1260       13.961 / 281               53.842 / 128
 Each replay matched all reference guest CPU-cycle, PC and sample-count checkpoints, final RGB pixels, and the full captured stereo PCM stream. Audio content parity and playback queue continuity are checked independently. Wood Man still fell below real time.
 Reproduce with n64/verify_library.py. Controller inputs, ROM revision hashes and reference hashes are in the verifier. Interactive builds omit the controller replay and stop frame.
+
+RSP stereo expansion experiment (emulator only, 512 mono samples -> 512 stereo pairs per AI block)
+Two 32-block passes per path, in CPU/RSP/RSP/CPU order. Modeled Count per block averaged 4625.47 for the VR4300 assembly copy and 3166.47 for the RSP vector job, including cache, submission, waiting and AI handoff. All 65,536 captured stereo pairs matched. At 48,000 samples/s this isolated difference accounts for about 0.29% of one second. Production still uses the VR4300 copy.
