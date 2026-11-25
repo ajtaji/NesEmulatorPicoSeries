@@ -40,8 +40,6 @@ Procedure NesRuntimeCheckExit()
   held+1
   If held<>30 : ProcedureReturn : EndIf
   If (PeekL($B0000020)&$FFFFFFFF)<>$4E455320 Or (PeekL($B0000024)&$FFFFFFFF)<>$4C494252 : ProcedureReturn : EndIf
-  LpmRdpSyncFullWait()
-  LpmDisplayWaitVBlank()
   NesLibBoot($B0000000+(PeekL($B000001C)&$FFFFFFFF))
 EndProcedure
 

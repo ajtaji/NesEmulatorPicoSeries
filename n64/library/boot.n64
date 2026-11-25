@@ -1,5 +1,5 @@
 ; Run the child IPL3 from RSP DMEM, outside either program's RDRAM range.
-ProcedureNaked NesLibBoot(entry.i)
+ProcedureNaked NesLibBootStage(entry.i)
   ASM
     sll t3,a0,0
     lui t0,$A450
@@ -30,8 +30,6 @@ nes_lib_wait_pi:
     lui t0,$A430
     ori t1,zero,$0555
     sw t1,12(t0)
-    lui t0,$A440
-    sw zero,0(t0)
     lui t0,$A404
     ori t1,zero,2
     sw t1,16(t0)
@@ -63,4 +61,11 @@ nes_lib_copy:
     jr a4
     nop
   EndASM
+EndProcedure
+
+
+Procedure NesLibBoot(entry.i)
+  LpmRdpSyncFullWait()
+  LpmViOff()
+  NesLibBootStage(entry)
 EndProcedure

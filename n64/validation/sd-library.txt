@@ -17,3 +17,7 @@ All three final framebuffers matched their existing replay references.
 These rates and the supported mapper subset make this a preview. The
 normal standalone 20 kHz Zelda build still matched its prior image
 byte for byte.
+
+The corrected handoff turns off the VI in vertical blank before loading
+the next program. In the seeded FAT fixture the emulator reported vi_hung=0
+and Zelda showed the registered file A with three hearts.
