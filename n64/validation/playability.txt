@@ -107,8 +107,8 @@ Local NTSC game replays, PureMetal Forge, VR4300RSPStudio with 4 MiB RDRAM
 Compared to the port at 0752b12. FPS uses guest frames divided by elapsed modeled Count ticks at 46,875,000 Hz. Underruns count observed AI queue-empty transitions between the indicated checkpoints.
 Game and route                            Guest frames   Baseline fps / underruns   Optimized fps / underruns
 Super Mario Bros. (World 1-1)             240-360         52.381 / 144               59.326 / 0
-The Legend of Zelda (overworld)           480-540         23.451 / 93                59.826 / 0
-Mega Man 2 (Wood Man movement and fire)   1080-1260       13.961 / 281               53.842 / 128
+The Legend of Zelda (overworld)           480-540         23.451 / 93                60.833 / 0
+Mega Man 2 (Wood Man movement and fire)   1080-1260       13.961 / 281               54.141 / 126
 Each replay matched all reference guest CPU-cycle, PC and sample-count checkpoints, final RGB pixels, and the full captured stereo PCM stream. Audio content parity and playback queue continuity are checked independently. Wood Man still fell below real time.
 Reproduce with n64/verify_library.py. Controller inputs, ROM revision hashes and reference hashes are in the verifier. Interactive builds omit the controller replay and stop frame.
 

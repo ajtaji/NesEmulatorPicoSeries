@@ -410,6 +410,16 @@ or $s4, $t2, $zero"""
         first_dispatch = "b nes_thread_dispatch\naddu $t0, $a1, $s3"
         next_fetch = ("subu $t1, $a1, $s2\nsltu $t1, $t1, $s4\n"
                       "beq $t1, $zero, nes_thread_fetch\naddu $t0, $a1, $s3")
+    check = "daddiu $t3, $t3, 1\n" + next_fetch
+    dispatch_jump = "jr $t1\nor $v1, $a0, $zero"
+    undo_charge = ""
+    if mapper == 1:
+        # The region subtraction fills the budget branch's delay slot. The
+        # table load can publish open bus while the jump target is in flight.
+        # Charge the opcode in the jump delay slot and undo it on fallback.
+        check = next_fetch
+        dispatch_jump = "or $v1, $a0, $zero\njr $t1\ndaddiu $t3, $t3, 1"
+        undo_charge = "daddiu $t3, $t3, -1\n"
     publish = (("pc", "$a1"), ("nesopenbus", "$v1")) + tuple(r for r in live if r[0] != "prgbias")
     store = "\n".join(f"la $t1, global_{name}\nsd {reg}, 0($t1)" for name, reg in publish)
     thread = f"""nes_thread_enter:
@@ -427,17 +437,15 @@ la $s1, global_m
 {first_dispatch}
 nes_thread_check:
 blez $a2, nes_thread_end
-daddiu $t3, $t3, 1
-{next_fetch}
+{check}
 lbu $a0, 0($t0)
 nes_thread_dispatch:
 sll $t1, $a0, 2
 addu $t1, $t1, $s0
 lw $t1, 0($t1)
-jr $t1
-or $v1, $a0, $zero
+{dispatch_jump}
 nes_thread_slow:
-addiu $a1, $a1, 1
+{undo_charge}addiu $a1, $a1, 1
 andi $a1, $a1, 0xFFFF
 la $t0, nes_thread_portable
 b nes_thread_flush
