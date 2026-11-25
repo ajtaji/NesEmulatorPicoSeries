@@ -11,6 +11,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from anvil_cartridge import read_anvil_rom
+from save_profile import save_copy_source, save_profile, stage_save
+from save_header import patch_save_header
 from rom_catalog import prg_views
 from port_desktop import CONTROLLER_PATCHES
 from stage_cpu import stage_cpu
@@ -76,6 +78,12 @@ def build(args, *, controller_trace=()):
     if not compiler.is_file():
         raise ValueError(f"missing compiler: {compiler}")
     cart, header = read_anvil_rom(args.rom, extra=EXPANSION_MAPPERS, pal_ok=True)
+    persist = getattr(args, "persist_save", None)
+    save = save_profile(cart, header) if (persist if persist is not None else not args.check_frame) else None
+    if save and save.reason:
+        print(f"NES save: {save.reason}", file=sys.stderr)
+    save_bytes = save.size if save else 0
+    save_banks = 1 if save_bytes <= 32768 else 3 if save_bytes <= 98304 else 4
     chr_size = len(cart.chr) or {6: 32768, 13: 16384}.get(cart.mapper, 8192)
     program = prg_views(cart)
     polling, has_polls = poll_source(program, cart.mapper)
@@ -100,6 +108,8 @@ def build(args, *, controller_trace=()):
         "NES_HAS_RAM_WAITS": int(has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
         "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": cart.mapper, "GAME_SUB": cart.submapper,
+        "GAME_SAVE_BYTES": save_bytes, "GAME_SAVE_BANKS": save_banks,
+        "GAME_SAVE_LINEAR": int(save_banks == 4 and not getattr(args, "banked_sram_128", False)),
         "GAME_MIRROR": cart.mirror, "GAME_RAM": cart.ram_size,
         "GAME_CONFLICT": int(cart.conflicts), "GAME_BATTERY": int(cart.battery),
         "GAME_FOUR_SCREEN": int(bool(header[6] & 8)),
@@ -137,10 +147,20 @@ def build(args, *, controller_trace=()):
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
+            if save_bytes:
+                code = stage_save(name, code, save)
             (guest / (name + ".pmi")).write_text(guest_names(code).replace('.pi4"', '.pmi"'), encoding="utf-8")
-        (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion_source()), encoding="utf-8")
+        expansion = expansion_source()
+        if save_bytes:
+            expansion = stage_save("mapper_konami_namco", expansion, save)
+        (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion), encoding="utf-8")
         app = stage / "n64"
         shutil.copytree(ROOT / "n64", app, ignore=shutil.ignore_patterns("build", "__pycache__","*.z64"))
+        if save_bytes:
+            mmc1 = app / "mmc1.n64"
+            mmc1.write_text(stage_save("mmc1", mmc1.read_text(), save), encoding="utf-8")
+            (app / "save_backing.pmi").write_text(save_copy_source(save), encoding="utf-8")
+            (app / "save_restore.pmi").write_text(save.restore + "\n", encoding="utf-8")
         oscillator = app / "oscillators.n64"
         oscillator.write_text(stage_oscillators(oscillator.read_text(encoding="utf-8"), cart.mapper), encoding="utf-8")
         if controller_trace:
@@ -161,7 +181,10 @@ def build(args, *, controller_trace=()):
             raise RuntimeError(log)
         check_storage_layout(log)
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(app / "nes.z64", args.out)
+        image = (app / "nes.z64").read_bytes()
+        if save_bytes:
+            image = patch_save_header(image, save_banks * 32)
+        args.out.write_bytes(image)
         print(log.split("VR4300: image")[-1].strip())
         print(args.out.resolve())
 
@@ -172,6 +195,10 @@ if __name__ == "__main__":
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000), default=48000)
     parser.add_argument("--rom", type=Path, default=ROOT / "demo/PureMetalDemo.nes")
     parser.add_argument("--out", type=Path, default=ROOT / "n64/build/nes.z64")
+    parser.add_argument("--banked-sram-128", action="store_true",
+                        help="use four bank windows for 128 KiB SRAM (default: SummerCart64 linear mapping)")
+    parser.add_argument("--persist-save", action=argparse.BooleanOptionalAction, default=None,
+                        help="persist NES battery RAM in cartridge SRAM (default on for playable builds, off for verification)")
     parser.add_argument("--check-frame", type=int, default=0, help="stop on a guest frame for capture (0 keeps playing)")
     try:
         args = parser.parse_args()

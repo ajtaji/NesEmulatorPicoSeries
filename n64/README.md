@@ -28,15 +28,52 @@ The PPU produces a 256 × 240 indexed image. NROM and UxROM cartridges with 8 KiB
 
 ## Cartridge support
 
-The builder uses the project's Anvil mapper and header validation plus the VRC6 and Namco 163 support from the desktop port. It carries over the existing board restrictions, including unsupported trainers, Dendy timing, VRC6 nametable modes and Namco 163 CHR-RAM pattern banking. Mapper work RAM is volatile across resets and power cycles. The game is embedded at build time, so the port needs no flash-cart filesystem driver.
+The builder uses the project's Anvil mapper and header validation plus the VRC6 and Namco 163 support from the desktop port. It carries over the existing board restrictions, including unsupported trainers, Dendy timing, VRC6 nametable modes and Namco 163 CHR-RAM pattern banking. The game is embedded at build time, so the port needs no flash-cart filesystem driver.
 
 Small games use base RDRAM. Larger games can use the Expansion Pak. On MMC5 and mapper 228, the loader can fetch 8 KiB PRG banks from the N64 cartridge on demand when the complete image would exceed the memory budget. The build checks the end of program statics against the VI buffer allocation.
+
+## Battery saves on flashcarts
+
+Playable builds persist battery RAM on supported boards and declare the required SRAM size in their N64 cartridge header. Ordinary work RAM remains volatile. `--no-persist-save` builds a playable cartridge with volatile RAM. Bounded verification leaves persistence off by default, so the same ROM and input schedule always start with fresh guest RAM.
+
+Zelda retains the first 8,192 bytes of a 32 KiB N64 SRAM save. Use the game's normal file and save commands. The port restores those bytes after mapper initialization and writes changed 256-byte pages at the end of each guest frame. This stores the NES battery memory, so a cold boot returns to the game's own save selection screen. On an SRAM write error the port keeps the pending pages for retry.
+
+The build selects the board's existing save memory, including banked MMC5 and Sunsoft RAM. Namco 163 packs its 128 internal bytes after any external save RAM. NES 2.0 headers select the nonvolatile region independently of volatile memory. A battery header with no supported backing produces a build diagnostic. To exercise battery saves in a bounded test, pass `--persist-save` and use a private emulator save directory.
+
+The header uses the ED64 homebrew save type. The flashcart maps that SRAM into N64 PI domain 2 and handles transferring it to a save file. The sizes below are the N64 SRAM chip capacities. They can exceed the number of bytes the NES board retains. [Flashcart menu header parser](https://github.com/n64brew/N64FlashcartMenu/blob/1903b4bcfe388a4048bc14551115ff5525085a51/src/menu/rom_info.c#L726-L744) [SummerCart64 deployer header parser](https://github.com/Polprzewodnikowy/SummerCart64/blob/a1e7996d2cbece686820a5c785029c68514f17b0/sw/deployer/src/n64.rs#L18-L40)
+
+| N64 capacity | ED64 save nibble | `sc64deployer --save-type` |
+|---:|---:|---|
+| 32 KiB | 3 | `sram` |
+| 96 KiB | 4 | `sram-banked` |
+| 128 KiB | 6 | `sram1m` |
+
+SummerCart64 maps its 96 KiB mode as three 32 KiB banks and its 128 KiB mode as contiguous SRAM. The 128 KiB build uses the contiguous layout by default. Use `--banked-sram-128` only for the project's emulator or hardware that implements four banks at 256 KiB strides. Use the layout your flashcart implements when moving the cartridge between devices. [SummerCart64 PI address decoder](https://github.com/Polprzewodnikowy/SummerCart64/blob/a1e7996d2cbece686820a5c785029c68514f17b0/fw/rtl/n64/n64_pi.sv#L211-L228)
+
+For normal SD boot with N64FlashcartMenu, copy the playable `.z64` to the SD card and select it in the menu. The menu recognizes the header and stores each game's file under a `saves` directory next to its ROM, using the same base name with a `.sav` extension. Give each game and save profile a distinct filename. Back up the existing save before changing the save type or moving it to another flashcart. [N64FlashcartMenu SD save files](https://github.com/n64brew/N64FlashcartMenu/blob/1903b4bcfe388a4048bc14551115ff5525085a51/docs/10_getting_started_sd.md#save-files)
+
+For SummerCart64 USB boot, stop any other listener using that port and upload with the console off. Supply an existing save or a new dedicated file of exactly the selected N64 capacity. This 32 KiB direct-boot example uses the tag for Zelda's 8 KiB guest battery RAM.
+
+```powershell
+sc64deployer -p serial://<port> upload --direct --save-type sram --save "Zelda.sav" "Zelda.z64"
+sc64deployer -p serial://<port> debug --save "Zelda-writeback.sav"
+```
+
+The second command receives USB writeback into a separate file. After saving in-game, wait for the writeback confirmation before stopping the listener or powering down. With USB power maintained, `sc64deployer download save <new-file>` reads the active save into a backup before an upload or reset replaces it. Keep ROM shadowing at its default. The default IS-Viewer address `0x03FF0000` overlaps 96 and 128 KiB saves, so omit `--isv` when using those modes. The benchmark listener uses `--no-writeback` and is intended for verification carts. [SummerCart64 shared save memory](https://github.com/Polprzewodnikowy/SummerCart64/blob/a1e7996d2cbece686820a5c785029c68514f17b0/docs/01_memory_map.md#pi-memory-map) [Deployer save and debug commands](https://github.com/Polprzewodnikowy/SummerCart64/blob/a1e7996d2cbece686820a5c785029c68514f17b0/sw/deployer/src/main.rs)
+
+Use the postbuild helper if an already SRAM-enabled cartridge needs a corrected header. The helper creates a new file and leaves the original intact. It changes no guest code or cartridge checksums. Select the capacity the runtime expects, and apply this before any optional cartridge signing.
+
+```powershell
+python n64/save_header.py input.z64 output.z64 --sram-kib 32
+```
 
 ## Display engine integration
 
 The emulator uses LibPureMetalN64 directly. It acquires a VI buffer with `LpmDisplayGet`, uploads indexed strips and scanline palettes through the RDP, and presents after the RDP interrupt with `LpmRdpDetachShow`. Joybus supplies controller input. The in-progress Neon Arcade Display Engine requires no changes for this port.
 
 ## Verification
+
+Run `python n64/verify_save.py --sdk <sdk> --emulator <emulator>` to test all 8 KiB of MMC1 save RAM across two independent boots and check the volatile controls.
 
 The physical-console log records the build hash, reset vector, CPU cycles, sample counts and program counter. At guest frame 120 the console reported 3,573,714 NES CPU cycles and 95,843 produced audio samples. The same image gave identical guest checkpoints in the N64 emulator. That console measurement predates the VR4300 interpreter, PPU and APU optimizations. [Hardware capture](validation/demo-console.txt)
 

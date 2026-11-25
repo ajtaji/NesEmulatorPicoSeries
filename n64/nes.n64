@@ -30,6 +30,9 @@ EndProcedure
 CompilerIf #GAME_MAPPER=1
   Declare.i NesReaderActive()
 CompilerEndIf
+CompilerIf #GAME_SAVE_BYTES>0
+  Declare NesSaveChanged(offset.i)
+CompilerEndIf
 Declare.i NesCurrentPoll(acc.i)
 Global NesDeliveredFrame.i, NesLoopRule.i, NesLoopCost.i
 XIncludeFile "poll.pmi"
@@ -109,6 +112,11 @@ Procedure.i NesCurrentPoll(acc.i)
   ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
 EndProcedure
 
+CompilerIf #GAME_SAVE_BYTES>0
+XIncludeFile "save_backing.pmi"
+XIncludeFile "save.n64"
+CompilerEndIf
+
 Procedure.i LoadGame()
   Protected i.i, bank.i
   If NesStorageLoad()=0 : ProcedureReturn 0 : EndIf
@@ -136,6 +144,10 @@ Procedure.i LoadGame()
   NesTiming(#GAME_PAL)
   If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
   If WorkerError : ProcedureReturn 0 : EndIf
+  CompilerIf #GAME_SAVE_BYTES>0
+    NesSaveLoad()
+    XIncludeFile "save_restore.pmi"
+  CompilerEndIf
   For i=0 To 31 : LengthTable(i)=PeekA(?LengthData+i) : Next
 
   For i=0 To 30 : PulseMix(i)=PeekU(?PulseData+i*2) : Next
@@ -187,6 +199,9 @@ Procedure RunGame()
     EndIf
     If WorkerFrames<>lastFrame
       lastFrame=WorkerFrames : NesDeliveredFrame=lastFrame : HostInputPoll() : HostAudioPoll()
+      CompilerIf #GAME_SAVE_BYTES>0
+        If NesSavePending : NesSaveFlush() : EndIf
+      CompilerEndIf
       If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
         elapsed=(LpmCpuCount()-start) & $FFFFFFFF
         LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))

@@ -1,0 +1,80 @@
+; Cartridge SRAM stores the mapper's battery-backed bytes in guest order.
+; Stage PI transfers through a private cache-line-aligned page. Mapper arrays
+; can be unaligned and can share a cache line with unrelated guest state.
+#NES_SAVE_PAGE=256
+Global Dim NesSaveStaging.a(#NES_SAVE_PAGE+15)
+Global Dim NesSaveDirty.a((#GAME_SAVE_BYTES+#NES_SAVE_PAGE-1)/#NES_SAVE_PAGE)
+Global NesSaveOnline.i, NesSavePending.i, NesSaveWriteError.i
+
+Procedure NesSaveChanged(offset.i)
+  If NesSaveOnline And offset>=0 And offset<#GAME_SAVE_BYTES
+    NesSaveDirty(offset>>8)=1
+    NesSavePending=1
+  EndIf
+EndProcedure
+
+CompilerIf #GAME_SAVE_LINEAR
+; SummerCart64 SRAM 1M exposes all 128 KiB consecutively on PI domain 2.
+Procedure.i NesSaveRead(offset.i, page.i, bytes.i)
+  Protected ticket.i=LpmPiRead(#LPM_SAVE_BASE+offset,page,bytes)
+  If ticket=0 : ProcedureReturn #LPM_SAVE_ALIGN : EndIf
+  LpmPiWait(ticket)
+  ProcedureReturn #LPM_SAVE_OK
+EndProcedure
+
+Procedure.i NesSaveWrite(offset.i, page.i, bytes.i)
+  Protected ticket.i
+  If LpmResetHold(1000+bytes)=0 : ProcedureReturn #LPM_SAVE_RESET : EndIf
+  ticket=LpmPiWrite(page,#LPM_SAVE_BASE+offset,bytes)
+  If ticket : LpmPiWait(ticket) : EndIf
+  LpmResetRelease()
+  If ticket=0 : ProcedureReturn #LPM_SAVE_ALIGN : EndIf
+  ProcedureReturn #LPM_SAVE_OK
+EndProcedure
+CompilerElse
+Macro NesSaveRead(offset,page,bytes)
+  LpmSramRead(offset,page,bytes)
+EndMacro
+Macro NesSaveWrite(offset,page,bytes)
+  LpmSramWrite(offset,page,bytes)
+EndMacro
+CompilerEndIf
+
+Procedure NesSaveLoad()
+  Protected page.i=(@NesSaveStaging(0)+15)&~15, offset.i, bytes.i
+  If LpmSramInit(#GAME_SAVE_BANKS)<>#LPM_SAVE_OK
+    LpmDebugPrint("NES SRAM initialization failed")
+    ProcedureReturn
+  EndIf
+  For offset=0 To #GAME_SAVE_BYTES-1 Step #NES_SAVE_PAGE
+    bytes=#GAME_SAVE_BYTES-offset
+    If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
+    If NesSaveRead(offset,page,bytes)<>#LPM_SAVE_OK
+      NesSaveClear()
+      LpmDebugPrint("NES SRAM read failed")
+      ProcedureReturn
+    EndIf
+    NesSaveCopy(offset,page,bytes,1)
+  Next
+  NesSaveOnline=1
+EndProcedure
+
+Procedure NesSaveFlush()
+  Protected page.i=(@NesSaveStaging(0)+15)&~15, i.i, offset.i, bytes.i
+  For i=0 To (#GAME_SAVE_BYTES-1)/#NES_SAVE_PAGE
+    If NesSaveDirty(i)
+      offset=i*#NES_SAVE_PAGE
+      bytes=#GAME_SAVE_BYTES-offset
+      If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
+      NesSaveCopy(offset,page,bytes,0)
+      If NesSaveWrite(offset,page,bytes)<>#LPM_SAVE_OK
+        If NesSaveWriteError=0 : LpmDebugPrint("NES SRAM write pending") : EndIf
+        NesSaveWriteError=1
+        ProcedureReturn
+      EndIf
+      NesSaveDirty(i)=0
+    EndIf
+  Next
+  NesSavePending=0
+  NesSaveWriteError=0
+EndProcedure

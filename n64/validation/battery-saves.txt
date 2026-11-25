@@ -1,0 +1,18 @@
+N64 NES cartridge battery save verification, 2026-11-25
+
+Real Zelda (USA, PRG 0), 20 kHz, default interactive build
+ROM SHA-256 96c3f46cc7b0509ebdfd131fc020f7cb3e99e359571739bccd90ae5d4b565440
+On an erased save, register slot A using the emulated N64 controller.
+Exit and launch a separate emulator process with the same SRAM image.
+The file-select screen shows A with three hearts. A third launch in a
+fresh save directory shows an empty slot. The first and reopened SRAM
+files have the same SHA-256 b532460aadee483f588cde7b297533807cecb0062cb49c4a147d43f31af3f57b.
+
+Synthetic mapper tests used guest stores and cold boots. MMC5 retained
+all 16 guest banks with the 128 KiB banked emulator layout. Namco 163
+retained external RAM and internal channel RAM. MMC3 variants 118 and
+119 respected write protection. Linear 128 KiB and power-cycle
+persistence on a physical SummerCart64 still need hardware verification.
+
+The normal non-battery Mario and Mega Man 2 cartridges and the default
+bounded Zelda replay matched their previous cartridge images byte for byte.
