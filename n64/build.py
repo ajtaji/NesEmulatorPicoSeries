@@ -91,7 +91,7 @@ def build(args, *, controller_trace=()):
     settings = {
         "NES_DMC_RASTER_DEADLINE": int(mmc1_20k),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
-        "HOST_AUDIO_FRAMES": 256 if audio_rate == 20000 else 512,
+        "HOST_AUDIO_FRAMES": 512,
         "NES_MMC1_ROWS": int(cart.mapper == 1 and not cart.chr and chr_size == 8192),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),

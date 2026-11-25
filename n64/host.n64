@@ -5,6 +5,11 @@
 #HOST_ROW_BYTES = #HOST_WIDTH * 2
 #HOST_AUDIO_BYTES = #HOST_AUDIO_FRAMES * 4
 #HOST_AUDIO_SLOTS = 3
+CompilerIf #NES_AUDIO_RATE=20000
+  #HOST_AUDIO_RESERVE=768
+CompilerElse
+  #HOST_AUDIO_RESERVE=3*#HOST_AUDIO_FRAMES
+CompilerEndIf
 
 Global HostPadPending.i, HostAudioReady.i
 Global HostPendingVideo.i, HostCoalesced.i, HostPcmRead.i, HostAiSlot.i, HostAiBase.i
@@ -20,10 +25,10 @@ XIncludeFile "stereo.n64"
 Procedure HostQueueAudio(produced.i)
   Protected dst.i
   If HostAiBase = 0 : ProcedureReturn : EndIf
-  ; Fill both hardware descriptors at startup, keeping one block in software
-  ; to absorb variation between busy guest scanlines and controller polls.
+  ; Start after the original sample-pair reserve has accumulated.
+  ; Keep the timing threshold independent of the DMA descriptor size.
   If HostAudioReady=0
-    If produced-HostPcmRead < 3*#HOST_AUDIO_FRAMES : ProcedureReturn : EndIf
+    If produced-HostPcmRead < #HOST_AUDIO_RESERVE : ProcedureReturn : EndIf
     HostAudioReady=1
   EndIf
   CompilerIf #VERIFY_FRAME>0
@@ -68,11 +73,29 @@ EndProcedure
 
 CompilerIf #VERIFY_FRAME>0
 Procedure HostDrainCapture()
+  CompilerIf #NES_AUDIO_RATE=20000
+    Protected dst.i
+  CompilerEndIf
   ; The guest has stopped. Submit complete blocks still in the software ring.
   HostAudioReady=1
   While ApuProduced-HostPcmRead>=#HOST_AUDIO_FRAMES
     HostQueueAudio(ApuProduced)
   Wend
+  CompilerIf #NES_AUDIO_RATE=20000
+    ; The previous 20 kHz capture included every complete 256-pair block.
+    ; A remaining half descriptor starts at a 512-pair-aligned ring address.
+    If ApuProduced-HostPcmRead>=256
+      While LpmAiFull() : Wend
+      dst=HostAiBase+HostAiSlot*4096
+      HostCopyStereo(dst,@Pcm[HostPcmRead&4095])
+      LpmCacheWritebackData(dst,1024)
+      LpmAiQueue(dst,1024)
+      HostPcmRead+=256
+      HostAiSlot+=1
+      If HostAiSlot=#HOST_AUDIO_SLOTS : HostAiSlot=0 : EndIf
+      HostAiQueued+=1 : HostAiEmpty=0
+    EndIf
+  CompilerEndIf
 EndProcedure
 CompilerEndIf
 
@@ -134,7 +157,7 @@ Procedure HostPresent(waitMode.i)
     ; Offer the completed picture again during vblank, before the next
     ; line zero reuses it. The VI and NES have different physical rates.
     If waitMode=0 : ProcedureReturn : EndIf
-    If waitMode=1 And HostAudioReady And ApuProduced-HostPcmRead<3*#HOST_AUDIO_FRAMES
+    If waitMode=1 And HostAudioReady And ApuProduced-HostPcmRead<#HOST_AUDIO_RESERVE
       HostPendingVideo=0 : HostCoalesced+=1 : ProcedureReturn
     EndIf
     seen=LpmIrqSleep(#LPM_WAKE_VI|#LPM_WAKE_AI,seen,#LPM_WAIT_TICK,0,0)

@@ -201,3 +201,19 @@ The extra physical Zelda underrun was detected at guest frame 1950. Frames 1920-
 
 Two offline experiments used the same 20 kHz Zelda route. Servicing AI from the line-zero RDP wait produced 10 gameplay underruns in the emulator. Increasing the startup and presentation reserve from three blocks to four preserved guest checkpoints, final RGB and all PCM at 60.101 fps. A passive observer measured 11.163 ms of minimum hardware FIFO headroom during frame 1950 with three blocks and 12.542 ms with four. Across frames 1920-1979 the minimum combined hardware and mixed software reserve rose from 25.219 ms to 38.127 ms, while the minimum hardware-only reserve went from 9.756 ms to 9.425 ms. The baseline emulator kept AI fed throughout this gameplay window. The hardware cause and any physical benefit of the extra reserve remain open.
 The same four-block experiment matched reference guest state, final RGB and PCM on Mario and Wood Man. Mario averaged 60.130 fps with zero gameplay underruns and four coalesced presentations, Wood Man 60.115 fps with zero and ten. Their standalone three-block controls recorded three and nine coalesced presentations. The shipping port retains the three-block policy.
+
+2026-11-25. The 20 kHz port now sends 512 stereo sample pairs per AI DMA descriptor, doubling each transfer to 25.6 ms. Startup and presentation still use a 768-pair reserve. At the end of bounded capture the verifier emits a final 256-pair half block when available, preserving the recorded PCM stream length. Guest APU timing and the 20 kHz mix are unchanged.
+
+Controller-driven LLE release tests with the original Joybus inputs:
+                         guest frames    FPS       AI FIFO gaps     matching PCM pairs
+Mario, World 1-1          360-2220        60.118    0                825,856
+Mega Man 2, Wood Man     1080-3060        60.095    0              1,105,408
+Zelda, sword and combat   540-2940        60.100    0              1,051,904
+All shared controller requests matched (2486, 3326 and 3165 respectively). Before those windows, actual modeled AI empty time changed from 9.212 to 0 ms for Mario, 1543.326 to 1517.559 ms for Wood Man, and 380.287 to 354.805 ms for Zelda. All three bounded replays matched their reference guest cycles, PCM sample counts, program counters, final RGB and complete stereo streams.
+
+In Zelda frames 1920-1979, the minimum modeled time to drain the hardware FIFO rose from 9.756 ms to 22.801 ms. During frame 1950 it rose from 11.163 ms to 24.789 ms. Both timing traces kept AI fed. A separate experiment that packed an optional second block increased headroom too, but its controller-driven Zelda stream diverged at sample pair 76967. The fixed 512-pair release matched all shared samples. The physical result in gameplay-console.txt is from the earlier 256-pair build. A hardware run is still needed to test the larger transfers on the console.
+
+20 kHz controller-driven production ROM SHA-256:
+Mario      28c68702f6b342cb28196e30e566a3f9e6f71a19835eccc435f72c01c6dcb07a
+Mega Man 2 5c49464a9d149695b8253bce55e97d64c6dbae2600e7102cfe4aba4ff8786a8e
+Zelda      a486e92501e1cc6b0ca57f9f3083577e92aa86518c9243c020e1ae961154614a
