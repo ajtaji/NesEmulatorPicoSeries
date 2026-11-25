@@ -127,7 +127,7 @@ def wait_lookup(sites):
     return lines + ["  EndSelect", "  ProcedureReturn 0", "EndProcedure"]
 
 
-def ram_wait_source(program, mapper):
+def ram_wait_source(program, mapper, chain_nrom=False):
     sites = {}
     span = poll_bank_size(mapper)
     if not span:
@@ -162,7 +162,7 @@ def ram_wait_source(program, mapper):
     if not sites:
         return "", False
     lines = wait_lookup(sites)
-    if mapper == 1:
+    if mapper == 1 or chain_nrom:
         # All PRG banks start on a page boundary. A low-byte hit returns to
         # the scheduler, which checks the full mapped read or branch address.
         low = {site & 255 for site in sites}

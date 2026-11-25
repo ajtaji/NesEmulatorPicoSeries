@@ -387,7 +387,7 @@ nop
 """ if has_waits else ""
     # At entry the live guest bus byte stays in v1. WorkerAdvance revokes
     # the scheduler's proof before it can change guest-visible device state.
-    # MMC1 has no mapper IRQ. Recheck the APU IRQ against the current I flag,
+    # NROM and MMC1 have no mapper IRQ. Recheck the APU IRQ against the I flag,
     # which an instruction may have changed since the scheduler armed us.
     # A possible wait PC returns to the full physical-bank lookup.
     return """la $t0, global_budget
@@ -424,7 +424,7 @@ nes_chain_exit:
 """
 
 
-def stage_thread(source: str, mapper: int = 0, has_waits: bool = False) -> str:
+def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nrom: bool = False) -> str:
     old_table = re.search(r"^nes_opcode_table:\n(?P<words>(?:    \.word .*\n)+)", source, re.M)
     if old_table is None:
         raise ValueError("VR4300 opcode table is missing")
@@ -457,14 +457,15 @@ def stage_thread(source: str, mapper: int = 0, has_waits: bool = False) -> str:
     entry_guard = rom_guard("$t0", "nes_thread_portable")
     first_dispatch = "b nes_thread_dispatch\naddu $t0, $a3, $a1"
     next_fetch = rom_guard("$a1", "nes_thread_fetch", "addu $t0, $a3, $a1")
-    next_window = ""
+    next_window = chain_window(has_waits) if mapper == 1 or chain_nrom else ""
+    if chain_nrom:
+        next_fetch = "nes_chain_fetch:\n" + next_fetch
     stack_size = 16
     save_region = ""
     restore_region = ""
     guest_pc = "or $a1, $t0, $zero"
     if mapper == 1:
         entry_guard = MMC1_EXEC_REGION
-        next_window = chain_window(has_waits)
         stack_size = 48
         save_region = """sd $ra, 40($sp)
 sd $s2, 16($sp)

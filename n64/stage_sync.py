@@ -73,7 +73,7 @@ CompilerEndIf
 """
 
 
-def stage_sync(name: str, source: str, mapper: int) -> str:
+def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False) -> str:
     if name == "bridge":
         # All existing timestamp expressions here are straight-line arithmetic.
         source, count = re.subn(r"\bNesRpc\(0,0,0,([^()\n]+)\)", r"WorkerAdvance(\1)", source)
@@ -116,7 +116,7 @@ def stage_sync(name: str, source: str, mapper: int) -> str:
         if source.count(advance) != 1:
             raise ValueError("worker clock entry changed")
         horizons = "  NesStatusHorizon=-1 : NesCpuHorizon=-1"
-        if mapper == 1:
+        if mapper == 1 or chain_nrom:
             horizons += " : NesChainLimit=-1"
         source = source.replace(advance, horizons + "\n" + advance)
         worker = "Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)"

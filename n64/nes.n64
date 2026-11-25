@@ -36,8 +36,10 @@ XIncludeFile "poll.pmi"
 Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
 Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
-CompilerIf #GAME_MAPPER=1
+CompilerIf #NES_CHAIN_WINDOWS
   Global NesChainLimit.i=-1
+CompilerEndIf
+CompilerIf #GAME_MAPPER=1
   Global Dim NesMmc1Bias.i(2)
   Macro NesMmc1Pointer(addr)
     (NesMmc1Bias(((addr)>>14)&1)+(addr))
@@ -149,7 +151,7 @@ Procedure RunGame()
   LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
   start=LpmCpuCount()
   While Stopped=0 And WorkerError=0
-    CompilerIf #GAME_MAPPER=1
+    CompilerIf #NES_CHAIN_WINDOWS
       NesChainLimit=NesCpuHorizon
     CompilerEndIf
     CompilerIf #NES_HAS_RAM_WAITS
@@ -161,7 +163,7 @@ Procedure RunGame()
         CpuRun(MapperCpuBudget())
       CompilerEndIf
     CompilerEndIf
-    CompilerIf #GAME_MAPPER=1
+    CompilerIf #NES_CHAIN_WINDOWS
       NesChainLimit=-1
     CompilerEndIf
     If CpuCycles>NesStatusHorizon And CpuCycles>NesCpuHorizon

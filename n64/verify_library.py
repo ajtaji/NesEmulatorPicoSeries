@@ -100,6 +100,38 @@ WOOD_MAN_ENDURANCE = replace(
 )
 
 
+# Keep the short replay inputs through frame 360, then continue playing
+# World 1-1 with alternating runs, jumps and pauses.
+MARIO_ENDURANCE = replace(
+    GAMES["Mario"],
+    controls=GAMES["Mario"].controls[:-1] + (
+        (342, 360, 128), (360, 399, 128), (399, 427, 129),
+        (436, 468, 128), (468, 490, 129), (515, 550, 128), (550, 578, 129),
+        (610, 632, 128), (632, 660, 129), (692, 718, 128), (718, 747, 129),
+        (798, 824, 128), (824, 849, 129), (877, 901, 128), (901, 928, 129),
+        (965, 986, 128), (986, 1016, 129), (1060, 1086, 128), (1086, 1120, 129),
+    ),
+    first=360, last=1140, stop=1140,
+    state_hash="8cb0730ed8dd44a2139b4d4d478def55c672c5131cacb27e14128be4abd086c0",
+    rgb_hash="b5d3e2b67298b35e7e818b04839802481cafb029e307210b4be41d5b0cd6addc",
+    pcm_hash="5d037f7d2893fabb1e5b01b278f3f8f3f4b44b2815a8d6a204fee783d3a97b39",
+)
+ZELDA_ENDURANCE = replace(
+    GAMES["Zelda"],
+    # Enter the cave, approach the old man, collect the sword and leave.
+    controls=GAMES["Zelda"].controls + (
+        (550, 622, 64), (622, 780, 16), (1038, 1044, 128), (1044, 1120, 16),
+        (1160, 1280, 32), (1285, 1325, 128), (1330, 1410, 16),
+        (1415, 1423, 1), (1423, 1440, 128),
+    ),
+    first=540, last=1440, stop=1440,
+    state_hash="7bdc0284183e6773e22aaa2372afb091def3328bea39b93000bc70caee0f000a",
+    rgb_hash="ba324f4c7e5ef7b79b43c57f7d2d707222dda022884d5030eeb0061c898c424e",
+    pcm_hash="1affa8141096c8c5f441fc2b02b53046d04fc1e3cf597a4763580e8f72491c0d",
+)
+ENDURANCE = {"Mario": MARIO_ENDURANCE, "Zelda": ZELDA_ENDURANCE, "MegaMan2": WOOD_MAN_ENDURANCE}
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -109,7 +141,7 @@ def verify(args):
     game = WOOD_MAN_EXTENDED if extended else GAMES[args.game]
     if getattr(args, "endurance", False):
         extended = True
-        game = WOOD_MAN_ENDURANCE
+        game = ENDURANCE[args.game]
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
     state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000 and not extended
@@ -138,15 +170,19 @@ def verify(args):
             raise ValueError("captured stereo stream changed")
     clocks = {int(row[0]): int(row[-1]) for row in states}
     gaps = {int(f): int(n) for n, f in re.findall(r"^NES AI QUEUED \d+ UNDERRUNS (\d+) FRAME (\d+)", log, re.M)}
+    coalesced = {int(f): int(n) for n, f in re.findall(r"^NES AI READY ON EMPTY \d+ LAST \d+ COALESCED (\d+) FRAME (\d+)", log, re.M)}
+
     def interval(first, last):
         ticks = (clocks[last] - clocks[first]) & 0xffffffff
         rate = (last - first) * 46_875_000 / ticks
-        return f"guest frames {first} to {last}: {rate:.3f} fps, {gaps[last] - gaps[first]} audio underruns"
+        return (f"guest frames {first} to {last}: {rate:.3f} fps, {gaps[last] - gaps[first]} audio underruns, "
+                f"{coalesced[last] - coalesced[first]} coalesced presentations")
 
     summary = f"{args.game} {interval(game.first, game.last)}; reference state, picture and PCM match."
     metrics = [summary]
     if extended:
-        metrics.append(interval(1260, game.last))
+        if args.game == "MegaMan2":
+            metrics.append(interval(1260, game.last))
         metrics.extend(interval(frame, frame + 60) for frame in range(game.first, game.last, 60))
     (work / "metrics.txt").write_text("\n".join(metrics) + "\n")
     print(summary)
@@ -158,13 +194,15 @@ if __name__ == "__main__":
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000),
                         help="default 48000, or 20000 for the extended replay")
     length = parser.add_mutually_exclusive_group()
-    length.add_argument("--endurance", action="store_true", help="continue MegaMan2 through frame 3060 at 20 kHz")
+    length.add_argument("--endurance", action="store_true", help="play a longer active gameplay route at 20 kHz")
     length.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
     for option in ("sdk", "emulator", "rom", "results"):
         parser.add_argument("--" + option, type=Path, required=True)
     args = parser.parse_args()
-    if (args.extended or args.endurance) and (args.game != "MegaMan2" or args.audio_rate == 48000):
-        parser.error("long replays require MegaMan2 at 20 kHz")
+    if args.extended and args.game != "MegaMan2":
+        parser.error("--extended is available for MegaMan2")
+    if (args.extended or args.endurance) and args.audio_rate == 48000:
+        parser.error("long replays require 20 kHz")
     if args.audio_rate is None:
         args.audio_rate = 20000 if args.extended or args.endurance else 48000
     verify(args)
