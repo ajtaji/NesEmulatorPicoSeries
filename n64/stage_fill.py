@@ -82,8 +82,8 @@ nes_ram_fill_single:
 """
 
 
-def stage_fill(source: str, program: bytes) -> str:
-    if not re.search(rb"\x9d.[\x00-\x1f]\xe8\xd0\xfa", program, re.S):
+def stage_fill(source: str, program: bytes, runtime: bool = False) -> str:
+    if not runtime and not re.search(rb"\x9d.[\x00-\x1f]\xe8\xd0\xfa", program, re.S):
         return source
     marker = "nes_native_9d:\n"
     if source.count(marker) != 1:

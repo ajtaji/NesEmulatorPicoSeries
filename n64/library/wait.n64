@@ -5,7 +5,7 @@ Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
   If readPc<$8000 Or branchPc>$FFFD Or ((readPc ! (branchPc+1))&$4000)
     ProcedureReturn 0
   EndIf
-  ptr=NesMmc1Pointer(readPc)
+  ptr=NesRuntimePrgPointer(readPc)
   op=PeekA(?NesRuntimeWaitOpcodes+PeekA(ptr))
   If op=0 : ProcedureReturn 0 : EndIf
   mode=op&7
@@ -25,7 +25,7 @@ Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
 EndProcedure
 
 Procedure.i NesRamWaitRule(pc.i)
-  Protected ptr.i=NesMmc1Pointer(pc), op.i=PeekA(ptr), rule.i, mode.i
+  Protected ptr.i=NesRuntimePrgPointer(pc), op.i=PeekA(ptr), rule.i, mode.i
   If (op&31)=16
     rule=NesRuntimeWaitPair(pc-2,pc,1)
     If rule : ProcedureReturn rule : EndIf
@@ -35,3 +35,51 @@ Procedure.i NesRamWaitRule(pc.i)
   If mode=0 : ProcedureReturn 0 : EndIf
   ProcedureReturn NesRuntimeWaitPair(pc,pc+2+Bool((mode&7)>=3),0)
 EndProcedure
+
+
+CompilerIf #GAME_MAPPER=0
+Global Dim NesRuntimeNromRules.l[32768]
+Declare.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
+
+Procedure NesRuntimeIndexNromWaits()
+  Protected pc.i, rule.i
+  For pc=$8000 To $FFFD
+    rule=NesRamWaitRule(pc)
+    If rule : NesRuntimeNromRules[pc-$8000]=rule : EndIf
+  Next
+EndProcedure
+
+ProcedureNaked.i NesRamCpuWindow(n.i, coalesce.i=0)
+  ASM
+    blez a0, nes_runtime_nrom_plain
+    nop
+    la t0, global_pc
+    ld t0, 0(t0)
+    addiu t0, t0, -32768
+    bltz t0, nes_runtime_nrom_plain
+    sll t0, t0, 2
+    la t1, global_nesruntimenromrules
+    addu t1, t1, t0
+    lw a2, 0(t1)
+    beqz a2, nes_runtime_nrom_plain
+    nop
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, nes_runtime_nrom_plain
+    nop
+    la t0, global_nesstall
+    ld t0, 0(t0)
+    bnez t0, nes_runtime_nrom_plain
+    nop
+    la t0, global_stopped
+    ld t0, 0(t0)
+    bnez t0, nes_runtime_nrom_plain
+    nop
+    j nesramwaitbatch
+    nop
+nes_runtime_nrom_plain:
+    j cpurun
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf

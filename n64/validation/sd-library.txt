@@ -21,3 +21,25 @@ byte for byte.
 The corrected handoff turns off the VI in vertical blank before loading
 the next program. In the seeded FAT fixture the emulator reported vi_hung=0
 and Zelda showed the registered file A with three hearts.
+
+Runtime board-loader follow-up
+
+The library counted all 857 filenames from the SD manifest in an emulator
+FAT32 fixture. The boot sweep reached guest frame 1 for 34 backend
+configurations across 33 mapper IDs. It used 25 USA ROMs and nine original
+synthetic boot fixtures for mapper IDs missing from that collection.
+This checks header acceptance and startup.
+
+Shared sprite-status and RAM polling analysis plus the MMC1 CHR-RAM
+renderer restored the following 20 kHz gameplay replay results:
+
+Title        Guest interval    Guest fps    AI queue-empty transitions
+Mario              360-1140      60.053                            0
+Mega Man 2        1080-1260      60.110                            0
+Zelda              480-540       59.827                            0
+
+All three final framebuffers matched the existing replay references.
+Super Mario Bros. 3 (PRG 0) launches through the MMC3 runtime and displayed
+the World 1 map in its replay. Its early stable window remains below
+full speed. Guest frames 60-120 used 167,360,942 modeled Count ticks,
+about 16.80 fps. Playability and uninterrupted audio remain open for MMC3.

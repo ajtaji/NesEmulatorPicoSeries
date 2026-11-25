@@ -2,19 +2,24 @@ XIncludeFile "Mips/Lib/LibPureMetalN64/lpm.n64"
 XIncludeFile "sd.n64"
 XIncludeFile "boot.n64"
 XIncludeFile "romheader.n64"
+XIncludeFile "cores.pmi"
 
 #NES_LIB_LIMIT=2048
 #NES_LIB_GAME_PI=$10800000
 #NES_LIB_ROWS=8
 Global NesLibCount.i, NesLibDir.i, NesLibCursor.i, NesLibFirst.i, NesLibSettings.i, NesLibShowTags.i=1, NesLibSaveDir.i
-Global NesLibLaunch.i, NesLibError.s
+Global NesLibLaunch.i, NesLibError.s, NesLibAlphabet.i, NesLibLetterIndex.i
+Global Dim NesLibLetterFirst.i[27]
 Global Dim NesLibNames.s[#NES_LIB_LIMIT]
 Global Dim NesLibClusters.l[#NES_LIB_LIMIT]
 Global Dim NesLibBytes.l[#NES_LIB_LIMIT]
 Global Dim NesLibWriteback.a[1040]
 
 Procedure NesFatEntry(title.s, cluster.i, size.i)
+  Protected initial.i=Asc(UCase(Left(title,1)))-65
   If NesLibCount>=#NES_LIB_LIMIT Or size<16 : ProcedureReturn : EndIf
+  If initial<0 Or initial>25 : initial=26 : EndIf
+  If NesLibLetterFirst[initial]<0 : NesLibLetterFirst[initial]=NesLibCount : EndIf
   NesLibNames[NesLibCount]=title
   NesLibClusters[NesLibCount]=cluster
   NesLibBytes[NesLibCount]=size
@@ -22,7 +27,8 @@ Procedure NesFatEntry(title.s, cluster.i, size.i)
 EndProcedure
 
 Procedure.i NesLibMount()
-  Protected folder.i
+  Protected folder.i, letter.i
+  For letter=0 To 26 : NesLibLetterFirst[letter]=-1 : Next
   NesLibCount=0 : NesLibFirst=0 : NesLibCursor=0
   If NesFatMount()=0
     NesLibError="Insert a FAT32 SummerCart64 SD card."
@@ -75,7 +81,7 @@ EndProcedure
 
 Procedure.i NesLibPrepare(item.i)
   Protected cluster.i=NesLibClusters[item], size.i=NesLibBytes[item], sector.i=NesFatFileSector(cluster)
-  Protected expected.i, stage.i, battery.i, saveName.s, saveCluster.i, ticket.i, fingerprint.i
+  Protected expected.i, stage.i, battery.i, saveName.s, saveCluster.i, ticket.i, fingerprint.i, core.i, mapper.i, capacity.i=32768, saveType.i
   Protected table.i=(@NesLibWriteback[0]+15)&~15
   If NesScCommand(119,0,0)=0 Or NesScIoRead(#NES_SC_CFG+4)
     NesLibError="Save still writing. Try again."
@@ -94,7 +100,14 @@ Procedure.i NesLibPrepare(item.i)
     NesLibError="Game file is truncated."
     ProcedureReturn 0
   EndIf
-  battery=Bool(PeekA(NesFatBufferAddress()+6)&2)
+  mapper=NesRomMapper(NesFatBufferAddress())
+  battery=Bool(NesRomSaveBytes(NesFatBufferAddress(),mapper))
+  If battery
+    saveType=3
+    If mapper=5 : capacity=131072 : saveType=6 : EndIf
+  EndIf
+  core=NesLibCore(mapper,Bool(PeekA(NesFatBufferAddress()+5)=0))
+  If core=0 : NesLibError="Emulator component is unavailable." : ProcedureReturn 0 : EndIf
   If NesFatTransfer(cluster,expected,#NES_LIB_GAME_PI,0)=0
     NesLibError="Game file could not be read."
     ProcedureReturn 0
@@ -104,19 +117,19 @@ Procedure.i NesLibPrepare(item.i)
     If fingerprint<0 : NesLibError="Game fingerprint could not be read." : ProcedureReturn 0 : EndIf
     LpmHex(@saveName,fingerprint,8)
     saveCluster=NesFatFind(NesLibSaveDir,saveName+"SAV",0)
-    If saveCluster=0 Or NesFatFileSize<>32768
+    If saveCluster=0 Or NesFatFileSize<>capacity
       NesLibError="Battery save file is missing."
       ProcedureReturn 0
     EndIf
   EndIf
   If battery
     For ticket=0 To 255 : PokeL(table+ticket*4,0) : Next
-    If NesFatTransfer(saveCluster,32768,$08000000,table)=0
+    If NesFatTransfer(saveCluster,capacity,$08000000,table)=0
       NesLibError="Game save could not be read."
       ProcedureReturn 0
     EndIf
   EndIf
-  If NesScCommand(67,6,3*battery)=0
+  If NesScCommand(67,6,saveType)=0
     NesLibError="SummerCart64 refused the save type."
     ProcedureReturn 0
   EndIf
@@ -130,12 +143,12 @@ Procedure.i NesLibPrepare(item.i)
       ProcedureReturn 0
     EndIf
   EndIf
-  stage=NesScIoRead($1020001C)
-  If NesScIoRead($10200000)<>$80371240 Or stage<4096 Or stage>$100000
+  stage=NesScIoRead(core+$1C)
+  If NesScIoRead(core)<>$80371240 Or stage<4096 Or stage>$100000
     NesLibError="Emulator component is invalid."
     ProcedureReturn 0
   EndIf
-  NesLibLaunch=$B0200000+stage
+  NesLibLaunch=($A0000000|core)+stage
   ProcedureReturn 1
 EndProcedure
 
@@ -196,15 +209,31 @@ Procedure NesLibDraw()
   LpmRdpModeFill(LpmRgb16(30,44,61)) : LpmRdpFillRect(16,16,304,56)
   LpmRdpModeFill(aqua) : LpmRdpFillRect(16,55,304,57)
   LpmRdpModeFill(LpmRgb16(23,34,49)) : LpmRdpFillRect(16,63,304,198)
-  If NesLibSettings=0 And NesLibCount>0
+  If NesLibSettings=0 And NesLibAlphabet=0 And NesLibCount>0
     row=NesLibCursor-NesLibFirst
     LpmRdpModeFill(aqua) : LpmRdpFillRect(20,68+15*row,300,81+15*row)
+  EndIf
+  If NesLibAlphabet
+    i=NesLibLetterIndex
+    LpmRdpModeFill(aqua)
+    LpmRdpFillRect(27+38*(i%7),78+25*(i/7),57+38*(i%7),97+25*(i/7))
   EndIf
   LpmRdpDetachWait()
   label="NES LIBRARY"
   If NesLibSettings : label="SETTINGS" : EndIf
+  If NesLibAlphabet : label="JUMP TO LETTER" : EndIf
   NesLibText(fb,24,24,label,white,2)
-  If NesLibSettings
+  If NesLibAlphabet
+    For i=0 To 26
+      label=Chr(65+i)
+      If i=26 : label="0" : EndIf
+      ink=white
+      If NesLibLetterFirst[i]<0 : ink=muted : EndIf
+      If i=NesLibLetterIndex : ink=dark : EndIf
+      NesLibText(fb,39+38*(i%7),84+25*(i/7),label,ink,1)
+    Next
+    NesLibText(fb,20,219,"A JUMP     B BACK",muted,1)
+  ElseIf NesLibSettings
     label="HIDE REGION AND REVISION TAGS"
     If NesLibShowTags : label="SHOW REGION AND REVISION TAGS" : EndIf
     NesLibText(fb,24,76,"GAME TITLES",muted,1)
@@ -221,7 +250,7 @@ Procedure NesLibDraw()
     If NesLibCount
       NesLibText(fb,24,43,Str(NesLibCursor+1)+" / "+Str(NesLibCount),muted,1)
       NesLibText(fb,144,43,"LEFT/RIGHT  JUMP LETTER",muted,1)
-      NesLibText(fb,20,219,"A PLAY   L/R PAGE   START SETTINGS",muted,1)
+      NesLibText(fb,20,219,"A PLAY  Z LETTER  L/R PAGE  START SETUP",muted,1)
     Else
       NesLibText(fb,24,78,"NO GAMES FOUND",white,1)
       NesLibText(fb,20,219,"START SETTINGS     B RETRY SD",muted,1)
@@ -244,6 +273,24 @@ Procedure NesLibMain()
     buttons=LpmPadButtons(0) : change=buttons & ~prev : prev=buttons
     direction=Bool(buttons & #LPM_PAD_DOWN)-Bool(buttons & #LPM_PAD_UP)
     If direction : held+1 : Else : held=0 : EndIf
+    If NesLibAlphabet
+      Select 1
+        Case Bool(change & (#LPM_PAD_B|#LPM_PAD_Z))
+          NesLibAlphabet=0 : refresh=1
+        Case Bool(change & #LPM_PAD_A)
+          If NesLibLetterFirst[NesLibLetterIndex]>=0
+            NesLibCursor=NesLibLetterFirst[NesLibLetterIndex]
+            NesLibFirst=NesLibCursor : NesLibAlphabet=0 : refresh=1
+          EndIf
+        Default
+          If change & (#LPM_PAD_LEFT|#LPM_PAD_C_LEFT) : NesLibLetterIndex+26 : refresh=1 : EndIf
+          If change & (#LPM_PAD_RIGHT|#LPM_PAD_C_RIGHT) : NesLibLetterIndex+1 : refresh=1 : EndIf
+          If change & #LPM_PAD_UP : NesLibLetterIndex+20 : refresh=1 : EndIf
+          If change & #LPM_PAD_DOWN : NesLibLetterIndex+7 : refresh=1 : EndIf
+          NesLibLetterIndex=NesLibLetterIndex%27
+      EndSelect
+      Continue
+    EndIf
     Select 1
       Case Bool(change & #LPM_PAD_START)
         NesLibSettings ! 1 : refresh=1
@@ -254,7 +301,9 @@ Procedure NesLibMain()
       Case Bool(NesLibSettings=0 And mounted=0 And (change & #LPM_PAD_B))
         mounted=NesLibMount() : refresh=1
       Case Bool(NesLibSettings=0 And NesLibCount>0)
-        If change & #LPM_PAD_A
+        If change & #LPM_PAD_Z
+          NesLibAlphabet=1 : refresh=1
+        ElseIf change & #LPM_PAD_A
           If NesLibPrepare(NesLibCursor)
             LpmDebugPrint("NES LIBRARY OPEN "+NesLibNames[NesLibCursor])
             NesLibBoot(NesLibLaunch)
@@ -263,8 +312,8 @@ Procedure NesLibMain()
           refresh=1
         Else
           If held=1 Or (held>18 And held%5=0) : NesLibCursor+direction : refresh=1 : EndIf
-          If change & #LPM_PAD_LEFT : NesLibLetter(-1) : refresh=1 : EndIf
-          If change & #LPM_PAD_RIGHT : NesLibLetter(1) : refresh=1 : EndIf
+          If change & (#LPM_PAD_LEFT|#LPM_PAD_C_LEFT) : NesLibLetter(-1) : refresh=1 : EndIf
+          If change & (#LPM_PAD_RIGHT|#LPM_PAD_C_RIGHT) : NesLibLetter(1) : refresh=1 : EndIf
           If change & #LPM_PAD_L : NesLibCursor-#NES_LIB_ROWS : refresh=1 : EndIf
           If change & #LPM_PAD_R : NesLibCursor+#NES_LIB_ROWS : refresh=1 : EndIf
           If NesLibCursor<0 : NesLibCursor=0 : EndIf

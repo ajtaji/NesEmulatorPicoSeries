@@ -6,8 +6,8 @@ import re
 REGISTER_ACCESS = """XIncludeFile "../n64/status.n64"
 Procedure.i NesReadRegister(addr.i, stamp.i)
   Protected result.i
-  CompilerIf #NES_PREDICTABLE_IRQ
-    If addr<$4000 And (addr&7)=2
+  CompilerIf {status_compiler}
+    If {status_condition}
       If stamp>NesStatusHorizon
         WorkerAdvance(stamp)
         NesSetStatusHorizon(stamp)
@@ -76,7 +76,7 @@ CompilerEndIf
 """
 
 
-def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dmc_deadline: bool = False) -> str:
+def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dmc_deadline: bool = False, runtime: bool = False) -> str:
     if name == "bridge":
         # All existing timestamp expressions here are straight-line arithmetic.
         source, count = re.subn(r"\bNesRpc\(0,0,0,([^()\n]+)\)", r"WorkerAdvance(\1)", source)
@@ -146,7 +146,13 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dm
             window = "addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))"
             bound = "(PpuMask&24)<>0 And stamp>WorkerClock"
         read_notice = "" if mapper == 1 else "MapperRegNotice(addr&7)"
-        access = REGISTER_ACCESS.format(window=window, bound=bound, read_notice=read_notice)
+        mmc3_status = runtime and mapper == 4
+        status_compiler = "1" if mmc3_status else "#NES_PREDICTABLE_IRQ"
+        status_condition = "addr<$4000 And (addr&7)=2"
+        if mmc3_status:
+            status_condition += " And MapIrqEnable=0"
+        access = REGISTER_ACCESS.format(window=window, bound=bound, read_notice=read_notice,
+                                        status_compiler=status_compiler, status_condition=status_condition)
         if mapper == 1:
             # MMC1 has no CPU timer or PPU register observer.
             tick = "    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf\n"

@@ -12,6 +12,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from anvil_cartridge import read_anvil_rom
+from library_profiles import BOARD_LIMITS, board_table_source
 from save_profile import save_copy_source, save_profile, stage_save
 from save_header import patch_save_header
 from rom_catalog import prg_views
@@ -80,7 +81,8 @@ def build(args, *, controller_trace=()):
         raise ValueError(f"missing compiler: {compiler}")
     runtime = getattr(args, "runtime", False)
     if runtime:
-        cart = SimpleNamespace(mapper=1, submapper=0, mirror=0, ram_size=0,
+        mapper = getattr(args, "runtime_mapper", 1)
+        cart = SimpleNamespace(mapper=mapper, submapper=0, mirror=0, ram_size=0,
                                conflicts=False, battery=False, prg=b"", chr=b"")
         header = bytes(16)
     else:
@@ -88,9 +90,10 @@ def build(args, *, controller_trace=()):
     persist = getattr(args, "persist_save", None)
     save = save_profile(cart, header) if not runtime and (persist if persist is not None else not args.check_frame) else None
     if runtime:
-        # The runtime accepts NROM and MMC1. The common CPU window uses two
-        # 16 KiB biases; only MMC1 installs its serial mapper and battery RAM.
-        save = save_profile(SimpleNamespace(mapper=1, battery=True, ram_size=8192), header)
+        ram_size = {5: 131072, 69: 32768}.get(cart.mapper, 8192)
+        save = save_profile(SimpleNamespace(mapper=cart.mapper, battery=True, ram_size=ram_size, chr=b"\0"), header)
+        if save.reason:
+            save = None
     if save and save.reason:
         print(f"NES save: {save.reason}", file=sys.stderr)
     save_bytes = save.size if save else 0
@@ -108,17 +111,19 @@ def build(args, *, controller_trace=()):
     mmc1_20k = cart.mapper == 1 and audio_rate == 20000
     raster_deadline = mmc1_20k
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper, chain_nrom)
+    runtime_waits = runtime and cart.mapper in (0, 1, 4)
     settings = {
         "NES_RUNTIME_ROM": int(runtime),
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
         "HOST_AUDIO_FRAMES": 512,
-        "NES_MMC1_ROWS": int(not runtime and cart.mapper == 1 and not cart.chr and chr_size == 8192),
+        "NES_MMC1_ROWS": int(cart.mapper == 1 and (getattr(args, "runtime_chr_ram", False) if runtime
+                                                   else not cart.chr and chr_size == 8192)),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),
-        "NES_PREDICTABLE_IRQ": int(runtime or bool(poll_bank_size(cart.mapper))),
-        "NES_HAS_POLLS": int(runtime or has_polls),
-        "NES_HAS_RAM_WAITS": int(runtime or has_ram_waits),
+        "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(cart.mapper))),
+        "NES_HAS_POLLS": int(runtime_waits or has_polls),
+        "NES_HAS_RAM_WAITS": int(runtime_waits or has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
         "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": cart.mapper, "GAME_SUB": cart.submapper,
         "GAME_SAVE_BYTES": save_bytes, "GAME_SAVE_BANKS": save_banks,
@@ -128,7 +133,8 @@ def build(args, *, controller_trace=()):
         "GAME_FOUR_SCREEN": int(bool(header[6] & 8)),
         "GAME_PRG": header[4] * 16384, "GAME_VIEWS": len(program),
         "GAME_CHR": chr_size, "GAME_CHR_RAM": int(not cart.chr),
-        "CART_CHR_BANKS": 32 if runtime else max(2, chr_size // 8192),
+        "CART_CHR_BANKS": (max(4, min(64, BOARD_LIMITS.get(cart.mapper, (524288, 262144))[1] // 8192))
+                           if runtime else max(2, chr_size // 8192)),
     }
     with tempfile.TemporaryDirectory(prefix="nes-n64-") as tmp:
         stage = Path(tmp)
@@ -145,8 +151,8 @@ def build(args, *, controller_trace=()):
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
-                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k)
-                if runtime:
+                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k, runtime)
+                if runtime and cart.mapper == 1:
                     serial = "nes_native_mapper_serial:\n"
                     if code.count(serial) != 1:
                         raise ValueError("native MMC1 serial write entry changed")
@@ -156,7 +162,7 @@ def build(args, *, controller_trace=()):
     nop
 """)
             elif name.startswith("mapper"):
-                code = stage_storage(name, stage_mapper(name, code, cart.mapper))
+                code = stage_storage(name, stage_mapper(name, code, cart.mapper, runtime))
             elif name == "bridge":
                 for old, new, count in CONTROLLER_PATCHES["bridge"]:
                     if code.count(old) != count:
@@ -165,7 +171,7 @@ def build(args, *, controller_trace=()):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper, audio_rate)
-            code = stage_sync(name, code, cart.mapper, chain_nrom, raster_deadline)
+            code = stage_sync(name, code, cart.mapper, chain_nrom, raster_deadline, runtime)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
@@ -178,6 +184,8 @@ def build(args, *, controller_trace=()):
         (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion), encoding="utf-8")
         app = stage / "n64"
         shutil.copytree(ROOT / "n64", app, ignore=shutil.ignore_patterns("build", "__pycache__","*.z64"))
+        if runtime:
+            (app / "library" / "boards.pmi").write_text(board_table_source(), encoding="ascii")
         if save_bytes:
             mmc1 = app / "mmc1.n64"
             mmc1.write_text(stage_save("mmc1", mmc1.read_text(), save), encoding="utf-8")
@@ -191,7 +199,7 @@ def build(args, *, controller_trace=()):
             replay = replay_source(controller_trace)
             (app / "replay.pmi").write_text(replay)
         (app / "poll.pmi").write_text(polling)
-        (app / "ramwait.pmi").write_text(runtime_wait_source() if runtime else ram_wait)
+        (app / "ramwait.pmi").write_text(runtime_wait_source(cart.mapper) if runtime_waits else ram_wait)
         (app / "region.pmi").write_text(render_region(audio_rate))
         (app / "game.pmi").write_text("".join(f"#{k} = {v}\n" for k, v in settings.items()))
         (app / "game.bin").write_bytes(program + cart.chr)

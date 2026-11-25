@@ -5,9 +5,18 @@
 Global Dim NesSaveStaging.a(#NES_SAVE_PAGE+15)
 Global Dim NesSaveDirty.a((#GAME_SAVE_BYTES+#NES_SAVE_PAGE-1)/#NES_SAVE_PAGE)
 Global NesSaveOnline.i, NesSavePending.i, NesSaveWriteError.i
+CompilerIf #NES_RUNTIME_ROM
+  Macro NesSaveLimit
+    NesRuntimeSaveBytes
+  EndMacro
+CompilerElse
+  Macro NesSaveLimit
+    #GAME_SAVE_BYTES
+  EndMacro
+CompilerEndIf
 
 Procedure NesSaveChanged(offset.i)
-  If NesSaveOnline And offset>=0 And offset<#GAME_SAVE_BYTES
+  If NesSaveOnline And offset>=0 And offset<NesSaveLimit
     NesSaveDirty(offset>>8)=1
     NesSavePending=1
   EndIf
@@ -46,8 +55,8 @@ Procedure NesSaveLoad()
     LpmDebugPrint("NES SRAM initialization failed")
     ProcedureReturn
   EndIf
-  For offset=0 To #GAME_SAVE_BYTES-1 Step #NES_SAVE_PAGE
-    bytes=#GAME_SAVE_BYTES-offset
+  For offset=0 To NesSaveLimit-1 Step #NES_SAVE_PAGE
+    bytes=NesSaveLimit-offset
     If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
     If NesSaveRead(offset,page,bytes)<>#LPM_SAVE_OK
       NesSaveClear()
@@ -61,10 +70,10 @@ EndProcedure
 
 Procedure NesSaveFlush()
   Protected page.i=(@NesSaveStaging(0)+15)&~15, i.i, offset.i, bytes.i
-  For i=0 To (#GAME_SAVE_BYTES-1)/#NES_SAVE_PAGE
+  For i=0 To (NesSaveLimit-1)/#NES_SAVE_PAGE
     If NesSaveDirty(i)
       offset=i*#NES_SAVE_PAGE
-      bytes=#GAME_SAVE_BYTES-offset
+      bytes=NesSaveLimit-offset
       If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
       NesSaveCopy(offset,page,bytes,0)
       If NesSaveWrite(offset,page,bytes)<>#LPM_SAVE_OK

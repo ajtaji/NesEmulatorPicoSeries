@@ -51,6 +51,17 @@ CompilerIf #GAME_MAPPER=1
     (NesMmc1Bias(((addr)>>14)&1)+(addr))
   EndMacro
 CompilerEndIf
+CompilerIf #NES_RUNTIME_ROM
+  CompilerIf #GAME_MAPPER=1
+    Macro NesRuntimePrgPointer(address)
+      NesMmc1Pointer(address)
+    EndMacro
+  CompilerElse
+    Macro NesRuntimePrgPointer(address)
+      (PrgBias+(address))
+    EndMacro
+  CompilerEndIf
+CompilerEndIf
 XIncludeFile "../anvil/cpu2a03.pmi"
 XIncludeFile "../anvil/mapper_state.pmi"
 CompilerIf #NES_BANKED_WAITS
@@ -128,6 +139,7 @@ Procedure.i LoadGame()
   Protected i.i, bank.i
   CompilerIf #NES_RUNTIME_ROM
     If NesRuntimeLoad()=0 : ProcedureReturn 0 : EndIf
+    NesExtraBoard=ExtraManaged(CartMapper) : NesA12Board=ExtraA12(CartMapper)
     If CartChrRam : GuestClear(CartChr,MapChrBytes) : EndIf
     PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
   CompilerElse
@@ -179,6 +191,9 @@ Procedure RunGame()
   If HostBegin()=0 : LpmDebugPrint("NES display init failed") : ProcedureReturn : EndIf
   LpmDmaInit()
   If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=0
+    NesRuntimeIndexNromWaits()
+  CompilerEndIf
   CpuReset()
   LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
   start=LpmCpuCount()
@@ -187,7 +202,11 @@ Procedure RunGame()
       NesChainLimit=NesCpuHorizon
     CompilerEndIf
     CompilerIf #NES_HAS_RAM_WAITS
-      NesRamCpuWindow(128,1)
+      CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+        NesRamCpuWindow(MapperCpuBudget(),0)
+      CompilerElse
+        NesRamCpuWindow(128,1)
+      CompilerEndIf
     CompilerElse
       CompilerIf #NES_PREDICTABLE_IRQ
         CpuRun(128)
@@ -220,7 +239,11 @@ Procedure RunGame()
         If NesSavePending : NesSaveFlush() : EndIf
       CompilerEndIf
       CompilerIf #NES_RUNTIME_ROM
-        If NesSavePending=0 : NesRuntimeCheckExit() : EndIf
+        CompilerIf #GAME_SAVE_BYTES>0
+          If NesSavePending=0 : NesRuntimeCheckExit() : EndIf
+        CompilerElse
+          NesRuntimeCheckExit()
+        CompilerEndIf
       CompilerEndIf
       If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
         elapsed=(LpmCpuCount()-start) & $FFFFFFFF

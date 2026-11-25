@@ -34,16 +34,16 @@ Small games use base RDRAM. Larger games can use the Expansion Pak. On MMC5 and 
 
 ## SummerCart64 NES library
 
-The library launcher opens original `.nes` files on a FAT32 SummerCart64 SD card. One emulator executable serves the library. At launch it reads the cartridge header, initializes the selected mapper and maps the ROM banks. The library currently accepts standard NTSC iNES mapper 0 (NROM) and mapper 1 (MMC1), including 8 KiB of MMC1 battery RAM. The individual embedded builds described elsewhere in this document support more boards. The runtime preview still has audio underruns under load. [Replay results](validation/sd-library.txt)
+The library launcher opens original `.nes` files on a FAT32 SummerCart64 SD card. It reads the header, selects the existing mapper backend and maps the original ROM banks. Backend selection uses board and memory geometry. The library contains no NES ROMs or per-title emulator images. It accepts NTSC iNES and linear-size NES 2.0 images for the project's mapper IDs, subject to board geometry and RDRAM limits. Legacy headers that require database corrections and PAL timing are still handled by the standalone build. [Runtime checks](validation/sd-library.txt)
 
 ```powershell
 python n64/library.py build --sdk "$env:PMF_ROOT" --out "NES Library.z64"
 python n64/library.py saves "path-to-roms" "path-to-sd\NES\SAVES"
 ```
 
-Put the input `.nes` files under `/NES/USA/` and put `NES Library.z64` on the card beside the existing flashcart menu. Launch it from the flashcart menu. D-pad up/down moves through the list, left/right jumps by initial letter, L/R moves a page, A opens a game, and Start opens the display settings. In a running game, hold L+R for half a second to return to the library. A game with an unsupported board or format shows an error in the browser.
+Put the input `.nes` files under `/NES/USA/` and put `NES Library.z64` on the card beside the existing flashcart menu. Launch it from the flashcart menu. D-pad up/down moves through the list, left/right or C-left/C-right jumps by initial letter, Z opens the letter picker, L/R moves a page, A opens a game, and Start opens the display settings. In a running game, hold L+R for half a second to return to the library. A game with an unsupported board or format shows an error in the browser.
 
-MMC1 battery games use individual 32 KiB files under `/NES/SAVES/`. The hex filename is the CRC32 of the iNES header and declared PRG and CHR bytes. The host tool provisions erased files and preserves existing saves. The launcher configures SummerCart64 SD writeback for the selected file, then the emulator updates its SRAM as the guest saves. USB ROM deployment of the launcher still reads games and saves from SD.
+Battery-backed games use individual 32 KiB files under `/NES/SAVES/`. MMC5 uses 128 KiB files. The hex filename is the CRC32 of the iNES header and declared PRG and CHR bytes. The host tool provisions erased files and preserves existing saves. The launcher configures SummerCart64 SD writeback for the selected file, then the emulator updates its SRAM as the guest saves. USB ROM deployment of the launcher still reads games and saves from SD.
 
 ## Battery saves on flashcarts
 

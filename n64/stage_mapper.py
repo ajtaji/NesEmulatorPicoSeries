@@ -47,7 +47,7 @@ nes_map_copy_done:
 EndProcedure"""
 
 
-def stage_mapper(name: str, source: str, mapper: int = 0) -> str:
+def stage_mapper(name: str, source: str, mapper: int = 0, runtime: bool = False) -> str:
     for constant, (array, size) in WINDOWS.items():
         source = re.sub(rf"^#{constant}=\$[0-9A-F]+$",
                         f"Global Dim {array}.a({size})", source, flags=re.M)
@@ -59,6 +59,43 @@ def stage_mapper(name: str, source: str, mapper: int = 0) -> str:
         if source.count(mirror) != 1:
             raise ValueError("mapper mirror update changed")
         source = source.replace(mirror, mirror + "\n  CompilerIf #NES_MMC1_ROWS\n    NesInvalidateMap()\n  CompilerEndIf")
+        if runtime and mapper == 4:
+            # Interior background fetches only take A12 low for four dots.
+            # Advance through those unqualified transitions as one interval.
+            anchor = "    edge=width\n"
+            if source.count(anchor) != 1:
+                raise ValueError("MMC3 sprite-edge scheduler changed")
+            source = source.replace(anchor, """    If (PpuMask&24)<>0 And (PpuCtrl&16)<>0 And (line=261 Or line<240)
+      If dot>=5 And dot<256 And MapA12 And (dot&7)>=5
+        step=256-dot : If step>left : step=left : EndIf
+        addr=dot+step : edge=((addr-1)&~7)+1
+        If edge>dot
+          MapLowSince=MapDots+edge-dot
+          MapA12=Bool((addr&7)=0 Or (addr&7)>=5)
+        EndIf
+        dot=addr : left-step : MapDots+step
+        Continue
+      EndIf
+    EndIf
+""" + anchor)
+            source = source.replace(
+                "If CartMapper<>4 And MapA12<>0 And",
+                "If MapA12<>0 And",
+            )
+            irq_anchor = "  ; New MMC3/RAMBO boards:"
+            if source.count(irq_anchor) != 1:
+                raise ValueError("MMC3 IRQ budget entry changed")
+            source = source.replace(irq_anchor, """  ; A qualified rising edge needs ten low dots. If several edges
+  ; remain, even consecutive qualified rises cannot assert the IRQ
+  ; inside this interval. A CPU register write ends the window.
+  distance=MapIrqCount
+  If MapReload Or distance=0 : distance=MapIrqLatch+1 : EndIf
+  If distance>1
+    budget=((distance-1)*10)/3
+    If budget>128 : budget=128 : EndIf
+    ProcedureReturn budget
+  EndIf
+""" + irq_anchor)
         if mapper == 1:
             for procedure in ("MapperUpdate", "MapperWrite"):
                 start = source.index(f"Procedure {procedure}(")

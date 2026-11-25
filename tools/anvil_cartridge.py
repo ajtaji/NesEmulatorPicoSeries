@@ -12,6 +12,14 @@ import hashlib
 ROOT = Path(__file__).resolve().parents[1]
 EXTRA = {6,9,13,34,41,47,64,68,69,71,79,105,118,119,144,148,158,206,228,232,234}
 SUPPORTED = {0,1,2,3,4,5,7,11,66} | EXTRA
+BOARD_LIMITS = {0:(32768,8192),1:(262144,131072),2:(524288,0),3:(32768,32768),
+            4:(524288,262144),5:(1048576,1048576),7:(262144,0),11:(131072,131072),
+            66:(131072,16384),9:(131072,131072),13:(32768,0),68:(131072,262144),
+            71:(262144,0),79:(65536,65536),105:(262144,0),118:(524288,131072),
+            119:(524288,65536),148:(65536,65536),158:(524288,131072),206:(131072,65536),
+            228:(4194304,1048576),232:(262144,0),234:(524288,524288)}
+BOARD_SUBMAPPERS = {6:set(range(8)),3:{0,1,2},7:{0,1,2},11:{0,1,2},34:{0,1,2},71:{0,1},232:{0,1}}
+LEGACY_RAM_BOARDS = {1,4,5,6,9,34,47,68,69,105,118,119}
 
 def corrections():
     with (ROOT/'anvil/rom_metadata.csv').open(newline='') as f:
@@ -46,18 +54,11 @@ def read_anvil_rom(path, extra=frozenset(), pal_ok=False):
         raise ValueError('PAL timing is unsupported')
     if (p&(p-1) and mapper!=228) or (c and c&(c-1)):
         raise ValueError('non-power-of-two cartridge banks')
-    limits={0:(32768,8192),1:(262144,131072),2:(524288,0),3:(32768,32768),
-            4:(524288,262144),5:(1048576,1048576),7:(262144,0),11:(131072,131072),
-            66:(131072,16384),9:(131072,131072),13:(32768,0),68:(131072,262144),
-            71:(262144,0),79:(65536,65536),105:(262144,0),118:(524288,131072),
-            119:(524288,65536),148:(65536,65536),158:(524288,131072),206:(131072,65536),
-            228:(4194304,1048576),232:(262144,0),234:(524288,524288)}
-    pm,cm=limits.get(mapper,(524288,262144))
+    pm,cm=BOARD_LIMITS.get(mapper,(524288,262144))
     if p>pm or c>cm: raise ValueError('unsupported cartridge board size')
     if mapper in (3,5,11,66) and not c: raise ValueError('cartridge requires CHR ROM')
     if mapper==66 and p%32768: raise ValueError('GxROM PRG must contain full 32 KiB banks')
-    allowed={6:set(range(8)),3:{0,1,2},7:{0,1,2},11:{0,1,2},34:{0,1,2},71:{0,1},232:{0,1}}
-    if sub not in allowed.get(mapper,{0}): raise ValueError('unsupported cartridge submapper')
+    if sub not in BOARD_SUBMAPPERS.get(mapper,{0}): raise ValueError('unsupported cartridge submapper')
     if mapper==34 and ((sub==1 and not c) or (sub==2 and c)):
         raise ValueError('BNROM/NINA submapper mismatch')
     ram=0
@@ -67,7 +68,7 @@ def read_anvil_rom(path, extra=frozenset(), pal_ok=False):
         if h[11]>>4 or cr>({6:32768,13:16384}.get(mapper,8192)):
             raise ValueError('unsupported CHR RAM geometry')
         if mapper==5 and cr: raise ValueError('MMC5 CHR RAM is unsupported')
-    elif mapper in (1,4,5,6,9,34,47,68,69,105,118,119):
+    elif mapper in LEGACY_RAM_BOARDS:
         ram=(h[8] or (8 if mapper==5 else 1))*8192
     cap={5:131072,69:32768}.get(mapper,8192)
     if ram>cap or (ram and (ram<8192 or ram&(ram-1))):

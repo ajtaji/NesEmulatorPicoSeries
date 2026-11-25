@@ -3,31 +3,64 @@ XIncludeFile "boot.n64"
 ; The launcher copies the original iNES file into this cartridge window.
 #NES_RUNTIME_BASE=$10800000
 Global Dim NesRuntimeHeader.a[32]
+Global NesRuntimeSaveBytes.i
 
 Procedure.i NesRuntimeLoad()
   Protected header.i=(@NesRuntimeHeader[0]+15)&~15, flags.i, prg.i, chrBytes.i, chrAddress.i, size.i
+  Protected base.i=#NES_CART_LOW, chrStorage.i, total.i, offset.i, dest.i
   If NesCartRead(#NES_RUNTIME_BASE,header,16)=0 : ProcedureReturn 0 : EndIf
   If NesRomSize(header)=0 : ProcedureReturn 0 : EndIf
-  flags=PeekA(header+6)
-  CartMapper=(flags>>4)|(PeekA(header+7)&$F0)
+  flags=PeekA(header+6) : CartMapper=NesRomMapper(header) : CartSubmapper=NesRomSubmapper(header)
+  If CartMapper<>#GAME_MAPPER : ProcedureReturn 0 : EndIf
   prg=PeekA(header+4)*16384 : chrBytes=PeekA(header+5)*8192
   size=prg
-  If size=16384 : size=32768 : EndIf
-  CartPrg=#NES_CART_LOW : CartChr=CartPrg+size
-  If NesCartRead(#NES_RUNTIME_BASE+16,CartPrg,prg)=0 : ProcedureReturn 0 : EndIf
-  If prg=16384 : MapCopy(CartPrg+16384,CartPrg,16384) : EndIf
-  NesMmc1Bias(0)=CartPrg-$8000 : NesMmc1Bias(1)=CartPrg-$8000
-  chrAddress=#NES_RUNTIME_BASE+16+prg
+  If prg=16384 : size=32768 : EndIf
+  If CartMapper=2 : size=prg*2 : EndIf
+  chrStorage=chrBytes
+  If chrStorage=0 : chrStorage=NesRomChrRam(CartMapper) : EndIf
+  If chrStorage>#CART_CHR_BANKS*8192 : ProcedureReturn 0 : EndIf
+  chrAddress=#NES_RUNTIME_BASE+16+prg : total=size+chrStorage
+  NesPrgOnCart=0
+  If total>#NES_CART_LOW_END-#NES_CART_LOW
+    If total<=#NES_CART_HIGH_END-#NES_CART_HIGH And LpmMemorySize()>=$800000
+      base=#NES_CART_HIGH
+    ElseIf (CartMapper=5 Or CartMapper=228) And prg>=32768 And chrStorage<=#NES_CART_LOW_END-#NES_CART_LOW
+      NesPrgOnCart=#NES_RUNTIME_BASE+16
+      size=0
+    Else
+      ProcedureReturn 0
+    EndIf
+  EndIf
+  CartPrg=base : CartChr=base+size
+  If NesPrgOnCart=0
+    If CartMapper=2
+      dest=base
+      For offset=0 To prg-1 Step 16384
+        If NesCartRead(#NES_RUNTIME_BASE+16+offset,dest,16384)=0 : ProcedureReturn 0 : EndIf
+        If offset=0
+          If NesCartRead(#NES_RUNTIME_BASE+prg-16384+16,dest+16384,16384)=0 : ProcedureReturn 0 : EndIf
+        Else
+          MapCopy(dest+16384,base+16384,16384)
+        EndIf
+        dest+32768
+      Next
+    Else
+      If NesCartRead(#NES_RUNTIME_BASE+16,CartPrg,prg)=0 : ProcedureReturn 0 : EndIf
+      If prg=16384 : MapCopy(CartPrg+16384,CartPrg,16384) : EndIf
+    EndIf
+  EndIf
+  CompilerIf #GAME_MAPPER=1
+    NesMmc1Bias(0)=CartPrg-$8000 : NesMmc1Bias(1)=CartPrg-$8000
+  CompilerEndIf
   If NesCartRead(chrAddress,CartChr,chrBytes)=0 : ProcedureReturn 0 : EndIf
-  CartPrgBanks=size/32768 : CartChrBanks=chrBytes/8192
+  CartPrgBanks=size/32768 : CartChrBanks=chrStorage/8192
   CartChrRam=Bool(chrBytes=0) : ChrWritable=CartChrRam
-  MapChrRam=CartChrRam : MapChrBytes=chrBytes
-  If CartChrRam : CartChrBanks=1 : MapChrBytes=8192 : EndIf
-  MapPrgBytes=prg : MapRamBytes=0
-  If CartMapper=1 : MapRamBytes=8192 : EndIf
-  CartConflicts=0 : CartSubmapper=0
-  PpuMirroring=flags&1 : MapFourScreen=0
-  MapBattery=Bool(flags&2)
+  MapChrRam=CartChrRam : MapChrBytes=chrStorage
+  MapPrgBytes=prg : MapRamBytes=NesRomRam(header,CartMapper)
+  CartConflicts=Bool(((CartMapper=2 Or CartMapper=3 Or CartMapper=66) And CartSubmapper<>1) Or ((CartMapper=7 Or CartMapper=11) And CartSubmapper=2) Or (CartMapper=34 And chrBytes=0))
+  PpuMirroring=flags&1 : MapFourScreen=Bool(flags&8)
+  NesRuntimeSaveBytes=NesRomSaveBytes(header,CartMapper)
+  MapBattery=Bool(NesRuntimeSaveBytes)
   ProcedureReturn 1
 EndProcedure
 
@@ -48,13 +81,29 @@ EndProcedure
 ; in the currently mapped bytes. The caller supplies the stable horizon
 ; and checks interrupts. Crossing a CPU page adds the 6502 branch cycle.
 Procedure.i NesRuntimePoll(pc.i, value.i)
-  Protected pointer.i, opcode.i, branch.i, cycles.i
+  Protected pointer.i, opcode.i, branch.i, cycles.i, origin.i, masked.i
   If pc<$8003 Or pc>$FFFD : ProcedureReturn 0 : EndIf
   If ((pc-3)! (pc+1))&$4000 : ProcedureReturn 0 : EndIf
-  pointer=NesMmc1Pointer(pc)
+  pointer=NesRuntimePrgPointer(pc)
   opcode=PeekA(pointer-3) : branch=PeekA(pointer)
   If opcode<>$2C And opcode<>$AD : ProcedureReturn 0 : EndIf
   If (PeekA(pointer-2)&7)<>2 Or (PeekA(pointer-1)&$E0)<>$20 : ProcedureReturn 0 : EndIf
+  ; LDA PPUSTATUS / AND #mask / BNE or BEQ back to LDA.
+  ; The read and branch stay inside the currently mapped CPU bank.
+  If opcode=$AD And branch=$29
+    If pc>$FFFB Or (((pc-3)!(pc+3))&$4000) : ProcedureReturn 0 : EndIf
+    If PeekA(pointer+3)<>$F9 : ProcedureReturn 0 : EndIf
+    branch=PeekA(pointer+2) : masked=value&PeekA(pointer+1)
+    If branch=$F0
+      If masked : ProcedureReturn 0 : EndIf
+    ElseIf branch=$D0
+      If masked=0 : ProcedureReturn 0 : EndIf
+    Else
+      ProcedureReturn 0
+    EndIf
+    origin=pc+4 : cycles=9+Bool((origin&$FF00)<>((pc-3)&$FF00))
+    ProcedureReturn cycles|(3<<8)
+  EndIf
   If PeekA(pointer+1)<>$FB : ProcedureReturn 0 : EndIf
   If branch=$10
     If value&128 : ProcedureReturn 0 : EndIf

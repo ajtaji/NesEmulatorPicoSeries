@@ -49,7 +49,7 @@ def cache_window_registers(source: str) -> str:
     return head + signature + declarations + body
 
 
-def stage_cpu(source: str, mapper: int, program: bytes = b"", has_waits: bool = False, chain_nrom: bool = False, mmc1_20k: bool = False) -> str:
+def stage_cpu(source: str, mapper: int, program: bytes = b"", has_waits: bool = False, chain_nrom: bool = False, mmc1_20k: bool = False, runtime: bool = False) -> str:
     # Keep the opcode bodies and the set of legal opcodes in the guest core.
     # Forge has no .Label or computed Goto lowering on VR4300.
     initialize = re.search(r"^  If Ready = 0\n.*?^  EndIf\n", source, re.M | re.S)
@@ -136,4 +136,4 @@ NesOpcodeSlow:
     if mapper == 1:
         source = source.replace("NesPollPtr=PrgBias+PC", "NesPollPtr=PC")
         source = re.sub(r"PeekA\((NesPollPtr(?:\+\d+)?)\)", r"PeekA(NesMmc1Pointer(\1))", source)
-    return stage_fill(stage_thread(source, mapper, has_waits, chain_nrom, mmc1_20k), program)
+    return stage_fill(stage_thread(source, mapper, has_waits, chain_nrom, mmc1_20k), program, runtime and mapper in (0, 1))

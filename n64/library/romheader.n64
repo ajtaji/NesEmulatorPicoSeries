@@ -1,13 +1,86 @@
-; The runtime currently supports NTSC iNES NROM and MMC1. Return the required
-; file size, excluding any harmless padding, or zero for an unsupported board.
+XIncludeFile "boards.pmi"
+
+Procedure.i NesRomMapper(header.i)
+  ProcedureReturn (PeekA(header+6)>>4)|(PeekA(header+7)&$F0)
+EndProcedure
+
+Procedure.i NesRomSubmapper(header.i)
+  If (PeekA(header+7)&12)=8 : ProcedureReturn PeekA(header+8)>>4 : EndIf
+  ProcedureReturn 0
+EndProcedure
+
+Procedure.i NesRomRam(header.i, mapper.i)
+  Protected low.i, high.i, banks.i
+  If (PeekA(header+7)&12)=8
+    low=PeekA(header+10)&15 : high=PeekA(header+10)>>4
+    If low : banks=64<<low : EndIf
+    If high : banks+(64<<high) : EndIf
+    ProcedureReturn banks
+  EndIf
+  banks=PeekL(?NesRomBoards+mapper*16+8)&$FFFFFFFF
+  If banks=0 : ProcedureReturn 0 : EndIf
+  If PeekA(header+8) : banks=PeekA(header+8) : EndIf
+  ProcedureReturn banks*8192
+EndProcedure
+
+Procedure.i NesRomChrRam(mapper.i)
+  If mapper=6 : ProcedureReturn 32768 : EndIf
+  If mapper=13 : ProcedureReturn 16384 : EndIf
+  ProcedureReturn 8192
+EndProcedure
+
+; Validate the file's declared NTSC iNES or linear-size NES 2.0 board geometry.
 Procedure.i NesRomSize(header.i)
-  Protected flags.i=PeekA(header+6), mapper.i, p.i, c.i
+  Protected flags.i=PeekA(header+6), format.i=PeekA(header+7)&12, mapper.i, sub.i
+  Protected p.i, c.i, table.i, ram.i, cap.i=8192, chrRam.i
   If PeekA(header)<>78 Or PeekA(header+1)<>69 Or PeekA(header+2)<>83 Or PeekA(header+3)<>26 : ProcedureReturn 0 : EndIf
-  If (flags&12) Or (PeekA(header+7)&15) Or PeekA(header+8)>1 Or (PeekA(header+9)&1) : ProcedureReturn 0 : EndIf
-  mapper=(flags>>4)|(PeekA(header+7)&$F0)
-  If mapper>1 : ProcedureReturn 0 : EndIf
+  If (flags&4) Or (PeekA(header+7)&3) : ProcedureReturn 0 : EndIf
+  If format=8
+    If PeekA(header+9) Or (PeekA(header+8)&15) Or (PeekA(header+12)&3)=1 Or (PeekA(header+12)&3)=3
+      ProcedureReturn 0
+    EndIf
+    If PeekA(header+11)>>4 : ProcedureReturn 0 : EndIf
+  ElseIf format<>0 Or (PeekA(header+9)&1)
+    ProcedureReturn 0
+  EndIf
+  mapper=NesRomMapper(header) : sub=NesRomSubmapper(header)
+  table=?NesRomBoards+mapper*16
+  If (PeekL(table+12)&(1<<sub))=0 : ProcedureReturn 0 : EndIf
+  If (flags&8) And mapper<>4 And mapper<>206 : ProcedureReturn 0 : EndIf
   p=PeekA(header+4) : c=PeekA(header+5)
-  If p<1 Or p>16 Or (p&(p-1)) Or c>16 Or (c&(c-1)) : ProcedureReturn 0 : EndIf
-  If mapper=0 And (p>2 Or c>1 Or (flags&2)) : ProcedureReturn 0 : EndIf
+  If p=0 Or p>PeekL(table) Or c>PeekL(table+4) : ProcedureReturn 0 : EndIf
+  If ((p&(p-1)) And mapper<>228) Or (c&(c-1)) : ProcedureReturn 0 : EndIf
+  If c=0 And (mapper=3 Or mapper=5 Or mapper=11 Or mapper=66) : ProcedureReturn 0 : EndIf
+  If mapper=66 And (p&1) : ProcedureReturn 0 : EndIf
+  If mapper=34 And ((sub=1 And c=0) Or (sub=2 And c)) : ProcedureReturn 0 : EndIf
+  ram=NesRomRam(header,mapper)
+  If mapper=5 : cap=131072 : ElseIf mapper=69 : cap=32768 : EndIf
+  If ram>cap Or (ram And (ram<8192 Or (ram&(ram-1)))) : ProcedureReturn 0 : EndIf
+  If format=8 And (PeekA(header+11)&15)
+    chrRam=64<<(PeekA(header+11)&15)
+    If mapper=5 Or chrRam>NesRomChrRam(mapper) : ProcedureReturn 0 : EndIf
+  EndIf
   ProcedureReturn 16+p*16384+c*8192
+EndProcedure
+
+
+Procedure.i NesRomSaveBytes(header.i, mapper.i)
+  Protected size.i, shift.i
+  If (PeekA(header+6)&2)=0 : ProcedureReturn 0 : EndIf
+  Select mapper
+    Case 1,4,5,6,9,19,24,26,34,68,69,105,118,119
+      If mapper=34 And PeekA(header+5)=0 : ProcedureReturn 0 : EndIf
+      If (PeekA(header+7)&12)=8
+        shift=PeekA(header+10)>>4
+        If shift : size=64<<shift : EndIf
+      Else
+        size=NesRomRam(header,mapper)
+        If mapper=5 And size=16384 : size=8192 : EndIf
+        If mapper=24 Or mapper=26 : size=8192 : EndIf
+      EndIf
+      ; The runtime reserves a stable external bank before N163 internal RAM.
+      If mapper=19 : ProcedureReturn 8320 : EndIf
+      ProcedureReturn size
+  EndSelect
+  ProcedureReturn 0
 EndProcedure
