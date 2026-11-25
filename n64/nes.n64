@@ -34,6 +34,9 @@ Declare.i NesCurrentPoll(acc.i)
 Global NesDeliveredFrame.i, NesLoopRule.i, NesLoopCost.i
 XIncludeFile "poll.pmi"
 Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
+CompilerIf #NES_DMC_RASTER_DEADLINE
+  Global NesPpuLimit.i=-1
+CompilerEndIf
 Global NesExtraBoard.i, NesA12Board.i
 XIncludeFile "../anvil/state.pmi"
 CompilerIf #NES_CHAIN_WINDOWS
@@ -167,7 +170,7 @@ Procedure RunGame()
       NesChainLimit=-1
     CompilerEndIf
     If CpuCycles>NesStatusHorizon And CpuCycles>NesCpuHorizon
-      WorkerAdvance(CpuCycles)
+      NesAdvanceCpuTime(CpuCycles)
       CompilerIf #NES_PREDICTABLE_IRQ
         NesSetCpuHorizon(CpuCycles)
       CompilerEndIf
@@ -175,7 +178,7 @@ Procedure RunGame()
     stalls=WorkerDmcCycles-NesSeenDmc
     While stalls>0
       NesSeenDmc=WorkerDmcCycles : CpuCycles=CpuCycles+stalls
-      WorkerAdvance(CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
+      NesAdvanceCpuTime(CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
     Wend
     If WorkerNmi<>NesSeenNmi
       NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)

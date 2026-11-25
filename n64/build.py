@@ -54,8 +54,10 @@ def build(args, *, controller_trace=()):
     # next device deadline is still ahead. The 48 kHz path retains its
     # original service cadence for the more frequent sample deadlines.
     chain_nrom = cart.mapper == 0 and audio_rate == 20000
+    mmc1_20k = cart.mapper == 1 and audio_rate == 20000
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper, chain_nrom)
     settings = {
+        "NES_DMC_RASTER_DEADLINE": int(mmc1_20k),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
         "HOST_AUDIO_FRAMES": 256 if audio_rate == 20000 else 512,
         "NES_MMC1_ROWS": int(cart.mapper == 1 and not cart.chr and chr_size == 8192),
@@ -88,7 +90,7 @@ def build(args, *, controller_trace=()):
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
-                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom)
+                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k)
             elif name.startswith("mapper"):
                 code = stage_storage(name, stage_mapper(name, code, cart.mapper))
             elif name == "bridge":
@@ -99,7 +101,7 @@ def build(args, *, controller_trace=()):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper, audio_rate)
-            code = stage_sync(name, code, cart.mapper, chain_nrom)
+            code = stage_sync(name, code, cart.mapper, chain_nrom, mmc1_20k)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")

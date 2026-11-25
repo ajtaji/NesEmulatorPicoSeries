@@ -30,6 +30,9 @@ XIncludeFile "../n64/nametable.n64"
 CompilerEndIf
 
 Procedure NesWriteRegister(addr.i, value.i, stamp.i)
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    If PpuClock<>WorkerClock : WorkerAdvance(stamp) : EndIf
+  CompilerEndIf
   CompilerIf #NES_PREDICTABLE_IRQ
     ; Blanking permits deferred CHR and nametable writes. Palette writes
     ; can also defer during vblank, after the last visible palette capture.
@@ -73,7 +76,7 @@ CompilerEndIf
 """
 
 
-def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False) -> str:
+def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dmc_deadline: bool = False) -> str:
     if name == "bridge":
         # All existing timestamp expressions here are straight-line arithmetic.
         source, count = re.subn(r"\bNesRpc\(0,0,0,([^()\n]+)\)", r"WorkerAdvance(\1)", source)
@@ -119,6 +122,20 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False) ->
         if mapper == 1 or chain_nrom:
             horizons += " : NesChainLimit=-1"
         source = source.replace(advance, horizons + "\n" + advance)
+        if dmc_deadline:
+            split = """    CompilerIf #NES_SPLIT<>2
+      PpuAdvance(dt)
+    CompilerEndIf
+    WorkerClock=stamp
+  EndIf"""
+            if source.count(split) != 1:
+                raise ValueError("worker clock layout changed")
+            source = source.replace(split, """  EndIf
+  If stamp>PpuClock
+    PpuAdvance(stamp-PpuClock)
+    PpuClock=stamp
+  EndIf
+  WorkerClock=stamp : NesPpuLimit=-1""")
         worker = "Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)"
         if source.count(worker) != 1:
             raise ValueError("worker command procedure changed")

@@ -40,13 +40,29 @@ NesCountBias:
   Data.q $7777777777777777,$8080808080808080
 EndDataSection
 
+CompilerIf #NES_DMC_RASTER_DEADLINE
+  Macro NesBoundDmcFetch(horizon,edge)
+    ; The buffered byte delays the next CPU bus read until the output
+    ; shifter has consumed all remaining bits. The last edge fetches the
+    ; next byte, charges four CPU stall cycles and can assert the DMC IRQ.
+    If DmcBytes>0
+      edge=DmcTimer+(DmcBits-1)*DmcTable(ApuReg(16)&15)-1
+      If edge<horizon : horizon=edge : EndIf
+    EndIf
+  EndMacro
+CompilerEndIf
+
 ; Called immediately after catching up the PPU and APU at a $2002 read.
 ; A second read may reuse the status up to (but excluding) the next edge
 ; capable of changing the answer or interrupting the CPU. Reads still clear
 ; vblank and the PPU write toggle. A write or other bus sync ends the interval.
 Procedure NesSetStatusHorizon(stamp.i)
   Protected dots.i, cycles.i, event.i, line.i, limit.i, spriteY.i, height.i
-  If DmcBytes>0 : ProcedureReturn : EndIf
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    If DmcBytes>0 And DmcEmpty : ProcedureReturn : EndIf
+  CompilerElse
+    If DmcBytes>0 : ProcedureReturn : EndIf
+  CompilerEndIf
   dots=341-PpuDot
   If PpuLine=PpuPreLine Or PpuLine=241
     If PpuDot=0 : ProcedureReturn : EndIf
@@ -88,6 +104,9 @@ Procedure NesSetStatusHorizon(stamp.i)
     If event<cycles : cycles=event : EndIf
   EndIf
   If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    NesBoundDmcFetch(cycles,event)
+  CompilerEndIf
   If cycles>0 : NesStatusHorizon=stamp+cycles : EndIf
 EndProcedure
 
@@ -96,35 +115,46 @@ EndProcedure
 ; still catches both devices up before it reads or changes either device.
 Procedure NesSetCpuHorizon(stamp.i)
   Protected dots.i, cycles.i, event.i
-  If DmcBytes>0 : ProcedureReturn : EndIf
-  If PpuLine<241
-    dots=(241-PpuLine)*341-PpuDot+1
-  ElseIf PpuLine=241 And PpuDot=0
-    ProcedureReturn
-  Else
-    ; A rendered odd NTSC prerender line may be one dot shorter.
-    dots=(PpuPreLine+1-PpuLine)*341-PpuDot-1
-  EndIf
-  ; Bound CPU run-ahead to roughly 4 ms on visible lines. Offset the
-  ; 64-line boundaries so line 224 still starts the controller transfer.
-  ; Timestamped MMIO, vblank, frame IRQ and APU reset can end the run sooner.
-  CompilerIf #NES_CHAIN_WINDOWS And #NES_AUDIO_RATE=20000
-    If PpuLine<240
-      event=(64-((PpuLine+32)&63))*341-PpuDot
-      If event<dots : dots=event : EndIf
-    EndIf
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    If DmcBytes>0 And DmcEmpty : ProcedureReturn : EndIf
   CompilerElse
-    If dots>2728 : dots=2728 : EndIf
+    If DmcBytes>0 : ProcedureReturn : EndIf
   CompilerEndIf
-  CompilerIf #GAME_PAL
-    cycles=(dots-1)>>2
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    ; Advancing only the APU leaves the next raster edge at the same timestamp.
+    If NesPpuLimit<0
+      IncludeFile "../n64/rasterdeadline.n64"
+      NesPpuLimit=PpuClock+cycles
+    EndIf
+    cycles=NesPpuLimit-stamp
   CompilerElse
-    cycles=(dots-1)/3
+    IncludeFile "../n64/rasterdeadline.n64"
   CompilerEndIf
   If ApuInhibit=0 And ApuFive=0
     event=ApuStep4-ApuFrameClock-1
     If event<cycles : cycles=event : EndIf
   EndIf
   If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    NesBoundDmcFetch(cycles,event)
+  CompilerEndIf
   If cycles>0 : NesCpuHorizon=stamp+cycles : EndIf
 EndProcedure
+
+; DMC reads and CPU stalls can advance the APU before the next PPU event.
+; Other callers of WorkerAdvance still synchronize both devices before MMIO.
+CompilerIf #NES_DMC_RASTER_DEADLINE
+  Procedure NesAdvanceCpuTime(stamp.i)
+    If DmcBytes>0 And stamp<=NesPpuLimit And stamp>=WorkerClock
+      NesStatusHorizon=-1 : NesCpuHorizon=-1 : NesChainLimit=-1
+      If stamp>WorkerClock : ApuAdvance(stamp-WorkerClock) : EndIf
+      WorkerClock=stamp
+    Else
+      WorkerAdvance(stamp)
+    EndIf
+  EndProcedure
+CompilerElse
+  Macro NesAdvanceCpuTime(stamp)
+    WorkerAdvance(stamp)
+  EndMacro
+CompilerEndIf

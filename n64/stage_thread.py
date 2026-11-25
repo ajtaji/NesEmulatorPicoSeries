@@ -11,7 +11,7 @@ end of the CPU cycle window, before the scheduler checks IRQ and NMI.
 import re
 
 
-def native_handlers(mapper=0):
+def native_handlers(mapper=0, mmc1_20k=False):
     handlers = {}
     common_reads = {}
 
@@ -73,10 +73,25 @@ def native_handlers(mapper=0):
                 # A live read still goes through the asynchronous pad bridge.
                 serial = mapper == 1 and op in (0xad, 0xbd)
                 io = f"nes_native_{op:02x}_io" if serial else "nes_thread_slow"
+                lower = io
+                lower_test = "nop"
+                cartridge_ram = []
+                if mmc1_20k:
+                    # The lower half here excludes mirrored CPU RAM. Preserve
+                    # t0 for controller I/O and t2 for an indexed page penalty.
+                    # Disabled SRAM uses the original bus path to regain open bus.
+                    lower = f"nes_native_{op:02x}_lower"
+                    lower_test = "sltiu $t1, $t0, 0x6000"
+                    cartridge_ram = [
+                        lower + ":", f"bne $t1, $zero, {io}", "andi $t1, $t0, 0x1FFF",
+                        "ld $t0, global_mapramenable-global_nesmmc1bias($a3)",
+                        "beq $t0, $zero, nes_thread_slow", "nop",
+                        "la $t0, global_mapram", f"b {read}", "addu $t0, $t0, $t1",
+                    ]
                 code += ["andi $t1, $t0, 0x8000", f"bne $t1, $zero, {rom}",
-                         "sltiu $t1, $t0, 0x2000", f"beq $t1, $zero, {io}", "nop",
-                         "andi $t0, $t0, 0x7FF", f"b {read}",
-                         "addu $t0, $t0, $s1", rom + ":", *rom_address(), read + ":"]
+                         "sltiu $t1, $t0, 0x2000", f"beq $t1, $zero, {lower}", lower_test,
+                         "andi $t0, $t0, 0x7FF", f"b {read}", "addu $t0, $t0, $s1",
+                         *cartridge_ram, rom + ":", *rom_address(), read + ":"]
                 if serial:
                     # Internal RAM and ordinary PRG already have host pointers.
                     # Both routes meet after reading the byte.
@@ -277,6 +292,47 @@ or $a1, $t1, $zero
 addiu $v0, $zero, 2
 b nes_thread_check
 daddiu $a2, $a2, -3"""
+    if mmc1_20k:
+        # Batch repeated JMP-to-self instructions up to the current CPU budget.
+        # The ordinary handler covers pending stalls and mutable I/O mappings.
+        handlers[0x4C] = handlers[0x4C].replace("beq $a1, $t1, nes_thread_slow",
+                                                 "beq $a1, $t1, nes_native_idle_jump")
+        handlers[0x4C] += """
+nes_native_idle_jump:
+sltiu $t0, $a2, 129
+beq $t0, $zero, nes_thread_slow
+sltiu $t0, $a2, 4
+bne $t0, $zero, nes_thread_slow
+andi $t0, $a1, 0x8000
+bne $t0, $zero, nes_idle_address_ok
+sltiu $t0, $a1, 0x1ffe
+beq $t0, $zero, nes_thread_slow
+nop
+nes_idle_address_ok:
+ld $t1, global_nesidleenabled-global_nesmmc1bias($a3)
+beq $t1, $zero, nes_thread_slow
+ld $t1, global_nesstall-global_nesmmc1bias($a3)
+bne $t1, $zero, nes_thread_slow
+nop
+la $t0, nes_idle_repeat_count
+addu $t0, $t0, $a2
+lbu $t0, 0($t0)
+ld $t1, global_nesidlebatched-global_nesmmc1bias($a3)
+sd $t0, global_nesidleextra-global_nesmmc1bias($a3)
+daddu $t1, $t1, $t0
+sd $t1, global_nesidlebatched-global_nesmmc1bias($a3)
+sd $a1, global_ea-global_nesmmc1bias($a3)
+daddu $t3, $t3, $t0
+sll $t1, $t0, 1
+addu $t1, $t1, $t0
+dsubu $a2, $a2, $t1
+or $v1, $t2, $zero
+addiu $v0, $zero, 2
+b nes_thread_check
+daddiu $a2, $a2, -3
+nes_idle_repeat_count:"""
+        repeats = bytes(max(0, (budget - 1) // 3) for budget in range(132))
+        handlers[0x4C] += "\n" + "\n".join(f".word 0x{repeats[i:i+4].hex()}" for i in range(0, 132, 4))
     handlers[0x20] = """nes_native_20:
 lbu $t1, 1($t0)
 lbu $v1, 2($t0)
@@ -424,14 +480,14 @@ nes_chain_exit:
 """
 
 
-def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nrom: bool = False) -> str:
+def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nrom: bool = False, mmc1_20k: bool = False) -> str:
     old_table = re.search(r"^nes_opcode_table:\n(?P<words>(?:    \.word .*\n)+)", source, re.M)
     if old_table is None:
         raise ValueError("VR4300 opcode table is missing")
     portable = re.findall(r"__ul_cpurun_\w+", old_table["words"])
     if len(portable) != 256:
         raise ValueError("VR4300 opcode table has wrong size")
-    handlers, readers = native_handlers(mapper)
+    handlers, readers = native_handlers(mapper, mmc1_20k)
     if any(portable[op] == "__ul_cpurun_illegal" for op in handlers):
         raise ValueError("Native opcode table covers an unsupported guest instruction")
     boot_table = ["nes_thread_enter" if op in handlers else portable[op] for op in range(256)]
