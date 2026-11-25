@@ -147,6 +147,23 @@ ZELDA_COMBAT = replace(
 )
 
 
+ZELDA_COMBAT_LONG = replace(
+    ZELDA_COMBAT,
+    controls=ZELDA_COMBAT.controls + tuple(
+        (start + first, start + end, buttons)
+        for start in range(1980, 2940, 240)
+        for first, end, buttons in (
+            (0, 24, 16), (27, 35, 1), (42, 80, 128), (83, 91, 1),
+            (98, 126, 32), (130, 138, 1), (146, 190, 64), (195, 203, 1), (212, 230, 16),
+        )
+    ),
+    last=2940, stop=2940,
+    state_hash="d1460931e15aed80b1ecca6f705c9b8d6d089df298c8a31567fb4fffbc779d6c",
+    rgb_hash="ffbf4f07827fb5f1d3bf6e607c56ec5cbf5d845bc10bb9b97e977afd09eb02bc",
+    pcm_hash="1d339ee59c2f9d22be26858d35dd8b7c51407d293246b35f3d41c35def4365ba",
+)
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -159,7 +176,7 @@ def verify(args):
         game = ENDURANCE[args.game]
     if getattr(args, "combat", False):
         extended = True
-        game = ZELDA_COMBAT
+        game = ZELDA_COMBAT_LONG if args.combat == 2940 else ZELDA_COMBAT
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
     state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000 and not extended
@@ -201,7 +218,7 @@ def verify(args):
     if extended:
         if args.game == "MegaMan2":
             metrics.append(interval(1260, game.last))
-        if game is ZELDA_COMBAT:
+        if getattr(args, "combat", False):
             metrics.append(interval(1440, game.last))
         metrics.extend(interval(frame, frame + 60) for frame in range(game.first, game.last, 60))
     (work / "metrics.txt").write_text("\n".join(metrics) + "\n")
@@ -214,7 +231,8 @@ if __name__ == "__main__":
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000),
                         help="default 48000, or 20000 for the extended replay")
     length = parser.add_mutually_exclusive_group()
-    length.add_argument("--combat", action="store_true", help="continue Zelda into overworld combat through frame 1980")
+    length.add_argument("--combat", nargs="?", type=int, const=1980, choices=(1980, 2940),
+                        help="continue Zelda overworld combat to the specified guest frame (default 1980)")
     length.add_argument("--endurance", action="store_true", help="play a longer active gameplay route at 20 kHz")
     length.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
     for option in ("sdk", "emulator", "rom", "results"):

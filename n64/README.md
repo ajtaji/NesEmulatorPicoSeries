@@ -70,7 +70,7 @@ python n64/verify_library.py MegaMan2 --sdk "$env:PMF_ROOT" --emulator "C:\path\
 
 Add `--extended` to the Mega Man 2 command to continue moving, jumping and firing through frame 1860 at 20 kHz. Its `metrics.txt` includes the later 600 frames and each 60-frame interval so short slowdowns and audio gaps are visible.
 
-Use `--endurance` for the 20 kHz World 1-1 route through frame 1140, the Zelda sword pickup and return outdoors through frame 1440, or Wood Man through frame 3060. Add `--combat` on the Zelda command in place of `--endurance` to keep moving and attacking in the enemy room through guest frame 1980. The per-interval results include coalesced video presentations.
+Use `--endurance` for the 20 kHz World 1-1 route through frame 1140, the Zelda sword pickup and return outdoors through frame 1440, or Wood Man through frame 3060. Add `--combat` on the Zelda command in place of `--endurance` to keep moving and attacking in the enemy room through guest frame 1980. Use `--combat 2940` to extend the same route with another 960 frames of movement and sword attacks. The per-interval results include coalesced video presentations.
 
 Select `Mario` or `Zelda` and supply the corresponding ROM to run the other replays. Each results directory contains the debugger log, framebuffer, stereo WAV and bounded replay cartridge. Use `n64/build.py` without `--check-frame` to build a cartridge for unrestricted controller play.
 
