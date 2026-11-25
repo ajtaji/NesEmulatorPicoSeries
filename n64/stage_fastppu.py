@@ -119,10 +119,15 @@ def stage_fastppu(name: str, source: str) -> str:
           If PeekA(Chr+addr)=value : ProcedureReturn : EndIf
         CompilerEndIf
         PokeA(Chr+addr,value) : PpuDecode(addr)""")
-        source = source.replace("    Nt(ntAddress)=value", """    CompilerIf #NES_BG_EXPANDED
-      If Nt(ntAddress)=value : ProcedureReturn : EndIf
-    CompilerEndIf
-    Nt(ntAddress)=value""")
+        start_nt = "    ntAddress=PpuNtAddr(addr)\n"
+        end_nt = "  Else\n    Pal(PpuPalAddr(addr))"
+        if source.count(start_nt) != 1 or source.count(end_nt) != 1:
+            raise ValueError("PPU nametable write changed")
+        start, end = source.index(start_nt), source.index(end_nt)
+        source = (source[:start] + "    CompilerIf #NES_BG_EXPANDED\n"
+                  "      NesWriteExpandedNt(addr,value)\n"
+                  "    CompilerElse\n" + source[start:end] +
+                  "    CompilerEndIf\n" + source[end:])
         palette = "    Pal(PpuPalAddr(addr))=value&63\n    PpuColours()"
         if source.count(palette) != 1:
             raise ValueError("PPU palette write changed")

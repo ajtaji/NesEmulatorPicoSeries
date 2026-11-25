@@ -25,6 +25,10 @@ Procedure.i NesReadRegister(addr.i, stamp.i)
   ProcedureReturn result
 EndProcedure
 
+CompilerIf #NES_BG_EXPANDED
+XIncludeFile "../n64/nametable.n64"
+CompilerEndIf
+
 Procedure NesWriteRegister(addr.i, value.i, stamp.i)
   CompilerIf #NES_PREDICTABLE_IRQ
     ; CHR and nametable writes can advance the address immediately while
@@ -61,6 +65,10 @@ Procedure NesWriteRegister(addr.i, value.i, stamp.i)
   EndIf
   QSent+=1 : QComplete=QSent
 EndProcedure
+
+CompilerIf #NES_BG_EXPANDED
+XIncludeFile "../n64/portloops.n64"
+CompilerEndIf
 
 """
 

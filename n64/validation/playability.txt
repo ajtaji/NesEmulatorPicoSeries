@@ -2,7 +2,7 @@ VR4300RSPStudio, 4 MiB RDRAM, 2026-11-24. Modeled CP0 Count runs at 46,875,000 H
 FRAME is the guest NES frame. COALESCED counts completed NES pictures superseded at VI presentation.
 UNDERRUNS counts observed transitions to an empty AI hardware queue after playback starts.
 
-Thwaite v0.04, game input replay through frame 450
+Thwaite v0.04, initial game input replay through frame 450 (before nametable batching)
 NES FRAME 1 CPU 29856 PCM 800 PC 52328 COUNT 295559
 NES AI QUEUED 90 UNDERRUNS 0 FRAME 60
 NES AI READY ON EMPTY 0 LAST 0 COALESCED 1 FRAME 60
@@ -30,7 +30,7 @@ NES AI READY ON EMPTY 1 LAST 193 COALESCED 5 FRAME 450
 NES FRAME 450 CPU 13401250 PCM 359408 PC 52804 COUNT 350483954
 NES CHECKPOINT 450
 
-PureMetal demo, 1,800-frame continuous audio test
+PureMetal demo before nametable batching, 1,800-frame continuous audio test
 NES FRAME 1 CPU 29796 PCM 799 PC 37331 COUNT 932991
 NES AI QUEUED 90 UNDERRUNS 0 FRAME 60
 NES AI READY ON EMPTY 0 LAST 0 COALESCED 0 FRAME 60
@@ -61,3 +61,44 @@ Both cartridges reached the identical frame-120 framebuffer and guest CPU/PC/sam
 Nova v1.0.3 title audio, same-source A/B through guest frame 240.
 Submitting each completed 512-sample PCM block reduced observed AI underruns from 112 to 17.
 The last underrun moved from frame 239 to frame 14. All 191,488 captured stereo pairs and the final picture matched.
+
+Thwaite v0.04 after aligned writebacks and nametable batching, same 450-frame input replay
+NES FRAME 1 CPU 29856 PCM 800 PC 52328 COUNT 291658
+NES AI QUEUED 91 UNDERRUNS 0 FRAME 60
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 0 FRAME 60
+NES FRAME 60 CPU 1786883 PCM 47922 PC 57666 COUNT 45312614
+NES AI QUEUED 185 UNDERRUNS 0 FRAME 120
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 0 FRAME 120
+NES FRAME 120 CPU 3573779 PCM 95845 PC 57666 COUNT 92327859
+NES AI QUEUED 277 UNDERRUNS 0 FRAME 180
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 1 FRAME 180
+NES FRAME 180 CPU 5360499 PCM 143763 PC 57879 COUNT 138496017
+NES AI QUEUED 370 UNDERRUNS 0 FRAME 240
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 3 FRAME 240
+NES FRAME 240 CPU 7147325 PCM 191684 PC 59526 COUNT 184783330
+NES AI QUEUED 464 UNDERRUNS 0 FRAME 300
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 3 FRAME 300
+NES FRAME 300 CPU 8934159 PCM 239605 PC 59526 COUNT 231719001
+NES AI QUEUED 560 UNDERRUNS 0 FRAME 360
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 3 FRAME 360
+NES FRAME 360 CPU 10721026 PCM 287527 PC 56024 COUNT 279572684
+NES AI QUEUED 654 UNDERRUNS 0 FRAME 420
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 3 FRAME 420
+NES FRAME 420 CPU 12507833 PCM 335448 PC 52804 COUNT 326576274
+NES AI QUEUED 701 UNDERRUNS 0 FRAME 450
+NES AI READY ON EMPTY 0 LAST 0 COALESCED 3 FRAME 450
+NES FRAME 450 CPU 13401250 PCM 359408 PC 52804 COUNT 350099423
+NES CHECKPOINT 450
+Frames 180 to 240: 46,287,313 modeled Count ticks, 60.76 guest fps, zero queue-empty transitions.
+Frames 1 to 450: zero observed queue-empty transitions; three completed pictures superseded at VI.
+Captured final RGB, 358,912 stereo sample pairs and all nine CPU/PC/sample checkpoints matched the reference.
+The original and final paths matched individual frame fingerprints for all 61 frames from 180 through 240, inclusive.
+Each fingerprint covers all 61,440 indexed pixels and the effective scanline palettes.
+Frame 193 wrote 3,199 nametable bytes through PPUDATA with guest rendering disabled: 3,055 tile and 144 attribute writes.
+The CPU batches identical absolute stores with counted branches within a proven device interval.
+The PPU updates equivalent mirrored tile descriptors together. Attribute writes retain their quadrant updates.
+Audio block size, startup lead and VI pacing policy are the same for both runs.
+Individual original/final VI framebuffer RGB and complete captured stereo PCM also matched at frames 191, 193 and 240.
+The rebuilt interactive ROM accepted Start and A via emulated Joybus and displayed the missile-defense tutorial.
+The final demo passed the desktop frame-60 rendering check. Its regular cart measured 46,030,491 Count ticks (61.10 fps) over guest frames 60 to 120.
+Final demo through guest frame 1,800: 45 observed queue-empty transitions, last on frame 41 during silent startup, 10 pictures superseded.

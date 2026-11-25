@@ -108,6 +108,20 @@ NesOpcodeSlow:
         "; Each opcode owns its tail. Assembly only implements computed dispatch;\n"
         "; operands and instruction semantics remain in checked PureMetal source.",
         "; The VR4300 dispatch table points to the existing PureMetal opcode handlers.")
+    for opcode, reg in (("8C", "Y"), ("8D", "A"), ("8E", "X")):
+        write = f"  NesWrite(Ea, {reg})\n"
+        handler = (f"Op{opcode}: ; ${opcode} ST{reg} abs\n"
+                   "  AccessPhase = 3\n  CpuFetchAddress()\n" + write)
+        if source.count(handler) != 1:
+            raise ValueError(f"2A03 absolute ST{reg} handler changed")
+        source = source.replace(handler, handler.replace(write, f"""  CompilerIf #NES_BG_EXPANDED
+    NesWriteAbsolute(Ea,{reg},${opcode})
+  CompilerElse
+    NesWrite(Ea,{reg})
+  CompilerEndIf
+"""))
+    declaration = "Declare NesWriteAbsolute(addr.i, value.i, writeOp.i)"
+    source = f"CompilerIf #NES_BG_EXPANDED\n{declaration}\nCompilerEndIf\n" + source
     # MMC5 and mapper 234 can attach read side effects to the PRG window.
     if mapper in (5, 234):
         return cache_window_registers(source)

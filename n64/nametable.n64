@@ -1,0 +1,80 @@
+; During a CPU-proven interval without PPU fetches, a run of identical
+; PPUDATA stores can update a row with one address and descriptor setup.
+; Each tile keeps its existing attribute quadrant and both wrapped copies.
+ProcedureNaked NesFillTileRow(offset.i, value.i, count.i)
+  ASM
+    la t0, global_nt
+    addu t1, t0, a0
+    la t2, global_ppumirroring
+    ld t2, 0(t2)
+    addiu t3, zero, 1
+    beq t2, t3, nes_fill_vertical
+    nop
+    xori a3, a0, 0x400
+    b nes_fill_slot
+    addiu a4, zero, 32
+nes_fill_vertical:
+    xori a3, a0, 0x800
+    addiu a4, zero, 4096
+nes_fill_slot:
+    addu t2, t0, a3
+    andi t0, a0, 0x800
+    sll t0, t0, 1
+    andi t3, a0, 0x3e0
+    sll t3, t3, 2
+    or t0, t0, t3
+    srl t3, a0, 5
+    andi t3, t3, 32
+    or t0, t0, t3
+    andi t3, a0, 31
+    or t0, t0, t3
+    xor a4, t0, a4
+    sll t0, t0, 1
+    sll a4, a4, 1
+    la t3, global_nesmaprows
+    addu a3, t3, t0
+    addu a4, t3, a4
+    sll a5, a1, 8
+nes_fill_tile:
+    lbu t0, 0(t1)
+    beq t0, a1, nes_fill_next_tile
+    addiu a2, a2, -1
+    lhu t3, 0(a3)
+    sb a1, 0(t1)
+    sb a1, 0(t2)
+    andi t3, t3, 0xc0
+    or t3, t3, a5
+    sh t3, 0(a3)
+    sh t3, 128(a3)
+    sh t3, 0(a4)
+    sh t3, 128(a4)
+nes_fill_next_tile:
+    addiu t1, t1, 1
+    addiu t2, t2, 1
+    addiu a3, a3, 2
+    bne a2, zero, nes_fill_tile
+    addiu a4, a4, 2
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+Procedure NesFillNametable(value.i, count.i)
+  Protected addr.i, offset.i, chunk.i
+  ; The caller has proved unit stride, no raster fetches, and no device
+  ; event through these writes. Attribute bytes still update their quadrants.
+  PpuBus=value : BgCacheAddr=-1 : RgbLastKey=-1
+  While count>0
+    addr=PpuV&$3FFF
+    If (addr&$3FF)>=$3C0
+      PpuRegWrite(7,value)
+      count-=1
+    Else
+      If PpuMirroring=1 : offset=addr&$7FF : Else : offset=addr&$BFF : EndIf
+      chunk=32-(offset&31) : If chunk>count : chunk=count : EndIf
+      NesFillTileRow(offset,value,chunk)
+      PpuV=(PpuV+chunk)&$7FFF
+      count-=chunk
+    EndIf
+  Wend
+EndProcedure

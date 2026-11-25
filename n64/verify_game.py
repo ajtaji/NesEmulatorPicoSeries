@@ -62,11 +62,15 @@ def verify_game(args, work):
         ticks = (clock[end] - clock[first]) & 0xffffffff
         print(f"Guest {first} to {end}: {(end-first)*46_875_000/ticks:.2f} fps, "
               f"{gaps[end]-gaps[first]} observed AI underruns")
+    tutorial_fps = 60 * 46_875_000 / ((clock[240] - clock[180]) & 0xffffffff)
+    if tutorial_fps < 59 or gaps[240] != gaps[180]:
+        raise ValueError(f"tutorial transition missed playback target: {tutorial_fps:.2f} fps, "
+                         f"{gaps[240]-gaps[180]} AI underruns")
     active_fps = 90 * 46_875_000 / ((clock[450] - clock[360]) & 0xffffffff)
     if active_fps < 59 or gaps[450] != gaps[360]:
         raise ValueError(f"active gameplay missed playback target: {active_fps:.2f} fps, "
                          f"{gaps[450]-gaps[360]} AI underruns")
-    print("PASS: nine guest checkpoints, final framebuffer, 358,912 stereo pairs and active play")
+    print("PASS: nine guest checkpoints, final framebuffer, 358,912 stereo pairs, tutorial transition and active play")
 
 
 if __name__ == "__main__":

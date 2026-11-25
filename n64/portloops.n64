@@ -1,0 +1,65 @@
+; A run of identical absolute stores followed by DEX/DEY and a taken BNE
+; can write through the same port at known cycle intervals. Stop before
+; the next device event, palette address, or the index reaches zero.
+Procedure NesBatchStoreLoop(addr.i, value.i, stamp.i, writeOp.i)
+  Protected ppuAddr.i, ptr.i, op.i, target.i, span.i, at.i
+  Protected index.i, stores.i, cycles.i, loops.i, limit.i
+  If NesIdleEnabled=0 Or CpuInWindow=0 Or NesStall Or DmcBytes>0 Or stamp+1>=NesCpuHorizon
+    ProcedureReturn
+  EndIf
+  If WorkerFrames<>NesDeliveredFrame Or WorkerNmi<>NesSeenNmi Or WorkerDmcCycles<>NesSeenDmc
+    ProcedureReturn
+  EndIf
+  If FI=0 And (WorkerIrq|MapIrq)<>0 : ProcedureReturn : EndIf
+  ppuAddr=PpuV&$3FFF
+  If (PpuMask&24) Or (PpuCtrl&4) Or ppuAddr<$2000 Or ppuAddr>=$3F00
+    ProcedureReturn
+  EndIf
+  If PC<$8003 Or PC>$FFFD : ProcedureReturn : EndIf
+  ptr=PrgBias+PC : op=PeekA(ptr)
+  If op<>$88 And op<>$CA : ProcedureReturn : EndIf
+  If (op=$88 And writeOp=$8C) Or (op=$CA And writeOp=$8E) : ProcedureReturn : EndIf
+  If PeekA(ptr+1)<>$D0 : ProcedureReturn : EndIf
+  span=253-PeekA(ptr+2) : target=PC-span
+  If span<3 Or span>48 Or span%3<>0 Or target<$8000 : ProcedureReturn : EndIf
+  If op=$88 : index=Y : Else : index=X : EndIf
+  loops=(index-1)&255
+  stores=span/3 : cycles=stores*4+5
+  If (((PC+3)!target)&$FF00) : cycles+=1 : EndIf
+  limit=(NesCpuHorizon-stamp-1)/cycles
+  If loops>limit : loops=limit : EndIf
+  limit=($3F00-ppuAddr)/stores
+  If loops>limit : loops=limit : EndIf
+  If loops=0 : ProcedureReturn : EndIf
+  ptr=PrgBias+target
+  For at=0 To span-1 Step 3
+    If PeekA(ptr+at)<>writeOp Or PeekA(ptr+at+1)<>(addr&255) Or PeekA(ptr+at+2)<>(addr>>8)
+      ProcedureReturn
+    EndIf
+  Next
+  ; Leave PC at the decrement after the final store, where an ordinary
+  ; PPUDATA access would return to the scheduler. The real store still
+  ; retires in its opcode handler.
+  index=(index-loops)&255
+  If op=$88 : Y=index : Else : X=index : EndIf
+  FN=index : FZ=index
+  NesInstructions+=loops*(stores+2)
+  stores=loops*stores : cycles=loops*cycles
+  NesFillNametable(value,stores)
+  QSent+=stores : QComplete=QSent
+  Budget+=cycles : CpuCycles+=cycles
+EndProcedure
+
+Procedure NesWriteAbsolute(addr.i, value.i, writeOp.i)
+  Protected stamp.i
+  If (addr&$E007)<>$2007
+    NesWrite(addr,value)
+    ProcedureReturn
+  EndIf
+  NesOpenBus=value
+  CpuNow()
+  stamp=CpuCycles+AccessPhase
+  NesWriteRegister(addr,value,stamp)
+  NesBatchStoreLoop(addr,value,stamp,writeOp)
+  CpuEndWindow()
+EndProcedure

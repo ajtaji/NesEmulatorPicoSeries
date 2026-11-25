@@ -69,26 +69,7 @@ CompilerIf #NES_HAS_RAM_WAITS
 CompilerEndIf
 
 CompilerIf #NES_BG_EXPANDED
-Procedure PpuUpdateDescriptor(addr.i)
-  Protected quad.i, attr.i, slot.i, desc.i
-  quad=((addr>>4)&4)|(addr&2)
-  attr=Nt((addr&$c00)|$3c0|((addr>>4)&$38)|((addr>>2)&7))
-  desc=(Nt(addr)<<8)|(((attr>>quad)&3)<<6)
-  slot=((addr&$800)<<1)|((addr&$3e0)<<2)|((addr>>5)&32)|(addr&31)
-  NesMapRows(slot)=desc : NesMapRows(slot+64)=desc
-EndProcedure
-Procedure PpuUpdateAttribute(addr.i)
-  Protected table.i=addr&$c00, y.i, x.i, tile.i, mirror.i
-  If PpuMirroring=1 : mirror=$800 : Else : mirror=$400 : EndIf
-  PpuUpdateDescriptor(addr) : PpuUpdateDescriptor(addr!mirror)
-  tile=table|((addr&$38)<<4)|((addr&7)<<2)
-  For y=0 To 3
-    For x=0 To 3
-      PpuUpdateDescriptor(tile+x) : PpuUpdateDescriptor((tile+x)!mirror)
-    Next
-    tile+=32
-  Next
-EndProcedure
+XIncludeFile "descriptors.n64"
 CompilerElse
 Procedure PpuUpdateDescriptor(addr.i)
 EndProcedure
