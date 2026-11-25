@@ -1,7 +1,11 @@
 ; Both 16 KiB PRG halves are resident in RDRAM. Every PRG access,
 ; including DMC reads, shares the biases and physical slot numbers.
 Procedure NesMapMmc1Prg()
-  Protected mode.i, bank.i, lo.i, hi.i, mask.i=(#GAME_PRG/8192)-1
+  CompilerIf #NES_RUNTIME_ROM
+    Protected mode.i, bank.i, lo.i, hi.i, mask.i=(MapPrgBytes/8192)-1
+  CompilerElse
+    Protected mode.i, bank.i, lo.i, hi.i, mask.i=(#GAME_PRG/8192)-1
+  CompilerEndIf
   mode=(MapControl>>2)&3 : bank=(MapPrgReg&15)*2
   lo=bank : hi=mask-1
   If mode<2 : lo=bank&(~3) : hi=lo+2
@@ -18,7 +22,11 @@ Procedure MapperUpdate()
   NesMapMmc1Prg()
   lo=(MapChr0&30)*4 : hi=lo+4
   If MapControl&16 : lo=MapChr0*4 : hi=MapChr1*4 : EndIf
-  mask=#GAME_CHR/1024-1 : lo=lo&mask : hi=hi&mask
+  CompilerIf #NES_RUNTIME_ROM
+    mask=MapChrBytes/1024-1 : lo=lo&mask : hi=hi&mask
+  CompilerElse
+    mask=#GAME_CHR/1024-1 : lo=lo&mask : hi=hi&mask
+  CompilerEndIf
   If MapChrSlots(0)<>lo
     For i=0 To 3 : MapperChr(i,lo+i) : Next
   EndIf

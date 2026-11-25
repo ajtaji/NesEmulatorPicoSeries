@@ -1,0 +1,19 @@
+NES Library preview, 2026-11-25
+
+The launcher scanned a FAT32 fixture with VFAT long filenames, opened the
+original Zelda and Mega Man 2 files through the same emulator executable,
+and returned from Mega Man 2 to the library. The controller opened the
+settings page. The emulator's SD command transport was simulated. The
+actual FAT chain traversal, SRAM preload path and boot handoffs ran as
+N64 code.
+
+20 kHz guest-frame gameplay replays in the N64 emulator
+Title        Guest interval    Guest fps    AI queue-empty transitions
+Mario              240-360       45.949                           62
+Mega Man 2        1080-1260       48.205                          115
+Zelda              480-540       54.143                           30
+
+All three final framebuffers matched their existing replay references.
+These rates and the supported mapper subset make this a preview. The
+normal standalone 20 kHz Zelda build still matched its prior image
+byte for byte.

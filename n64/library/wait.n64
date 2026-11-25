@@ -1,0 +1,37 @@
+; Decode the current mapped bytes when a CPU window begins. A ROM bank
+; change takes effect through the same pointer as the next opcode fetch.
+Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
+  Protected ptr.i, op.i, length.i=2, mode.i, branch.i, addr.i, rule.i
+  If readPc<$8000 Or branchPc>$FFFD Or ((readPc ! (branchPc+1))&$4000)
+    ProcedureReturn 0
+  EndIf
+  ptr=NesMmc1Pointer(readPc)
+  op=PeekA(?NesRuntimeWaitOpcodes+PeekA(ptr))
+  If op=0 : ProcedureReturn 0 : EndIf
+  mode=op&7
+  If mode>=3 : length=3 : EndIf
+  If readPc+length<>branchPc : ProcedureReturn 0 : EndIf
+  branch=PeekA(ptr+length)
+  If (branch&31)<>16 Or PeekA(ptr+length+1)<>254-length : ProcedureReturn 0 : EndIf
+  addr=PeekA(ptr+1)
+  If length=3
+    addr=addr|(PeekA(ptr+2)<<8)
+    If addr>=$2000 And (mode=3 Or addr<=$FF00) : ProcedureReturn 0 : EndIf
+  EndIf
+  rule=addr|((op>>3)<<16)|(mode<<19)|((branch>>5)<<22)
+  If ((readPc ! (branchPc+2))&$FF00) : rule|$2000000 : EndIf
+  If atBranch : rule|$4000000 : EndIf
+  ProcedureReturn rule
+EndProcedure
+
+Procedure.i NesRamWaitRule(pc.i)
+  Protected ptr.i=NesMmc1Pointer(pc), op.i=PeekA(ptr), rule.i, mode.i
+  If (op&31)=16
+    rule=NesRuntimeWaitPair(pc-2,pc,1)
+    If rule : ProcedureReturn rule : EndIf
+    ProcedureReturn NesRuntimeWaitPair(pc-3,pc,1)
+  EndIf
+  mode=PeekA(?NesRuntimeWaitOpcodes+op)
+  If mode=0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn NesRuntimeWaitPair(pc,pc+2+Bool((mode&7)>=3),0)
+EndProcedure

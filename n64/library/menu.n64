@@ -1,0 +1,279 @@
+XIncludeFile "Mips/Lib/LibPureMetalN64/lpm.n64"
+XIncludeFile "sd.n64"
+XIncludeFile "boot.n64"
+XIncludeFile "romheader.n64"
+
+#NES_LIB_LIMIT=2048
+#NES_LIB_GAME_PI=$10800000
+#NES_LIB_ROWS=8
+Global NesLibCount.i, NesLibDir.i, NesLibCursor.i, NesLibFirst.i, NesLibSettings.i, NesLibShowTags.i=1, NesLibSaveDir.i
+Global NesLibLaunch.i, NesLibError.s
+Global Dim NesLibNames.s[#NES_LIB_LIMIT]
+Global Dim NesLibClusters.l[#NES_LIB_LIMIT]
+Global Dim NesLibBytes.l[#NES_LIB_LIMIT]
+Global Dim NesLibWriteback.a[1040]
+
+Procedure NesFatEntry(title.s, cluster.i, size.i)
+  If NesLibCount>=#NES_LIB_LIMIT Or size<16 : ProcedureReturn : EndIf
+  NesLibNames[NesLibCount]=title
+  NesLibClusters[NesLibCount]=cluster
+  NesLibBytes[NesLibCount]=size
+  NesLibCount+1
+EndProcedure
+
+Procedure.i NesLibMount()
+  Protected folder.i
+  NesLibCount=0 : NesLibFirst=0 : NesLibCursor=0
+  If NesFatMount()=0
+    NesLibError="Insert a FAT32 SummerCart64 SD card."
+    ProcedureReturn 0
+  EndIf
+  folder=NesFatFind(NesFatRoot,"NES        ",16)
+  NesLibDir=NesFatFind(folder,"USA        ",16)
+  NesLibSaveDir=NesFatFind(folder,"SAVES      ",16)
+  If NesLibDir=0
+    NesLibError="The NES/USA folder is missing."
+    ProcedureReturn 0
+  EndIf
+  NesFatEnumerate(NesLibDir)
+  LpmDebugPrint("NES LIBRARY ROMS "+Str(NesLibCount))
+  NesLibError=""
+  ProcedureReturn 1
+EndProcedure
+
+Global Dim NesLibCrc.l[256]
+Global Dim NesLibHashBuffer.a[4112]
+
+Procedure NesLibCrcInit()
+  Protected i.i, state.i, bit.i
+  For i=0 To 255
+    state=i
+    For bit=0 To 7
+      If state&1 : state=(state>>1)!$EDB88320 : Else : state>>1 : EndIf
+    Next
+    NesLibCrc[i]=state
+  Next
+EndProcedure
+
+Procedure.i NesLibFingerprint(length.i)
+  Protected buffer.i=(@NesLibHashBuffer[0]+15)&~15, address.i=#NES_LIB_GAME_PI
+  Protected value.i=$FFFFFFFF, bytes.i, i.i, ticket.i, key.i
+  While length>0
+    bytes=length
+    If bytes>4096 : bytes=4096 : EndIf
+    ticket=LpmPiRead(address,buffer,bytes)
+    If ticket<=0 : ProcedureReturn -1 : EndIf
+    LpmPiWait(ticket)
+    For i=0 To bytes-1
+      key=(value!PeekA(buffer+i))&255
+      value=(value>>8)!(NesLibCrc[key]&$FFFFFFFF)
+    Next
+    length-bytes : address+bytes
+  Wend
+  ProcedureReturn (value!$FFFFFFFF)&$FFFFFFFF
+EndProcedure
+
+Procedure.i NesLibPrepare(item.i)
+  Protected cluster.i=NesLibClusters[item], size.i=NesLibBytes[item], sector.i=NesFatFileSector(cluster)
+  Protected expected.i, stage.i, battery.i, saveName.s, saveCluster.i, ticket.i, fingerprint.i
+  Protected table.i=(@NesLibWriteback[0]+15)&~15
+  If NesScCommand(119,0,0)=0 Or NesScIoRead(#NES_SC_CFG+4)
+    NesLibError="Save still writing. Try again."
+    ProcedureReturn 0
+  EndIf
+  If sector=0 Or NesFatReadSector(sector)=0
+    NesLibError="Game file could not be opened."
+    ProcedureReturn 0
+  EndIf
+  expected=NesRomSize(NesFatBufferAddress())
+  If expected=0
+    NesLibError="This mapper or ROM format is unsupported."
+    ProcedureReturn 0
+  EndIf
+  If size<expected
+    NesLibError="Game file is truncated."
+    ProcedureReturn 0
+  EndIf
+  battery=Bool(PeekA(NesFatBufferAddress()+6)&2)
+  If NesFatTransfer(cluster,expected,#NES_LIB_GAME_PI,0)=0
+    NesLibError="Game file could not be read."
+    ProcedureReturn 0
+  EndIf
+  If battery
+    fingerprint=NesLibFingerprint(expected)
+    If fingerprint<0 : NesLibError="Game fingerprint could not be read." : ProcedureReturn 0 : EndIf
+    LpmHex(@saveName,fingerprint,8)
+    saveCluster=NesFatFind(NesLibSaveDir,saveName+"SAV",0)
+    If saveCluster=0 Or NesFatFileSize<>32768
+      NesLibError="Battery save file is missing."
+      ProcedureReturn 0
+    EndIf
+  EndIf
+  If battery
+    For ticket=0 To 255 : PokeL(table+ticket*4,0) : Next
+    If NesFatTransfer(saveCluster,32768,$08000000,table)=0
+      NesLibError="Game save could not be read."
+      ProcedureReturn 0
+    EndIf
+  EndIf
+  If NesScCommand(67,6,3*battery)=0
+    NesLibError="SummerCart64 refused the save type."
+    ProcedureReturn 0
+  EndIf
+  If battery
+    LpmCacheWritebackData(table,1024)
+    ticket=LpmPiWrite(table,#NES_SC_DATA,1024)
+    If ticket<=0 : NesLibError="Save writeback unavailable." : ProcedureReturn 0 : EndIf
+    LpmPiWait(ticket)
+    If NesScCommand(87,#NES_SC_DATA,0)=0
+      NesLibError="Save writeback unavailable."
+      ProcedureReturn 0
+    EndIf
+  EndIf
+  stage=NesScIoRead($1020001C)
+  If NesScIoRead($10200000)<>$80371240 Or stage<4096 Or stage>$100000
+    NesLibError="Emulator component is invalid."
+    ProcedureReturn 0
+  EndIf
+  NesLibLaunch=$B0200000+stage
+  ProcedureReturn 1
+EndProcedure
+
+Procedure NesLibText(fb.i,x.i,y.i,value.s,ink.i,scale.i)
+  Protected i.i, row.i, col.i, g.i, bits.i, dx.i, dy.i
+  For i=0 To Len(value)-1
+    If x+6*scale>300 : Break : EndIf
+    g=LpmCrashGlyph(PeekA(@value+i))
+    If g>=0
+      For row=0 To 6
+        bits=PeekA(?lpm_crash_font+g*7+row)
+        For col=0 To 4
+          If bits & (16>>col)
+            For dy=0 To scale-1
+              For dx=0 To scale-1
+                PokeW(fb+((y+row*scale+dy)*320+x+col*scale+dx)*2,ink)
+              Next
+            Next
+          EndIf
+        Next
+      Next
+    EndIf
+    x+6*scale
+  Next
+EndProcedure
+
+Procedure.s NesLibTitle(item.i)
+  Protected title.s=NesLibNames[item], suffix.i
+  If NesLibShowTags=0
+    suffix=FindString(title," (U)",1)
+    If suffix : title=Left(title,suffix-1) : EndIf
+  EndIf
+  ProcedureReturn title
+EndProcedure
+
+Procedure NesLibLetter(direction.i)
+  Protected item.i=NesLibCursor, letter.s=UCase(Left(NesLibNames[item],1))
+  If direction>0
+    While item+1<NesLibCount
+      item+1
+      If UCase(Left(NesLibNames[item],1))<>letter
+        NesLibCursor=item : ProcedureReturn
+      EndIf
+    Wend
+  Else
+    While item>0 And UCase(Left(NesLibNames[item],1))=letter : item-1 : Wend
+    letter=UCase(Left(NesLibNames[item],1))
+    While item>0 And UCase(Left(NesLibNames[item-1],1))=letter : item-1 : Wend
+    NesLibCursor=item
+  EndIf
+EndProcedure
+
+Procedure NesLibDraw()
+  Protected fb.i=LpmDisplayGet(), row.i, i.i, ink.i, dark.i=LpmRgb16(12,19,31), white.i=$FFFF
+  Protected aqua.i=LpmRgb16(93,230,208), muted.i=LpmRgb16(158,180,199), label.s
+  LpmRdpAttach(fb)
+  LpmRdpModeFill(dark) : LpmRdpFillRect(0,0,320,240)
+  LpmRdpModeFill(LpmRgb16(30,44,61)) : LpmRdpFillRect(16,16,304,56)
+  LpmRdpModeFill(aqua) : LpmRdpFillRect(16,55,304,57)
+  LpmRdpModeFill(LpmRgb16(23,34,49)) : LpmRdpFillRect(16,63,304,198)
+  If NesLibSettings=0 And NesLibCount>0
+    row=NesLibCursor-NesLibFirst
+    LpmRdpModeFill(aqua) : LpmRdpFillRect(20,68+15*row,300,81+15*row)
+  EndIf
+  LpmRdpDetachWait()
+  label="NES LIBRARY"
+  If NesLibSettings : label="SETTINGS" : EndIf
+  NesLibText(fb,24,24,label,white,2)
+  If NesLibSettings
+    label="HIDE REGION AND REVISION TAGS"
+    If NesLibShowTags : label="SHOW REGION AND REVISION TAGS" : EndIf
+    NesLibText(fb,24,76,"GAME TITLES",muted,1)
+    NesLibText(fb,24,93,label,aqua,1)
+    NesLibText(fb,24,124,"A  TOGGLE TAGS     B  BACK",white,1)
+  Else
+    For row=0 To #NES_LIB_ROWS-1
+      i=NesLibFirst+row
+      If i>=NesLibCount : Break : EndIf
+      ink=white
+      If i=NesLibCursor : ink=dark : EndIf
+      NesLibText(fb,25,71+row*15,NesLibTitle(i),ink,1)
+    Next
+    If NesLibCount
+      NesLibText(fb,24,43,Str(NesLibCursor+1)+" / "+Str(NesLibCount),muted,1)
+      NesLibText(fb,144,43,"LEFT/RIGHT  JUMP LETTER",muted,1)
+      NesLibText(fb,20,219,"A PLAY   L/R PAGE   START SETTINGS",muted,1)
+    Else
+      NesLibText(fb,24,78,"NO GAMES FOUND",white,1)
+      NesLibText(fb,20,219,"START SETTINGS     B RETRY SD",muted,1)
+    EndIf
+    If NesLibError<>"" : NesLibText(fb,20,204,NesLibError,aqua,1) : EndIf
+  EndIf
+  LpmDisplayShow(fb)
+EndProcedure
+
+Procedure NesLibMain()
+  Protected buttons.i, prev.i, change.i, refresh.i=1, held.i, direction.i, mounted.i
+  LpmInterruptsInit() : LpmDmaInit() : LpmJoybusInit()
+  If LpmDisplayInit(320,240,16,2,#LPM_VI_RESAMPLE,#LPM_TV_AUTO)=0 : ProcedureReturn : EndIf
+  LpmRdpInit() : LpmInterruptsOn() : LpmPadScan()
+  NesLibCrcInit()
+  mounted=NesLibMount()
+  Repeat
+    If refresh : NesLibDraw() : refresh=0 : EndIf
+    LpmDisplayWaitVBlank() : LpmPadRead()
+    buttons=LpmPadButtons(0) : change=buttons & ~prev : prev=buttons
+    direction=Bool(buttons & #LPM_PAD_DOWN)-Bool(buttons & #LPM_PAD_UP)
+    If direction : held+1 : Else : held=0 : EndIf
+    Select 1
+      Case Bool(change & #LPM_PAD_START)
+        NesLibSettings ! 1 : refresh=1
+      Case Bool(NesLibSettings<>0 And (change & #LPM_PAD_B))
+        NesLibSettings=0 : refresh=1
+      Case Bool(NesLibSettings<>0 And mounted<>0 And (change & #LPM_PAD_A))
+        NesLibShowTags ! 1 : refresh=1
+      Case Bool(NesLibSettings=0 And mounted=0 And (change & #LPM_PAD_B))
+        mounted=NesLibMount() : refresh=1
+      Case Bool(NesLibSettings=0 And NesLibCount>0)
+        If change & #LPM_PAD_A
+          If NesLibPrepare(NesLibCursor)
+            LpmDebugPrint("NES LIBRARY OPEN "+NesLibNames[NesLibCursor])
+            NesLibBoot(NesLibLaunch)
+          EndIf
+          LpmDebugPrint("NES LIBRARY "+NesLibError)
+          refresh=1
+        Else
+          If held=1 Or (held>18 And held%5=0) : NesLibCursor+direction : refresh=1 : EndIf
+          If change & #LPM_PAD_LEFT : NesLibLetter(-1) : refresh=1 : EndIf
+          If change & #LPM_PAD_RIGHT : NesLibLetter(1) : refresh=1 : EndIf
+          If change & #LPM_PAD_L : NesLibCursor-#NES_LIB_ROWS : refresh=1 : EndIf
+          If change & #LPM_PAD_R : NesLibCursor+#NES_LIB_ROWS : refresh=1 : EndIf
+          If NesLibCursor<0 : NesLibCursor=0 : EndIf
+          If NesLibCursor>=NesLibCount : NesLibCursor=NesLibCount-1 : EndIf
+          If NesLibCursor<NesLibFirst : NesLibFirst=NesLibCursor : EndIf
+          If NesLibCursor>=NesLibFirst+#NES_LIB_ROWS : NesLibFirst=NesLibCursor-#NES_LIB_ROWS+1 : EndIf
+        EndIf
+    EndSelect
+  ForEver
+EndProcedure
+
+NesLibMain()

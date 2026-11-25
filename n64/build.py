@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from stage_fastppu import stage_fastppu
 from stage_sync import stage_sync
 from stage_input import stage_input
 from stage_poll import poll_bank_size, poll_source, stage_poll
-from stage_ramwait import ram_wait_source
+from stage_ramwait import ram_wait_source, runtime_wait_source
 from stage_expansion import EXPANSION_MAPPERS, expansion_source, stage_expansion
 from stage_storage import check_storage_layout, stage_storage
 from stage_region import header_is_pal, render_region, stage_region
@@ -77,9 +78,19 @@ def build(args, *, controller_trace=()):
     compiler = sdk / "PureMetalForge.exe"
     if not compiler.is_file():
         raise ValueError(f"missing compiler: {compiler}")
-    cart, header = read_anvil_rom(args.rom, extra=EXPANSION_MAPPERS, pal_ok=True)
+    runtime = getattr(args, "runtime", False)
+    if runtime:
+        cart = SimpleNamespace(mapper=1, submapper=0, mirror=0, ram_size=0,
+                               conflicts=False, battery=False, prg=b"", chr=b"")
+        header = bytes(16)
+    else:
+        cart, header = read_anvil_rom(args.rom, extra=EXPANSION_MAPPERS, pal_ok=True)
     persist = getattr(args, "persist_save", None)
-    save = save_profile(cart, header) if (persist if persist is not None else not args.check_frame) else None
+    save = save_profile(cart, header) if not runtime and (persist if persist is not None else not args.check_frame) else None
+    if runtime:
+        # The runtime accepts NROM and MMC1. The common CPU window uses two
+        # 16 KiB biases; only MMC1 installs its serial mapper and battery RAM.
+        save = save_profile(SimpleNamespace(mapper=1, battery=True, ram_size=8192), header)
     if save and save.reason:
         print(f"NES save: {save.reason}", file=sys.stderr)
     save_bytes = save.size if save else 0
@@ -95,17 +106,19 @@ def build(args, *, controller_trace=()):
     # original service cadence for the more frequent sample deadlines.
     chain_nrom = cart.mapper == 0 and audio_rate == 20000
     mmc1_20k = cart.mapper == 1 and audio_rate == 20000
+    raster_deadline = mmc1_20k
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper, chain_nrom)
     settings = {
-        "NES_DMC_RASTER_DEADLINE": int(mmc1_20k),
+        "NES_RUNTIME_ROM": int(runtime),
+        "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
         "HOST_AUDIO_FRAMES": 512,
-        "NES_MMC1_ROWS": int(cart.mapper == 1 and not cart.chr and chr_size == 8192),
+        "NES_MMC1_ROWS": int(not runtime and cart.mapper == 1 and not cart.chr and chr_size == 8192),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),
-        "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(cart.mapper))),
-        "NES_HAS_POLLS": int(has_polls),
-        "NES_HAS_RAM_WAITS": int(has_ram_waits),
+        "NES_PREDICTABLE_IRQ": int(runtime or bool(poll_bank_size(cart.mapper))),
+        "NES_HAS_POLLS": int(runtime or has_polls),
+        "NES_HAS_RAM_WAITS": int(runtime or has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
         "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": cart.mapper, "GAME_SUB": cart.submapper,
         "GAME_SAVE_BYTES": save_bytes, "GAME_SAVE_BANKS": save_banks,
@@ -115,7 +128,7 @@ def build(args, *, controller_trace=()):
         "GAME_FOUR_SCREEN": int(bool(header[6] & 8)),
         "GAME_PRG": header[4] * 16384, "GAME_VIEWS": len(program),
         "GAME_CHR": chr_size, "GAME_CHR_RAM": int(not cart.chr),
-        "CART_CHR_BANKS": max(2, chr_size // 8192),
+        "CART_CHR_BANKS": 32 if runtime else max(2, chr_size // 8192),
     }
     with tempfile.TemporaryDirectory(prefix="nes-n64-") as tmp:
         stage = Path(tmp)
@@ -133,6 +146,15 @@ def build(args, *, controller_trace=()):
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
                 code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k)
+                if runtime:
+                    serial = "nes_native_mapper_serial:\n"
+                    if code.count(serial) != 1:
+                        raise ValueError("native MMC1 serial write entry changed")
+                    code = code.replace(serial, serial + """    la $t0, global_cartmapper
+    ld $t1, 0($t0)
+    beq $t1, $zero, nes_absolute_store
+    nop
+""")
             elif name.startswith("mapper"):
                 code = stage_storage(name, stage_mapper(name, code, cart.mapper))
             elif name == "bridge":
@@ -143,7 +165,7 @@ def build(args, *, controller_trace=()):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper, audio_rate)
-            code = stage_sync(name, code, cart.mapper, chain_nrom, mmc1_20k)
+            code = stage_sync(name, code, cart.mapper, chain_nrom, raster_deadline)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
@@ -169,7 +191,7 @@ def build(args, *, controller_trace=()):
             replay = replay_source(controller_trace)
             (app / "replay.pmi").write_text(replay)
         (app / "poll.pmi").write_text(polling)
-        (app / "ramwait.pmi").write_text(ram_wait)
+        (app / "ramwait.pmi").write_text(runtime_wait_source() if runtime else ram_wait)
         (app / "region.pmi").write_text(render_region(audio_rate))
         (app / "game.pmi").write_text("".join(f"#{k} = {v}\n" for k, v in settings.items()))
         (app / "game.bin").write_bytes(program + cart.chr)
@@ -193,6 +215,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk", type=Path, default=os.environ.get("PMF_ROOT"), required=not os.environ.get("PMF_ROOT"))
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000), default=48000)
+    parser.add_argument("--runtime", action="store_true", help="build with a runtime ROM loader at cartridge offset 8 MiB")
     parser.add_argument("--rom", type=Path, default=ROOT / "demo/PureMetalDemo.nes")
     parser.add_argument("--out", type=Path, default=ROOT / "n64/build/nes.z64")
     parser.add_argument("--banked-sram-128", action="store_true",

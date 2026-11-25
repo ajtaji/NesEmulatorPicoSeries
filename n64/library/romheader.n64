@@ -1,0 +1,13 @@
+; The runtime currently supports NTSC iNES NROM and MMC1. Return the required
+; file size, excluding any harmless padding, or zero for an unsupported board.
+Procedure.i NesRomSize(header.i)
+  Protected flags.i=PeekA(header+6), mapper.i, p.i, c.i
+  If PeekA(header)<>78 Or PeekA(header+1)<>69 Or PeekA(header+2)<>83 Or PeekA(header+3)<>26 : ProcedureReturn 0 : EndIf
+  If (flags&12) Or (PeekA(header+7)&15) Or PeekA(header+8)>1 Or (PeekA(header+9)&1) : ProcedureReturn 0 : EndIf
+  mapper=(flags>>4)|(PeekA(header+7)&$F0)
+  If mapper>1 : ProcedureReturn 0 : EndIf
+  p=PeekA(header+4) : c=PeekA(header+5)
+  If p<1 Or p>16 Or (p&(p-1)) Or c>16 Or (c&(c-1)) : ProcedureReturn 0 : EndIf
+  If mapper=0 And (p>2 Or c>1 Or (flags&2)) : ProcedureReturn 0 : EndIf
+  ProcedureReturn 16+p*16384+c*8192
+EndProcedure

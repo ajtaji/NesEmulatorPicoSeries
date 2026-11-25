@@ -32,6 +32,19 @@ The builder uses the project's Anvil mapper and header validation plus the VRC6 
 
 Small games use base RDRAM. Larger games can use the Expansion Pak. On MMC5 and mapper 228, the loader can fetch 8 KiB PRG banks from the N64 cartridge on demand when the complete image would exceed the memory budget. The build checks the end of program statics against the VI buffer allocation.
 
+## SummerCart64 NES library
+
+The library launcher opens original `.nes` files on a FAT32 SummerCart64 SD card. One emulator executable serves the library. At launch it reads the cartridge header, initializes the selected mapper and maps the ROM banks. The library currently accepts standard NTSC iNES mapper 0 (NROM) and mapper 1 (MMC1), including 8 KiB of MMC1 battery RAM. The individual embedded builds described elsewhere in this document support more boards. The runtime preview still has audio underruns under load. [Replay results](validation/sd-library.txt)
+
+```powershell
+python n64/library.py build --sdk "$env:PMF_ROOT" --out "NES Library.z64"
+python n64/library.py saves "path-to-roms" "path-to-sd\NES\SAVES"
+```
+
+Put the input `.nes` files under `/NES/USA/` and put `NES Library.z64` on the card beside the existing flashcart menu. Launch it from the flashcart menu. D-pad up/down moves through the list, left/right jumps by initial letter, L/R moves a page, A opens a game, and Start opens the display settings. In a running game, hold L+R for half a second to return to the library. A game with an unsupported board or format shows an error in the browser.
+
+MMC1 battery games use individual 32 KiB files under `/NES/SAVES/`. The hex filename is the CRC32 of the iNES header and declared PRG and CHR bytes. The host tool provisions erased files and preserves existing saves. The launcher configures SummerCart64 SD writeback for the selected file, then the emulator updates its SRAM as the guest saves. USB ROM deployment of the launcher still reads games and saves from SD.
+
 ## Battery saves on flashcarts
 
 Playable builds persist battery RAM on supported boards and declare the required SRAM size in their N64 cartridge header. Ordinary work RAM remains volatile. `--no-persist-save` builds a playable cartridge with volatile RAM. Bounded verification leaves persistence off by default, so the same ROM and input schedule always start with fresh guest RAM.

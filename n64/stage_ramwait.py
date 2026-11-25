@@ -178,3 +178,21 @@ def ram_wait_source(program, mapper, chain_nrom=False):
                 lines += [f"  Data.u {spent},{retired}"]
     lines += ["EndDataSection"]
     return "\n".join(lines) + "\n", True
+
+
+def runtime_wait_source():
+    """Publish the generic decoder table and existing CPU window periods."""
+    table = [0] * 256
+    for opcode, (action, mode) in READS.items():
+        table[opcode] = (action << 3) | mode
+    lines = ["#NES_NATIVE_RAM_WAIT = 0", 'XIncludeFile "library/wait.n64"',
+             "DataSection", "NesRuntimeWaitOpcodes:"]
+    lines.extend("  Data.a " + ",".join(map(str, table[i:i + 16]))
+                 for i in range(0, 256, 16))
+    lines.append("NesRamWaitPeriods:")
+    for read_cycles in range(3, 6):
+        for branch_cycles in range(3, 5):
+            for at_branch in (False, True):
+                spent, retired = phase_period(read_cycles, branch_cycles, at_branch)
+                lines.append(f"  Data.u {spent},{retired}")
+    return "\n".join([*lines, "EndDataSection", ""])

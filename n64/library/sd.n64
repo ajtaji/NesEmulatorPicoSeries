@@ -1,0 +1,204 @@
+; Read-only FAT32 access to the library's short filenames.
+; SC64 sector DMA uses the PI data buffer, or cartridge SDRAM for launches.
+#NES_SC_CFG=$1FFF0000
+#NES_SC_DATA=$1FFE0000
+#NES_SC_ID=$53437632
+Global NesScResult.i, NesFatStart.i, NesFatData.i, NesFatSpc.i, NesFatRoot.i
+Global NesFatClusters.i, NesFatFileSize.i
+Global Dim NesFatBuffer.a[528]
+
+Procedure.i NesScIoRead(address.i)
+  ProcedureReturn LpmDebugIoRead($A0000000 | address)
+EndProcedure
+
+Procedure NesScIoWrite(address.i, value.i)
+  LpmDebugIoWrite($A0000000 | address,value)
+EndProcedure
+
+Procedure.i NesScCommand(cmd.i, arg0.i, arg1.i)
+  Protected start.i=LpmCpuCount(), status.i
+  NesScIoWrite(#NES_SC_CFG+4,arg0)
+  NesScIoWrite(#NES_SC_CFG+8,arg1)
+  NesScIoWrite(#NES_SC_CFG,cmd)
+  Repeat
+    status=NesScIoRead(#NES_SC_CFG)
+    If (status & $80000000)=0
+      NesScResult=NesScIoRead(#NES_SC_CFG+8)
+      ProcedureReturn Bool((status & $40000000)=0)
+    EndIf
+  Until ((LpmCpuCount()-start)&$FFFFFFFF)>=140625000
+  ProcedureReturn 0
+EndProcedure
+
+Procedure.i NesScRead(sector.i, count.i, destination.i)
+  If NesScCommand(73,sector,0)=0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn NesScCommand(115,destination,count)
+EndProcedure
+
+Procedure.i NesFatBufferAddress()
+  ProcedureReturn (@NesFatBuffer[0]+15)&~15
+EndProcedure
+
+Procedure.i NesFatReadSector(sector.i)
+  Protected ticket.i
+  If NesScRead(sector,1,#NES_SC_DATA)=0 : ProcedureReturn 0 : EndIf
+  ticket=LpmPiRead(#NES_SC_DATA,NesFatBufferAddress(),512)
+  If ticket<=0 : ProcedureReturn 0 : EndIf
+  LpmPiWait(ticket)
+  ProcedureReturn 1
+EndProcedure
+
+Procedure.i NesFatWord(p.i)
+  ProcedureReturn PeekA(p)|(PeekA(p+1)<<8)
+EndProcedure
+
+Procedure.i NesFatLong(p.i)
+  ProcedureReturn NesFatWord(p)|(NesFatWord(p+2)<<16)
+EndProcedure
+
+Procedure.i NesFatMount()
+  Protected b.i=NesFatBufferAddress(), volume.i, fats.i, reserved.i, fatSize.i, used.i, total.i
+  NesScIoWrite(#NES_SC_CFG+16,0)
+  NesScIoWrite(#NES_SC_CFG+16,$5F554E4C)
+  NesScIoWrite(#NES_SC_CFG+16,$4F434B5F)
+  If NesScIoRead(#NES_SC_CFG+12)<>#NES_SC_ID : ProcedureReturn 0 : EndIf
+  If NesScCommand(105,0,1)=0 Or NesScCommand(105,0,5)=0 : ProcedureReturn 0 : EndIf
+  If NesFatReadSector(0)=0 Or NesFatWord(b+510)<>$AA55 : ProcedureReturn 0 : EndIf
+  If NesFatWord(b+11)<>512 Or NesFatWord(b+17)<>0 Or NesFatWord(b+22)<>0
+    volume=NesFatLong(b+454)
+    If volume=0 Or NesFatReadSector(volume)=0 : ProcedureReturn 0 : EndIf
+  EndIf
+  If NesFatWord(b+510)<>$AA55 Or NesFatWord(b+11)<>512 Or NesFatWord(b+17)<>0 Or NesFatWord(b+22)<>0
+    ProcedureReturn 0
+  EndIf
+  NesFatSpc=PeekA(b+13) : reserved=NesFatWord(b+14) : fats=PeekA(b+16)
+  fatSize=NesFatLong(b+36) : total=NesFatLong(b+32)
+  used=reserved+fats*fatSize
+  If NesFatSpc=0 Or NesFatSpc>128 : ProcedureReturn 0 : EndIf
+  If (NesFatSpc & (NesFatSpc-1))<>0 Or reserved=0 Or fats=0 Or fats>2 Or fatSize=0 Or total<=used
+    ProcedureReturn 0
+  EndIf
+  NesFatClusters=(total-used)/NesFatSpc
+  If NesFatClusters<65525 Or NesFatClusters+2>fatSize*128 : ProcedureReturn 0 : EndIf
+  NesFatStart=volume+reserved : NesFatData=volume+used : NesFatRoot=NesFatLong(b+44)&$0FFFFFFF
+  ProcedureReturn Bool(NesFatRoot>=2 And NesFatRoot<NesFatClusters+2)
+EndProcedure
+
+Procedure.i NesFatNext(cluster.i)
+  If NesFatReadSector(NesFatStart+cluster/128)=0 : ProcedureReturn 0 : EndIf
+  ProcedureReturn NesFatLong(NesFatBufferAddress()+(cluster&127)*4)&$0FFFFFFF
+EndProcedure
+
+Procedure.i NesFatFind(cluster.i, name.s, directory.i)
+  Protected sector.i, entry.i, p.i, i.i, count.i, attr.i, b.i=NesFatBufferAddress()
+  If Len(name)<>11 : ProcedureReturn 0 : EndIf
+  While cluster>=2 And cluster<NesFatClusters+2 And count<4096
+    For sector=0 To NesFatSpc-1
+      If NesFatReadSector(NesFatData+(cluster-2)*NesFatSpc+sector)=0 : ProcedureReturn 0 : EndIf
+      For entry=0 To 15
+        p=b+32*entry
+        If PeekA(p)=0 : ProcedureReturn 0 : EndIf
+        attr=PeekA(p+11)
+        If PeekA(p)<>$E5 And (attr&$08)=0 And (attr&$10)=directory
+          For i=0 To 10
+            If PeekA(p+i)<>PeekA(@name+i) : Break : EndIf
+          Next
+          If i=11
+            NesFatFileSize=NesFatLong(p+28)
+            ProcedureReturn (NesFatWord(p+20)<<16)|NesFatWord(p+26)
+          EndIf
+        EndIf
+      Next
+    Next
+    cluster=NesFatNext(cluster) : count+1
+  Wend
+  ProcedureReturn 0
+EndProcedure
+
+Procedure.i NesFatTransfer(cluster.i, length.i, target.i, sectors.i)
+  Protected pending.i=(length+511)/512, count.i, sector.i, j.i
+  While pending>0 And cluster>=2 And cluster<NesFatClusters+2
+    sector=NesFatData+(cluster-2)*NesFatSpc
+    count=NesFatSpc
+    If count>pending : count=pending : EndIf
+    If NesScRead(sector,count,target)=0 : ProcedureReturn 0 : EndIf
+    If sectors
+      For j=0 To count-1 : PokeL(sectors+j*4,sector+j) : Next
+      sectors+count*4
+    EndIf
+    pending-count : target+count*512
+    If pending>0 : cluster=NesFatNext(cluster) : EndIf
+  Wend
+  ProcedureReturn Bool(pending=0)
+EndProcedure
+
+Declare NesFatEntry(title.s, cluster.i, size.i)
+Global Dim NesFatLongName.a[260]
+
+Procedure NesFatEnumerate(cluster.i)
+  Protected b.i=NesFatBufferAddress(), p.i, sector.i, entry.i, attr.i, count.i, part.i, pending.i, checksum.i
+  Protected i.i, n.i, ch.i, offset.i, shortSum.i, title.s
+  While cluster>=2 And cluster<NesFatClusters+2 And count<4096
+    For sector=0 To NesFatSpc-1
+      If NesFatReadSector(NesFatData+(cluster-2)*NesFatSpc+sector)=0 : ProcedureReturn : EndIf
+      For entry=0 To 15
+        p=b+32*entry : part=PeekA(p) : attr=PeekA(p+11)
+        If part=0 : ProcedureReturn : EndIf
+        If part=$E5
+          pending=0
+        ElseIf attr=$0F
+          n=part&31
+          If (part&64) And n>=1 And n<=20
+            pending=n : checksum=PeekA(p+13)
+            For i=0 To 259 : NesFatLongName[i]=0 : Next
+          EndIf
+          If pending>0 And pending=n And checksum=PeekA(p+13)
+            For i=0 To 12
+              offset=1+i*2
+              If i>=5 : offset+3 : EndIf
+              If i>=11 : offset+2 : EndIf
+              ch=NesFatWord(p+offset)
+              If ch=$FFFF : ch=0 : EndIf
+              If ch>127 : ch=32 : EndIf
+              NesFatLongName[(n-1)*13+i]=ch
+            Next
+            pending-1
+            If pending=0 : pending=-1 : EndIf
+          Else
+            pending=0
+          EndIf
+        Else
+          If (attr&$18)=0 And PeekA(p+8)=78 And PeekA(p+9)=69 And PeekA(p+10)=83
+            shortSum=0
+            For i=0 To 10
+              shortSum=(((shortSum&1)<<7)+(shortSum>>1)+PeekA(p+i))&255
+            Next
+            title=""
+            If pending=-1 And shortSum=checksum
+              For i=0 To 55
+                ch=NesFatLongName[i]
+                If ch=0 : Break : EndIf
+                title+Chr(ch)
+              Next
+            Else
+              For i=0 To 7
+                ch=PeekA(p+i)
+                If ch=32 : Break : EndIf
+                title+Chr(ch)
+              Next
+            EndIf
+            If Right(LCase(title),4)=".nes" : title=Left(title,Len(title)-4) : EndIf
+            NesFatEntry(title,(NesFatWord(p+20)<<16)|NesFatWord(p+26),NesFatLong(p+28))
+          EndIf
+          pending=0
+        EndIf
+      Next
+    Next
+    cluster=NesFatNext(cluster) : count+1
+  Wend
+EndProcedure
+
+Procedure.i NesFatFileSector(cluster.i)
+  If cluster<2 Or cluster>=NesFatClusters+2 : ProcedureReturn 0 : EndIf
+  ProcedureReturn NesFatData+(cluster-2)*NesFatSpc
+EndProcedure

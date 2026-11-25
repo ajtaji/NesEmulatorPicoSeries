@@ -17,7 +17,11 @@ Procedure.i NesRamCpuWindow(n.i, coalesce.i=0)
   If n<=0 Or Stopped Or NesStall Or NesIdleEnabled=0 Or PC<$8000
     ProcedureReturn CpuRun(n)
   EndIf
-  rule=NesRamWaitRule(NesPollOffset(PC))
+  CompilerIf #NES_RUNTIME_ROM
+    rule=NesRamWaitRule(PC)
+  CompilerElse
+    rule=NesRamWaitRule(NesPollOffset(PC))
+  CompilerEndIf
   If rule=0 : ProcedureReturn CpuRun(n) : EndIf
   ProcedureReturn NesRamWaitBatch(n,coalesce,rule)
 EndProcedure

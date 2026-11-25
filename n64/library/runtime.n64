@@ -1,0 +1,70 @@
+XIncludeFile "romheader.n64"
+XIncludeFile "boot.n64"
+; The launcher copies the original iNES file into this cartridge window.
+#NES_RUNTIME_BASE=$10800000
+Global Dim NesRuntimeHeader.a[32]
+
+Procedure.i NesRuntimeLoad()
+  Protected header.i=(@NesRuntimeHeader[0]+15)&~15, flags.i, prg.i, chrBytes.i, chrAddress.i, size.i
+  If NesCartRead(#NES_RUNTIME_BASE,header,16)=0 : ProcedureReturn 0 : EndIf
+  If NesRomSize(header)=0 : ProcedureReturn 0 : EndIf
+  flags=PeekA(header+6)
+  CartMapper=(flags>>4)|(PeekA(header+7)&$F0)
+  prg=PeekA(header+4)*16384 : chrBytes=PeekA(header+5)*8192
+  size=prg
+  If size=16384 : size=32768 : EndIf
+  CartPrg=#NES_CART_LOW : CartChr=CartPrg+size
+  If NesCartRead(#NES_RUNTIME_BASE+16,CartPrg,prg)=0 : ProcedureReturn 0 : EndIf
+  If prg=16384 : MapCopy(CartPrg+16384,CartPrg,16384) : EndIf
+  NesMmc1Bias(0)=CartPrg-$8000 : NesMmc1Bias(1)=CartPrg-$8000
+  chrAddress=#NES_RUNTIME_BASE+16+prg
+  If NesCartRead(chrAddress,CartChr,chrBytes)=0 : ProcedureReturn 0 : EndIf
+  CartPrgBanks=size/32768 : CartChrBanks=chrBytes/8192
+  CartChrRam=Bool(chrBytes=0) : ChrWritable=CartChrRam
+  MapChrRam=CartChrRam : MapChrBytes=chrBytes
+  If CartChrRam : CartChrBanks=1 : MapChrBytes=8192 : EndIf
+  MapPrgBytes=prg : MapRamBytes=0
+  If CartMapper=1 : MapRamBytes=8192 : EndIf
+  CartConflicts=0 : CartSubmapper=0
+  PpuMirroring=flags&1 : MapFourScreen=0
+  MapBattery=Bool(flags&2)
+  ProcedureReturn 1
+EndProcedure
+
+
+Procedure NesRuntimeCheckExit()
+  Static held.i
+  If (LpmPadButtons(0)&(#LPM_PAD_L|#LPM_PAD_R))<>(#LPM_PAD_L|#LPM_PAD_R)
+    held=0 : ProcedureReturn
+  EndIf
+  held+1
+  If held<>30 : ProcedureReturn : EndIf
+  If (PeekL($B0000020)&$FFFFFFFF)<>$4E455320 Or (PeekL($B0000024)&$FFFFFFFF)<>$4C494252 : ProcedureReturn : EndIf
+  LpmRdpSyncFullWait()
+  LpmDisplayWaitVBlank()
+  NesLibBoot($B0000000+(PeekL($B000001C)&$FFFFFFFF))
+EndProcedure
+
+
+; Recognize the ordinary five-byte BIT/LDA PPUSTATUS and BPL/BMI loop
+; in the currently mapped bytes. The caller supplies the stable horizon
+; and checks interrupts. Crossing a CPU page adds the 6502 branch cycle.
+Procedure.i NesRuntimePoll(pc.i, value.i)
+  Protected pointer.i, opcode.i, branch.i, cycles.i
+  If pc<$8003 Or pc>$FFFD : ProcedureReturn 0 : EndIf
+  If ((pc-3)! (pc+1))&$4000 : ProcedureReturn 0 : EndIf
+  pointer=NesMmc1Pointer(pc)
+  opcode=PeekA(pointer-3) : branch=PeekA(pointer)
+  If opcode<>$2C And opcode<>$AD : ProcedureReturn 0 : EndIf
+  If (PeekA(pointer-2)&7)<>2 Or (PeekA(pointer-1)&$E0)<>$20 : ProcedureReturn 0 : EndIf
+  If PeekA(pointer+1)<>$FB : ProcedureReturn 0 : EndIf
+  If branch=$10
+    If value&128 : ProcedureReturn 0 : EndIf
+  ElseIf branch=$30
+    If (value&128)=0 : ProcedureReturn 0 : EndIf
+  Else
+    ProcedureReturn 0
+  EndIf
+  cycles=7+Bool(((pc+2)&$FF00)<>((pc-3)&$FF00))
+  ProcedureReturn cycles|(2<<8)
+EndProcedure

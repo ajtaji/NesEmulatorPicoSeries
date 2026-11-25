@@ -80,6 +80,9 @@ XIncludeFile "../anvil/lookup_tables.pmi"
 XIncludeFile "region.pmi"
 XIncludeFile "host.n64"
 XIncludeFile "storage.n64"
+CompilerIf #NES_RUNTIME_ROM
+  XIncludeFile "library/runtime.n64"
+CompilerEndIf
 CompilerIf #NES_HAS_RAM_WAITS
   XIncludeFile "ramwait.pmi"
   XIncludeFile "ramwait.n64"
@@ -109,7 +112,11 @@ Procedure.i NesCurrentPoll(acc.i)
     ProcedureReturn 0
   EndIf
   If FI=0 And (WorkerIrq|MapIrq)<>0 : ProcedureReturn 0 : EndIf
-  ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
+  CompilerIf #NES_RUNTIME_ROM
+    ProcedureReturn NesRuntimePoll(PC,acc)
+  CompilerElse
+    ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
+  CompilerEndIf
 EndProcedure
 
 CompilerIf #GAME_SAVE_BYTES>0
@@ -119,17 +126,23 @@ CompilerEndIf
 
 Procedure.i LoadGame()
   Protected i.i, bank.i
-  If NesStorageLoad()=0 : ProcedureReturn 0 : EndIf
-  CartMapper=#GAME_MAPPER : CartSubmapper=#GAME_SUB
-  CartPrgBanks=#GAME_VIEWS/32768 : CartChrBanks=#GAME_CHR/8192
-  NesExtraBoard=ExtraManaged(CartMapper) : NesA12Board=ExtraA12(CartMapper)
-  CartConflicts=#GAME_CONFLICT : CartChrRam=#GAME_CHR_RAM
-  MapBattery=#GAME_BATTERY : MapFourScreen=#GAME_FOUR_SCREEN
-  MapRamBytes=#GAME_RAM : MapChrRam=CartChrRam
-  MapPrgBytes=#GAME_PRG : MapChrBytes=#GAME_CHR
-  PpuMirroring=#GAME_MIRROR : ChrWritable=CartChrRam
-  If CartChrRam : For i=0 To MapChrBytes-1 : PokeA(CartChr+i,0) : Next : EndIf
-  PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  CompilerIf #NES_RUNTIME_ROM
+    If NesRuntimeLoad()=0 : ProcedureReturn 0 : EndIf
+    If CartChrRam : GuestClear(CartChr,MapChrBytes) : EndIf
+    PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  CompilerElse
+    If NesStorageLoad()=0 : ProcedureReturn 0 : EndIf
+    CartMapper=#GAME_MAPPER : CartSubmapper=#GAME_SUB
+    CartPrgBanks=#GAME_VIEWS/32768 : CartChrBanks=#GAME_CHR/8192
+    NesExtraBoard=ExtraManaged(CartMapper) : NesA12Board=ExtraA12(CartMapper)
+    CartConflicts=#GAME_CONFLICT : CartChrRam=#GAME_CHR_RAM
+    MapBattery=#GAME_BATTERY : MapFourScreen=#GAME_FOUR_SCREEN
+    MapRamBytes=#GAME_RAM : MapChrRam=CartChrRam
+    MapPrgBytes=#GAME_PRG : MapChrBytes=#GAME_CHR
+    PpuMirroring=#GAME_MIRROR : ChrWritable=CartChrRam
+    If CartChrRam : For i=0 To MapChrBytes-1 : PokeA(CartChr+i,0) : Next : EndIf
+    PrgBase=CartPrg : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
+  CompilerEndIf
   For i=0 To 255
     PixelSpread(i)=(i&3)|(((i>>2)&3)<<8)|(((i>>4)&3)<<16)|(((i>>6)&3)<<24)
   Next
@@ -145,7 +158,11 @@ Procedure.i LoadGame()
   If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
   If WorkerError : ProcedureReturn 0 : EndIf
   CompilerIf #GAME_SAVE_BYTES>0
-    NesSaveLoad()
+    CompilerIf #NES_RUNTIME_ROM
+      If MapBattery : NesSaveLoad() : EndIf
+    CompilerElse
+      NesSaveLoad()
+    CompilerEndIf
     XIncludeFile "save_restore.pmi"
   CompilerEndIf
   For i=0 To 31 : LengthTable(i)=PeekA(?LengthData+i) : Next
@@ -201,6 +218,9 @@ Procedure RunGame()
       lastFrame=WorkerFrames : NesDeliveredFrame=lastFrame : HostInputPoll() : HostAudioPoll()
       CompilerIf #GAME_SAVE_BYTES>0
         If NesSavePending : NesSaveFlush() : EndIf
+      CompilerEndIf
+      CompilerIf #NES_RUNTIME_ROM
+        If NesSavePending=0 : NesRuntimeCheckExit() : EndIf
       CompilerEndIf
       If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
         elapsed=(LpmCpuCount()-start) & $FFFFFFFF
