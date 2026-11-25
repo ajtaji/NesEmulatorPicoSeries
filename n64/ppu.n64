@@ -1,5 +1,10 @@
 ; Native pixel output for the shared NES PPU.
 Global NesLineRow.i
+; A full scanline starts at a cache-line boundary. The renderer's four-tile
+; stores can then create each wholly overwritten cache line without a fill.
+Macro NesIndexedPixels()
+  ((@LinePixels(0)+15)&~15)
+EndMacro
 ; The zero-initialized pixel buffers need no clearing until either layer draws.
 Global NesBlankUntouched.i=1
 Declare PpuN64StoreSpan(dst.i, first.i, second.i)

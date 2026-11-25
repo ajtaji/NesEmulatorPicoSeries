@@ -161,7 +161,8 @@ def stage_fastppu(name: str, source: str) -> str:
                             "    If value&$18 : NesBlankUntouched=0 : EndIf\n"
                             "    If (previous!value)&$E1 : PpuColours() : EndIf")
     # Sprite priority is resolved before that row's indexed pixels go to RDP.
-    source = source.replace("LinePixels.a(256)", "LinePixels.a(61440)")
+    # Leave room to use a whole cache-line-aligned 256-byte row.
+    source = source.replace("LinePixels.a(256)", "LinePixels.a(61455)")
     # The shared lookup is RGB565; VI and the texture palette use RGBA5551.
     source = replace_procedure(source, "PpuRgbLineRaw", "")
     source = source.replace("    color=Rgb64(e+c)\n",
@@ -169,7 +170,7 @@ def stage_fastppu(name: str, source: str) -> str:
     source = replace_procedure(source, "PpuBeginLine", """Procedure PpuBeginLine()
   ; DisplayWaitLine handles frame start and the sixteen-line audio cadence.
   If (PpuLine&15)=0 : DisplayWaitLine(PpuLine) : EndIf
-  NesLineRow=@LinePixels(0)+PpuLine*256
+  NesLineRow=NesIndexedPixels()+PpuLine*256
 EndProcedure""")
     source = replace_procedure(source, "PpuClearSprites", CLEAR_SPRITES)
     source = replace_procedure(source, "PpuOverlay8", "")

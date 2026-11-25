@@ -110,7 +110,7 @@ Procedure NesIndexCommands()
       If NesPaletteChange(y+h) : Break : EndIf
       h=h+1
     Wend
-    LpmRdpLoadTexture(@LinePixels(y*256),256,h,#LPM_TEX_CI8)
+    LpmRdpLoadTexture(NesIndexedPixels()+y*256,256,h,#LPM_TEX_CI8)
     LpmRdpTextureRect(32,y,288,y+h,0,0,1024,1024)
     y=y+h
   Wend
