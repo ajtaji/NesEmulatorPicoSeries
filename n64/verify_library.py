@@ -131,6 +131,21 @@ ZELDA_ENDURANCE = replace(
 )
 ENDURANCE = {"Mario": MARIO_ENDURANCE, "Zelda": ZELDA_ENDURANCE, "MegaMan2": WOOD_MAN_ENDURANCE}
 
+ZELDA_COMBAT = replace(
+    ZELDA_ENDURANCE,
+    controls=ZELDA_ENDURANCE.controls + (
+        (1450, 1504, 32), (1510, 1552, 128), (1558, 1660, 16),
+        (1685, 1693, 1), (1705, 1733, 128), (1738, 1746, 1),
+        (1752, 1776, 16), (1782, 1790, 1), (1798, 1832, 64),
+        (1840, 1848, 1), (1855, 1891, 32), (1896, 1904, 1),
+        (1910, 1936, 128), (1941, 1949, 1), (1954, 1980, 16),
+    ),
+    last=1980, stop=1980,
+    state_hash="980258c102fa56eef1c2427c1cba3f1188fdb8eeb851a39d9d5853d6638a26de",
+    rgb_hash="28ea597eb0abb220e9ffa032c0beff1a0decd60870c4fcfc49d334eeb9672581",
+    pcm_hash="f9857d1eafa51da4eafbf53eb948e5dd1d705a68a39fe12e59790a050b76aa61",
+)
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -142,6 +157,9 @@ def verify(args):
     if getattr(args, "endurance", False):
         extended = True
         game = ENDURANCE[args.game]
+    if getattr(args, "combat", False):
+        extended = True
+        game = ZELDA_COMBAT
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
     state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000 and not extended
@@ -183,6 +201,8 @@ def verify(args):
     if extended:
         if args.game == "MegaMan2":
             metrics.append(interval(1260, game.last))
+        if game is ZELDA_COMBAT:
+            metrics.append(interval(1440, game.last))
         metrics.extend(interval(frame, frame + 60) for frame in range(game.first, game.last, 60))
     (work / "metrics.txt").write_text("\n".join(metrics) + "\n")
     print(summary)
@@ -194,6 +214,7 @@ if __name__ == "__main__":
     parser.add_argument("--audio-rate", type=int, choices=(20000, 48000),
                         help="default 48000, or 20000 for the extended replay")
     length = parser.add_mutually_exclusive_group()
+    length.add_argument("--combat", action="store_true", help="continue Zelda into overworld combat through frame 1980")
     length.add_argument("--endurance", action="store_true", help="play a longer active gameplay route at 20 kHz")
     length.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
     for option in ("sdk", "emulator", "rom", "results"):
@@ -201,8 +222,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.extended and args.game != "MegaMan2":
         parser.error("--extended is available for MegaMan2")
-    if (args.extended or args.endurance) and args.audio_rate == 48000:
+    if args.combat and args.game != "Zelda":
+        parser.error("--combat is available for Zelda")
+    long_replay = args.extended or args.endurance or args.combat
+    if long_replay and args.audio_rate == 48000:
         parser.error("long replays require 20 kHz")
     if args.audio_rate is None:
-        args.audio_rate = 20000 if args.extended or args.endurance else 48000
+        args.audio_rate = 20000 if long_replay else 48000
     verify(args)
