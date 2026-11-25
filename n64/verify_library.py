@@ -1,6 +1,6 @@
 """Replay three NTSC games in the N64 emulator using locally supplied NES ROMs."""
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from pathlib import Path
 import re
@@ -70,16 +70,34 @@ AUDIO_20K = {
         "46d12970b9fc7fa7c48eb1c69948cbf7ee1a65a0275bbf14052a8a71255a4d39"),
 }
 
+WOOD_MAN_EXTENDED = replace(
+    GAMES["MegaMan2"],
+    controls=GAMES["MegaMan2"].controls + tuple(
+        (frame + first, frame + end, buttons)
+        for frame in range(1260, 1860, 120)
+        for first, end, buttons in (
+            (0, 20, 128), (20, 35, 129), (35, 42, 130), (42, 66, 128),
+            (70, 78, 2), (80, 93, 64), (96, 120, 128),
+        )
+    ),
+    last=1860,
+    stop=1860,
+    state_hash="e244535315c4c59e2939d22b59c9277163764bc97d0ed9e0dce5f26a467de4b2",
+    rgb_hash="e80b4eb884e772a999933301190161f78abcce7cb260ef3b429952b637e218da",
+    pcm_hash="ac0c943192ef77910c9be2d83d854f14e8a22d20fba85d9a07f6a6e9c633daf9",
+)
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
 def verify(args):
-    game = GAMES[args.game]
+    extended = getattr(args, "extended", False)
+    game = WOOD_MAN_EXTENDED if extended else GAMES[args.game]
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
-    state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000
+    state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000 and not extended
                             else (game.state_hash, game.pcm_hash))
     work = args.results.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -99,24 +117,37 @@ def verify(args):
         if image.size != (320, 240) or digest(image.convert("RGB").tobytes()) != game.rgb_hash:
             raise ValueError("gameplay framebuffer changed")
     with wave.open(str(pcm)) as sound:
-        if (sound.getnchannels() != 2 or sound.getsampwidth() != 2
+        if (abs(sound.getframerate() - args.audio_rate) > 50
+                or sound.getnchannels() != 2 or sound.getsampwidth() != 2
                 or digest(sound.readframes(sound.getnframes())) != pcm_hash):
             raise ValueError("captured stereo stream changed")
     clocks = {int(row[0]): int(row[-1]) for row in states}
     gaps = {int(f): int(n) for n, f in re.findall(r"^NES AI QUEUED \d+ UNDERRUNS (\d+) FRAME (\d+)", log, re.M)}
-    ticks = (clocks[game.last] - clocks[game.first]) & 0xffffffff
-    rate = (game.last - game.first) * 46_875_000 / ticks
-    underruns = gaps[game.last] - gaps[game.first]
-    summary = (f"{args.game} guest frames {game.first} to {game.last}: {rate:.3f} fps, "
-               f"{underruns} audio underruns; reference state, picture and PCM match.")
-    (work / "metrics.txt").write_text(summary + "\n")
+    def interval(first, last):
+        ticks = (clocks[last] - clocks[first]) & 0xffffffff
+        rate = (last - first) * 46_875_000 / ticks
+        return f"guest frames {first} to {last}: {rate:.3f} fps, {gaps[last] - gaps[first]} audio underruns"
+
+    summary = f"{args.game} {interval(game.first, game.last)}; reference state, picture and PCM match."
+    metrics = [summary]
+    if extended:
+        metrics.append(interval(1260, game.last))
+        metrics.extend(interval(frame, frame + 60) for frame in range(game.first, game.last, 60))
+    (work / "metrics.txt").write_text("\n".join(metrics) + "\n")
     print(summary)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", choices=GAMES)
-    parser.add_argument("--audio-rate", type=int, choices=(20000, 48000), default=48000)
+    parser.add_argument("--audio-rate", type=int, choices=(20000, 48000),
+                        help="default 48000, or 20000 for the extended replay")
+    parser.add_argument("--extended", action="store_true", help="continue MegaMan2 through Wood Man at 20 kHz")
     for option in ("sdk", "emulator", "rom", "results"):
         parser.add_argument("--" + option, type=Path, required=True)
-    verify(parser.parse_args())
+    args = parser.parse_args()
+    if args.extended and (args.game != "MegaMan2" or args.audio_rate == 48000):
+        parser.error("--extended requires MegaMan2 at 20 kHz")
+    if args.audio_rate is None:
+        args.audio_rate = 20000 if args.extended else 48000
+    verify(args)

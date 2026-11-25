@@ -13,6 +13,7 @@ import re
 
 def native_handlers(mapper=0):
     handlers = {}
+    common_reads = {}
 
     def handler(op, length, cycles, body, phase=None):
         code = [f"nes_native_{op:02x}:", *body, f"addiu $a1, $a1, {length}"]
@@ -58,9 +59,13 @@ def native_handlers(mapper=0):
                 code += ["or $t0, $t1, $zero"]
             if write:
                 if mapper == 1 and op == 0x8d:
-                    code += ["andi $t1, $t0, 0x8000", "bne $t1, $zero, nes_native_mapper_serial", "nop"]
-                code += ["sltiu $t1, $t0, 0x2000", "beq $t1, $zero, nes_thread_slow",
-                         "andi $t0, $t0, 0x7FF", "addu $t0, $t0, $s1"]
+                    # Keep the resolved address for the normal bus handler.
+                    code += ["andi $t1, $t0, 0x8000", "bne $t1, $zero, nes_native_mapper_serial",
+                             "or $a0, $t0, $zero", "sltiu $t1, $t0, 0x2000",
+                             "beq $t1, $zero, nes_absolute_store"]
+                else:
+                    code += ["sltiu $t1, $t0, 0x2000", "beq $t1, $zero, nes_thread_slow"]
+                code += ["andi $t0, $t0, 0x7FF", "addu $t0, $t0, $s1"]
             else:
                 rom = f"nes_native_{op:02x}_rom"
                 read = f"nes_native_{op:02x}_read"
@@ -92,6 +97,14 @@ def native_handlers(mapper=0):
                     return code
         if not write:
             code += ["lbu $v1, 0($t0)"]
+            if mapper == 1 and mode in ("abs", "absx", "absy", "ind_x", "ind_y"):
+                entry = f"nes_read_operand_{mode}"
+                prefix = f"nes_native_{op:02x}_"
+                body = [word.replace(prefix, entry + "_") for word in code[1:-1]]
+                shared = [entry + ":", *body, "jr $ra", code[-1]]
+                if common_reads.setdefault(entry, shared) != shared:
+                    raise ValueError(f"Inconsistent MMC1 operand reader for {mode}")
+                return [f"jal {entry}", code[0]]
         return code
 
     modes = {"imm": (2, 2), "zp": (2, 3), "zpx": (2, 4), "zpy": (2, 4),
@@ -305,7 +318,8 @@ addiu $a1, $a1, 1
 andi $a1, $a1, 0xFFFF
 b nes_thread_check
 daddiu $a2, $a2, -6"""
-    return handlers
+    return handlers, ["\n".join(reader) for reader in common_reads.values()]
+
 
 
 def assembly(text):
@@ -359,14 +373,65 @@ ori $t2, $zero, 0x3ffd
 nes_exec_entry:"""
 
 
-def stage_thread(source: str, mapper: int = 0) -> str:
+def chain_window(has_waits):
+    """Continue only an armed 128-cycle window behind the device horizon."""
+    possible_wait = """
+andi $t1, $a1, 0x8000
+beq $t1, $zero, nes_chain_begin
+andi $t1, $a1, 255
+la $t0, nespossiblewait
+addu $t1, $t1, $t0
+lbu $t1, 0($t1)
+bne $t1, $zero, nes_chain_exit
+nop
+""" if has_waits else ""
+    # At entry the live guest bus byte stays in v1. WorkerAdvance revokes
+    # the scheduler's proof before it can change guest-visible device state.
+    # MMC1 has no mapper IRQ. Recheck the APU IRQ against the current I flag,
+    # which an instruction may have changed since the scheduler armed us.
+    # A possible wait PC returns to the full physical-bank lookup.
+    return """la $t0, global_budget
+ld $t1, 0($t0)
+la $t0, global_nesrunstart
+ld $t0, 0($t0)
+daddu $t1, $t1, $t0
+dsubu $a0, $t1, $a2
+la $t0, global_neschainlimit
+ld $t1, 0($t0)
+slt $t0, $t1, $a0
+bne $t0, $zero, nes_chain_exit
+nop
+la $t0, global_workerirq
+ld $t1, 0($t0)
+beq $t1, $zero, nes_chain_noirq
+nop
+la $t0, global_fi
+ld $t1, 0($t0)
+beq $t1, $zero, nes_chain_exit
+nop
+nes_chain_noirq:
+""" + possible_wait + """nes_chain_begin:
+la $t0, global_cpucycles
+sd $a0, 0($t0)
+la $t0, global_nesrunstart
+sd $a0, 0($t0)
+addiu $a2, $zero, 128
+la $t0, global_budget
+sd $a2, 0($t0)
+b nes_chain_fetch
+nop
+nes_chain_exit:
+"""
+
+
+def stage_thread(source: str, mapper: int = 0, has_waits: bool = False) -> str:
     old_table = re.search(r"^nes_opcode_table:\n(?P<words>(?:    \.word .*\n)+)", source, re.M)
     if old_table is None:
         raise ValueError("VR4300 opcode table is missing")
     portable = re.findall(r"__ul_cpurun_\w+", old_table["words"])
     if len(portable) != 256:
         raise ValueError("VR4300 opcode table has wrong size")
-    handlers = native_handlers(mapper)
+    handlers, readers = native_handlers(mapper)
     if any(portable[op] == "__ul_cpurun_illegal" for op in handlers):
         raise ValueError("Native opcode table covers an unsupported guest instruction")
     boot_table = ["nes_thread_enter" if op in handlers else portable[op] for op in range(256)]
@@ -392,23 +457,26 @@ def stage_thread(source: str, mapper: int = 0) -> str:
     entry_guard = rom_guard("$t0", "nes_thread_portable")
     first_dispatch = "b nes_thread_dispatch\naddu $t0, $a3, $a1"
     next_fetch = rom_guard("$a1", "nes_thread_fetch", "addu $t0, $a3, $a1")
+    next_window = ""
     stack_size = 16
     save_region = ""
     restore_region = ""
     guest_pc = "or $a1, $t0, $zero"
     if mapper == 1:
         entry_guard = MMC1_EXEC_REGION
+        next_window = chain_window(has_waits)
         stack_size = 48
-        save_region = """sd $s2, 16($sp)
+        save_region = """sd $ra, 40($sp)
+sd $s2, 16($sp)
 sd $s3, 24($sp)
 sd $s4, 32($sp)
 or $s2, $t0, $zero
 or $s3, $t1, $zero
 or $s4, $t2, $zero"""
-        restore_region = "ld $s2, 16($sp)\nld $s3, 24($sp)\nld $s4, 32($sp)"
+        restore_region = "ld $ra, 40($sp)\nld $s2, 16($sp)\nld $s3, 24($sp)\nld $s4, 32($sp)"
         guest_pc = "addiu $a1, $a1, -1\nandi $a1, $a1, 0xffff"
         first_dispatch = "b nes_thread_dispatch\naddu $t0, $a1, $s3"
-        next_fetch = ("subu $t1, $a1, $s2\nsltu $t1, $t1, $s4\n"
+        next_fetch = ("nes_chain_fetch:\nsubu $t1, $a1, $s2\nsltu $t1, $t1, $s4\n"
                       "beq $t1, $zero, nes_thread_fetch\naddu $t0, $a1, $s3")
     check = "daddiu $t3, $t3, 1\n" + next_fetch
     dispatch_jump = "jr $t1\nor $v1, $a0, $zero"
@@ -455,7 +523,7 @@ la $t0, __ul_cpurun_slowfetch
 b nes_thread_flush
 nop
 nes_thread_end:
-la $t0, __ul_cpurun_done
+{next_window}la $t0, __ul_cpurun_done
 nes_thread_flush:
 {store}
 ld $s0, 0($sp)
@@ -477,12 +545,12 @@ nop
         # A reset or fifth bit can affect a live mapping and uses the full bus.
         thread += """nes_native_mapper_serial:
 andi $t1, $a4, 128
-bne $t1, $zero, nes_thread_slow
+bne $t1, $zero, nes_absolute_store
 nop
 la $t0, global_mapshift
 ld $t1, 0($t0)
 andi $t2, $t1, 1
-bne $t2, $zero, nes_thread_slow
+bne $t2, $zero, nes_absolute_store
 nop
 la $t0, global_budget
 ld $t1, 0($t0)
@@ -513,9 +581,21 @@ addiu $a1, $a1, 3
 b nes_thread_check
 addiu $a2, $zero, -4
 """
+        # Rejoin STA after CpuFetchAddress with the high address byte on the
+        # guest bus. The original store applies all side effects and retires once.
+        thread += """nes_absolute_store:
+sd $a0, global_ea-global_nesmmc1bias($a3)
+srl $v1, $a0, 8
+addiu $a1, $a1, 3
+andi $a1, $a1, 0xffff
+addiu $v0, $zero, 3
+la $t0, __ul_cpurun_nesstoreabsolute
+b nes_thread_flush
+daddiu $t3, $t3, -1
+"""
     body = (
         "nes_opcode_table:\n" + table(boot_table) + "\n" + assembly(thread) + "\n" +
-        "\n".join(assembly(code) for code in handlers.values()) + "\n" +
+        "\n".join(assembly(code) for code in (*handlers.values(), *readers)) + "\n" +
         "nes_thread_portable_table:\n" + table(portable) + "\n" +
         "nes_thread_table:\n" + table(thread_table) + "\n"
     )

@@ -18,7 +18,7 @@ Procedure.i NesReadRegister(addr.i, stamp.i)
   WorkerAdvance(stamp)
   If addr<$4000
     result=PpuRegRead(addr&7)
-    MapperRegNotice(addr&7)
+    {read_notice}
   ElseIf addr=$4015
     result=ApuReadStatus()
   EndIf
@@ -54,7 +54,7 @@ Procedure NesWriteRegister(addr.i, value.i, stamp.i)
   QResult=0
   If addr<$4000
     PpuRegWrite(addr&7,value)
-    CompilerIf #GAME_MAPPER<>0 And #GAME_MAPPER<>2 And #GAME_MAPPER<>66
+    CompilerIf #GAME_MAPPER<>0 And #GAME_MAPPER<>1 And #GAME_MAPPER<>2 And #GAME_MAPPER<>66
       MapperRegNotice(addr&7)
     CompilerEndIf
     CompilerIf #GAME_MAPPER=5
@@ -115,7 +115,10 @@ def stage_sync(name: str, source: str, mapper: int) -> str:
         advance = "  dt=stamp-WorkerClock"
         if source.count(advance) != 1:
             raise ValueError("worker clock entry changed")
-        source = source.replace(advance, "  NesStatusHorizon=-1 : NesCpuHorizon=-1\n" + advance)
+        horizons = "  NesStatusHorizon=-1 : NesCpuHorizon=-1"
+        if mapper == 1:
+            horizons += " : NesChainLimit=-1"
+        source = source.replace(advance, horizons + "\n" + advance)
         worker = "Procedure WorkerCommand(command.i, addr.i, value.i, stamp.i)"
         if source.count(worker) != 1:
             raise ValueError("worker command procedure changed")
@@ -125,5 +128,13 @@ def stage_sync(name: str, source: str, mapper: int) -> str:
         else:
             window = "addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))"
             bound = "(PpuMask&24)<>0 And stamp>WorkerClock"
-        source = source.replace(worker, REGISTER_ACCESS.format(window=window, bound=bound) + worker)
+        read_notice = "" if mapper == 1 else "MapperRegNotice(addr&7)"
+        access = REGISTER_ACCESS.format(window=window, bound=bound, read_notice=read_notice)
+        if mapper == 1:
+            # MMC1 has no CPU timer or PPU register observer.
+            tick = "    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf\n"
+            if source.count(tick) != 1:
+                raise ValueError("extra mapper CPU clock site changed")
+            source = source.replace(tick, "")
+        source = source.replace(worker, access + worker)
     return source

@@ -162,6 +162,14 @@ def ram_wait_source(program, mapper):
     if not sites:
         return "", False
     lines = wait_lookup(sites)
+    if mapper == 1:
+        # All PRG banks start on a page boundary. A low-byte hit returns to
+        # the scheduler, which checks the full mapped read or branch address.
+        low = {site & 255 for site in sites}
+        lines.extend(["DataSection", "NesPossibleWait:"])
+        for first in range(0, 256, 16):
+            lines.append("  Data.a " + ",".join(str(int(i in low)) for i in range(first, first + 16)))
+        lines.append("EndDataSection")
     lines += ["DataSection", "NesRamWaitPeriods:"]
     for read_cycles in range(3, 6):
         for branch_cycles in range(3, 5):

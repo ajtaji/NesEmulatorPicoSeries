@@ -49,7 +49,7 @@ def cache_window_registers(source: str) -> str:
     return head + signature + declarations + body
 
 
-def stage_cpu(source: str, mapper: int, program: bytes = b"") -> str:
+def stage_cpu(source: str, mapper: int, program: bytes = b"", has_waits: bool = False) -> str:
     # Keep the opcode bodies and the set of legal opcodes in the guest core.
     # Forge has no .Label or computed Goto lowering on VR4300.
     initialize = re.search(r"^  If Ready = 0\n.*?^  EndIf\n", source, re.M | re.S)
@@ -115,7 +115,8 @@ NesOpcodeSlow:
                    "  AccessPhase = 3\n  CpuFetchAddress()\n" + write)
         if source.count(handler) != 1:
             raise ValueError(f"2A03 absolute ST{reg} handler changed")
-        source = source.replace(handler, handler.replace(write, f"""  CompilerIf #NES_BG_EXPANDED
+        entry = "NesStoreAbsolute:\n" if mapper == 1 and opcode == "8D" else ""
+        source = source.replace(handler, handler.replace(write, entry + f"""  CompilerIf #NES_BG_EXPANDED
     NesWriteAbsolute(Ea,{reg},${opcode})
   CompilerElse
     NesWrite(Ea,{reg})
@@ -127,6 +128,11 @@ NesOpcodeSlow:
     if mapper in (5, 234):
         return cache_window_registers(source)
     if mapper == 1:
+        # Only the scheduler's complete 128-cycle CPU window can continue.
+        budget = "  If n <= 0\n"
+        if source.count(budget) != 1:
+            raise ValueError("2A03 CPU budget guard changed")
+        source = source.replace(budget, "  If n<>128 : NesChainLimit=-1 : EndIf\n" + budget)
         source = source.replace("NesPollPtr=PrgBias+PC", "NesPollPtr=PC")
         source = re.sub(r"PeekA\((NesPollPtr(?:\+\d+)?)\)", r"PeekA(NesMmc1Pointer(\1))", source)
-    return stage_fill(stage_thread(source, mapper), program)
+    return stage_fill(stage_thread(source, mapper, has_waits), program)

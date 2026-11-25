@@ -83,7 +83,7 @@ def build(args, *, controller_trace=()):
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
             elif name == "cpu2a03":
-                code = stage_cpu(stage_poll(code), cart.mapper, program)
+                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits)
             elif name.startswith("mapper"):
                 code = stage_storage(name, stage_mapper(name, code, cart.mapper))
             elif name == "bridge":

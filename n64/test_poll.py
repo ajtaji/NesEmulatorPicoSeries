@@ -2,6 +2,7 @@
 import unittest
 
 from stage_poll import poll_rule
+from stage_ramwait import ram_wait_source
 
 
 class StatusLoopTests(unittest.TestCase):
@@ -39,6 +40,20 @@ class StatusLoopTests(unittest.TestCase):
         self.assertEqual(rule & 65535, (3 << 8) | 9)
         self.assertEqual(((rule >> 16) & 511) - 256, -32)
         self.assertTrue(rule & (1 << 25))
+
+
+class RamWaitWindowTests(unittest.TestCase):
+    def test_mmc1_checks_both_instruction_addresses_across_banks_and_pages(self):
+        rom = bytearray(32768)
+        rom[0x45:0x49] = bytes.fromhex("a5 07 d0 fc")
+        rom[0x40fe:0x4102] = bytes.fromhex("a5 05 f0 fc")
+        source, found = ram_wait_source(rom, 1)
+        self.assertTrue(found)
+        table = source.split("NesPossibleWait:\n")[1].split("EndDataSection")[0]
+        values = [int(byte) for row in table.splitlines()
+                  for byte in row.strip().removeprefix("Data.a ").split(",")]
+        self.assertEqual(len(values), 256)
+        self.assertEqual({i for i, byte in enumerate(values) if byte}, {0x45, 0x47, 0xfe, 0x00})
 
 
 if __name__ == "__main__":

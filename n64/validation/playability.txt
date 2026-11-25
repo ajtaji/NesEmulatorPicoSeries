@@ -123,3 +123,16 @@ Zelda 480-540                        60.833 / 0                60.841 / 0
 Mega Man 2 1080-1260                 54.141 / 126              58.096 / 26
 All recorded guest PCs, guest CPU cycles and final RGB pixels matched across rates. The tone fixture measured 867.32 Hz at the default rate and 867.16 Hz at 20 kHz. The DMC fixture preserved all 17 memory reads, 68 CPU stall cycles and the IRQ result.
 A separate VR4300 experiment applied a 12:5 area-average resampler after the 48 kHz mixer. Wood Man reached 51.408 fps with 171 underruns; 419,160 output pairs matched independent offline resampling. The optional build mixes directly at 20 kHz.
+
+MMC1 native CPU windows, VR4300RSPStudio, 4 MiB, 2026-11-25
+20 kHz NTSC replay                         Before fps / underruns      After fps / underruns
+Mario World 1-1, frames 240-360                  60.319 / 0                 60.319 / 0
+Zelda overworld, frames 480-540                  60.841 / 0                 59.827 / 0
+Wood Man, frames 1080-1260                       58.096 / 26                60.121 / 0
+Wood Man extended, frames 1260-1860              49.316 / 703               59.819 / 37
+Wood Man extended, frames 1080-1860              50.914 / 754               59.859 / 37
+The extended replay uses the same controller inputs through frame 1260, then keeps moving and firing. Both sides of each comparison use the same replay and DMA buffer sizes. The slowest 60-frame interval of the final extended replay was 57.855 fps (frames 1620-1680). Each replay matched its reference at every guest PC, cycle and sample checkpoint, the final RGB capture and the complete captured PCM stream.
+At 48 kHz the standard replays measured Mario 59.326, Zelda 59.826 and Wood Man 59.604 fps, all with zero observed queue-empty events in the measured interval. These are emulator measurements.
+The extended cart SHA-256 is bc330e2aae281bc583cb9b313bb1c594fa931af9b82d406dc866e6317fd66f4a. PureMetalForge.exe SHA-256 is 6298343e238042190edb035d4c9f4b733cd7f5b8fba95997ab3359f5b0619535 with SDK sources at 24f2bc999. The scheduler differential passed 280 comparisons, 14 bounded-run cases and four worker synchronization cases.
+The separate decoded STA absolute differential passed 10,800 cases, including 3,384 entries through the device-write path. Eight further stores checked both ends of the tested address range across all four internal RAM mirrors.
+Final Wood Man profile over guest frames 1561-1801: 377,652,981 modeled CPU cycles (baseline 470,108,582). Handwritten VR4300 assembly accounted for 75.31%, compiler-generated code for 24.68%, and 0.01% was unattributed. The largest generated routines were PpuAdvanceReference (3.34% of all cycles), CpuRun fallbacks (2.20%), RunGame (2.07%), NesWrite (2.03%) and audio block preparation plus sample enqueue (2.11%). The handwritten CPU interpreter accounted for 25.62% and NesRenderTo for 16.49%.
