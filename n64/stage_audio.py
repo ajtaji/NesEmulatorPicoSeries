@@ -24,7 +24,25 @@ def replace(source: str, old: str, new: str) -> str:
     return source.replace(old, new)
 
 
+def triangle_mean_table(source: str) -> str:
+    # The TND index is 3*triangle + 2*noise + DMC. Average the nonlinear
+    # mixer output rather than feeding it the triangle's mean DAC position.
+    table = re.search(r"^TndData:\n(.*?)^RgbData:", source, re.M | re.S)
+    if table is None:
+        raise ValueError("N64 audio staging expected the shared TND table")
+    values = [int(value) for value in re.findall(r"\d+", table[1])]
+    if len(values) != 203:
+        raise ValueError("N64 audio staging expected 203 TND levels")
+    mean = [(sum(values[base + dac * 3] for dac in range(16)) + 8) // 16 for base in range(158)]
+    rows = ["NesTndTriMeanData:"]
+    for start in range(0, len(mean), 16):
+        rows.append("  Data.u " + ",".join(map(str, mean[start:start + 16])))
+    return replace(source, "\nRgbData:", "\n" + "\n".join(rows) + "\nRgbData:")
+
+
 def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) -> str:
+    if name == "lookup_tables":
+        return triangle_mean_table(source)
     if name == "bridge":
         shared = re.search(r"^Procedure\.i NesPost\(.*?^Procedure\.i NesRpc\(.*?^EndProcedure",
                            source, re.M | re.S)
@@ -58,7 +76,14 @@ def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) ->
         blocked = mapper not in IMMEDIATE_MIXERS
         source = f"#NES_APU_BLOCKED={int(blocked)}\n" + source
         if not blocked:
-            return source
+            mix = "  x=PulseMix(pulse)+TndMix(TriDac*3+noise*2+DmcLevel)+ExpSample"
+            return replace(source, mix, """  If ApuPeriod(2)<=1 And ApuLength(2)>0 And ApuLinear>0
+    target=noise*2+DmcLevel
+    x=PeekU(?NesTndTriMeanData+target*2)
+  Else
+    x=TndMix(TriDac*3+noise*2+DmcLevel)
+  EndIf
+  x=x+PulseMix(pulse)+ExpSample""")
 
         # Mixer and event scheduler preserve old oscillator parameters until
         # register/clock boundaries. DMC bus work stays in the shared code.

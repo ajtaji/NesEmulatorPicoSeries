@@ -27,7 +27,7 @@ nes_flush_osc_done:
 EndProcedure
 
 Procedure NesRenderBlock()
-  Protected v0.i, v1.i, nv.i, duty0.i, duty1.i, completed.i
+  Protected v0.i, v1.i, nv.i, duty0.i, duty1.i, completed.i, ultrasonic.i
   If NesAudioBlockCount=0 : ProcedureReturn : EndIf
   If ApuLength(0)>0 And ApuPeriod(0)>=8 And ApuTarget(0)<=$7FF
     v0=ApuVolume(0)
@@ -38,8 +38,11 @@ Procedure NesRenderBlock()
   If ApuLength(3)>0 : nv=ApuVolume(2) : EndIf
   duty0=($F91E0602>>((ApuReg(0)>>6)*8))&255
   duty1=($F91E0602>>((ApuReg(4)>>6)*8))&255
+  ; Keep the real sequencer running. Average only the output of an
+  ; actively clocked ultrasonic triangle to avoid sampling it as a tone.
+  If ApuPeriod(2)<=1 And ApuLength(2)>0 And ApuLinear>0 : ultrasonic=1 : EndIf
   completed=NesAudioBlockCount
-  NesMixBlock(@NesSpanCycles(0),@NesSpanDmc(0),completed,v0|(v1<<8)|(nv<<16),duty0|(duty1<<8))
+  NesMixBlock(@NesSpanCycles(0),@NesSpanDmc(0),completed,v0|(v1<<8)|(nv<<16),duty0|(duty1<<8)|(ultrasonic<<16))
   NesAudioBlockCount=0
   ApuSamples=ApuProduced
   ; Submit a newly completed DMA block before another guest interval runs.

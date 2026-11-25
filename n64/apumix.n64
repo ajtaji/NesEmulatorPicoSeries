@@ -80,15 +80,19 @@ nes_mix_next:
     ld a1, 112(sp)
     and t1, t1, a1
     sll t1, t1, 1
+    lbu t3, 0(s1)
+    addu t1, t1, t3
+    srl t3, s4, 16
+    bnez t3, nes_mix_triangle_mean
+    sll t1, t1, 1
     la t2, global_tridac
     lw t2, 4(t2)
     sll a1, t2, 1
     addu t2, t2, a1
-    lbu t3, 0(s1)
-    addu t2, t2, t1
-    addu t2, t2, t3
     sll t2, t2, 1
+    addu t2, t2, t1
     la t3, global_tndmix
+nes_mix_tnd_load:
     addu t3, t3, t2
     lhu t2, 0(t3)
     addu v0, t0, t2
@@ -207,5 +211,9 @@ nes_mix_capture:
     ld s7, 64(sp)
     jr ra
     daddiu sp, sp, 128
+nes_mix_triangle_mean:
+    la t3, NesTndTriMeanData
+    b nes_mix_tnd_load
+    or t2, t1, zero
   EndASM
 EndProcedure

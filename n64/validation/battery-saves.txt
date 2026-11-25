@@ -16,3 +16,8 @@ persistence on a physical SummerCart64 still need hardware verification.
 
 The normal non-battery Mario and Mega Man 2 cartridges and the default
 bounded Zelda replay matched their previous cartridge images byte for byte.
+
+The combined save and corrected-audio Zelda ROM has SHA-256
+609d395945a7a906beb5ab1ff3d594192ca5e8ef59d65f5cc49d3c7545caf694.
+Repeating registration, a cold reopen, and the fresh-directory control
+with this ROM produced the same saved bytes and reopened file-select picture.

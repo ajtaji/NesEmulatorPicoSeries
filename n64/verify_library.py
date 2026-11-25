@@ -24,7 +24,8 @@ class Replay:
     pcm_hash: str
 
 
-# The reference is the port before the gameplay optimizations. Hash the
+# State and RGB reference the port before gameplay optimizations. Mega Man 2
+# PCM includes the verified ultrasonic triangle correction. Hash the
 # guest-frame checkpoints separately from the modeled N64 Count register.
 GAMES = {
     "Mario": Replay(
@@ -52,7 +53,7 @@ GAMES = {
         1080, 1260, 1260,
         "566af03c002638c8a6df4987b69affadbb84819db18116275f3292ed825a1a1f",
         "a4b96b481006c04d443cbfe85a18368b35f429b512843c113a1eaf67d707cc84",
-        "01a25809c4699e274843797ef1af97ef5e0eb51ecd7c725475f7e56925403104"),
+        "6d30efea1a437b1c8291831931f927f61a60c281ff5be03c722cb859e96984e6"),
 }
 
 
@@ -67,7 +68,7 @@ AUDIO_20K = {
         "b26e1a6b880ca821884a45bcbe3bbb337a0e5e97ea6f13f87a45412691c3a51f"),
     "MegaMan2": (
         "73f91d641deedec1ce56d921827f6163f1adef6f1b8df451f2660c8452c51cfd",
-        "46d12970b9fc7fa7c48eb1c69948cbf7ee1a65a0275bbf14052a8a71255a4d39"),
+        "0d917b4b795b03a3bca942a072c926f4082eb2699630ad6dd925d4ff3a0e7e9c"),
 }
 
 def wood_man_controls(stop):
@@ -88,7 +89,7 @@ WOOD_MAN_EXTENDED = replace(
     stop=1860,
     state_hash="e244535315c4c59e2939d22b59c9277163764bc97d0ed9e0dce5f26a467de4b2",
     rgb_hash="e80b4eb884e772a999933301190161f78abcce7cb260ef3b429952b637e218da",
-    pcm_hash="ac0c943192ef77910c9be2d83d854f14e8a22d20fba85d9a07f6a6e9c633daf9",
+    pcm_hash="0ce06eeada862555ae308bc244e37a27ba34b50400e25c5cca1696557d10663e",
 )
 
 
@@ -96,7 +97,7 @@ WOOD_MAN_ENDURANCE = replace(
     WOOD_MAN_EXTENDED, controls=wood_man_controls(3060), last=3060, stop=3060,
     state_hash="c3ed5478a22195f730720d11adb587b4c6680213c58e22719701750cbcea4366",
     rgb_hash="5ddbbb816533a4908d42d8ccd2832ac4b6dfd9b740c63e14e1d6680f9412385d",
-    pcm_hash="fa56bfecebf730434cfe778453ba3abff5f4d82ca67d58dc7216250077674854",
+    pcm_hash="0830f67e7a3498bfb27b2fd1cb50f91651d1ea2e5be124638325ed9de2e15796",
 )
 
 

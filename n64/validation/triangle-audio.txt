@@ -1,0 +1,32 @@
+Mega Man 2 (USA), N64 emulator, 2026-11-25
+Guest SHA-256 27b5a635df33ed57ed339dfc7fd62fc603b39c1d1603adb5cdc3562a0b0d555b
+
+The old 20 kHz recording acquired a 4,070 Hz tone when the active triangle
+timer was zero. The first changed PCM pair, 38,949, is the first mixer block
+with that state. The same intro passage at 48 kHz had a 7,930 Hz tone.
+Both agree with folding the approximately 55,930 Hz NES triangle oscillator
+into the host sample rate. Mesen 0.9.9 and Nestopia UE 2.0 independently
+rendered the same music without the prominent tone.
+
+At 20 kHz, around guest frame 224 in the scripted title menu, the old stream
+had 82.47% of its AC spectral power within 16 Hz of 4,070 Hz. The corrected
+stream had 0.0612%. In a separate no-input boot through frame 3240, the
+old and corrected title screens matched, along with 55 guest CPU, PC and
+sample checkpoints and the 1,078,016-pair capture length. At menu frame
+2954 the same band's share fell from 12.286% to 0.3539%.
+
+Wood Man gameplay, 20 kHz, 512 pairs per AI descriptor
+Guest frames 1080 through 3060: old 60.126 fps, corrected 60.096 fps.
+Zero active queue-empty events in both. All 52 guest checkpoints and the
+final framebuffer matched. Both captures contain 1,018,112 sample pairs.
+At pairs 426673 through 428172 the old 4035-4100 Hz band measured 2551
+PCM units RMS; the corrected mix measured under one unit.
+Corrected PCM SHA-256 0830f67e7a3498bfb27b2fd1cb50f91651d1ea2e5be124638325ed9de2e15796.
+
+These are emulator measurements. Physical N64 listening confirmation is open.
+
+Isolated 20 kHz triangle fixture: steady timer 0 and timer 1 outputs lost
+the respective 4070 Hz and 7965 Hz aliases. The timer 126 control (440 Hz)
+remained byte-identical. The immediate VRC6 mixer passed 12,640 cases
+covering the nonlinear table, held DAC states and expansion-channel mixing.
+Thwaite and the bundled demo passed their existing PCM and picture checks.

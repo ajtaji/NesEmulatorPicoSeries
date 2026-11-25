@@ -99,7 +99,7 @@ Thwaite sustained about 60 guest fps during movement and firing with zero observ
 
 ## Commercial gameplay replays
 
-Use a local NTSC ROM to replay World 1-1 in Super Mario Bros., the overworld in The Legend of Zelda, or Wood Man's stage in Mega Man 2. The verifier checks the ROM revision, applies controller input on guest frames, and compares guest CPU cycles, PC, sample counts, the final 320 by 240 framebuffer and the complete captured stereo stream with the pre-optimization build. It reports guest fps using the modeled N64 Count register and counts AI queue-empty transitions during the gameplay interval.
+Use a local NTSC ROM to replay World 1-1 in Super Mario Bros., the overworld in The Legend of Zelda, or Wood Man's stage in Mega Man 2. The verifier checks the ROM revision, applies controller input on guest frames, and compares the guest CPU cycles, PC, sample counts and final 320 by 240 framebuffer against the pre-optimization build. It checks the complete captured stereo stream against its verified audio reference. It reports guest fps using the modeled N64 Count register and counts AI queue-empty transitions during the gameplay interval.
 
 ```powershell
 python n64/verify_library.py MegaMan2 --sdk "$env:PMF_ROOT" --emulator "C:\path\to\VR4300RSPStudio.exe" --rom "path-to-roms\Mega Man 2 (U).nes" --results n64/build/gameplay/verified/MegaMan2
@@ -111,4 +111,6 @@ Use `--endurance` for the 20 kHz World 1-1 route through frame 1140, the Zelda s
 
 Select `Mario` or `Zelda` and supply the corresponding ROM to run the other replays. Each results directory contains the debugger log, framebuffer, stereo WAV and bounded replay cartridge. Use `n64/build.py` without `--check-frame` to build a cartridge for unrestricted controller play.
 
-The N64 build defaults to 48 kHz audio. Pass `--audio-rate 20000` to `n64/build.py` or `n64/verify_library.py` to mix the mono NES signal at 20 kHz and send it to both AI channels. Both rates use the same regional NES CPU and device clocks. The 20 kHz mode uses 256 sample frames per AI buffer (12.8 ms) and adjusts the DC filter for the lower rate.
+The N64 build defaults to 48 kHz audio. Pass `--audio-rate 20000` to `n64/build.py` or `n64/verify_library.py` to mix the mono NES signal at 20 kHz and send it to both AI channels. Both rates use the same regional NES CPU and device clocks. The 20 kHz mode uses 512 sample frames per AI buffer (25.6 ms) and adjusts the DC filter for the lower rate.
+
+At both output rates, the N64 mixer averages the nonlinear triangle/noise/DMC output over a triangle cycle when the active triangle timer is 0 or 1. The triangle sequencer continues advancing. When either counter stops it, the mixer uses the held DAC value. This removes the audible tone that appeared when Mega Man 2 parked the channel at an ultrasonic frequency. [Title and Wood Man measurements](validation/triangle-audio.txt)
