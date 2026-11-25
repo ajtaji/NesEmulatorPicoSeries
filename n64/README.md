@@ -69,3 +69,5 @@ python n64/verify_library.py MegaMan2 --sdk "$env:PMF_ROOT" --emulator "C:\path\
 ```
 
 Select `Mario` or `Zelda` and supply the corresponding ROM to run the other replays. Each results directory contains the debugger log, framebuffer, stereo WAV and bounded replay cartridge. Use `n64/build.py` without `--check-frame` to build a cartridge for unrestricted controller play.
+
+The N64 build defaults to 48 kHz audio. Pass `--audio-rate 20000` to `n64/build.py` or `n64/verify_library.py` to mix the mono NES signal at 20 kHz and send it to both AI channels. Both rates use the same regional NES CPU and device clocks. The 20 kHz mode uses 256 sample frames per AI buffer (12.8 ms) and adjusts the DC filter for the lower rate.

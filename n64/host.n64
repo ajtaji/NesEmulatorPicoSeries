@@ -195,6 +195,6 @@ Procedure.i HostBegin()
   HostAiBase = ((@HostAiMemory[0] + 4095) & ~4095) + 64
   HostPcmRead = ApuProduced
   HostAiSlot = 0
-  LpmAiInit(48000)
+  LpmAiInit(#NES_AUDIO_RATE)
   ProcedureReturn 1
 EndProcedure

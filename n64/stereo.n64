@@ -1,8 +1,9 @@
-; Mono NES samples are 16-bit. The ring and AI blocks both contain a whole
-; number of 512-frame blocks, so one transfer never wraps the input ring.
+; Each AI transfer consumes one aligned block of 16-bit mono samples.
+; Both block sizes divide the input ring exactly.
+#HOST_MONO_BYTES = #HOST_AUDIO_FRAMES * 2
 ProcedureNaked HostCopyStereo(dst.i, src.i)
   ASM
-    addiu a2, a1, 1024
+    addiu a2, a1, #HOST_MONO_BYTES
 nes_stereo_copy:
     cache 0x0d, 0(a0)
     lhu t0, 0(a1)

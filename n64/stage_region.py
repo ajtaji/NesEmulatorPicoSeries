@@ -36,11 +36,23 @@ def stage_region(name: str, source: str) -> str:
     return source
 
 
-def render_region() -> str:
+def render_region(audio_rate: int = 48000) -> str:
     """Extract the desktop's timing procedure and the Pico-derived APU tables."""
     desktop = (ROOT / "desktop" / "machine.pbi").read_text(encoding="utf-8")
     timing = re.search(r"^Procedure NesTiming\(pal\.i\)\n.*?^EndDataSection\b", desktop, re.M | re.S)
     desktop_state = "  MachinePal=pal\n"
     if not timing or timing[0].count(desktop_state) != 1:
         raise ValueError("desktop timing procedure or PAL APU tables changed")
-    return "; NES timing and PAL APU tables from desktop/machine.pbi.\n" + timing[0].replace(desktop_state, "") + "\n"
+    # Preserve the original regional CPU clock as a rational sample cadence.
+    region = timing[0].replace(desktop_state, "")
+    if audio_rate == 20000:
+        for original, native in (
+            ("ApuSampleBase=34 : ApuFracStep=30607 : ApuFracDen=48000",
+             "ApuSampleBase=83 : ApuFracStep=2607 : ApuFracDen=20000"),
+            ("ApuSampleBase=37 : ApuFracStep=101 : ApuFracDen=352",
+             "ApuSampleBase=89 : ApuFracStep=43 : ApuFracDen=88"),
+        ):
+            if region.count(original) != 1:
+                raise ValueError("regional APU sample cadence changed")
+            region = region.replace(original, native)
+    return "; NES timing and PAL APU tables from desktop/machine.pbi.\n" + region + "\n"

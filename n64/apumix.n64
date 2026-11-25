@@ -93,6 +93,24 @@ nes_mix_next:
     lhu t2, 0(t3)
     addu v0, t0, t2
 
+  EndASM
+  CompilerIf #NES_AUDIO_RATE=20000
+    ASM
+    ; Q16 pole (65400/65536)^(48000/20000) rounds to 65210.
+    ; Subtract 326*y from y<<16 to retain the original signed truncation.
+    ld t0, 104(sp)
+    dsll t2, s5, 16
+    dsll t3, s5, 8
+    dsll t1, s5, 6
+    dsubu t2, t2, t3
+    dsubu t2, t2, t1
+    dsll t3, s5, 2
+    dsll t1, s5, 1
+    dsubu t2, t2, t3
+    dsubu t2, t2, t1
+    EndASM
+  CompilerElse
+    ASM
     ; y * 65400 = (y << 16) - (y << 7) - (y << 3).
     daddu t1, s5, zero
     ld t0, 104(sp)
@@ -101,6 +119,9 @@ nes_mix_next:
     dsll t1, t1, 3
     dsubu t2, t2, t3
     dsubu t2, t2, t1
+    EndASM
+  CompilerEndIf
+  ASM
     bgez t2, nes_mix_dc_positive
     dsubu t0, v0, t0
     ori t1, zero, 65535

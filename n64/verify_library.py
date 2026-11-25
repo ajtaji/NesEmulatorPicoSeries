@@ -56,6 +56,21 @@ GAMES = {
 }
 
 
+# Native 20 kHz keeps the same guest PCs and cycle counts. The reduced
+# sample cadence and its rate-adjusted DC filter have their own references.
+AUDIO_20K = {
+    "Mario": (
+        "4e762187ef6198fd5a17f40be5b2f3d17c2e45050dea1a1b688203b3897d2a8d",
+        "880f246fb796fdf643b7ffd85b1d764492ebfe61dbb09f41249d6f7d80cc7604"),
+    "Zelda": (
+        "7579260d126b0be086cf094fbb770b5defbdd79360a579bf665f89e73d1969a1",
+        "b26e1a6b880ca821884a45bcbe3bbb337a0e5e97ea6f13f87a45412691c3a51f"),
+    "MegaMan2": (
+        "73f91d641deedec1ce56d921827f6163f1adef6f1b8df451f2660c8452c51cfd",
+        "46d12970b9fc7fa7c48eb1c69948cbf7ee1a65a0275bbf14052a8a71255a4d39"),
+}
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -64,6 +79,8 @@ def verify(args):
     game = GAMES[args.game]
     if digest(args.rom.read_bytes()) != game.rom_hash:
         raise ValueError(f"this replay requires the {args.game} ROM with SHA-256 {game.rom_hash}")
+    state_hash, pcm_hash = (AUDIO_20K[args.game] if args.audio_rate == 20000
+                            else (game.state_hash, game.pcm_hash))
     work = args.results.resolve()
     work.mkdir(parents=True, exist_ok=True)
     args.out = work / "replay.z64"
@@ -76,14 +93,14 @@ def verify(args):
     if f"NES CHECKPOINT {game.stop}" not in log or "NES STOP" in log or "FIRST code " in log:
         raise ValueError(f"cartridge did not finish cleanly. See {report}")
     states = re.findall(r"^NES FRAME (\d+) CPU (\d+) PCM (\d+) PC (\d+) COUNT (\d+)", log, re.M)
-    if digest("\n".join(" ".join(state[:4]) for state in states).encode()) != game.state_hash:
+    if digest("\n".join(" ".join(state[:4]) for state in states).encode()) != state_hash:
         raise ValueError("guest CPU cycles, sample clock or PC changed")
     with Image.open(frame) as image:
         if image.size != (320, 240) or digest(image.convert("RGB").tobytes()) != game.rgb_hash:
             raise ValueError("gameplay framebuffer changed")
     with wave.open(str(pcm)) as sound:
         if (sound.getnchannels() != 2 or sound.getsampwidth() != 2
-                or digest(sound.readframes(sound.getnframes())) != game.pcm_hash):
+                or digest(sound.readframes(sound.getnframes())) != pcm_hash):
             raise ValueError("captured stereo stream changed")
     clocks = {int(row[0]): int(row[-1]) for row in states}
     gaps = {int(f): int(n) for n, f in re.findall(r"^NES AI QUEUED \d+ UNDERRUNS (\d+) FRAME (\d+)", log, re.M)}
@@ -99,6 +116,7 @@ def verify(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", choices=GAMES)
+    parser.add_argument("--audio-rate", type=int, choices=(20000, 48000), default=48000)
     for option in ("sdk", "emulator", "rom", "results"):
         parser.add_argument("--" + option, type=Path, required=True)
     verify(parser.parse_args())

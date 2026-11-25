@@ -4,7 +4,6 @@
 #PPU_PROFILE=0
 #NES_VIDEO_BACKEND=2
 #NES_AUDIO_BACKEND=2
-#HOST_AUDIO_FRAMES=512
 XIncludeFile "game.pmi"
 XIncludeFile "Mips/Lib/LibPureMetalN64/lpm.n64"
 ASM

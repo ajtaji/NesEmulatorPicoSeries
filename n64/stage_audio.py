@@ -24,7 +24,7 @@ def replace(source: str, old: str, new: str) -> str:
     return source.replace(old, new)
 
 
-def stage_audio(name: str, source: str, mapper: int) -> str:
+def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) -> str:
     if name == "bridge":
         shared = re.search(r"^Procedure\.i NesPost\(.*?^Procedure\.i NesRpc\(.*?^EndProcedure",
                            source, re.M | re.S)
@@ -47,6 +47,8 @@ def stage_audio(name: str, source: str, mapper: int) -> str:
                          "      WorkerPpuUs=WorkerPpuUs+NesHostUs()-timer\n", "      PpuAdvance(dt)\n")
         return replace(source, "  QResult=0\n  If command=1", "  QResult=0\n  If command=0 : ProcedureReturn : EndIf\n  If command=1")
     if name == "apu":
+        if audio_rate == 20000:
+            source = replace(source, "ApuOutput=ApuLastY*65400", "ApuOutput=ApuLastY*65210")
         # The native oscillator path returns before the less frequent DMC edge.
         # Keep DMC fetch, looping and IRQ side effects in the shared implementation.
         begin = source.index("Procedure ApuTick(dt.i)")

@@ -114,3 +114,12 @@ Reproduce with n64/verify_library.py. Controller inputs, ROM revision hashes and
 
 RSP stereo expansion experiment (emulator only, 512 mono samples -> 512 stereo pairs per AI block)
 Two 32-block passes per path, in CPU/RSP/RSP/CPU order. Modeled Count per block averaged 4625.47 for the VR4300 assembly copy and 3166.47 for the RSP vector job, including cache, submission, waiting and AI handoff. All 65,536 captured stereo pairs matched. At 48,000 samples/s this isolated difference accounts for about 0.29% of one second. Production still uses the VR4300 copy.
+
+Native 20 kHz mono, same emulator and controller replays, 2026-11-25
+Both AI channels carry identical samples at either rate. 48 kHz uses 512-frame DMA blocks (10.67 ms); 20 kHz uses 256 (12.8 ms). FPS and observed AI queue-empty events over the same active gameplay intervals:
+                                     48 kHz fps / underruns    20 kHz fps / underruns
+Mario 240-360                        59.326 / 0                60.319 / 0
+Zelda 480-540                        60.833 / 0                60.841 / 0
+Mega Man 2 1080-1260                 54.141 / 126              58.096 / 26
+All recorded guest PCs, guest CPU cycles and final RGB pixels matched across rates. The tone fixture measured 867.32 Hz at the default rate and 867.16 Hz at 20 kHz. The DMC fixture preserved all 17 memory reads, 68 CPU stall cycles and the IRQ result.
+A separate VR4300 experiment applied a 12:5 area-average resampler after the 48 kHz mixer. Wood Man reached 51.408 fps with 171 underruns; 419,160 output pairs matched independent offline resampling. The optional build mixes directly at 20 kHz.
