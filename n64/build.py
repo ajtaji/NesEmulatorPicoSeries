@@ -38,7 +38,39 @@ def guest_names(code):
     return re.sub(r'\bChr\b(?!\s*\()', 'NesChrWindow', code)
 
 
+def replay_source(controller_trace):
+    """Encode ordered controller intervals for the bounded verification cart."""
+    for first, end, buttons in controller_trace:
+        if not (0 <= first < end and 0 <= buttons <= 255):
+            raise ValueError("invalid controller replay interval")
+    last = max(end for _, end, _ in controller_trace)
+    # Avoid expanding distant, sparse input events into a large ROM table.
+    if last > max(4096, 64 * len(controller_trace)):
+        lines = ["Procedure.i NesReplayPad(frame.i)"]
+        for first, end, buttons in controller_trace:
+            lines.append(f"  If frame>={first} And frame<{end} : ProcedureReturn {buttons} : EndIf")
+        lines.extend(("  ProcedureReturn 0", "EndProcedure"))
+    else:
+        masks = bytearray(last)
+        # The original ordered predicates give the first overlap priority.
+        for first, end, buttons in reversed(controller_trace):
+            masks[first:end] = bytes([buttons]) * (end - first)
+        lines = [
+            "Procedure.i NesReplayPad(frame.i)",
+            f"  If frame<0 Or frame>={len(masks)} : ProcedureReturn 0 : EndIf",
+            "  ProcedureReturn PeekA(?NesReplayMasks+frame)",
+            "EndProcedure",
+            "DataSection",
+            "NesReplayMasks:",
+        ]
+        for i in range(0, len(masks), 32):
+            lines.append("  Data.a " + ",".join(map(str, masks[i:i + 32])))
+        lines.append("EndDataSection")
+    return "\n".join(lines) + "\n"
+
+
 def build(args, *, controller_trace=()):
+    controller_trace = tuple(controller_trace)
     sdk = args.sdk.resolve()
     compiler = sdk / "PureMetalForge.exe"
     if not compiler.is_file():
@@ -114,13 +146,8 @@ def build(args, *, controller_trace=()):
         if controller_trace:
             if not args.check_frame:
                 raise ValueError("controller replay requires a bounded verification run")
-            lines = ["Procedure.i NesReplayPad(frame.i)"]
-            for first, end, buttons in controller_trace:
-                if not (0 <= first < end and 0 <= buttons <= 255):
-                    raise ValueError("invalid controller replay interval")
-                lines.append(f"  If frame>={first} And frame<{end} : ProcedureReturn {buttons} : EndIf")
-            lines.extend(("  ProcedureReturn 0", "EndProcedure"))
-            (app / "replay.pmi").write_text("\n".join(lines) + "\n")
+            replay = replay_source(controller_trace)
+            (app / "replay.pmi").write_text(replay)
         (app / "poll.pmi").write_text(polling)
         (app / "ramwait.pmi").write_text(ram_wait)
         (app / "region.pmi").write_text(render_region(audio_rate))
