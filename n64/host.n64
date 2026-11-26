@@ -277,7 +277,11 @@ Procedure.i HostBegin()
   LpmInterruptsInit()
   LpmJoybusInit()
   ; Three 153,600-byte buffers fit below the embedded cartridge at $80280000.
-  If LpmDisplayInit(#HOST_WIDTH, #HOST_HEIGHT, 16, 3, #LPM_VI_RESAMPLE, #LPM_TV_AUTO) = 0
+  ; Nearest pixel, no anti-alias and no resample: each NES pixel becomes exactly two output
+  ; pixels across, with hard edges. Resample blended every pixel with its neighbour and
+  ; smeared the picture sideways. At 16-bit the VI's NTSC bug applies only under 320 wide;
+  ; at exactly 320 the library writes X_SCALE $201 for $200, which avoids it.
+  If LpmDisplayInit(#HOST_WIDTH, #HOST_HEIGHT, 16, 3, #LPM_VI_NEAREST, #LPM_TV_AUTO) = 0
     ProcedureReturn 0
   EndIf
   CompilerIf #GAME_PAL
