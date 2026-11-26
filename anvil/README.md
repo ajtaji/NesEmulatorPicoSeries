@@ -77,8 +77,10 @@ in the selector with an error message. Cartridge RAM is volatile: battery-backed
 
 * `core.pi4`, `cpu2a03.pi4`, `bridge.pi4`, `ppu.pi4`, `apu.pi4` and
   `worker.pi4` own guest state. `port_anvil.py` derives the portable CPU from
-  the same generator before its Thumb assembly pass. Pico files are not
-  modified. Packed CHR lookup and the RGB conversion loop are native A64.
+  the same generator before its Thumb assembly pass, and the other guest modules
+  from the RP2350 sources with their assembly replaced by its plain twins; it
+  needs `PMF_REPO` set to a checkout of the compiler's repository (for the SBC
+  test vectors). Pico files are not modified. Packed CHR lookup and the RGB conversion loop are native A64.
 * `scheduler.pi4` owns two complete RGB565 frames and their publication
   fences. Core 1 computes CPU/PPU/APU work. Core 0 owns all hardware and
   every Anvil service call. Anvil parallel jobs are bounded to two-second
