@@ -17,6 +17,9 @@ ProcedureNaked NesHotHolder()
   XIncludeFile "../n64/unit/advance.n64"
   XIncludeFile "../n64/unit/a12.n64"
   XIncludeFile "../n64/unit/write.n64"
+  XIncludeFile "../n64/unit/ppu.n64"
+  XIncludeFile "../n64/unit/ppu_cold.n64"
+  XIncludeFile "../n64/unit/ppu_check.n64"
 EndProcedure
 ProcedureNaked.i NesRunMapper4(start.i)
   ASM

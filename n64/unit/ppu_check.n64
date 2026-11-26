@@ -1,0 +1,214 @@
+; unit/ppu_check.n64 - the checking build of the PPU state machine (#NES_PPU_CHECK, --ppu-check).
+; In the hot unit's cold part (cpu6502.n64) or the reference build's holder (mmc3_run.n64); empty in
+; every other build.
+;
+; WHAT IT PROVES, on every call, while the guest runs (design note, section N, step N3)
+;   1 / 2  after every draw: the v and the sprite-0 flag the renderer produced while composing
+;          pixels equal the state machine's own (unit/ppu.n64, ppu_draw_v / ppu_span_hit);
+;   5      after every line's sprite drawing: sprite 0's opacity row (U_S0ROW) equals the pixels
+;          of the renderer's sprite row that carry the sprite-0 mark ($80), x < 255;
+;   4      at every line inside an open band: the signature of the picture's inputs (PPUCTRL,
+;          PPUMASK, fine X, t, the mirroring, the eight MMC3 pattern banks, the 32 palette bytes)
+;          equals the band's at its first line - so every change of them was cut first;
+;   3      the same lines: v equals the band rule from the line before (IncY, then t's horizontal
+;          bits, when rendering is on; unchanged when it is off).
+; On the first failure the record NesPpuCheck (64-bit words) keeps: 1 the code above, 2 the guest
+; frame, 3 line, 4 dot, 5 the value found (renderer / actual), 6 the value expected (state machine /
+; rule). Counts: 0 draws, 7 band lines, 10 sprite rows, 11 sprite-0 hits raised. Words 8 and 9 hold the open band's
+; signature and the last line's v. The guest CPU is then stopped (Stopped = 1).
+;
+; REGISTERS: called from u_ppuadvance, s4 = global_ppuline, s6 = NesUnitData. ppu_check_draw keeps
+; v0 and a7 (the state machine's results, stored after it) and clobbers t0-t2, a0-a2.
+CompilerIf #NES_PPU_CHECK
+  ASM
+ppu_check_draw:
+    la t2, global_nesppucheck
+    ld t0, 0(t2)
+    daddiu t0, t0, 1
+    sd t0, 0(t2)                    ; draws checked
+    ld a1, global_ppuv-global_ppuline(s4)       ; the renderer's v
+    move a2, v0
+    bne a1, a2, ppu_check_fail
+    addiu a0, zero, 1
+    ld t0, global_ppustatus-global_ppuline(s4)
+    andi a1, t0, 64                 ; the renderer's sprite-0 flag
+    move a2, a7
+    bne a1, a2, ppu_check_fail
+    addiu a0, zero, 2
+    ld t0, #NES_U_DRAWST(s6)
+    andi t0, t0, 64
+    bnez t0, ppu_chk_draw_out       ; the flag was up before this draw
+    nop
+    beqz a7, ppu_chk_draw_out
+    nop
+    ld t0, 88(t2)
+    daddiu t0, t0, 1
+    sd t0, 88(t2)                   ; word 11: sprite-0 hits raised by a draw
+ppu_chk_draw_out:
+    jr ra
+    nop
+
+ppu_check_s0row:                    ; the renderer's sprite row against U_S0ROW
+    la t0, global_sprx
+    ld t0, 0(t0)                    ; X of roster slot 0
+    la t1, global_spriteline
+    daddu t1, t1, t0
+    move a2, zero                   ; a2 = the marked pixels, bit 2j for x = X + j
+    move t2, zero
+ppu_chk_s0_px:
+    daddu t3, t0, t2
+    sltiu t3, t3, 255
+    beqz t3, ppu_chk_s0_cmp         ; x = 255 and beyond never raise the flag
+    daddu t3, t1, t2
+    lbu t3, 0(t3)
+    andi t3, t3, 128
+    beqz t3, ppu_chk_s0_next
+    sll a0, t2, 1
+    addiu t3, zero, 1
+    sllv t3, t3, a0
+    or a2, a2, t3
+ppu_chk_s0_next:
+    addiu t2, t2, 1
+    sltiu t3, t2, 8
+    bnez t3, ppu_chk_s0_px
+    nop
+ppu_chk_s0_cmp:
+    la t2, global_nesppucheck
+    ld t3, 80(t2)
+    daddiu t3, t3, 1
+    sd t3, 80(t2)                   ; sprite rows checked
+    ld a1, #NES_U_S0ROW(s6)
+    bne a1, a2, ppu_check_fail
+    addiu a0, zero, 5
+    jr ra
+    nop
+
+ppu_check_band:                     ; a0 = 0: a band opens at this line; 1: a line inside it
+    move a3, ra
+    jal ppu_check_sig
+    nop
+    move ra, a3
+    la t2, global_nesppucheck
+    ld t3, global_ppuv-global_ppuline(s4)       ; this line's v
+    bnez a0, ppu_chk_band_line
+    nop
+    sd v0, 64(t2)                   ; the band's signature
+    jr ra
+    sd t3, 72(t2)                   ; and its v
+ppu_chk_band_line:
+    ld t0, 56(t2)
+    daddiu t0, t0, 1
+    sd t0, 56(t2)                   ; band lines checked
+    move a1, v0
+    ld a2, 64(t2)
+    bne a1, a2, ppu_check_fail      ; an input changed with no cut
+    addiu a0, zero, 4
+    ld v0, 72(t2)                   ; v at the line before ...
+    sd t3, 72(t2)
+    ld t0, global_ppumask-global_ppuline(s4)
+    andi t0, t0, 24
+    beqz t0, ppu_chk_band_v         ; rendering off: v stays
+    nop
+    andi t0, v0, 0x7000             ; ... with the line's IncY
+    xori t0, t0, 0x7000
+    beqz t0, ppu_chk_coarse
+    nop
+    b ppu_chk_hcopy
+    addiu v0, v0, 4096
+ppu_chk_coarse:
+    andi v0, v0, 0x0FFF
+    srl t0, v0, 5
+    andi t0, t0, 31
+    addiu t1, zero, 29
+    bne t0, t1, ppu_chk_row
+    addiu t0, t0, 1
+    xori v0, v0, 0x0800
+    move t0, zero
+ppu_chk_row:
+    andi t0, t0, 31
+    andi v0, v0, 0x7C1F
+    sll t0, t0, 5
+    or v0, v0, t0
+ppu_chk_hcopy:
+    ld t0, global_pput-global_ppuline(s4)       ; ... and t's horizontal bits (dot 257)
+    andi t0, t0, 0x041F
+    andi v0, v0, 0x7BE0
+    or v0, v0, t0
+ppu_chk_band_v:
+    move a1, t3
+    move a2, v0
+    bne a1, a2, ppu_check_fail
+    addiu a0, zero, 3
+    jr ra
+    nop
+
+ppu_check_sig:                      ; leaf: v0 = h * 31 + w over the inputs; clobbers t0-t3
+    move v0, zero
+    ld t0, global_ppuctrl-global_ppuline(s4)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    ld t0, global_ppumask-global_ppuline(s4)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    ld t0, global_ppufinex-global_ppuline(s4)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    ld t0, global_pput-global_ppuline(s4)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    la t2, global_mapmirrormode
+    ld t0, 0(t2)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    la t2, global_nesmmc3patternbias
+    daddiu t3, t2, 64
+ppu_chk_sig_bank:
+    ld t0, 0(t2)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    daddiu t2, t2, 8
+    bne t2, t3, ppu_chk_sig_bank
+    nop
+    la t2, global_pal
+    daddiu t3, t2, 32
+ppu_chk_sig_pal:
+    lbu t0, 0(t2)
+    dsll t1, v0, 5
+    dsubu v0, t1, v0
+    daddu v0, v0, t0
+    daddiu t2, t2, 1
+    bne t2, t3, ppu_chk_sig_pal
+    nop
+    jr ra
+    nop
+
+ppu_check_fail:                     ; a0 code, a1 found, a2 expected: keep the first, stop the guest
+    la t2, global_nesppucheck
+    ld t0, 8(t2)
+    bnez t0, ppu_check_out
+    nop
+    sd a0, 8(t2)
+    la t0, global_workerframes
+    ld t0, 0(t0)
+    sd t0, 16(t2)
+    la t0, global_ppuline
+    ld t1, 0(t0)
+    sd t1, 24(t2)
+    ld t1, global_ppudot-global_ppuline(t0)
+    sd t1, 32(t2)
+    sd a1, 40(t2)
+    sd a2, 48(t2)
+    la t0, global_stopped
+    addiu t1, zero, 1
+    sd t1, 0(t0)
+ppu_check_out:
+    jr ra
+    nop
+  EndASM
+CompilerEndIf

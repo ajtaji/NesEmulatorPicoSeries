@@ -2492,6 +2492,7 @@ c65_refetch:
   XIncludeFile "../n64/unit/advance.n64"
   XIncludeFile "../n64/unit/a12.n64"
   XIncludeFile "../n64/unit/write.n64"
+  XIncludeFile "../n64/unit/ppu.n64"
   ASM
     ; --- the core's cold part: the slow fetch, the status byte, the illegal stop, the shapes
 c65_fetch_slow:              ; copy the instruction's bytes into the buffer
@@ -2987,6 +2988,11 @@ c65_shape_status:            ; a0 = NesPollStatusDone(), the state published and
     ld ra, global_c65link-global_nesmmc3bias(a3)
     jr ra
     nop
+  EndASM
+  ; the PPU state machine's checking build (empty in every other build), in the cold part
+  XIncludeFile "../n64/unit/ppu_cold.n64"
+  XIncludeFile "../n64/unit/ppu_check.n64"
+  ASM
 
     ; --- data (read through the D-cache only) -------------------------------------
     .align 2

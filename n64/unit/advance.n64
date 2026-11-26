@@ -208,7 +208,7 @@ mmc3_worker_render:
     dsubu a0, s0, t0
     blez a0, mmc3_worker_done
     nop
-    jal ppuadvance
+    jal u_ppuadvance              ; the PPU state machine (unit/ppu.n64), no compiled wrapper
     nop
     sd s0, global_ppuclock-global_nesmmc3apuclock(s1)
     daddiu t1, zero, -1

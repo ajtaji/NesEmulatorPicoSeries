@@ -178,7 +178,10 @@ ProcedureNaked MapperChr(slot.i,bank.i)
     daddu t0, t0, t1
     ld t2, 0(t0)
     beq t2, a1, mmc3_chr_done
-    nop
+    move a3, ra
+    jal u_ppucut                  ; a CHR bank changes: the open raster band ends first
+    nop                           ; (u_ppucut keeps a0-a7, t0, t1)
+    move ra, a3
     sd a1, 0(t0)
     andi a2, a0, 4
     sll a2, a2, 1
@@ -278,6 +281,8 @@ mmc3_mirror_mode:
     sd ra, 0(sp)
     sd s0, 8(sp)
     sd s1, 16(sp)
+    jal u_ppucut                  ; the mirroring changes: the open raster band ends first
+    nop                           ; (u_ppucut keeps t0)
     move s0, t0
     move s1, zero
 mmc3_mirror_copy:

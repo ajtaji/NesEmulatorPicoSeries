@@ -1,0 +1,711 @@
+; unit/ppu.n64 - the PPU's state machine: the raster's lines and dots, vblank / NMI, the scroll
+; address v and its increments, sprite evaluation (the eight-sprite limit and the overflow flag),
+; the sprite-0 hit, the CPU's $2000-$2007 ports and the raster bands.
+; Part of the hot unit (design note, section N, step N3): included inside cpu6502.n64's procedure
+; (the shipped build) or the holder in mmc3_run.n64 (the reference build), never on its own. Entry
+; labels are u_<procedure>; the procedure of the same name is a one-jump stub for outside callers.
+;
+; WHAT IT OWNS (the guest-visible PPU state; everything the 6502 can observe)
+;   PpuLine / PpuDot / PpuOdd, PpuStatus (vblank, sprite 0, overflow), WorkerNmi, WorkerFrames,
+;   WorkerDot, PpuV / PpuT / PpuFineX / PpuW, SprCount and roster slot 0 (SprIndex(0), SprX(0)) that
+;   the status horizon reads, and the band log in NesUnitData.
+; WHAT IT CALLS (the CPU renderer, which still draws the picture; step N4 replaces it):
+;   ppubuildspritecache (the per-line sprite lists, rebuilt when OAM's Y bytes change),
+;   nesmmc3drawsprites / ppuclearsprites (the line's sprite pixels), nesreuseline (the background
+;   spans and the sprite overlay), ppurgblineraw (the line's publish), displayframe (line 239).
+;
+; HOW THE RENDERER STOPPED BEING AN AUTHORITY
+;   Before this step the renderer, while composing pixels, moved v's coarse X one tile a span and
+;   set the sprite-0 flag. Both are now computed here, from the state alone:
+;   - v: a span is consumed when its first dot is (spans start at multiples of 8 below 256), and
+;     each consumed span adds one to coarse X when rendering is on (PPUMASK bits 3-4). Coarse X
+;     with the horizontal name-table bit 10 above it is a 6-bit counter, so n spans add n to it
+;     modulo 64 (ppu_add6 below) - exactly n single increments, the wrap toggling bit 10.
+;   - sprite 0: at the line's start the evaluation keeps sprite 0's eight-pixel opacity (U_S0ROW,
+;     bit 2j = pixel X+j, with the left-column clip and the x >= 255 exclusion of the renderer
+;     applied). When spans are consumed, the at most two spans that hold sprite 0's pixels are
+;     decoded: the background's opacity there from the name table, fine Y, the pattern table and
+;     the MMC3 bank (the same bytes the renderer reads, at the same moment), shifted by fine X; the
+;     flag rises if any pixel is opaque in both. That is the renderer's rule, span for span: the
+;     flag rises in the interval that consumes the span, PpuStatus bit 6, never at x = 255.
+;   The renderer still writes v and bit 6 while it draws; the state machine puts its own values
+;   back after every draw. (The sprite-0 row and span test, the band record, the warm-up, the PAL
+;   dot rate and the $2007 read run rarely and sit in the unit's cold part, unit/ppu_cold.n64.
+;   NesUnitData is placed at load on D-cache sets clear of guest RAM and the stack - nes.n64,
+;   NesUnitPlace - and s6 / v0 load its address from NesUnitBase.)
+;   The checking build (#NES_PPU_CHECK, unit/ppu_check.n64) compares the two
+;   at every draw and stops the guest on the first difference.
+;
+; THE BANDS (NesUnitData; the emitter of step N4 is their consumer)
+;   A band is a run of whole visible lines over which every PPU input of the background picture is
+;   unchanged: PPUCTRL, PPUMASK, fine X, t, the CHR banks, the mirroring, the palette and the name
+;   tables. Its v advances line by line by the fixed rule (IncY, then t's horizontal bits). A band
+;   opens at the first line that begins while none is open; u_ppucut closes it BEFORE any write of
+;   such an input is applied (PpuRegWrite $2000/$2001/$2005/$2006/$2007, a $2007 read, MapperChr and
+;   MapperMirror on a change), and line 240 closes the frame's last band. A cut at dot 0 ends the
+;   band before that line; at dots 1-255 the line is split (a bit in U_SPLIT, the fallback lines of
+;   step N5) and the band ends before it; at dot 256 or later the line is complete and is the band's
+;   last. A record (32 bytes at U_BANDS): first line, end line, v at the first line, and
+;   PPUCTRL | PPUMASK << 8 | fine X << 16 | t << 32 at the close. 32 records a frame; more count
+;   in U_BANDLOST. The checking build proves the cut list complete: at every line inside an open
+;   band it recomputes a signature of all those inputs and the predicted v, and stops on a change
+;   that no cut announced.
+;
+; REGISTERS in u_ppuadvance (its frame saves ra, s0-s7): s0 dots still to advance, s1 line, s2 dot,
+;   s3 the interval's end dot on this line, s4 = global_ppuline (the PPU scalars by offset),
+;   s5 the edge (blank lines) or the draw's end dot, s6 = NesUnitData, s7 v before a draw.
+;
+; CHECKED BY: the per-instruction digest against the reference (status reads, NMI, IRQ times),
+;   the 61 checkpoints with picture and PCM, the video digest, and the checking build above.
+
+; ---- ppuadvancereference, from mmc3_ppu_raster.n64, the renderer's parts made calls ----
+  ASM
+u_ppuadvance:                       ; a0 = CPU cycles to advance the PPU by
+    la t0, global_ppuwarmup
+    ld t1, 0(t0)
+    bgtz t1, ppu_adv_warmup         ; the power-up warm-up (cold part, unit/ppu_cold.n64)
+    nop
+ppu_adv_save:
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    la t0, global_cartpal
+    ld t0, 0(t0)
+    bnez t0, ppu_adv_fraction       ; PAL: 3.2 dots a cycle (cold part)
+    dsll s0, a0, 1
+    daddu s0, s0, a0                ; NTSC: three dots a CPU cycle
+ppu_adv_start:
+    la s4, global_ppuline
+    ld s1, 0(s4)
+    ld s2, global_ppudot-global_ppuline(s4)
+    la s6, global_nesunitbase
+    ld s6, 0(s6)                    ; NesUnitData (placed at load: nes.n64, NesUnitPlace)
+ppu_adv_next:
+    blez s0, ppu_adv_commit
+    sltiu t0, s1, 240
+    beqz t0, ppu_adv_blank          ; vblank and the pre-render line
+    daddu s3, s2, s0                ; where this line's part of the interval ends
+    sltiu t0, s2, 256
+    beqz t0, ppu_adv_hblank         ; the visible dots are already done
+    nop
+    bnez s2, ppu_adv_draw           ; the line has begun in an earlier interval
+    nop
+
+    ; --- a visible line begins: host cadence and row, the band, the sprite evaluation ---
+    jal u_ppubeginline
+    nop
+    ld t0, #NES_U_BANDOPEN(s6)
+    bnez t0, ppu_line_band_on
+    addiu t1, zero, 1
+    beqz s1, ppu_line_frame         ; line 0: a new frame's band log (cold part)
+    nop
+ppu_line_band_open:
+    sd t1, #NES_U_BANDOPEN(s6)      ; this line opens a band
+    sd s1, #NES_U_BANDFIRST(s6)
+    ld t0, global_ppuv-global_ppuline(s4)
+    sd t0, #NES_U_BANDV(s6)         ; the scroll of its first line
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_band
+      move a0, zero                 ; a0 = 0: the band opens here
+    EndASM
+  CompilerEndIf
+  ASM
+    b ppu_line_eval
+    nop
+ppu_line_band_on:
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_band
+      addiu a0, zero, 1             ; a0 = 1: a line inside the open band
+    EndASM
+  CompilerEndIf
+  ASM
+ppu_line_eval:
+    ; Sprite evaluation from the per-line lists (CachedCount: candidates on the line, 9 = more
+    ; than eight; CachedSprite: their OAM indices in OAM order, so slot 0 is the lowest index).
+    la t0, global_oamcachedirty
+    ld t1, 0(t0)
+    beqz t1, ppu_line_cached
+    nop
+    jal ppubuildspritecache         ; OAM's Y bytes changed since the lists were built
+    nop
+ppu_line_cached:
+    la t0, global_cachedcount
+    daddu t0, t0, s1
+    lbu a1, 0(t0)                   ; a1 = candidates on this line
+    la t0, global_sprcount
+    sd a1, 0(t0)
+    bnez a1, ppu_line_count
+    sd zero, #NES_U_S0ROW(s6)       ; no sprite-0 pixels unless found below
+    jal ppuclearsprites             ; an empty line: the renderer clears its sprite row
+    nop
+    b ppu_adv_draw
+    nop
+ppu_line_count:
+    la t1, global_ppumask
+    ld a2, 0(t1)                    ; a2 = PPUMASK
+    sltiu t1, a1, 9
+    bnez t1, ppu_line_roster        ; eight or fewer: no overflow
+    andi t1, a2, 24
+    addiu a1, zero, 8               ; the ninth and later are not drawn
+    beqz t1, ppu_line_roster        ; rendering off: no overflow flag
+    sd a1, 0(t0)                    ; SprCount = 8 (both ways)
+    la t1, global_ppustatus
+    ld t2, 0(t1)
+    ori t2, t2, 32                  ; the sprite-overflow flag, at this line's dot 0
+    sd t2, 0(t1)
+ppu_line_roster:
+    sll t0, s1, 3
+    la t1, global_cachedsprite
+    daddu t1, t1, t0
+    lbu t0, 0(t1)                   ; roster slot 0: its OAM index
+    la t1, global_sprindex
+    sd t0, 0(t1)                    ; SprIndex(0), read by the status horizon
+    la t1, global_oam
+    sll t9, t0, 2
+    daddu t9, t9, t1
+    lwu t9, 0(t9)                   ; t9 = the OAM entry: Y << 24 | tile << 16 | attr << 8 | X
+    andi t1, t9, 255
+    la t2, global_sprx
+    sd t1, 0(t2)                    ; SprX(0)
+    bnez t0, ppu_line_sprites       ; slot 0 is not sprite 0: no sprite-0 hit on this line
+    andi t1, a2, 16
+    beqz t1, ppu_line_sprites       ; sprites hidden: no sprite-0 pixels
+    nop
+
+    b ppu_s0_row                    ; sprite 0's row (cold part)
+    nop
+ppu_line_sprites:
+    jal nesmmc3drawsprites          ; the renderer draws the line's sprites (a1 count, a2 mask)
+    move a0, s1
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_s0row
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+
+ppu_adv_draw:
+    sltiu t0, s3, 256
+    beqz t0, ppu_adv_draw_call
+    addiu a0, zero, 256
+    move a0, s3                     ; a0 = the end dot of the spans to consume, at most 256
+ppu_adv_draw_call:
+    move s5, a0
+    ld s7, global_ppuv-global_ppuline(s4)       ; v: the tile of the next span to consume
+    ld t0, global_ppustatus-global_ppuline(s4)
+    jal nesreuseline                ; the renderer draws spans ceil8(dot) .. a0
+    sd t0, #NES_U_DRAWST(s6)        ; the status before the draw
+    addiu t0, s2, 7
+    srl t0, t0, 3
+    addiu t1, s5, 7
+    srl t1, t1, 3
+    subu a4, t1, t0                 ; a4 = spans consumed (their first dots in [dot, end))
+    sll a5, t0, 3                   ; a5 = the first of them
+    ld a6, global_ppumask-global_ppuline(s4)
+    ld a7, #NES_U_DRAWST(s6)
+    andi a7, a7, 64                 ; a7 = the sprite-0 flag: already up?
+    bnez a7, ppu_draw_v
+    ld t9, #NES_U_S0ROW(s6)
+    beqz t9, ppu_draw_v             ; no sprite-0 pixel on this line
+    andi t0, a6, 8
+    beqz t0, ppu_draw_v             ; background hidden: nothing to hit
+    ld t8, #NES_U_S0X(s6)
+    b ppu_hit_first                 ; the spans holding sprite 0 (cold part)
+    nop
+ppu_draw_v:
+    andi t0, a6, 24
+    beqz t0, ppu_draw_store         ; rendering off: v does not move
+    move v0, s7
+    jal ppu_add6                    ; v0 = v + a4 coarse-X increments
+    move a0, a4
+ppu_draw_store:
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_draw            ; the renderer's v and flag against v0 and a7
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    sd v0, global_ppuv-global_ppuline(s4)
+    ld t0, #NES_U_DRAWST(s6)
+    ori t0, t0, 64
+    xori t0, t0, 64
+    or t0, t0, a7
+    sd t0, global_ppustatus-global_ppuline(s4)   ; the status before the draw, with this flag
+
+    sltiu t0, s3, 256
+    bnez t0, ppu_adv_current_dot    ; the line's visible part continues later
+    nop
+    ld t0, global_ppumask-global_ppuline(s4)
+    andi t0, t0, 24
+    beqz t0, ppu_adv_publish
+    nop
+    jal u_ppuincy                   ; dot 256: the next fine / coarse Y
+    nop
+ppu_adv_publish:
+    jal ppurgblineraw               ; the renderer publishes the line
+    nop
+    addiu t0, zero, 239
+    bne s1, t0, ppu_adv_hblank
+    nop
+    jal displayframe
+    nop
+ppu_adv_hblank:
+    sltiu t0, s2, 257
+    beqz t0, ppu_adv_end_row
+    sltiu t0, s3, 257
+    bnez t0, ppu_adv_end_row
+    ld t0, global_ppumask-global_ppuline(s4)
+    andi t0, t0, 24
+    beqz t0, ppu_adv_end_row
+    nop
+    ld t0, global_ppuv-global_ppuline(s4)       ; dot 257: v's horizontal bits from t
+    ld t1, global_pput-global_ppuline(s4)
+    andi t0, t0, 0x7BE0
+    andi t1, t1, 0x041F
+    or t0, t0, t1
+    sd t0, global_ppuv-global_ppuline(s4)
+ppu_adv_end_row:
+    sltiu t0, s3, 341
+    bnez t0, ppu_adv_current_dot
+    nop
+    daddiu s0, s3, -341
+    b ppu_adv_next_line
+    nop
+ppu_adv_current_dot:
+    b ppu_adv_save_dot
+    move s2, s3
+
+ppu_adv_blank:
+    ld t0, global_ppupreline-global_ppuline(s4)
+    addiu s3, zero, 341
+    addiu s5, zero, 341
+    bne s1, t0, ppu_adv_vblank
+    ld t1, global_ppuodd-global_ppuline(s4)
+    beqz t1, ppu_adv_pre_edges
+    ld t1, global_ppumask-global_ppuline(s4)
+    andi t1, t1, 24
+    beqz t1, ppu_adv_pre_edges
+    nop
+    addiu s3, zero, 340             ; the odd frame's pre-render line is one dot short
+    move s5, s3
+ppu_adv_pre_edges:
+    beqz s2, ppu_adv_dot_one
+    sltiu t0, s2, 257
+    bnez t0, ppu_adv_dot_x
+    sltiu t0, s2, 280
+    beqz t0, ppu_adv_blank_step
+    nop
+    b ppu_adv_blank_step
+    addiu s5, zero, 280
+ppu_adv_dot_x:
+    b ppu_adv_blank_step
+    addiu s5, zero, 257
+ppu_adv_vblank:
+    addiu t0, zero, 241
+    bne s1, t0, ppu_adv_blank_step
+    nop
+    bnez s2, ppu_adv_blank_step
+    nop
+ppu_adv_dot_one:
+    addiu s5, zero, 1
+ppu_adv_blank_step:
+    subu t0, s5, s2
+    sltu t1, s0, t0
+    beqz t1, ppu_adv_blank_edge
+    nop
+    b ppu_adv_save_dot
+    addu s2, s2, s0
+ppu_adv_blank_edge:
+    move s2, s5
+    dsubu s0, s0, t0
+    sd s2, global_ppudot-global_ppuline(s4)
+    addiu t0, zero, 1
+    bne s5, t0, ppu_adv_blank_scroll
+    addiu t0, zero, 241
+    ld t1, global_ppustatus-global_ppuline(s4)
+    bne s1, t0, ppu_adv_pre_clear
+    ld t0, global_ppuctrl-global_ppuline(s4)
+    ori t1, t1, 128                 ; line 241 dot 1: vblank
+    sd t1, global_ppustatus-global_ppuline(s4)
+    andi t0, t0, 128
+    beqz t0, ppu_adv_next
+    nop
+    la t0, global_workernmi
+    ld t1, 0(t0)
+    daddiu t1, t1, 1                ; NMI enabled: one more NMI edge
+    b ppu_adv_next
+    sd t1, 0(t0)
+ppu_adv_pre_clear:
+    andi t1, t1, 31                 ; pre-render dot 1: vblank, sprite 0, overflow cleared
+    b ppu_adv_next
+    sd t1, global_ppustatus-global_ppuline(s4)
+
+ppu_adv_blank_scroll:
+    beq s5, s3, ppu_adv_next_line
+    ld t0, global_ppumask-global_ppuline(s4)
+    andi t0, t0, 24
+    beqz t0, ppu_adv_next
+    addiu t2, zero, 257
+    ld t0, global_ppuv-global_ppuline(s4)
+    ld t1, global_pput-global_ppuline(s4)
+    beq s5, t2, ppu_adv_blank_latch ; 257: v's horizontal bits from t
+    nop
+    move t2, t0                     ; 280: v's vertical bits from t
+    move t0, t1
+    move t1, t2
+ppu_adv_blank_latch:
+    andi t0, t0, 0x7BE0
+    andi t1, t1, 0x041F
+    or t0, t0, t1
+    b ppu_adv_next
+    sd t0, global_ppuv-global_ppuline(s4)
+
+ppu_adv_next_line:
+    move s2, zero
+    sd zero, global_ppudot-global_ppuline(s4)
+    addiu s1, s1, 1
+    addiu t0, zero, 240
+    bne s1, t0, ppu_adv_line_count
+    move v0, s6
+    jal ppu_cut_close               ; the visible lines are over: close the frame's last band
+    addiu t3, zero, 240
+ppu_adv_line_count:
+    ld t0, global_ppulinecount-global_ppuline(s4)
+    bne s1, t0, ppu_adv_store_line
+    nop
+    move s1, zero
+    ld t0, global_ppuodd-global_ppuline(s4)
+    ld t1, global_ppuoddtoggle-global_ppuline(s4)
+    xor t0, t0, t1
+    sd t0, global_ppuodd-global_ppuline(s4)
+    la t0, global_workerframes
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+ppu_adv_store_line:
+    b ppu_adv_next
+    sd s1, 0(s4)
+ppu_adv_save_dot:
+    sd s2, global_ppudot-global_ppuline(s4)
+ppu_adv_commit:
+    addiu t0, zero, 341
+    multu s1, t0
+    mflo t0
+    daddu t0, t0, s2
+    la t1, global_workerdot
+    sd t0, 0(t1)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    jr ra
+    daddiu sp, sp, 80
+
+ppu_add6:                           ; leaf: v0 = v0 + a0 coarse-X increments (a0 0..63); t0 t1
+    andi t0, v0, 31                 ; coarse X ...
+    srl t1, v0, 5
+    andi t1, t1, 32                 ; ... with name-table bit 10 as its bit 5
+    or t0, t0, t1
+    addu t0, t0, a0                 ; the 6-bit sum (the carry out of bit 5 is dropped)
+    andi t1, t0, 32
+    sll t1, t1, 5                   ; bit 5 back to bit 10
+    andi t0, t0, 31
+    andi v0, v0, 0x7BE0
+    or v0, v0, t0
+    jr ra
+    or v0, v0, t1
+
+  EndASM
+
+; ---- the band cut ----
+  ASM
+u_ppucut:                           ; leaf: close the open band BEFORE a picture input changes
+    la v0, global_nesunitbase       ; clobbers t2 t3 t8 t9 v0 v1 only (callers keep a0-a7, t0, t1)
+    ld v0, 0(v0)                    ; NesUnitData
+    la t2, global_ppuline
+    ld t3, 0(t2)
+    sltiu t8, t3, 240
+    beqz t8, ppu_cut_done           ; vblank or pre-render: no band is open
+    nop
+    ld t2, global_ppudot-global_ppuline(t2)
+    beqz t2, ppu_cut_close          ; the line has not begun: the band ends before it
+    sltiu t8, t2, 256
+    bnez t8, ppu_cut_split          ; mid-line: the line is split
+    nop
+    b ppu_cut_close
+    addiu t3, t3, 1                 ; the line is complete: the band ends after it
+ppu_cut_done:
+    jr ra
+    nop
+  EndASM
+
+; ---- ppubeginline and ppuincy, from mmc3_ppu_raster.n64 ----
+  ASM
+u_ppubeginline:
+    la t0, global_ppuline
+    ld a0, 0(t0)
+    andi t1, a0, 15
+    bnez t1, ppu_begin_row
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal displaywaitline             ; every 16 lines: the host's frame start and audio cadence
+    sd a0, 8(sp)
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    daddiu sp, sp, 16
+ppu_begin_row:
+    la t0, global_linepixels        ; the renderer's row for this line
+    addiu t0, t0, 15
+    srl t0, t0, 4
+    sll t0, t0, 4
+    sll a0, a0, 8
+    addu t0, t0, a0
+    la t1, global_neslinerow
+    jr ra
+    sd t0, 0(t1)
+
+u_ppuincy:
+    la t0, global_ppuv
+    ld t1, 0(t0)
+    andi t2, t1, 0x7000
+    xori t2, t2, 0x7000
+    beqz t2, ppu_incy_coarse
+    addiu t3, t1, 4096
+    jr ra
+    sd t3, 0(t0)                    ; fine Y + 1
+ppu_incy_coarse:
+    andi t1, t1, 0x0FFF             ; fine Y wraps to 0
+    srl t2, t1, 5
+    andi t2, t2, 31
+    addiu t3, zero, 29
+    bne t2, t3, ppu_incy_next
+    addiu t2, t2, 1
+    xori t1, t1, 0x0800             ; row 29: the vertical name table flips
+    move t2, zero
+ppu_incy_next:
+    andi t2, t2, 31                 ; rows 30-31 wrap to 0 without the flip
+    andi t1, t1, 0x7C1F
+    sll t2, t2, 5
+    or t1, t1, t2
+    jr ra
+    sd t1, 0(t0)
+  EndASM
+
+; ---- ppuregwrite and ppuregread, from mmc3_ppu_registers.n64, with the band cuts ----
+  ASM
+u_ppuregwrite:
+    andi a0, a0, 7
+    la a2, global_ppubus
+    daddiu t0, zero, -1
+    sd a1, 0(a2)
+    sd t0, global_bgcacheaddr-global_ppubus(a2)
+    sd t0, global_rgblastkey-global_ppubus(a2)
+    ld t0, global_ppuwarmup-global_ppubus(a2)
+    blez t0, nes_ppu_write_dispatch
+    addiu t0, zero, 0x63
+    srlv t0, t0, a0                 ; warm-up: $2000, $2001, $2005, $2006 are ignored
+    andi t0, t0, 1
+    bnez t0, nes_ppu_port_done
+    nop
+nes_ppu_write_dispatch:
+    la t0, nes_ppu_write_table
+    sll a0, a0, 2
+    daddu t0, t0, a0
+    lw t0, 0(t0)
+    jr t0
+    nop
+nes_ppu_write_table:
+    .word nes_ppu_write_ctrl, nes_ppu_write_mask, nes_ppu_port_done, nes_ppu_write_oamaddr
+    .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
+nes_ppu_write_ctrl:
+    ld t0, global_ppuctrl-global_ppubus(a2)
+    beq t0, a1, nes_ppu_ctrl_store
+    move a3, ra
+    jal u_ppucut                    ; PPUCTRL changes: the band ends first
+    nop
+    move ra, a3
+nes_ppu_ctrl_store:
+    sd a1, global_ppuctrl-global_ppubus(a2)
+    xor t1, t0, a1
+    andi t1, t1, 32
+    beqz t1, nes_ppu_ctrl_scroll
+    addiu t2, zero, 1
+    sd t2, global_oamcachedirty-global_ppubus(a2)
+nes_ppu_ctrl_scroll:
+    ld t1, global_pput-global_ppubus(a2)
+    andi t2, a1, 3
+    sll t2, t2, 10
+    andi t1, t1, 0x73FF
+    or t1, t1, t2
+    sd t1, global_pput-global_ppubus(a2)
+    andi t0, t0, 128
+    bnez t0, nes_ppu_port_done
+    andi a1, a1, 128
+    beqz a1, nes_ppu_port_done
+    ld t1, global_ppustatus-global_ppubus(a2)
+    andi t1, t1, 128
+    beqz t1, nes_ppu_port_done
+    nop
+    ld t0, global_workernmi-global_ppubus(a2)
+    daddiu t0, t0, 1                ; NMI enabled during vblank: an NMI edge now
+    jr ra
+    sd t0, global_workernmi-global_ppubus(a2)
+nes_ppu_write_mask:
+    ld t0, global_ppumask-global_ppubus(a2)
+    beq t0, a1, nes_ppu_mask_store
+    move a3, ra
+    jal u_ppucut                    ; PPUMASK changes: the band ends first
+    nop
+    move ra, a3
+nes_ppu_mask_store:
+    sd a1, global_ppumask-global_ppubus(a2)
+    andi t1, a1, 24
+    beqz t1, nes_ppu_mask_colours
+    nop
+    sd zero, global_nesblankuntouched-global_ppubus(a2)
+nes_ppu_mask_colours:
+    xor t0, t0, a1
+    andi t0, t0, 0xE1
+    beqz t0, nes_ppu_port_done
+    nop
+    j ppucolours
+    nop
+nes_ppu_write_oamaddr:
+    jr ra
+    sd a1, global_ppuoamaddr-global_ppubus(a2)
+nes_ppu_write_oam:
+    addiu t0, zero, 1
+    sd t0, global_oamcachedirty-global_ppubus(a2)
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    sb a1, 0(t1)
+    addiu t0, t0, 1
+    andi t0, t0, 255
+    jr ra
+    sd t0, global_ppuoamaddr-global_ppubus(a2)
+nes_ppu_write_scroll:
+    move a3, ra
+    jal u_ppucut                    ; t or fine X changes: the band ends first
+    nop
+    move ra, a3
+    ld t0, global_ppuw-global_ppubus(a2)
+    ld t1, global_pput-global_ppubus(a2)
+    bnez t0, nes_ppu_scroll_high
+    xori t0, t0, 1
+    andi t1, t1, 0x7FE0
+    srl t2, a1, 3
+    or t1, t1, t2
+    andi t2, a1, 7
+    b nes_ppu_latch_write
+    sd t2, global_ppufinex-global_ppubus(a2)
+nes_ppu_scroll_high:
+    andi t1, t1, 0x0C1F
+    andi t2, a1, 0xF8
+    sll t2, t2, 2
+    andi t3, a1, 7
+    sll t3, t3, 12
+    or t1, t1, t2
+    b nes_ppu_latch_write
+    or t1, t1, t3
+nes_ppu_write_addr:
+    move a3, ra
+    jal u_ppucut                    ; t (and v on the second write) changes: the band ends first
+    nop
+    move ra, a3
+    ld t0, global_ppuw-global_ppubus(a2)
+    ld t1, global_pput-global_ppubus(a2)
+    bnez t0, nes_ppu_addr_low
+    xori t0, t0, 1
+    andi t1, t1, 0xFF
+    andi t2, a1, 0x3F
+    sll t2, t2, 8
+    b nes_ppu_latch_write
+    or t1, t1, t2
+nes_ppu_addr_low:
+    andi t1, t1, 0x7F00
+    or t1, t1, a1
+    sd t1, global_ppuv-global_ppubus(a2)
+nes_ppu_latch_write:
+    sd t1, global_pput-global_ppubus(a2)
+    jr ra
+    sd t0, global_ppuw-global_ppubus(a2)
+nes_ppu_write_data:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal u_ppucut                    ; a name table, the palette, CHR-RAM or v changes
+    nop
+    jal ppuwrite
+    ld a0, global_ppuv-global_ppubus(a2)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la a2, global_ppubus
+    j nes_ppu_port_increment
+    nop
+nes_ppu_port_done:
+    jr ra
+    nop
+
+u_ppuregread:
+    andi a0, a0, 7
+    la a2, global_ppubus
+    addiu t0, zero, 2
+    beq a0, t0, nes_ppu_read_status
+    addiu t0, zero, 4
+    beq a0, t0, nes_ppu_read_oam
+    addiu t0, zero, 7
+    beq a0, t0, nes_ppu_read_data
+    nop
+    jr ra
+    ld a0, 0(a2)
+nes_ppu_read_status:
+    ld t0, global_ppustatus-global_ppubus(a2)
+    ld a0, 0(a2)
+    andi t1, t0, 0x7F               ; reading clears vblank and the write toggle
+    sd t1, global_ppustatus-global_ppubus(a2)
+    sd zero, global_ppuw-global_ppubus(a2)
+    andi t0, t0, 0xE0
+    andi a0, a0, 31
+    or a0, a0, t0
+    jr ra
+    sd a0, 0(a2)
+nes_ppu_read_oam:
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    lbu a0, 0(t1)
+    jr ra
+    sd a0, 0(a2)
+nes_ppu_port_increment:
+    ld t0, global_ppuctrl-global_ppubus(a2)
+    ld t1, global_ppuv-global_ppubus(a2)
+    andi t0, t0, 4
+    beqz t0, nes_ppu_port_increment_mask
+    addiu t1, t1, 1
+    addiu t1, t1, 31                ; PPUCTRL bit 2: +32
+nes_ppu_port_increment_mask:
+    andi t1, t1, 0x7FFF
+    jr ra
+    sd t1, global_ppuv-global_ppubus(a2)
+  EndASM

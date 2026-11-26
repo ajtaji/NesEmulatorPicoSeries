@@ -1,0 +1,307 @@
+; unit/ppu_cold.n64 - the PPU state machine's rarely run paths, in the hot unit's cold part
+; (design note, section N.3: the cold tail). Included after c65_fetch_slow in cpu6502.n64 (the
+; shipped build) or in the reference build's holder. Every block is entered by a branch from
+; unit/ppu.n64 and branches back to it; registers as described there. Moved here because each
+; line runs well under 500 cycles a frame: the warm-up and PAL dot rate, the frame's band-log
+; reset, sprite 0's row (only on lines that hold sprite 0), the sprite-0 span test (only until
+; the flag rises), the band record (a few times a frame) and the $2007 read.
+  ASM
+ppu_adv_warmup:                     ; t0 = &PpuWarmup, t1 = its value (> 0), a0 = cycles
+    dsubu t1, t1, a0
+    bgez t1, ppu_adv_warm_store
+    nop
+    move t1, zero
+ppu_adv_warm_store:
+    b ppu_adv_save
+    sd t1, 0(t0)
+ppu_adv_fraction:                   ; PAL: pputakedots keeps the fractional dot clock
+    jal pputakedots
+    nop
+    b ppu_adv_start
+    move s0, a0
+ppu_line_frame:                     ; line 0 opens a frame: clear its band log and split map
+    daddiu t2, s6, #NES_U_SPLIT     ; (t1 = 1 is kept for the band open)
+    sd zero, #NES_U_BANDCOUNT(s6)
+    sd zero, #NES_U_BANDLOST(s6)
+    sd zero, 0(t2)
+    sd zero, 8(t2)
+    sd zero, 16(t2)
+    sd zero, 24(t2)
+    b ppu_line_band_open
+    nop
+ppu_s0_row:
+    ; Sprite 0's row on this line, as the renderer fetches it (NesMmc3DrawSprites).
+    la t0, global_ppuctrl
+    ld t0, 0(t0)
+    andi t1, t0, 32
+    srl t1, t1, 2
+    addiu t1, t1, 7                 ; t1 = height - 1 (7 or 15, PPUCTRL bit 5)
+    srl t2, t9, 24                  ; Y
+    addiu t3, s1, -1
+    subu t2, t3, t2                 ; t2 = the row in the sprite: line - 1 - Y
+    srl v0, t9, 8
+    andi v0, v0, 255                ; v0 = attributes
+    srl v1, t9, 16
+    andi v1, v1, 255                ; v1 = tile
+    andi t3, v0, 128
+    beqz t3, ppu_s0_flipped
+    nop
+    subu t2, t1, t2                 ; vertical flip
+ppu_s0_flipped:
+    andi t3, t0, 8
+    sltiu t8, t1, 8
+    bnez t8, ppu_s0_address         ; 8x8: the sprite table is PPUCTRL bit 3
+    sll t3, t3, 9                   ; t3 = $1000 or 0 (both ways)
+    andi t3, v1, 1                  ; 8x16: tile bit 0 selects the table
+    sll t3, t3, 12
+    andi v1, v1, 254
+    srl t8, t2, 3
+    addu v1, v1, t8                 ; rows 8-15 come from the next tile
+    andi t2, t2, 7
+ppu_s0_address:
+    sll v1, v1, 4
+    sll t2, t2, 1
+    addu v1, v1, t3
+    addu t2, t2, v1                 ; t2 = the row's PPU pattern address
+    andi t8, t2, 0x1c00
+    srl t8, t8, 7                   ; its 1 KB bank's entry in the MMC3 pattern bias table
+    la t3, global_nesmmc3patternbias
+    addu t8, t8, t3
+    lw t8, 4(t8)
+    addu t8, t8, t2
+    lhu t8, 0(t8)                   ; the decoded row: pixel j in bits 2j+1:2j
+    andi t3, v0, 64
+    beqz t3, ppu_s0_opacity
+    andi t0, t8, 0x3333
+    srl t1, t8, 2                   ; horizontal flip: reverse the eight 2-bit pixels
+    andi t1, t1, 0x3333             ; (swap pairs, then nibbles, then bytes)
+    sll t0, t0, 2
+    or t8, t0, t1
+    andi t0, t8, 0x0F0F
+    srl t1, t8, 4
+    andi t1, t1, 0x0F0F
+    sll t0, t0, 4
+    or t8, t0, t1
+    srl t1, t8, 8
+    sll t8, t8, 8
+    andi t8, t8, 0xFFFF
+    or t8, t8, t1
+ppu_s0_opacity:
+    srl t0, t8, 1
+    or t8, t8, t0
+    andi t8, t8, 0x5555             ; bit 2j: pixel j opaque
+    andi t0, t9, 255                ; t0 = X
+    andi t1, a2, 4
+    bnez t1, ppu_s0_right           ; the left column shows sprites
+    sltiu t1, t0, 8
+    beqz t1, ppu_s0_right
+    addiu t1, zero, 8
+    subu t1, t1, t0                 ; the 8 - X pixels left of x = 8 are clipped
+    sll t1, t1, 1
+    daddiu t2, zero, -1
+    sllv t2, t2, t1
+    and t8, t8, t2
+ppu_s0_right:
+    sltiu t1, t0, 248
+    bnez t1, ppu_s0_store
+    addiu t1, zero, 255
+    subu t1, t1, t0                 ; only pixels left of x = 255 can raise the flag
+    sll t1, t1, 1
+    addiu t2, zero, 1
+    sllv t2, t2, t1
+    addiu t2, t2, -1
+    and t8, t8, t2
+ppu_s0_store:
+    sd t8, #NES_U_S0ROW(s6)
+    sd t0, #NES_U_S0X(s6)
+    b ppu_line_sprites
+    nop
+ppu_hit_first:
+    srl a3, t8, 3
+    sll a3, a3, 3                   ; a3 = the first span holding sprite 0
+ppu_hit_span:
+    sltu t0, a3, a5
+    bnez t0, ppu_hit_next           ; consumed in an earlier interval
+    sltu t0, a3, s5
+    beqz t0, ppu_draw_v             ; not consumed yet
+    nop
+    jal ppu_span_hit
+    nop
+    bnez v0, ppu_hit_found
+    nop
+ppu_hit_next:
+    daddiu a3, a3, 8
+    daddiu t0, t8, 8
+    sltu t0, a3, t0                 ; the next span still holds sprite pixels (X mod 8 > 0)
+    beqz t0, ppu_draw_v
+    sltiu t0, a3, 256
+    bnez t0, ppu_hit_span
+    nop
+    b ppu_draw_v
+    nop
+ppu_hit_found:
+    ori a7, zero, 64
+    b ppu_draw_v
+    nop
+ppu_span_hit:                       ; v0 = 1 if sprite 0 meets the background in span a3
+    ; In: a3 the span's first dot, a5 the interval's first span, s7 v at a5, t8 X, t9 U_S0ROW,
+    ; a6 PPUMASK. Clobbers a0-a2, t0-t3, v0, v1; keeps a3-a7, t8, t9.
+    move a2, ra
+    subu a0, a3, a5
+    srl a0, a0, 3
+    jal ppu_add6                    ; v0 = v of span a3: its first tile
+    move v0, s7
+    move a1, v0
+    jal ppu_tile_opacity            ; v0 = the first tile's row opacity
+    move a0, a1
+    la t0, global_ppufinex
+    ld t2, 0(t0)
+    beqz t2, ppu_span_bg            ; no fine X: the span is the one tile
+    move a1, v0
+    move v0, a0                     ; fine X: the span also shows the next tile's left pixels
+    jal ppu_add6
+    addiu a0, zero, 1
+    move a0, v0
+    jal ppu_tile_opacity
+    nop
+    dsll v0, v0, 16
+    or a1, a1, v0
+    sll t2, t2, 1
+    dsrlv a1, a1, t2                ; span pixel p = tile pixel p + fine X of the pair
+ppu_span_bg:
+    andi a1, a1, 0x5555
+    bnez a3, ppu_span_sprite
+    andi t0, a6, 2
+    bnez t0, ppu_span_sprite
+    nop
+    move a1, zero                   ; span 0 with the left background column hidden
+ppu_span_sprite:
+    subu t0, t8, a3                 ; X - span
+    bltz t0, ppu_span_left
+    sll t0, t0, 1
+    b ppu_span_test
+    sllv t1, t9, t0                 ; sprite pixel j at span pixel X - span + j
+ppu_span_left:
+    subu t0, zero, t0
+    srlv t1, t9, t0
+ppu_span_test:
+    and v0, a1, t1
+    andi v0, v0, 0xFFFF
+    jr a2
+    sltu v0, zero, v0
+
+ppu_tile_opacity:                   ; leaf: a0 = v; v0 = bit 2i set if the tile's pixel i is opaque
+    andi t0, a0, 0xFFF              ; clobbers t0 t1 t3 v1
+    la t1, global_nt
+    daddu t0, t0, t1
+    lbu t0, 0(t0)                   ; the name-table byte: the tile number
+    la t1, global_ppuctrl
+    ld t1, 0(t1)
+    andi t1, t1, 16
+    sll t1, t1, 8                   ; the background's pattern table
+    srl t3, a0, 11
+    andi t3, t3, 14                 ; fine Y * 2 (two bytes a decoded row)
+    or t1, t1, t3
+    sll t0, t0, 4
+    addu t0, t0, t1                 ; the row's PPU pattern address
+    andi t3, t0, 0x1c00
+    srl t3, t3, 7
+    la v1, global_nesmmc3patternbias
+    addu t3, t3, v1
+    lw t3, 4(t3)                    ; its MMC3 bank
+    addu t0, t0, t3
+    lhu v0, 0(t0)                   ; the decoded row (pixel i in bits 2i+1:2i)
+    srl t0, v0, 1
+    or v0, v0, t0
+    jr ra
+    andi v0, v0, 0x5555
+ppu_cut_split:
+    srl t8, t3, 3
+    daddu t8, t8, v0
+    lbu t9, #NES_U_SPLIT(t8)
+    andi t2, t3, 7
+    addiu v1, zero, 1
+    sllv v1, v1, t2
+    or t9, t9, v1
+    sb t9, #NES_U_SPLIT(t8)         ; U_SPLIT bit (line): a fallback line
+ppu_cut_close:                      ; v0 = NesUnitData, t3 = the line the band ends before
+    ld t8, #NES_U_BANDOPEN(v0)
+    beqz t8, ppu_cut_done
+    ld t9, #NES_U_BANDFIRST(v0)
+    sd zero, #NES_U_BANDOPEN(v0)
+    sltu t8, t9, t3
+    beqz t8, ppu_cut_done           ; no complete line in it: no record
+    ld t8, #NES_U_BANDCOUNT(v0)
+    sltiu t2, t8, #NES_U_BANDMAX
+    beqz t2, ppu_cut_lost
+    dsll t2, t8, 5
+    daddu t2, t2, v0                ; the record
+    sd t9, #NES_U_REC_FIRST(t2)
+    sd t3, #NES_U_REC_END(t2)
+    ld t9, #NES_U_BANDV(v0)
+    sd t9, #NES_U_REC_V(t2)
+    daddiu t8, t8, 1
+    sd t8, #NES_U_BANDCOUNT(v0)
+    la v1, global_ppuctrl
+    ld t9, 0(v1)
+    la v1, global_ppumask
+    ld t8, 0(v1)
+    dsll t8, t8, 8
+    or t9, t9, t8
+    la v1, global_ppufinex
+    ld t8, 0(v1)
+    dsll t8, t8, 16
+    or t9, t9, t8
+    la v1, global_pput
+    ld t8, 0(v1)
+    dsll32 t8, t8, 0
+    or t9, t9, t8
+    jr ra
+    sd t9, #NES_U_REC_STATE(t2)
+ppu_cut_lost:
+    ld t8, #NES_U_BANDLOST(v0)
+    daddiu t8, t8, 1
+    jr ra
+    sd t8, #NES_U_BANDLOST(v0)
+nes_ppu_read_data:
+    ld a0, global_ppuv-global_ppubus(a2)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    jal u_ppucut                    ; the read moves v: the band ends first
+    sd a2, 16(sp)
+    andi a0, a0, 0x3FFF
+    sltiu t0, a0, 0x3F00
+    beqz t0, nes_ppu_read_palette
+    sd a0, 24(sp)
+    ld t0, global_ppubuffer-global_ppubus(a2)
+    jal ppuread
+    sd t0, 8(sp)
+    b nes_ppu_read_buffer
+    nop
+nes_ppu_read_palette:
+    jal ppuread
+    nop
+    ld a2, 16(sp)
+    ld t0, 0(a2)
+    andi t0, t0, 0xC0
+    or t1, a0, t0
+    ld t0, global_ppumask-global_ppubus(a2)
+    andi t0, t0, 1
+    beqz t0, nes_ppu_read_palette_mirror
+    nop
+    andi t1, t1, 0xF0
+nes_ppu_read_palette_mirror:
+    ld a0, 24(sp)
+    addiu a0, a0, -4096
+    jal ppuread
+    sd t1, 8(sp)
+nes_ppu_read_buffer:
+    ld a2, 16(sp)
+    sd a0, global_ppubuffer-global_ppubus(a2)
+    ld a0, 8(sp)
+    ld ra, 0(sp)
+    sd a0, 0(a2)
+    daddiu sp, sp, 32
+    b nes_ppu_port_increment
+    nop
+  EndASM

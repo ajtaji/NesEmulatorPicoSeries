@@ -165,6 +165,9 @@ def build(args, *, controller_trace=()):
         raise ValueError("the assembly 6502 core is built for the runtime MMC3 cartridge only")
     cpu_trace = getattr(args, "cpu_trace", False)
     a12_check = getattr(args, "a12_check", False)
+    ppu_check = getattr(args, "ppu_check", False)
+    if ppu_check and not (runtime and cart.mapper == 4 and args.check_frame):
+        raise ValueError("the PPU check is a runtime-MMC3 verification build")
     if a12_check and not (runtime and cart.mapper == 4 and args.check_frame):
         raise ValueError("the A12 check is a runtime-MMC3 verification build")
     if cpu_trace and not (runtime and cart.mapper == 4 and args.check_frame):
@@ -172,6 +175,7 @@ def build(args, *, controller_trace=()):
     settings = {
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
+        "NES_PPU_CHECK": int(ppu_check),
         "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
@@ -314,6 +318,8 @@ if __name__ == "__main__":
                         help="checking build: a per-frame digest of the state after every instruction (needs --check-frame)")
     parser.add_argument("--a12-check", action="store_true",
                         help="checking build: the exact and the analytic A12 walks compared at every call (needs --check-frame)")
+    parser.add_argument("--ppu-check", action="store_true",
+                        help="checking build: the PPU state machine against the renderer and the band rule (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:
