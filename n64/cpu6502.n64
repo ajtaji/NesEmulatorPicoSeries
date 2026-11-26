@@ -3024,8 +3024,8 @@ c65_shape_status:            ; a0 = NesPollStatusDone(), the state published and
     jr ra
     nop
 
-    ; --- moved here from the hot span by measured heat (N7, design note N.40: 0 cycles a guest frame over
-    ; SMB3 0-3600 in rdp-n6d-replay); each is entered by a branch and leaves by one -----------------------
+    ; --- moved here from the hot span by measured heat (N7, design note N.40: measured at 0 cycles a guest
+    ; frame in SMB3, frames 0-3600); each is entered by a branch and leaves by one -----------------------
 c65_op_00_rest:
     srl t0, a1, 8
     addu t1, s1, t2

@@ -1,8 +1,8 @@
 ; unit/cold.n64 - pieces of the hot unit's files that run (almost) never, kept in the unit's COLD part
 ; Part of the hot unit: included inside cpu6502.n64's procedure after its cold part begins (the shipped build) or
 ; in the holder procedure in mmc3_run.n64 (the reference build), never on its own.
-; N7 (design note N.40): moved out of the hot span by MEASURED heat (rdp-n6d-replay, SMB3 0-3600: 0 cycles a
-; guest frame) to make room for the bus handlers; each block is entered by a branch and leaves by one, so its
+; N7 (design note N.40): moved out of the hot span by MEASURED heat (measured at 0 cycles a guest frame in
+; SMB3, frames 0-3600) to make room for the bus handlers; each block is entered by a branch and leaves by one, so its
 ; place changes no path, only which I-cache set it occupies.
 
 ; ---- the RAM-wait cache's miss (from unit/window.n64): decode the rule, fill the cache entry ----
