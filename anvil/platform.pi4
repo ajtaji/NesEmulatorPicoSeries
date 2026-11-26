@@ -1,3 +1,10 @@
+; The compiler's heap (Shared/Memory/memory_arena.pmi, 32 MB by default on this board) lies in
+; the BSS, which this map gives $2000000 up to 1 MB below the stack top at $3000000. Nothing here
+; allocates from it: no string is growable (every .s has a room), nothing calls AllocateMemory,
+; and the built image holds no allocator - only the arena's reservation. 64 KB keeps that true
+; with room to spare; a growable string added later that outgrows it stops the core (the text
+; library's pm_text_failed), it does not overwrite anything.
+#MEMORY_HEAP_BYTES=65536
 ; CPU cache ownership belongs to the platform, not video/audio or the NES.
 ; Match Anvil's WB attributes for resident code/state and secondary mailboxes.
 ; DMA/framebuffer/GPU arenas stay NC, including every private GPU allocation.
