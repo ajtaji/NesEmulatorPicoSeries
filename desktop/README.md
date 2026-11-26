@@ -53,7 +53,8 @@ py tools/gen_desktop_cpu_procs.py
 
 You need PureBasic 6.41 (x64, the C back end: `pbcompilerc.exe`) and two public repositories, cloned side
 by side: this one and the [Neon Arcade Display Engine](https://github.com/ajtaji/Neon-Arcade-Dispay-Engine).
-The engine's name really is spelled "Dispay".
+The engine's name really is spelled "Dispay". The commands show the compiler where a machine-wide install
+puts it; an install for one user puts it under `$env:LOCALAPPDATA\Programs\PureBasic\Compilers\` instead.
 
 ```powershell
 git clone https://github.com/ajtaji/NesEmulatorPicoSeries.git
