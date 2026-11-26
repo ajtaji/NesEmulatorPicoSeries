@@ -354,3 +354,59 @@ mmc3_budget_dmc_one:
     jr ra
     addiu a0, zero, 1
   EndASM
+
+; ---- the MMC3 register paths that SMB3 never runs (C4, design note N.46b: 0 cycles a guest frame in the record
+; replay's profile), moved with u_mapperwrite's dispatch from mmc3_registers.n64 unchanged; reached through its
+; table (unit/write.n64). In: a0 address, a1 value. Each leaves by a tail jump or jr ra to u_mapperwrite's caller. ----
+  ASM
+mmc3_write_select:                  ; $8000: the bank select; a change of the PRG / CHR mode bits remaps
+    la t0, global_mapselect
+    ld t1, 0(t0)
+    sd a1, 0(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    beqz t1, mmc3_write_done        ; only the register index changed
+    nop
+    j mapperupdate
+    nop
+mmc3_write_mirror:                  ; $A000: vertical (0) or horizontal (1), not with four-screen VRAM
+    la t0, global_mapfourscreen
+    ld t1, 0(t0)
+    bnez t1, mmc3_write_done
+    andi a0, a1, 1
+    j mappermirror
+    xori a0, a0, 1
+mmc3_write_protect:                 ; $A001: bit 7 enables the work RAM, bit 6 protects it
+    la t0, global_mapramenable
+    srl t1, a1, 7
+    srl t2, a1, 6
+    andi t1, t1, 1
+    andi t2, t2, 1
+    sd t1, 0(t0)
+    jr ra
+    sd t2, global_mapramprotect-global_mapramenable(t0)
+  EndASM
+
+; ---- the $2004 port (OAMDATA), from unit/ppu.n64 (C4, N.46b: 0 cycles a guest frame - SMB3 and MM4 fill OAM by
+; the $4014 DMA), reached through u_ppuregwrite's / u_ppuregread's tables unchanged. In: a1 the value (write),
+; a2 = @PpuBus. ----
+  ASM
+nes_ppu_write_oam:                  ; Oam(OamAddr) = value : OamAddr + 1 (mod 256) : the sprite cache is dirty
+    addiu t0, zero, 1
+    sd t0, global_oamcachedirty-global_ppubus(a2)
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    sb a1, 0(t1)
+    addiu t0, t0, 1
+    andi t0, t0, 255
+    jr ra
+    sd t0, global_ppuoamaddr-global_ppubus(a2)
+nes_ppu_read_oam:                   ; PpuBus = Oam(OamAddr), no increment on a read
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    lbu a0, 0(t1)
+    jr ra
+    sd a0, 0(a2)
+  EndASM

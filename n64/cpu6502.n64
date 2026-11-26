@@ -217,16 +217,8 @@ c65_rw_frames:
     move a1, s1
     beqz a0, c65_rw_window
     nop
-    b c65_rw_exit
+    b c65_rw_exit            ; (c65_rw_stop / c65_rw_exit: the run's end, once a run - in the cold part, C4)
     nop
-c65_rw_stop:
-    move a0, zero
-c65_rw_exit:
-    ld ra, 0(sp)
-    ld s0, 8(sp)
-    ld s1, 16(sp)
-    jr ra
-    daddiu sp, sp, 32
 
     ; --- the end of every instruction --------------------------------------
 c65_next:
@@ -2283,30 +2275,7 @@ c65_reload:                  ; leaf; a0 and t2 are left alone
     jr ra
     ld v0, global_accessphase-global_nesmmc3bias(a3)
 
-    ; --- the end of the window -------------------------------------------------
-c65_end:
-  EndASM
-  CompilerIf #NES_CPU_TRACE
-    ASM
-      or a4, s5, zero        ; the digest reads A X Y FZ in a4-a7
-      or a5, s6, zero
-      or a6, s7, zero
-      jal nescputracestep    ; a window can end without passing c65_next
-      or a7, fp, zero
-    EndASM
-  CompilerEndIf
-  ASM
-    jal c65_publish
-    nop
-    ; CpuCycles = NesRunStart + Budget - Left : CpuInWindow = 0
-    la t0, global_cpucycles
-    ld t1, global_nesrunstart-global_cpucycles(t0)
-    ld t2, global_budget-global_cpucycles(t0)
-    daddu t2, t1, t2
-    dsubu t2, t2, a2
-    sd t2, 0(t0)
-    sd zero, global_cpuinwindow-global_cpucycles(t0)
-    dsubu a0, t2, t1         ; ProcedureReturn CpuCycles - NesRunStart
+    ; --- the end of the window: c65_wend below; c65_end (a stop's end, once a run) is in the cold part (C4) --
 c65_restore:                 ; a3 = global_nesmmc3bias: the caller's registers back, and return
     ld s0, global_c65saves0-global_nesmmc3bias(a3)
     ld s1, global_c65saves1-global_nesmmc3bias(a3)
@@ -2532,6 +2501,45 @@ c65_peek_prg:
     addu t1, t1, t2
     jr ra
     lbu t1, 0(t1)
+
+    ; --- moved out of the hot span by measured heat (C4, design note N.46b: 0 cycles a guest frame) ----------
+    ; c65_end: the window's end by a stop (an illegal opcode, code fetched from device space) - since C3 every other
+    ; end is c65_wend's. It publishes the state, sets CpuCycles = NesRunStart + Budget - Left and CpuInWindow = 0,
+    ; and returns CpuCycles - NesRunStart to the run loop through c65_restore (a3 = global_nesmmc3bias, as the
+    ; core keeps it). Unchanged but for the branch to c65_restore, which it used to fall into.
+c65_end:
+  EndASM
+  CompilerIf #NES_CPU_TRACE
+    ASM
+      or a4, s5, zero        ; the digest reads A X Y FZ in a4-a7
+      or a5, s6, zero
+      or a6, s7, zero
+      jal nescputracestep    ; a window can end without passing c65_next
+      or a7, fp, zero
+    EndASM
+  CompilerEndIf
+  ASM
+    jal c65_publish
+    nop
+    ; CpuCycles = NesRunStart + Budget - Left : CpuInWindow = 0
+    la t0, global_cpucycles
+    ld t1, global_nesrunstart-global_cpucycles(t0)
+    ld t2, global_budget-global_cpucycles(t0)
+    daddu t2, t1, t2
+    dsubu t2, t2, a2
+    sd t2, 0(t0)
+    sd zero, global_cpuinwindow-global_cpucycles(t0)
+    b c65_restore
+    dsubu a0, t2, t1         ; ProcedureReturn CpuCycles - NesRunStart
+    ; c65_rw_stop / c65_rw_exit: the run loop's end (NesRunMapper4's return; s0, s1 and ra from its frame).
+c65_rw_stop:
+    move a0, zero
+c65_rw_exit:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    jr ra
+    daddiu sp, sp, 32
 c65_bad_fetch:               ; code fetched from device space: stop loudly
     lui t1, 1
     or t1, t1, t2

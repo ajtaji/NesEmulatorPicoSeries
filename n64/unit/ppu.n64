@@ -758,17 +758,7 @@ nes_ppu_mask_colours:
 nes_ppu_write_oamaddr:
     jr ra
     sd a1, global_ppuoamaddr-global_ppubus(a2)
-nes_ppu_write_oam:
-    addiu t0, zero, 1
-    sd t0, global_oamcachedirty-global_ppubus(a2)
-    ld t0, global_ppuoamaddr-global_ppubus(a2)
-    la t1, global_oam
-    daddu t1, t1, t0
-    sb a1, 0(t1)
-    addiu t0, t0, 1
-    andi t0, t0, 255
-    jr ra
-    sd t0, global_ppuoamaddr-global_ppubus(a2)
+    ; nes_ppu_write_oam ($2004): in unit/cold.n64 (C4, design note N.46b: 0 cycles a guest frame)
 nes_ppu_write_scroll:
     move a3, ra
     jal u_ppucut                    ; t or fine X changes: the band ends first
@@ -881,13 +871,7 @@ nes_ppu_read_status:
     or a0, a0, t0
     jr ra
     sd a0, 0(a2)
-nes_ppu_read_oam:
-    ld t0, global_ppuoamaddr-global_ppubus(a2)
-    la t1, global_oam
-    daddu t1, t1, t0
-    lbu a0, 0(t1)
-    jr ra
-    sd a0, 0(a2)
+    ; nes_ppu_read_oam ($2004): in unit/cold.n64 (C4, design note N.46b: 0 cycles a guest frame)
 nes_ppu_port_increment:
     ld t0, global_ppuctrl-global_ppubus(a2)
     ld t1, global_ppuv-global_ppubus(a2)
