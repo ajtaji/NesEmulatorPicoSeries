@@ -27,8 +27,10 @@
 ;   Dispatch: the guest PC is checked against a cached FETCH REGION (s2 guest
 ;   base, s3 host bias, s4 extent = how far an opcode may sit so that its two
 ;   operand bytes are inside too). Inside it the opcode byte is loaded from
-;   host memory, its handler address read from c65_table (1 KB) and jumped
-;   to: one indexed jump. Outside it the region is rebuilt (c65_rebase) or
+;   host memory and the handler entered at c65_slots + opcode * 16: every
+;   handler owns a fixed 16-byte slot (the whole handler when it fits four
+;   instructions, else its start and a branch to c65_op_xx_rest), so the
+;   dispatch is one computed jump with no table load in the D-cache. Outside it the region is rebuilt (c65_rebase) or
 ;   the instruction's bytes are copied one by one into a small buffer
 ;   (c65_fetch_slow) and the handler reads its operands from there.
 ;   Handlers: a handler sets the access phase, calls the shared block of its
@@ -37,21 +39,29 @@
 ;   operation and branches to c65_next, charging its cycles in the delay slot.
 ;   Memory: internal RAM and the stack ($0000-$1FFF), PRG ROM through the MMC3
 ;   bank-bias table, enabled work RAM and the open-bus ranges are handled
-;   inline. Every other address is a CALL-OUT: the guest state is published
-;   to the globals the device code reads (c65_publish), the device procedure
-;   is called with the compiled calling convention (Help/VR4300.txt: a0-a7
-;   in, a0 out, s0-s7 kept), and the state is reloaded (c65_reload), because
-;   a device may end the window (CpuEndWindow: Left and Budget) and a write may
-;   switch a PRG bank (so a write call-out also drops the fetch region).
+;   inline. Every other address is a CALL-OUT (c65_out / c65_in): PC, Left,
+;   the access phase and the open bus - what device code reads during a
+;   window - are published with the caller-saved FN, FC and NesInstructions,
+;   the device procedure is called with the compiled calling convention
+;   (Help/VR4300.txt: a0-a7 in, a0 out, s0-s7 and fp kept), and those are
+;   reloaded: a device may end the window (CpuEndWindow: Left and Budget).
+;   A, X, Y and FZ stay in callee-saved registers. A write at $6000-$FFFF may
+;   switch a PRG bank or the work-RAM enable, so it drops the fetch region.
+;   The window's end publishes the whole state (c65_publish).
+;   The core has no stack frame: its saves live in the port globals C65Save*,
+;   C65Link, C65Ea, C65Value, C65Count and C65Fetch (the host stack's D-cache
+;   lines are shared with every compiled call the devices make).
+;   The MMC3 run-window loop (c65_run_mapper4, NesRunMapper4's body) lives in
+;   this unit too, beside the core it calls every window.
 ;
 ; REGISTERS during a window (the convention the device code already met at
 ; the old core's flush):
 ;   a1 PC         a2 Left (cycles still to run)   a3 global_nesmmc3bias
-;   a4 A  a5 X  a6 Y   a7 FZ   t8 FN   t9 FC        t3 NesInstructions
+;   s5 A  s6 X  s7 Y   fp FZ   t8 FN   t9 FC        t3 NesInstructions
 ;   v0 AccessPhase   v1 open bus (the last byte on the guest data bus)
-;   s0 c65_table   s1 global_m (RAM)   s2 s3 s4 the fetch region
+;   s0 c65_slots   s1 global_m (RAM)   s2 s3 s4 the fetch region
 ;   t0 the host address of the opcode byte (operands at 1(t0) and 2(t0))
-;   t1 t2 a0 scratch; t2 holds an effective address between a mode block and
+;   t1 t2 a0 a4-a7 scratch; t2 holds an effective address between a mode block and
 ;   the read / write routine.  ra: the link to a mode block.
 ;   FV, FD, FI, S stay in their globals (as in the old core's fast paths).
 ;
