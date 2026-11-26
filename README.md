@@ -284,9 +284,9 @@ Keep that file out of version control if you don't want your speaker's address
 published.
 
 Generated sources are produced by scripts in `rp2040/` and reproduce
-byte-for-byte: `generate_cpu.py` (the 2A03 core, from `nmos6502.pico`; needs
-`py65`), `generate_ppu.py` (the renderer), `make_demo.py` (the built-in demo
-cartridge) and `Diagnostics/generate_zp_vectors.py` (test vectors).
+byte-for-byte: `generate_cpu.py` (the 2A03 core, from `nmos6502.pico`),
+`generate_ppu.py` (the renderer), `make_demo.py` (the built-in demo
+cartridge) and `Diagnostics/generate_zp_vectors.py` (test vectors; needs `py65`).
 `tools/make_menu_font.py` (needs Pillow) renders the boot menu's text and the
 FPS counter's digits from TrueType fonts into `rp2040/menu_font.pico`; the
 firmware only copies those pre-rendered glyphs, it never rasterises a font. The SBC
