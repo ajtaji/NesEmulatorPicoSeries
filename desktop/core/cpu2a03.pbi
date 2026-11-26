@@ -1294,7 +1294,7 @@ OpCD: ; $CD CMP abs
   FC = ~Res
   CpuNextOp(4)
 OpCE: ; $CE DEC abs
-  AccessPhase = 2
+  AccessPhase = 5
   CpuFetchAddress()
   AccessPhase = AccessPhase - 2
   Value = NesRead(Ea)
@@ -1306,7 +1306,7 @@ OpCE: ; $CE DEC abs
   NesWrite(Ea, Value)
   AccessPhase = AccessPhase + 1
   NesWrite(Ea, Res)
-  CpuNextOp(3)
+  CpuNextOp(6)
 OpD0: ; $D0 BNE rel
   If (FZ & 255) <> 0
     CompilerIf #CPU_TIMING = 1
@@ -1344,6 +1344,41 @@ OpD0: ; $D0 BNE rel
         NesIdleBatched=NesIdleBatched+NesPollCount*3
         A=NesPollStatusDone()
         X=X+NesPollCount : FN=X : FZ=X : NesOpenBus=$FA
+      EndIf
+    EndIf
+  EndIf
+  EndIf
+  If Res=-3
+  If NesIdleEnabled<>0 And (FZ&255)<>0 And Left>8 And PC>=$8000 And PC<=$FFFD
+    NesPollPtr=PrgBias+PC
+    If PeekA(NesPollPtr+1)=$D0 And PeekA(NesPollPtr+2)=$FD
+      Tmp=PeekA(NesPollPtr)
+      If Tmp=$CA Or Tmp=$88
+        NesPollCycles=5
+        If (Base&$FF00)<>(PC&$FF00)
+          NesPollCycles=6
+        EndIf
+        NesPollCount=NesDiv(Left-3,NesPollCycles)
+        If Tmp=$CA
+          Ea=X
+        Else
+          Ea=Y
+        EndIf
+        If NesPollCount>((Ea-1)&255)
+          NesPollCount=(Ea-1)&255
+        EndIf
+        If NesPollCount>0
+          CpuTick(NesPollCount*NesPollCycles)
+          NesInstructions=NesInstructions+NesPollCount*2
+          NesIdleBatched=NesIdleBatched+NesPollCount*2
+          Ea=(Ea-NesPollCount)&255
+          If Tmp=$CA
+            X=Ea
+          Else
+            Y=Ea
+          EndIf
+          FN=Ea : FZ=Ea : NesOpenBus=$FD
+        EndIf
       EndIf
     EndIf
   EndIf

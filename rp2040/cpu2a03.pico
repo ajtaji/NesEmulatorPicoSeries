@@ -4666,7 +4666,7 @@ __cpu_ird_165:
   FC = ~Res
   NextOp(4)
 OpCE: ; $CE DEC abs
-  AccessPhase = 2
+  AccessPhase = 5
   ASM Uses PC
     mov r0, r8
     ldr r1, =$8000
@@ -4729,7 +4729,7 @@ __cpu_ird_166:
   NesWrite(Ea, Value)
   AccessPhase = AccessPhase + 1
   NesWrite(Ea, Res)
-  NextOp(3)
+  NextOp(6)
 OpD0: ; $D0 BNE rel
   If (FZ & 255) <> 0
     CompilerIf #CPU_TIMING = 1

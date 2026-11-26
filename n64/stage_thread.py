@@ -272,7 +272,7 @@ def native_handlers(mapper=0, mmc1_20k=False, runtime=False):
                         ["lbu $v1, 0($t0)", *operation, "sb $v1, 0($t0)", *nz("$v1")], phase)
     if mapper == 4:
         for op, mode, cycles, phase, delta in (
-            (0xCE, "abs", 3, 2, -1), (0xDE, "absx", 7, 6, -1),
+            (0xCE, "abs", 6, 5, -1), (0xDE, "absx", 7, 6, -1),
             (0xEE, "abs", 6, 5, 1), (0xFE, "absx", 7, 6, 1),
         ):
             handler(op, modes[mode][0], cycles, operand(op, mode, write=True) +
@@ -284,7 +284,7 @@ def native_handlers(mapper=0, mmc1_20k=False, runtime=False):
         (0x10, "$t8", 0x80, False, ()), (0x30, "$t8", 0x80, True, ()),
         (0x90, "$t9", 0x100, False, ()), (0xB0, "$t9", 0x100, True, ()),
         (0x50, "$t2", 0x80, False, ()), (0x70, "$t2", 0x80, True, ()),
-        (0xD0, "$a7", 0xFF, True, (-6,)), (0xF0, "$a7", 0xFF, False, (-7, -4)),
+        (0xD0, "$a7", 0xFF, True, (-6, -3)), (0xF0, "$a7", 0xFF, False, (-7, -4)),
     ):
         label = f"nes_native_{op:02x}"
         branch = "beq" if take_when_set else "bne"
@@ -300,13 +300,19 @@ def native_handlers(mapper=0, mmc1_20k=False, runtime=False):
             # Crossing a physical bank must use the ordinary mapped-bus check.
             skip = f"{label}_skip_{-offset}"
             back = -offset - 2
+            # The countdown (-3: DEX or DEY, then this BNE) has two possible first bytes; its
+            # whole pattern is the decrement and this branch, so it always goes to the portable test.
             first = 0xa5 if offset == -4 else 0xad
             code += [f"addiu $t1, $zero, {offset}", f"bne $t2, $t1, {skip}",
                      "andi $t1, $a1, 0x8000", f"beq $t1, $zero, {skip}",
                      f"andi $t1, $a1, {0x3fff if mapper == 1 else 0x1fff}", f"sltiu $t1, $t1, {back}",
-                     "bne $t1, $zero, nes_thread_slow", "nop", f"lbu $t1, -{back}($t0)",
-                     f"xori $t1, $t1, {first}", "beq $t1, $zero, nes_thread_slow", "nop",
-                     skip + ":", "addiu $t1, $a1, 2"]
+                     "bne $t1, $zero, nes_thread_slow", "nop"]
+            if offset == -3:
+                code += ["b nes_thread_slow", "nop"]
+            else:
+                code += [f"lbu $t1, -{back}($t0)",
+                         f"xori $t1, $t1, {first}", "beq $t1, $zero, nes_thread_slow", "nop"]
+            code += [skip + ":", "addiu $t1, $a1, 2"]
         code += [
             "andi $v1, $t2, 0xFF", "addu $a1, $t1, $t2", "andi $a1, $a1, 0xFFFF",
             "xor $t2, $a1, $t1", "srl $t2, $t2, 8", "sltu $t2, $zero, $t2",

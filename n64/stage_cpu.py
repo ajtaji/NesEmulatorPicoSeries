@@ -203,6 +203,17 @@ NesOpcodeSlow:
         if source.count(budget) != 1:
             raise ValueError("2A03 CPU budget guard changed")
         source = source.replace(budget, "  If n<>128 : NesChainLimit=-1 : EndIf\n" + budget)
+    if mapper == 4:
+        # The polling and countdown shortcuts read their own code: through the bank mapped at PC
+        # (NesMmc3Bias, PrgBias is the linear start of PRG), with every byte they read inside PC's
+        # 8 KB slot, as the RP2350's paged core does.
+        count = source.count("    NesPollPtr=PrgBias+PC\n")
+        if count != 4:
+            raise ValueError(f"2A03 polling shortcuts changed ({count})")
+        source = source.replace("    NesPollPtr=PrgBias+PC\n", "    NesPollPtr=NesMmc3Pointer(PC)\n")
+        source, count = re.subn(r"And PC<=\$FFF([0-9A-F])\b", r"And PC<=$FFF\1 And (PC&$1FFF)<=$1FF\1", source)
+        if count != 4:
+            raise ValueError(f"2A03 polling shortcut bounds changed ({count})")
     if mapper == 1:
         source = source.replace("NesPollPtr=PrgBias+PC", "NesPollPtr=PC")
         source = re.sub(r"PeekA\((NesPollPtr(?:\+\d+)?)\)", r"PeekA(NesMmc1Pointer(\1))", source)

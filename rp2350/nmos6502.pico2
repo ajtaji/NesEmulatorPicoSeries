@@ -1359,7 +1359,7 @@ OpCE: ; $CE DEC abs
   Res = Res & 255
   NZ(Res)
   M(Ea) = Res
-  NextOp(3)
+  NextOp(6)
 OpD0: ; $D0 BNE rel
   If (FZ & 255) <> 0
     CompilerIf #CPU_TIMING = 1

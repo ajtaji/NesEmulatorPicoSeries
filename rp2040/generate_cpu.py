@@ -5,7 +5,40 @@ the last instruction may overshoot, and the caller carries that debt.
 """
 from pathlib import Path
 import re
-from py65.devices.mpu6502 import MPU
+
+# The documented base cycle counts of the 151 official NMOS 6502 opcodes (public 6502 documentation;
+# the +1 for an indexed read crossing a page and the branch's +1 taken / +1 more across a page are
+# charged by the core itself and are not in this table). It is used for one thing: the first line of
+# every handler, AccessPhase = cycles - 1, the cycle of the instruction in which the effective address
+# is read or written (the last one; read-modify-write forms step back 2 and 1 from it below). The
+# cycle COUNTS each handler charges come from nmos6502.pico's NextOp(n), not from here.
+CYCLES={}
+def _cycles(pairs):
+    for opcode,count in pairs:
+        assert opcode not in CYCLES,hex(opcode)
+        CYCLES[opcode]=count
+# ORA AND EOR ADC LDA CMP SBC: imm zp zp,X abs abs,X abs,Y (zp,X) (zp),Y
+for base in (0x00,0x20,0x40,0x60,0xA0,0xC0,0xE0):
+    _cycles([(base+0x09,2),(base+0x05,3),(base+0x15,4),(base+0x0D,4),(base+0x1D,4),(base+0x19,4),(base+0x01,6),(base+0x11,5)])
+_cycles([(0x85,3),(0x95,4),(0x8D,4),(0x9D,5),(0x99,5),(0x81,6),(0x91,6)])            # STA
+# ASL ROL LSR ROR: A, zp, zp,X, abs, abs,X
+for base in (0x00,0x20,0x40,0x60):
+    _cycles([(base+0x0A,2),(base+0x06,5),(base+0x16,6),(base+0x0E,6),(base+0x1E,7)])
+_cycles([(0xC6,5),(0xD6,6),(0xCE,6),(0xDE,7)])                                       # DEC
+_cycles([(0xE6,5),(0xF6,6),(0xEE,6),(0xFE,7)])                                       # INC
+_cycles([(0xA2,2),(0xA6,3),(0xB6,4),(0xAE,4),(0xBE,4)])                              # LDX
+_cycles([(0xA0,2),(0xA4,3),(0xB4,4),(0xAC,4),(0xBC,4)])                              # LDY
+_cycles([(0x86,3),(0x96,4),(0x8E,4)])                                                # STX
+_cycles([(0x84,3),(0x94,4),(0x8C,4)])                                                # STY
+_cycles([(0xE0,2),(0xE4,3),(0xEC,4)])                                                # CPX
+_cycles([(0xC0,2),(0xC4,3),(0xCC,4)])                                                # CPY
+_cycles([(0x24,3),(0x2C,4)])                                                         # BIT
+_cycles([(op,2) for op in (0x10,0x30,0x50,0x70,0x90,0xB0,0xD0,0xF0)])                # branches
+_cycles([(0x00,7),(0x20,6),(0x40,6),(0x60,6),(0x4C,3),(0x6C,5)])                     # BRK JSR RTI RTS JMP
+_cycles([(0x08,3),(0x48,3),(0x28,4),(0x68,4)])                                       # PHP PHA PLP PLA
+_cycles([(op,2) for op in (0x18,0x38,0x58,0x78,0xB8,0xD8,0xF8,0xEA,0xAA,0xA8,0xBA,0x8A,0x9A,0x98,
+                           0xCA,0x88,0xE8,0xC8)])                                    # flags, NOP, transfers, INX..DEY
+assert len(CYCLES)==151,len(CYCLES)
 root=Path(__file__).resolve().parent
 s=(root/'nmos6502.pico').read_text()
 s=s.replace('Left = r11, X = r4, FZ = r5','Left = r11')
@@ -74,7 +107,7 @@ for line in s.splitlines():
     if line.lstrip().startswith('Op') and ': ; $' in line:
         lines.append(line)
         opcode=int(line.split(':')[0][2:],16)
-        lines.append(f'  AccessPhase = {MPU.cycletime[opcode]-1}')
+        lines.append(f'  AccessPhase = {CYCLES[opcode]-1}')
         continue
     lines.append(calls(line))
 s='\n'.join(lines)+'\n'

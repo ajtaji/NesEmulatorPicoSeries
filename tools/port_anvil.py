@@ -2,7 +2,7 @@
 
 Uses the same CPU generator before its Thumb-only operand inlining pass and
 the PPU's existing reference routines. No guest timing or opcode changes.
-Requires py65, as does generate_cpu.py. Does not execute or write its tail.
+Needs no third-party package (generate_cpu.py carries its own cycle table). Does not execute or write its tail.
 """
 from pathlib import Path
 import re
