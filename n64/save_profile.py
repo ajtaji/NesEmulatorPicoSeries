@@ -54,7 +54,7 @@ _MMC5_RESTORE = (
 _MMC5_INDEX = "offset+(addr&8191)"
 _SUNSOFT_INDEX = "((ExtraRegs(8)&3)*8192)+(addr&8191)"
 _PRG_STORES = {
-    1: ("@MapRam(0)", _Store("mmc1", "MapperWrite", _LINEAR_ASSIGNMENT, _LINEAR_OFFSET), ""),
+    1: ("@MapRam(0)", _Store("mmc1", "NesMmc1WriteRam", _LINEAR_ASSIGNMENT, _LINEAR_OFFSET), ""),
     4: ("@MapRam(0)", _MMC3_STORE, ""),
     5: ("@M5Ram(0)", _Store("mapper5", "M5PrgWrite", f"M5Ram({_MMC5_INDEX})=value", _MMC5_INDEX), _MMC5_RESTORE),
     19: ("@MapRam(0)", _Store(_NAMCO, "N1Write", _LINEAR_ASSIGNMENT, _LINEAR_OFFSET), ""),
@@ -116,6 +116,12 @@ def save_profile(cart, header: bytes) -> SaveProfile:
 
 def stage_save(name: str, code: str, profile: SaveProfile) -> str:
     """Mark writes after the actual backing store, inside the same branch."""
+    if name == "mapper_extra" and any(
+        f'XIncludeFile "../n64/{unit}"' in code
+        for unit in ("mapper_discrete.n64", "mapper_board_regs.n64")
+    ):
+        # The native backing store marks the written address itself.
+        return code
     for store in profile._stores:
         if name == store.unit:
             code = _mark_store(code, store)

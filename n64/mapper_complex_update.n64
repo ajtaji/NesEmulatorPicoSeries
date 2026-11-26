@@ -1,0 +1,348 @@
+; Bank geometry for the larger discrete boards. Shared helpers publish
+; the actual memory windows and preserve RAM/ROM mirroring semantics.
+ProcedureNaked.i ExtraMapperUpdate()
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      la s3, global_extraregs
+      la t0, global_mapselect
+      ld s4, 0(t0)
+      andi t0, s4, 64
+      bnez t0, nes_rambo_swap_prg
+      ld a1, 48(s3)
+      jal mapperprg
+      move a0, zero
+      ld a1, 56(s3)
+      jal mapperprg
+      addiu a0, zero, 1
+      ld a1, 120(s3)
+      b nes_rambo_third_prg
+      nop
+nes_rambo_swap_prg:
+      ld a1, 120(s3)
+      jal mapperprg
+      move a0, zero
+      ld a1, 48(s3)
+      jal mapperprg
+      addiu a0, zero, 1
+      ld a1, 56(s3)
+nes_rambo_third_prg:
+      jal mapperprg
+      addiu a0, zero, 2
+      la t0, global_mapprgbytes
+      ld a1, 0(t0)
+      dsrl a1, a1, 13
+      daddiu a1, a1, -1
+      jal mapperprg
+      addiu a0, zero, 3
+
+      andi s1, s4, 128
+      srl s1, s1, 5
+      ld a1, 0(s3)
+      jal mapperchr
+      move a0, s1
+      ld a1, 8(s3)
+      jal mapperchr
+      xori a0, s1, 2
+      move s0, zero
+nes_rambo_high_chr:
+      sll t0, s0, 3
+      daddu t0, t0, s3
+      ld a1, 16(t0)
+      addiu a0, s0, 4
+      jal mapperchr
+      xor a0, a0, s1
+      addiu s0, s0, 1
+      sltiu t0, s0, 4
+      bnez t0, nes_rambo_high_chr
+      nop
+      andi t0, s4, 32
+      beqz t0, nes_rambo_chr_pairs
+      ld a1, 0(s3)
+      ld a1, 64(s3)
+      jal mapperchr
+      xori a0, s1, 1
+      ld a1, 72(s3)
+      b nes_rambo_chr_last
+      nop
+nes_rambo_chr_pairs:
+      daddiu a1, a1, 1
+      jal mapperchr
+      xori a0, s1, 1
+      ld a1, 8(s3)
+      daddiu a1, a1, 1
+nes_rambo_chr_last:
+      jal mapperchr
+      xori a0, s1, 3
+    EndASM
+    CompilerIf #GAME_MAPPER=158
+      ASM
+        jal extrantrefresh
+        nop
+      EndASM
+    CompilerEndIf
+  CompilerElseIf #GAME_MAPPER=69
+    ASM
+      la s3, global_extraregs
+      move s0, zero
+nes_sunsoft5b_prg:
+      sll t0, s0, 3
+      daddu t0, t0, s3
+      ld a1, 72(t0)
+      move a0, s0
+      jal mapperprg
+      andi a1, a1, 63
+      addiu s0, s0, 1
+      sltiu t0, s0, 3
+      bnez t0, nes_sunsoft5b_prg
+      nop
+      la t0, global_mapprgbytes
+      ld a1, 0(t0)
+      dsrl a1, a1, 13
+      daddiu a1, a1, -1
+      jal mapperprg
+      addiu a0, zero, 3
+      move s0, zero
+nes_sunsoft5b_chr:
+      sll t0, s0, 3
+      daddu t0, t0, s3
+      ld a1, 0(t0)
+      jal mapperchr
+      move a0, s0
+      addiu s0, s0, 1
+      sltiu t0, s0, 8
+      bnez t0, nes_sunsoft5b_chr
+      nop
+    EndASM
+  CompilerElse
+    CompilerIf #GAME_MAPPER=6
+      ASM
+        la t0, global_extramode
+        ld t0, 0(t0)
+        la t1, global_extraregs
+        ld t1, 0(t1)
+        sltiu t2, t0, 3
+        beqz t2, nes_ffe_large
+        andi t3, t1, 7
+        addiu s2, zero, 14
+        addiu t2, zero, 1
+        bne t0, t2, nes_ffe_256
+        move s3, zero
+        srl t3, t1, 2
+        andi t3, t3, 15
+        b nes_ffe_publish
+        andi s3, t1, 3
+nes_ffe_256:
+        addiu t2, zero, 2
+        bne t0, t2, nes_ffe_publish
+        nop
+        andi t3, t1, 15
+        b nes_ffe_publish
+        addiu s2, zero, 30
+nes_ffe_large:
+        addiu t2, zero, 3
+        bne t0, t2, nes_ffe_32k
+        nop
+        addiu s1, zero, 30
+        andi s2, t1, 15
+        sll s2, s2, 1
+        srl s3, t1, 4
+        andi s3, s3, 3
+        la t0, global_extrachr
+        b nes_complex_prg
+        sd s3, 0(t0)
+nes_ffe_32k:
+        andi s3, t1, 3
+        addiu t3, zero, 3
+        addiu t2, zero, 4
+        bne t0, t2, nes_ffe_32k_chr
+        srl t2, t1, 4
+        andi t3, t2, 3
+nes_ffe_32k_chr:
+        addiu t2, zero, 6
+        bne t0, t2, nes_ffe_32k_fixed
+        nop
+        andi s3, t1, 1
+nes_ffe_32k_fixed:
+        addiu t2, zero, 7
+        bne t0, t2, nes_ffe_32k_publish
+        nop
+        move s3, zero
+nes_ffe_32k_publish:
+        sll s1, t3, 2
+        b nes_ffe_registers
+        addiu s2, s1, 2
+nes_ffe_publish:
+        sll s1, t3, 1
+nes_ffe_registers:
+        la t0, global_extrachr
+        sd s3, 0(t0)
+        la t0, global_mapprgreg
+        sd t3, 0(t0)
+      EndASM
+    CompilerElseIf #GAME_MAPPER=68
+      ASM
+        la t0, global_mapprgreg
+        ld t0, 0(t0)
+        andi s1, t0, 7
+        sll s1, s1, 1
+        addiu s2, zero, 14
+        la s3, global_extraregs
+      EndASM
+    CompilerElse
+      ASM
+        la t0, global_mapchr0
+        ld s4, 0(t0)
+        la t0, global_extramode
+        ld t1, 0(t0)
+        andi t2, s4, 16
+        bnez t1, nes_event_committed
+        addiu t3, zero, 1
+        bnez t2, nes_event_mode
+        nop
+        b nes_event_mode
+        move t1, t3
+nes_event_committed:
+        bne t1, t3, nes_event_mode
+        nop
+        beqz t2, nes_event_mode
+        nop
+        addiu t1, zero, 2
+nes_event_mode:
+        sd t1, 0(t0)
+        move s3, t1
+        la t0, global_extrairqrun
+        beqz t2, nes_event_run
+        addiu t1, zero, 1
+        sd zero, global_extrairqcount-global_extrairqrun(t0)
+        sd zero, global_mapirq-global_extrairqrun(t0)
+        move t1, zero
+nes_event_run:
+        sd t1, 0(t0)
+        la t0, global_mapprgreg
+        ld t0, 0(t0)
+        la t1, global_mapramenable
+        andi t2, t0, 16
+        sltiu t2, t2, 1
+        sd t2, 0(t1)
+        andi s1, t0, 7
+        ori s1, s1, 8
+        sll s1, s1, 1
+        la t0, global_mapcontrol
+        ld s0, 0(t0)
+        andi a0, s0, 3
+        sltiu t0, a0, 2
+        beqz t0, nes_event_mirror_pair
+        nop
+        b nes_event_mirror
+        addiu a0, a0, 2
+nes_event_mirror_pair:
+        andi a0, a0, 1
+        xori a0, a0, 1
+nes_event_mirror:
+        jal mappermirror
+        nop
+        addiu t0, zero, 2
+        beq s3, t0, nes_event_unlocked
+        andi t0, s4, 8
+        move s1, zero
+        b nes_complex_prg
+        addiu s2, zero, 2
+nes_event_unlocked:
+        bnez t0, nes_event_serial
+        andi s0, s0, 12
+        andi s1, s4, 6
+        sll s1, s1, 1
+        b nes_complex_prg
+        addiu s2, s1, 2
+nes_event_serial:
+        sltiu t0, s0, 8
+        beqz t0, nes_event_fixed
+        addiu t0, zero, 8
+        andi s1, s1, 60
+        b nes_complex_prg
+        addiu s2, s1, 2
+nes_event_fixed:
+        bne s0, t0, nes_complex_prg
+        addiu s2, zero, 30
+        move s2, s1
+        addiu s1, zero, 16
+      EndASM
+    CompilerEndIf
+    ASM
+nes_complex_prg:
+      move a0, zero
+      jal mapperprg
+      move a1, s1
+      addiu a0, zero, 1
+      jal mapperprg
+      addiu a1, s1, 1
+      addiu a0, zero, 2
+      jal mapperprg
+      move a1, s2
+      addiu a0, zero, 3
+      jal mapperprg
+      addiu a1, s2, 1
+      move s0, zero
+    EndASM
+    CompilerIf #GAME_MAPPER=68
+      ASM
+nes_sunsoft4_chr:
+        sll t0, s0, 2
+        daddu t0, t0, s3
+        ld s1, 0(t0)
+        dsll s1, s1, 1
+        move a0, s0
+        jal mapperchr
+        move a1, s1
+        addiu a0, s0, 1
+        jal mapperchr
+        addiu a1, s1, 1
+        addiu s0, s0, 2
+        sltiu t0, s0, 8
+        bnez t0, nes_sunsoft4_chr
+        nop
+        jal extrantrefresh
+        nop
+      EndASM
+    CompilerElse
+      ASM
+        move s1, zero
+      EndASM
+      CompilerIf #GAME_MAPPER=6
+        ASM
+          dsll s1, s3, 3
+        EndASM
+      CompilerEndIf
+      ASM
+nes_complex_chr:
+        move a0, s0
+        jal mapperchr
+        daddu a1, s1, s0
+        addiu s0, s0, 1
+        sltiu t0, s0, 8
+        bnez t0, nes_complex_chr
+        nop
+      EndASM
+    CompilerEndIf
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    daddiu sp, sp, 48
+    jr ra
+    addiu a0, zero, 1
+  EndASM
+EndProcedure

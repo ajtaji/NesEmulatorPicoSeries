@@ -1,0 +1,180 @@
+; Register map shared by the MMC3 derivatives and RAMBO-1.
+ProcedureNaked NesWriteMmc3Common(addr.i,value.i)
+  ASM
+    andi t0, a0, 0x8000
+    beqz t0, nes_mmc3_common_done
+    andi t0, a0, 1
+    srl t1, a0, 12
+    andi t1, t1, 6
+    or t1, t1, t0
+    la t2, nes_mmc3_common_table
+    sll t1, t1, 2
+    daddu t2, t2, t1
+    lw t2, 0(t2)
+    jr t2
+    nop
+nes_mmc3_common_table:
+    .word nes_mmc3_common_select, nes_mmc3_common_bank, nes_mmc3_common_mirror, nes_mmc3_common_protect
+    .word nes_mmc3_common_latch, nes_mmc3_common_reload, nes_mmc3_common_ack, nes_mmc3_common_enable
+nes_mmc3_common_select:
+    la t0, global_mapselect
+    sd a1, 0(t0)
+    j mapperupdate
+    nop
+nes_mmc3_common_bank:
+    la t0, global_mapselect
+    ld t0, 0(t0)
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      la t1, global_extraregs
+      andi t0, t0, 15
+    EndASM
+  CompilerElse
+    ASM
+      la t1, global_mapregs
+      andi t0, t0, 7
+    EndASM
+  CompilerEndIf
+  ASM
+    sll t0, t0, 3
+    daddu t0, t0, t1
+    j mapperupdate
+    sd a1, 0(t0)
+nes_mmc3_common_mirror:
+  EndASM
+  CompilerIf #GAME_MAPPER=158
+    ASM
+      b nes_mmc3_common_done
+      nop
+    EndASM
+  CompilerElse
+    CompilerIf #GAME_MAPPER<>64
+      ASM
+        la t0, global_mapfourscreen
+        ld t0, 0(t0)
+        bnez t0, nes_mmc3_common_done
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
+      andi a0, a1, 1
+      j mappermirror
+      xori a0, a0, 1
+    EndASM
+  CompilerEndIf
+  ASM
+nes_mmc3_common_protect:
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      b nes_mmc3_common_done
+      nop
+    EndASM
+  CompilerElse
+    ASM
+      la t0, global_mapramenable
+      srl t1, a1, 7
+      srl t2, a1, 6
+      andi t1, t1, 1
+      andi t2, t2, 1
+      sd t1, 0(t0)
+      jr ra
+      sd t2, global_mapramprotect-global_mapramenable(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+nes_mmc3_common_latch:
+    la t0, global_mapirqlatch
+    jr ra
+    sd a1, 0(t0)
+nes_mmc3_common_reload:
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      la t0, global_extrairqmode
+      ld t1, 0(t0)
+      andi t2, a1, 1
+      beqz t2, nes_rambo_switch_a12
+      sd t2, 0(t0)
+      b nes_mmc3_common_mark_reload
+      sd zero, global_extrairqdivider-global_extrairqmode(t0)
+nes_rambo_switch_a12:
+      beqz t1, nes_mmc3_common_mark_reload
+      addiu t2, zero, 1
+      sd t2, global_extraflags-global_extrairqmode(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+nes_mmc3_common_mark_reload:
+    la t0, global_mapreload
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+nes_mmc3_common_ack:
+    la t0, global_mapirqenable
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      sd zero, global_extrapending-global_mapirqenable(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    jr ra
+    sd zero, 0(t0)
+nes_mmc3_common_enable:
+    la t0, global_mapirqenable
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+nes_mmc3_common_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+ProcedureNaked ExtraRamboWrite(addr.i,value.i)
+  ASM
+    j neswritemmc3common
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked ExtraRamboClock(delay.i)
+  ASM
+    la t0, global_mapirqcount
+    ld t1, 0(t0)
+    ld t2, global_mapirqclocks-global_mapirqcount(t0)
+    ld t3, global_mapreload-global_mapirqcount(t0)
+    daddiu t2, t2, 1
+    sd t2, global_mapirqclocks-global_mapirqcount(t0)
+    bnez t3, nes_rambo_reload
+    nop
+    bnez t1, nes_rambo_decrement
+    nop
+    ld t1, global_mapirqlatch-global_mapirqcount(t0)
+    b nes_rambo_decrement
+    daddiu t1, t1, 1
+nes_rambo_reload:
+    ld t1, global_mapirqlatch-global_mapirqcount(t0)
+    sd zero, global_mapreload-global_mapirqcount(t0)
+    slti t2, t1, 2
+    daddiu t1, t1, 2
+    dsubu t1, t1, t2
+nes_rambo_decrement:
+    daddiu t1, t1, -1
+    andi t1, t1, 255
+    bnez t1, nes_rambo_clock_done
+    sd t1, 0(t0)
+    ld t2, global_mapirqenable-global_mapirqcount(t0)
+    beqz t2, nes_rambo_clock_done
+    nop
+    sd a0, global_extrapending-global_mapirqcount(t0)
+nes_rambo_clock_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf

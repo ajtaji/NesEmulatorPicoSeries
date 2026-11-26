@@ -1,75 +1,292 @@
-; Both 16 KiB PRG halves are resident in RDRAM. Every PRG access,
-; including DMC reads, shares the biases and physical slot numbers.
-Procedure NesMapMmc1Prg()
+; CPU, DMC and wait lookups share the resident PRG halves and physical slots.
+CompilerIf #NES_RUNTIME_ROM=0
+  #NES_MMC1_PRG_MASK=(#GAME_PRG/8192)-1
+  #NES_MMC1_CHR_MASK=(#GAME_CHR/1024)-1
+CompilerEndIf
+
+ProcedureNaked NesMapMmc1Prg()
+  ASM
+    la a3, global_mapcontrol
+    ld t0, 0(a3)
+    ld t1, global_mapprgreg-global_mapcontrol(a3)
+    srl t0, t0, 2
+    andi t0, t0, 3
+    andi a0, t1, 15
+    sll a0, a0, 1
+  EndASM
   CompilerIf #NES_RUNTIME_ROM
-    Protected mode.i, bank.i, lo.i, hi.i, mask.i=(MapPrgBytes/8192)-1
+    ASM
+      ld t2, global_mapprgbytes-global_mapcontrol(a3)
+      dsrl t2, t2, 13
+      addiu t2, t2, -1
+    EndASM
   CompilerElse
-    Protected mode.i, bank.i, lo.i, hi.i, mask.i=(#GAME_PRG/8192)-1
+    ASM
+      addiu t2, zero, #NES_MMC1_PRG_MASK
+    EndASM
   CompilerEndIf
-  mode=(MapControl>>2)&3 : bank=(MapPrgReg&15)*2
-  lo=bank : hi=mask-1
-  If mode<2 : lo=bank&(~3) : hi=lo+2
-  ElseIf mode=2 : lo=0 : hi=bank : EndIf
-  lo=lo&mask : hi=hi&mask
-  NesMmc1Bias(0)=CartPrg+lo*8192-$8000
-  NesMmc1Bias(1)=CartPrg+hi*8192-$C000
-  MapPrgSlots(0)=lo : MapPrgSlots(1)=lo+1 : MapPrgSlots(2)=hi : MapPrgSlots(3)=hi+1
-  MapRamEnable=(MapPrgReg&16)=0 : MapRamProtect=0
+  ASM
+    sltiu t3, t0, 2
+    bnez t3, mmc1_prg_pair
+    addiu a1, t2, -1
+    addiu t3, zero, 2
+    bne t0, t3, mmc1_prg_publish
+    nop
+    move a1, a0
+    b mmc1_prg_publish
+    move a0, zero
+mmc1_prg_pair:
+    srl a0, a0, 2
+    sll a0, a0, 2
+    addiu a1, a0, 2
+mmc1_prg_publish:
+    and a0, a0, t2
+    and a1, a1, t2
+    la t0, global_mapprgslots
+    sd a0, 0(t0)
+    sd a1, 16(t0)
+    addiu t2, a0, 1
+    sd t2, 8(t0)
+    addiu t2, a1, 1
+    sd t2, 24(t0)
+    ld t0, global_cartprg-global_mapcontrol(a3)
+    dsll a0, a0, 13
+    dsll a1, a1, 13
+    daddu a0, a0, t0
+    daddu a1, a1, t0
+    daddiu a0, a0, -32768
+    ori t2, zero, 0xC000
+    dsubu a1, a1, t2
+    la t0, global_nesmmc1bias
+    sd a0, 0(t0)
+    sd a1, 8(t0)
+    andi t1, t1, 16
+    sltiu t1, t1, 1
+    sd t1, global_mapramenable-global_mapcontrol(a3)
+    jr ra
+    sd zero, global_mapramprotect-global_mapcontrol(a3)
+  EndASM
 EndProcedure
 
-Procedure MapperUpdate()
-  Protected mode.i, i.i, lo.i, hi.i, mask.i
-  NesMapMmc1Prg()
-  lo=(MapChr0&30)*4 : hi=lo+4
-  If MapControl&16 : lo=MapChr0*4 : hi=MapChr1*4 : EndIf
+ProcedureNaked MapperUpdate()
+  ASM
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    la s0, global_mapcontrol
+    jal nesmapmmc1prg
+    nop
+    ld t0, 0(s0)
+    ld t1, global_mapchr0-global_mapcontrol(s0)
+    andi t0, t0, 16
+    bnez t0, mmc1_chr_independent
+    andi t2, t1, 30
+    sll s1, t2, 2
+    b mmc1_chr_limit
+    addiu s2, s1, 4
+mmc1_chr_independent:
+    ld t2, global_mapchr1-global_mapcontrol(s0)
+    sll s1, t1, 2
+    sll s2, t2, 2
+mmc1_chr_limit:
+  EndASM
   CompilerIf #NES_RUNTIME_ROM
-    mask=MapChrBytes/1024-1 : lo=lo&mask : hi=hi&mask
+    ASM
+      ld t0, global_mapchrbytes-global_mapcontrol(s0)
+      dsrl t0, t0, 10
+      addiu t0, t0, -1
+    EndASM
   CompilerElse
-    mask=#GAME_CHR/1024-1 : lo=lo&mask : hi=hi&mask
+    ASM
+      addiu t0, zero, #NES_MMC1_CHR_MASK
+    EndASM
   CompilerEndIf
-  If MapChrSlots(0)<>lo
-    For i=0 To 3 : MapperChr(i,lo+i) : Next
-  EndIf
-  If MapChrSlots(4)<>hi
-    For i=0 To 3 : MapperChr(4+i,hi+i) : Next
-  EndIf
-  mode=MapControl&3
-  If mode<2 : mode+=2 : Else : mode=3-mode : EndIf
-  MapperMirror(mode)
-  PrgBase=@NesMapPrg(0) : PrgBias=PrgBase-$8000 : WorkerPrgBase=PrgBase
-  NesChrWindow=@NesMapChr(0) : Pattern=@NesMapPattern(0) : ChrWritable=MapChrRam<>0
+  ASM
+    and s6, s1, t0
+    and s2, s2, t0
+    move s3, zero
+    addiu s4, zero, 4
+    la s5, global_mapchrslots
+mmc1_chr_half:
+    ; Each half maps four consecutive physical 1 KiB slots. The first
+    ; slot determines whether a half needs updating, as in MapperChr.
+    sll t0, s3, 3
+    addu t0, t0, s5
+    ld t1, 0(t0)
+    beq t1, s6, mmc1_chr_half_done
+    nop
+mmc1_chr_slot:
+    sll t0, s3, 3
+    addu s1, t0, s5
+    ld t0, 0(s1)
+    beq t0, s6, mmc1_chr_step
+    sll t0, s3, 10
+    la a0, global_nesmapchr
+    addu a0, a0, t0
+    ld a1, global_cartchr-global_mapcontrol(s0)
+    sll t0, s6, 10
+    daddu a1, a1, t0
+    jal mapcopy
+    addiu a2, zero, 1024
+    sll t0, s3, 10
+    la a0, global_nesmappattern
+    addu a0, a0, t0
+    la a1, global_decoded
+    sll t0, s6, 10
+    addu a1, a1, t0
+    jal mapcopy
+    addiu a2, zero, 1024
+    sd s6, 0(s1)
+    daddiu t0, zero, -1
+    sd t0, global_bgcacheaddr-global_mapcontrol(s0)
+    sd t0, global_rgblastkey-global_mapcontrol(s0)
+mmc1_chr_step:
+    addiu s3, s3, 1
+    bne s3, s4, mmc1_chr_slot
+    addiu s6, s6, 1
+mmc1_chr_half_done:
+    sltiu t0, s4, 8
+    beqz t0, mmc1_chr_mirror
+    move s3, s4
+    move s6, s2
+    b mmc1_chr_half
+    addiu s4, zero, 8
+
+mmc1_chr_mirror:
+    ld t0, 0(s0)
+    andi t0, t0, 3
+    sltiu t1, t0, 2
+    bnez t1, mmc1_mirror_call
+    addiu a0, t0, 2
+    addiu t1, zero, 3
+    subu a0, t1, t0
+mmc1_mirror_call:
+    jal mappermirror
+    nop
+    la t0, global_nesmapprg
+    sd t0, global_prgbase-global_mapcontrol(s0)
+    daddiu t1, t0, -32768
+    sd t1, global_prgbias-global_mapcontrol(s0)
+    sd t0, global_workerprgbase-global_mapcontrol(s0)
+    la t0, global_nesmapchr
+    sd t0, global_neschrwindow-global_mapcontrol(s0)
+    la t0, global_nesmappattern
+    sd t0, global_pattern-global_mapcontrol(s0)
+    ld t0, global_mapchrram-global_mapcontrol(s0)
+    sltu t0, zero, t0
+    sd t0, global_chrwritable-global_mapcontrol(s0)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
 EndProcedure
 
-Procedure MapperWrite(addr.i,value.i,stamp.i)
-  Protected previous.i, value5.i
-  If addr<$8000
-    If MapRamEnable And MapRamProtect=0 : MapRam(addr&8191)=value : EndIf
-    ProcedureReturn
-  EndIf
-  previous=MapLastWrite : MapLastWrite=stamp
-  If value&128
-    MapShift=$10
-    If (MapControl&12)=12 : ProcedureReturn : EndIf
-    MapControl|12
-  Else
-    If stamp-previous=1 : ProcedureReturn : EndIf
-    previous=MapShift : MapShift=(previous>>1)|((value&1)<<4)
-    If (previous&1)=0 : ProcedureReturn : EndIf
-    value5=MapShift : MapShift=$10
-    Select (addr>>13)&3
-      Case 0
-        If MapControl=value5 : ProcedureReturn : EndIf
-        MapControl=value5
-      Case 1
-        If MapChr0=value5 : ProcedureReturn : EndIf
-        MapChr0=value5
-      Case 2
-        If MapChr1=value5 : ProcedureReturn : EndIf
-        MapChr1=value5
-      Case 3
-        If MapPrgReg=value5 : ProcedureReturn : EndIf
-        MapPrgReg=value5 : NesMapMmc1Prg() : ProcedureReturn
-    EndSelect
-  EndIf
-  MapperUpdate()
+CompilerIf #GAME_SAVE_BYTES>0
+  ; Make the accepted backing store visible to the save-page staging hook.
+Procedure NesMmc1WriteRam(addr.i,value.i)
+  If MapRamEnable And MapRamProtect=0 : MapRam(addr&8191)=value : EndIf
+EndProcedure
+CompilerEndIf
+
+ProcedureNaked MapperWrite(addr.i,value.i,stamp.i)
+  ASM
+    la t3, global_mapcontrol
+    ori t0, zero, 0x8000
+    sltu t0, a0, t0
+    bnez t0, mmc1_write_ram
+    nop
+    ld t0, global_maplastwrite-global_mapcontrol(t3)
+    sd a2, global_maplastwrite-global_mapcontrol(t3)
+    andi t1, a1, 128
+    bnez t1, mmc1_write_reset
+    dsubu t0, a2, t0
+    addiu t1, zero, 1
+    beq t0, t1, mmc1_write_done
+    ld t0, global_mapshift-global_mapcontrol(t3)
+    andi t1, a1, 1
+    dsrl t2, t0, 1
+    sll t1, t1, 4
+    or t1, t1, t2
+    sd t1, global_mapshift-global_mapcontrol(t3)
+    andi t0, t0, 1
+    beqz t0, mmc1_write_done
+    addiu t2, zero, 16
+    sd t2, global_mapshift-global_mapcontrol(t3)
+    srl t0, a0, 13
+    andi t0, t0, 3
+    beqz t0, mmc1_write_control
+    addiu t2, zero, 1
+    beq t0, t2, mmc1_write_chr0
+    addiu t2, zero, 2
+    beq t0, t2, mmc1_write_chr1
+    nop
+    ld t0, global_mapprgreg-global_mapcontrol(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    j nesmapmmc1prg
+    sd t1, global_mapprgreg-global_mapcontrol(t3)
+mmc1_write_control:
+    ld t0, 0(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    j mapperupdate
+    sd t1, 0(t3)
+mmc1_write_chr0:
+    ld t0, global_mapchr0-global_mapcontrol(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    j mapperupdate
+    sd t1, global_mapchr0-global_mapcontrol(t3)
+mmc1_write_chr1:
+    ld t0, global_mapchr1-global_mapcontrol(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    j mapperupdate
+    sd t1, global_mapchr1-global_mapcontrol(t3)
+mmc1_write_reset:
+    addiu t0, zero, 16
+    sd t0, global_mapshift-global_mapcontrol(t3)
+    ld t0, 0(t3)
+    ori t1, t0, 12
+    beq t0, t1, mmc1_write_done
+    nop
+    j mapperupdate
+    sd t1, 0(t3)
+mmc1_write_ram:
+  EndASM
+  CompilerIf #GAME_SAVE_BYTES>0
+    ASM
+      j nesmmc1writeram
+      nop
+    EndASM
+  CompilerElse
+    ASM
+      ld t0, global_mapramenable-global_mapcontrol(t3)
+      beqz t0, mmc1_write_done
+      ld t0, global_mapramprotect-global_mapcontrol(t3)
+      bnez t0, mmc1_write_done
+      andi t0, a0, 8191
+      la t1, global_mapram
+      addu t0, t0, t1
+      sb a1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+mmc1_write_done:
+    jr ra
+    nop
+  EndASM
 EndProcedure

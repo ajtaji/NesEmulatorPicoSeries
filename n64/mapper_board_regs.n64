@@ -1,0 +1,363 @@
+; Mapper CPU registers for FFE, NINA/BNROM, Sunsoft and NES-EVENT.
+ProcedureNaked.i ExtraMapperWrite(addr.i,value.i,stamp.i)
+  CompilerIf #GAME_MAPPER=6
+    ASM
+      addiu t0, a0, -17148
+      sltiu t0, t0, 4
+      bnez t0, nes_board6_mode
+      addiu t0, a0, -17665
+      sltiu t1, t0, 3
+      bnez t1, nes_board6_timer
+      andi t1, a0, 0x8000
+      beqz t1, nes_board6_ram
+      nop
+      la t0, global_extraflags
+      ld t0, 0(t0)
+      beqz t0, nes_board_regs_done
+      nop
+      la t0, global_extraregs
+      b nes_board_regs_update
+      sd a1, 0(t0)
+nes_board6_ram:
+      ori t0, zero, 0x6000
+      sltu t0, a0, t0
+      beqz t0, nes_board_regs_ram
+      nop
+      ori t0, zero, 0x5000
+      sltu t0, a0, t0
+      bnez t0, nes_board_regs_done
+      andi a0, a0, 4095
+      la t0, global_extraram
+      daddu t0, t0, a0
+      b nes_board_regs_done
+      sb a1, 0(t0)
+nes_board6_mode:
+      la t0, global_extramode
+      srl t1, a1, 5
+      andi t1, t1, 7
+      sd t1, 0(t0)
+      srl t1, a0, 1
+      andi t1, t1, 1
+      sd t1, global_extraflags-global_extramode(t0)
+      andi t1, a0, 1
+      sll t1, t1, 1
+      srl t0, a1, 4
+      andi t0, t0, 1
+      bnez t1, nes_board6_pair
+      or a0, t0, t1
+      b nes_board_regs_mirror
+      addiu a0, a0, 2
+nes_board6_pair:
+      b nes_board_regs_mirror
+      xori a0, t0, 1
+nes_board6_timer:
+      la t2, global_extrairqrun
+      sd zero, global_mapirq-global_extrairqrun(t2)
+      bnez t0, nes_board6_reload
+      ld t1, global_extrairqcount-global_extrairqrun(t2)
+      b nes_board_regs_done
+      sd zero, 0(t2)
+nes_board6_reload:
+      addiu t0, t0, -1
+      bnez t0, nes_board6_reload_high
+      nop
+      andi t1, t1, 0xff00
+      b nes_board6_reload_store
+      or t1, t1, a1
+nes_board6_reload_high:
+      andi t1, t1, 255
+      sll a1, a1, 8
+      or t1, t1, a1
+      addiu t0, zero, 1
+      sd t0, 0(t2)
+nes_board6_reload_store:
+      b nes_board_regs_done
+      sd t1, global_extrairqcount-global_extrairqrun(t2)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=34
+    ASM
+      la t0, global_mapchrram
+      ld t0, 0(t0)
+      beqz t0, nes_board34_nina
+      andi t1, a0, 0x8000
+      beqz t1, nes_board_regs_done
+      nop
+      la t0, global_cartconflicts
+      ld t0, 0(t0)
+      beqz t0, nes_board34_prg
+      nop
+      la t0, global_prgbias
+      ld t0, 0(t0)
+      daddu t0, t0, a0
+      lbu t0, 0(t0)
+      and a1, a1, t0
+nes_board34_prg:
+      la t0, global_mapprgreg
+      b nes_board_regs_update
+      sd a1, 0(t0)
+nes_board34_nina:
+      addiu t0, a0, -24576
+      sltiu t0, t0, 8192
+      beqz t0, nes_board_regs_done
+      ori t0, zero, 0x7ffd
+      subu t0, a0, t0
+      sltiu t1, t0, 3
+      beqz t1, nes_board34_write
+      andi t1, a1, 1
+      bnez t0, nes_board34_chr
+      sltiu t2, t0, 2
+      la t0, global_mapprgreg
+      b nes_board34_write
+      sd t1, 0(t0)
+nes_board34_chr:
+      la t0, global_mapchr1
+      beqz t2, nes_board34_store
+      andi t1, a1, 15
+      la t0, global_mapchr0
+nes_board34_store:
+      sd t1, 0(t0)
+nes_board34_write:
+      la t0, global_mapram
+      andi a0, a0, 8191
+      daddu t0, t0, a0
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      sb a1, 0(t0)
+    EndASM
+    CompilerIf #GAME_SAVE_BYTES>0
+      ASM
+        jal nessavechanged
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
+      b nes_board_regs_update_saved
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=68
+    ASM
+      srl t0, a0, 12
+      sltiu t1, t0, 8
+      bnez t1, nes_board68_ram
+      sltiu t1, t0, 12
+      bnez t1, nes_board68_bank
+      sltiu t1, t0, 14
+      beqz t1, nes_board68_control
+      nop
+      ori a1, a1, 128
+nes_board68_bank:
+      la t1, global_extraregs
+      addiu t0, t0, -8
+      sll t0, t0, 3
+      daddu t1, t1, t0
+      b nes_board_regs_update
+      sd a1, 0(t1)
+nes_board68_control:
+      addiu t1, zero, 14
+      bne t0, t1, nes_board68_prg
+      andi t1, a1, 16
+      la t0, global_extraflags
+      sd t1, 0(t0)
+      andi a0, a1, 3
+      sltiu t0, a0, 2
+      b nes_board_regs_mirror
+      xor a0, a0, t0
+nes_board68_prg:
+      la t0, global_mapramenable
+      sltu t1, zero, t1
+      sd t1, 0(t0)
+      la t0, global_mapprgreg
+      b nes_board_regs_update
+      sd a1, 0(t0)
+nes_board68_ram:
+      la t0, global_mapramenable
+      ld t0, 0(t0)
+      beqz t0, nes_board_regs_done
+      ori t0, zero, 0x6000
+      sltu t0, a0, t0
+      beqz t0, nes_board_regs_ram
+      nop
+      b nes_board_regs_done
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=69
+    ASM
+      srl t0, a0, 13
+      addiu t1, zero, 4
+      bne t0, t1, nes_board69_other
+      addiu t1, zero, 5
+      la t1, global_mapselect
+      andi a1, a1, 15
+      b nes_board_regs_done
+      sd a1, 0(t1)
+nes_board69_other:
+      beq t0, t1, nes_board69_data
+      sltiu t1, t0, 6
+      beqz t1, nes_board69_sound
+      addiu t1, zero, 3
+      bne t0, t1, nes_board_regs_done
+      nop
+      la t0, global_extraregs
+      ld t1, 64(t0)
+      andi t2, t1, 0xc0
+      xori t2, t2, 0xc0
+      bnez t2, nes_board_regs_done
+      andi t1, t1, 3
+      sll t1, t1, 13
+      andi a0, a0, 8191
+      or a0, a0, t1
+      la t0, global_extraram
+      b nes_board_regs_store
+      nop
+nes_board69_sound:
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal extrasoundwrite
+      nop
+      b nes_board_regs_restore
+      nop
+nes_board69_data:
+      la t0, global_mapselect
+      ld t0, 0(t0)
+      andi t0, t0, 15
+      la t1, global_extraregs
+      sll t2, t0, 3
+      daddu t1, t1, t2
+      sd a1, 0(t1)
+      addiu t1, zero, 12
+      bne t0, t1, nes_board69_timer
+      addiu t1, zero, 13
+      andi a0, a1, 3
+      sltiu t0, a0, 2
+      b nes_board_regs_mirror
+      xor a0, a0, t0
+nes_board69_timer:
+      bne t0, t1, nes_board69_counter
+      addiu t1, zero, 14
+      la t0, global_extrairqrun
+      andi t1, a1, 128
+      srl t1, t1, 7
+      sd t1, 0(t0)
+      andi t1, a1, 1
+      sd t1, global_mapirqenable-global_extrairqrun(t0)
+      b nes_board_regs_update
+      sd zero, global_mapirq-global_extrairqrun(t0)
+nes_board69_counter:
+      sltiu t1, t0, 14
+      bnez t1, nes_board_regs_update
+      andi t0, t0, 1
+      la t1, global_extrairqcount
+      ld t2, 0(t1)
+      bnez t0, nes_board69_counter_high
+      nop
+      andi t2, t2, 0xff00
+      b nes_board69_counter_store
+      or t2, t2, a1
+nes_board69_counter_high:
+      andi t2, t2, 255
+      sll a1, a1, 8
+      or t2, t2, a1
+nes_board69_counter_store:
+      b nes_board_regs_update
+      sd t2, 0(t1)
+    EndASM
+  CompilerElse
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_board105_ram
+      nop
+      la t0, global_maplastwrite
+      ld t1, 0(t0)
+      sd a2, 0(t0)
+      dsubu t1, a2, t1
+      andi t2, a1, 128
+      bnez t2, nes_board105_reset
+      addiu t2, zero, 1
+      beq t1, t2, nes_board_regs_done
+      nop
+      la t0, global_mapshift
+      ld t1, 0(t0)
+      andi t2, t1, 1
+      andi a1, a1, 1
+      sll a1, a1, 4
+      srl t1, t1, 1
+      or t1, t1, a1
+      beqz t2, nes_board_regs_update
+      sd t1, 0(t0)
+      addiu t2, zero, 16
+      sd t2, 0(t0)
+      la t0, nes_board105_registers
+      srl a0, a0, 13
+      andi a0, a0, 3
+      sll a0, a0, 2
+      daddu t0, t0, a0
+      lw t0, 0(t0)
+      b nes_board_regs_update
+      sd t1, 0(t0)
+nes_board105_registers:
+      .word global_mapcontrol, global_mapchr0, global_mapchr1, global_mapprgreg
+nes_board105_reset:
+      la t0, global_mapshift
+      addiu t1, zero, 16
+      sd t1, 0(t0)
+      la t0, global_mapcontrol
+      ld t1, 0(t0)
+      ori t1, t1, 12
+      b nes_board_regs_update
+      sd t1, 0(t0)
+nes_board105_ram:
+      ori t0, zero, 0x6000
+      sltu t0, a0, t0
+      bnez t0, nes_board_regs_done
+      nop
+      la t0, global_mapramenable
+      ld t0, 0(t0)
+      beqz t0, nes_board_regs_done
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_board_regs_ram:
+    la t0, global_mapram
+    andi a0, a0, 8191
+nes_board_regs_store:
+    daddu t0, t0, a0
+    sb a1, 0(t0)
+  EndASM
+  CompilerIf #GAME_SAVE_BYTES>0
+    ASM
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal nessavechanged
+      nop
+      b nes_board_regs_restore
+      nop
+    EndASM
+  CompilerElse
+    ASM
+      b nes_board_regs_done
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_board_regs_mirror:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal mappermirror
+    nop
+    b nes_board_regs_update_saved
+    nop
+nes_board_regs_update:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+nes_board_regs_update_saved:
+    jal mapperupdate
+    nop
+nes_board_regs_restore:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+nes_board_regs_done:
+    jr ra
+    addiu a0, zero, 1
+  EndASM
+EndProcedure

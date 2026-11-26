@@ -107,7 +107,29 @@ nes_triangle_done:
     addiu t2, zero, 1
     addiu t2, zero, 6
 nes_noise_batch:
-    ; At period four, up to nine shifts cannot see newly inserted bits.
+    ; Across eight clocks, even tap six cannot reach newly inserted bits.
+    ; This also covers the fastest envelopes at the 20 kHz sample cadence.
+    sll a7, a2, 3
+    subu a6, a7, a2
+    subu a5, zero, t3
+    sltu a4, a5, a6
+    bnez a4, nes_noise_short
+    nop
+nes_noise_eight:
+    srlv a4, a3, t2
+    xor a4, a4, a3
+    andi a4, a4, 255
+    sll a4, a4, 7
+    srl a3, a3, 8
+    or a3, a3, a4
+    addu t3, t3, a7
+    bgtz t3, nes_noise_save
+    subu a5, zero, t3
+    sltu a4, a5, a6
+    beqz a4, nes_noise_eight
+    nop
+nes_noise_short:
+    ; At period four the remaining clocks can be counted with a shift.
     addiu a5, zero, 4
     bne a2, a5, nes_noise_clock
     subu a5, zero, t3

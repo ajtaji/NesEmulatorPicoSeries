@@ -29,10 +29,22 @@ def stage_region(name: str, source: str) -> str:
             ("  DmcTimer=428\n", "", 1),
             ("  AudioReadCursor=0\nEndProcedure", "  AudioReadCursor=0\n  NesTiming(#GAME_PAL)\nEndProcedure", 1),
         ]
+    mmc3_clock = name == "mappers" and 'mmc3_ticks.n64' in source
+    if name == "mappers" and "mapper_budget.n64" in source:
+        patches = []
+    elif mmc3_clock:
+        patches = [patch for patch in patches if patch[0] not in (
+            "left=cycles*3 : line=PpuLine", "If line=261 And odd<>0", "(line<240 Or line=261)",
+            "If line=262 : line=0 : odd=odd!1 : EndIf", "If line=261 : nextLine=0 : EndIf",
+        )]
     for old, new, expected in patches:
         if source.count(old) != expected:
             raise ValueError(f"{name}: PAL timing patch expected {expected} occurrences of {old!r}")
         source = source.replace(old, new)
+    if mmc3_clock:
+        start = source.index("Procedure.i MapperCpuBudget()")
+        end = source.index("EndProcedure", start) + len("EndProcedure")
+        source = source[:start] + 'XIncludeFile "../n64/mmc3_budget.n64"' + source[end:]
     return source
 
 

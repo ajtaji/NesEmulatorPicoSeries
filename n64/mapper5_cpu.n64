@@ -1,0 +1,448 @@
+; MMC5 CPU-side cartridge register and PRG window handlers.
+
+ProcedureNaked.i M5RamOffset(bank.i)
+  ASM
+    la t0, global_maprambytes
+    ld t0, 0(t0)
+    beqz t0, m5_cpu_ram_absent
+    andi a0, a0, 15
+    addiu t1, zero, 8192
+    beq t0, t1, m5_cpu_ram_8k
+    sll t1, t1, 1
+    beq t0, t1, m5_cpu_ram_16k
+    sll t1, t1, 1
+    bne t0, t1, m5_cpu_ram_mask
+    andi t1, a0, 4
+    bnez t1, m5_cpu_ram_absent
+    andi a0, a0, 3
+    jr ra
+    sll a0, a0, 13
+m5_cpu_ram_8k:
+    andi t1, a0, 4
+    bnez t1, m5_cpu_ram_absent
+    or a0, zero, zero
+    jr ra
+    nop
+m5_cpu_ram_16k:
+    andi a0, a0, 4
+    jr ra
+    sll a0, a0, 11
+m5_cpu_ram_mask:
+    dsrl t0, t0, 13
+    daddiu t0, t0, -1
+    and a0, a0, t0
+    jr ra
+    sll a0, a0, 13
+m5_cpu_ram_absent:
+    jr ra
+    daddiu a0, zero, -1
+  EndASM
+EndProcedure
+
+ProcedureNaked M5IrqUpdate()
+  ASM
+    la t0, global_m5pending
+    ld t1, 0(t0)
+    ld t2, global_m5irqenable-global_m5pending(t0)
+    sltu t1, zero, t1
+    sltu t2, zero, t2
+    and t1, t1, t2
+    ld t2, global_m5pcmpending-global_m5pending(t0)
+    ld t3, global_m5pcmenable-global_m5pending(t0)
+    sltu t2, zero, t2
+    sltu t3, zero, t3
+    and t2, t2, t3
+    or t1, t1, t2
+    ld t2, global_m5timerflag-global_m5pending(t0)
+    sltu t2, zero, t2
+    or t1, t1, t2
+    la t0, global_mapirq
+    jr ra
+    sd t1, 0(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked.i M5WritableOffset(addr.i)
+  ASM
+    la t0, global_m5protect1
+    ld t1, 0(t0)
+    addiu t2, zero, 2
+    bne t1, t2, m5_cpu_write_protected
+    ld t1, global_m5protect2-global_m5protect1(t0)
+    addiu t2, zero, 1
+    bne t1, t2, m5_cpu_write_protected
+    ori t0, zero, 0x8000
+    sltu t1, a0, t0
+    beqz t1, m5_cpu_write_high
+    nop
+    la t0, global_m5prg
+    j m5ramoffset
+    ld a0, 0(t0)
+m5_cpu_write_high:
+    subu t0, a0, t0
+    srl t0, t0, 13
+    la t1, global_m5ramslots
+    sll t0, t0, 3
+    addu t0, t0, t1
+    jr ra
+    ld a0, 0(t0)
+m5_cpu_write_protected:
+    jr ra
+    daddiu a0, zero, -1
+  EndASM
+EndProcedure
+
+ProcedureNaked M5MirrorPrg(offset.i,addr.i,value.i)
+  ASM
+    la t0, global_m5ramslots
+    la t1, global_nesmapprg
+    andi a1, a1, 8191
+    addu t1, t1, a1
+    addiu t3, zero, 4
+m5_cpu_mirror_next:
+    ld t2, 0(t0)
+    bne t2, a0, m5_cpu_mirror_skip
+    addiu t0, t0, 8
+    sb a2, 0(t1)
+m5_cpu_mirror_skip:
+    addiu t3, t3, -1
+    bnez t3, m5_cpu_mirror_next
+    addiu t1, t1, 8192
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+CompilerIf #GAME_SAVE_BYTES=0
+ProcedureNaked M5PrgWrite(addr.i,value.i)
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    jal m5writableoffset
+    sd a1, 16(sp)
+    bltz a0, m5_cpu_write_return
+    ld a1, 8(sp)
+    ld a2, 16(sp)
+    andi t1, a1, 8191
+    la t0, global_m5ram
+    addu t0, t0, a0
+    addu t0, t0, t1
+    sb a2, 0(t0)
+    ld ra, 0(sp)
+    j m5mirrorprg
+    daddiu sp, sp, 32
+m5_cpu_write_return:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure
+CompilerEndIf
+
+ProcedureNaked.i M5PrgRead(addr.i)
+  ASM
+    ori t0, zero, 0x8000
+    sltu t1, a0, t0
+    bnez t1, m5_cpu_read_low
+    nop
+    subu t0, a0, t0
+    srl t1, t0, 13
+    la t2, global_m5ramslots
+    sll t1, t1, 3
+    addu t1, t1, t2
+    ld t1, 0(t1)
+    addiu t2, zero, -1
+    beq t1, t2, m5_cpu_open_bus
+    nop
+    la t2, global_prgbase
+    ld t2, 0(t2)
+    addu t0, t0, t2
+    jr ra
+    lbu a0, 0(t0)
+m5_cpu_read_low:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    andi t1, a0, 8191
+    la t0, global_m5prg
+    sd t1, 8(sp)
+    jal m5ramoffset
+    ld a0, 0(t0)
+    ld t1, 8(sp)
+    ld ra, 0(sp)
+    bltz a0, m5_cpu_open_bus
+    daddiu sp, sp, 16
+    la t0, global_m5ram
+    addu t0, t0, a0
+    addu t0, t0, t1
+    jr ra
+    lbu a0, 0(t0)
+m5_cpu_open_bus:
+    la t0, global_nesopenbus
+    jr ra
+    ld a0, 0(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked.i M5Read(addr.i)
+  ASM
+    ori t0, zero, 0x5010
+    beq a0, t0, m5_cpu_read_pcm_irq
+    ori t0, zero, 0x5015
+    beq a0, t0, m5_cpu_read_audio
+    ori t0, zero, 0x5204
+    beq a0, t0, m5_cpu_read_scan_irq
+    ori t0, zero, 0x5205
+    beq a0, t0, m5_cpu_read_mul
+    or t1, zero, zero
+    ori t0, zero, 0x5206
+    beq a0, t0, m5_cpu_read_mul
+    addiu t1, zero, 8
+    ori t0, zero, 0x5209
+    beq a0, t0, m5_cpu_read_timer_irq
+    sltiu t0, a0, 0x5c00
+    bnez t0, m5_cpu_open_bus
+    nop
+    la t0, global_m5exmode
+    ld t0, 0(t0)
+    slti t0, t0, 2
+    bnez t0, m5_cpu_open_bus
+    andi a0, a0, 1023
+    la t0, global_m5ex
+    addu t0, t0, a0
+    jr ra
+    lbu a0, 0(t0)
+m5_cpu_read_pcm_irq:
+    la t0, global_m5pcmpending
+    ld a0, 0(t0)
+    sd zero, 0(t0)
+    j m5irqupdate
+    dsll a0, a0, 7
+m5_cpu_read_audio:
+    la t0, global_m5length
+    ld t1, 0(t0)
+    ld t2, 8(t0)
+    slt t1, zero, t1
+    slt t2, zero, t2
+    sll t2, t2, 1
+    jr ra
+    or a0, t1, t2
+m5_cpu_read_scan_irq:
+    la t0, global_m5pending
+    ld t1, global_m5inframe-global_m5pending(t0)
+    ld t2, 0(t0)
+    dsll t1, t1, 6
+    dsll t2, t2, 7
+    sd zero, 0(t0)
+    j m5irqupdate
+    daddu a0, t1, t2
+m5_cpu_read_timer_irq:
+    la t0, global_m5timerflag
+    ld a0, 0(t0)
+    sd zero, 0(t0)
+    j m5irqupdate
+    dsll a0, a0, 7
+m5_cpu_read_mul:
+    la t0, global_m5mula
+    ld t2, global_m5mulb-global_m5mula(t0)
+    ld t3, 0(t0)
+    multu t2, t3
+    mflo a0
+    srlv a0, a0, t1
+    jr ra
+    andi a0, a0, 255
+  EndASM
+EndProcedure
+
+ProcedureNaked M5Write(addr.i,value.i)
+  ASM
+    sltiu t0, a0, 0x6000
+    beqz t0, m5_cpu_write_prg
+    sltiu t0, a0, 0x5016
+    bnez t0, m5_cpu_write_sound
+    addiu t0, a0, -0x5113
+    sltiu t1, t0, 5
+    bnez t1, m5_cpu_prg_bank
+    sll t0, t0, 3
+    ori t0, zero, 0x5100
+    beq a0, t0, m5_cpu_prg_mode
+    ori t0, zero, 0x5102
+    beq a0, t0, m5_cpu_protect1
+    ori t0, zero, 0x5103
+    beq a0, t0, m5_cpu_protect2
+    ori t0, zero, 0x5203
+    beq a0, t0, m5_cpu_irq_target
+    ori t0, zero, 0x5204
+    beq a0, t0, m5_cpu_irq_enable
+    ori t0, zero, 0x5205
+    beq a0, t0, m5_cpu_mul_a
+    ori t0, zero, 0x5206
+    beq a0, t0, m5_cpu_mul_b
+    ori t0, zero, 0x5209
+    beq a0, t0, m5_cpu_timer_low
+    ori t0, zero, 0x520a
+    beq a0, t0, m5_cpu_timer_high
+    nop
+    j m5writevideo
+    nop
+m5_cpu_write_prg:
+    j m5prgwrite
+    nop
+m5_cpu_write_sound:
+    j m5soundwrite
+    nop
+m5_cpu_prg_bank:
+    la t1, global_m5prg
+    addu t1, t1, t0
+    j m5prgupdate
+    sd a1, 0(t1)
+m5_cpu_prg_mode:
+    la t0, global_m5prgmode
+    andi t1, a1, 3
+    j m5prgupdate
+    sd t1, 0(t0)
+m5_cpu_protect1:
+    la t0, global_m5protect1
+    andi t1, a1, 3
+    jr ra
+    sd t1, 0(t0)
+m5_cpu_protect2:
+    la t0, global_m5protect2
+    andi t1, a1, 3
+    jr ra
+    sd t1, 0(t0)
+m5_cpu_irq_target:
+    la t0, global_m5irqtarget
+    jr ra
+    sd a1, 0(t0)
+m5_cpu_irq_enable:
+    la t0, global_m5irqenable
+    andi t1, a1, 128
+    srl t1, t1, 7
+    j m5irqupdate
+    sd t1, 0(t0)
+m5_cpu_mul_a:
+    la t0, global_m5mula
+    jr ra
+    sd a1, 0(t0)
+m5_cpu_mul_b:
+    la t0, global_m5mulb
+    jr ra
+    sd a1, 0(t0)
+m5_cpu_timer_low:
+    la t0, global_m5timer
+    ld t1, 0(t0)
+    andi t1, t1, 0xff00
+    or t1, t1, a1
+    sd t1, 0(t0)
+    sltu t1, zero, t1
+    sd t1, global_m5timerrun-global_m5timer(t0)
+    j m5irqupdate
+    sd zero, global_m5timerflag-global_m5timer(t0)
+m5_cpu_timer_high:
+    la t0, global_m5timer
+    ld t1, 0(t0)
+    dsll t2, a1, 8
+    andi t1, t1, 255
+    or t1, t1, t2
+    jr ra
+    sd t1, 0(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked M5PrgUpdate()
+  ASM
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    or s0, zero, zero
+    la s1, global_m5ramslots
+    la s2, global_mapprgslots
+    la s3, global_nesmapprg
+    la s4, global_m5prg
+    la t0, global_m5prgmode
+    ld s5, 0(t0)
+m5_cpu_bank_next:
+    addiu t0, s0, 1
+    beqz s5, m5_cpu_bank_32k
+    or t1, zero, zero
+    addiu t2, zero, 1
+    beq s5, t2, m5_cpu_bank_16k
+    addiu t2, zero, 2
+    bne s5, t2, m5_cpu_bank_selected
+    sltiu t2, s0, 2
+    beqz t2, m5_cpu_bank_selected
+    nop
+m5_cpu_bank_16k:
+    andi t0, s0, 2
+    addiu t0, t0, 2
+    b m5_cpu_bank_selected
+    addiu t1, zero, 1
+m5_cpu_bank_32k:
+    addiu t0, zero, 4
+    addiu t1, zero, 3
+m5_cpu_bank_selected:
+    sll t2, t0, 3
+    addu t2, t2, s4
+    ld t2, 0(t2)
+    xori t3, t1, 127
+    and t3, t3, t2
+    and t1, t1, s0
+    addu a1, t3, t1
+    andi t2, t2, 128
+    bnez t2, m5_cpu_bank_rom
+    addiu t1, zero, 4
+    beq t0, t1, m5_cpu_bank_rom
+    nop
+    jal m5ramoffset
+    or a0, a1, zero
+    sd a0, 0(s1)
+    ld t0, 0(s2)
+    daddiu s6, a0, 0x1000
+    beq t0, s6, m5_cpu_bank_advance
+    nop
+    bltz a0, m5_cpu_bank_clear
+    nop
+    la t0, global_m5ram
+    addu a1, a0, t0
+    or a0, s3, zero
+    jal mapcopy
+    addiu a2, zero, 8192
+    b m5_cpu_bank_advance
+    sd s6, 0(s2)
+m5_cpu_bank_clear:
+    or a0, s3, zero
+    jal guestclear
+    addiu a1, zero, 8192
+    b m5_cpu_bank_advance
+    sd s6, 0(s2)
+m5_cpu_bank_rom:
+    addiu t0, zero, -2
+    sd t0, 0(s1)
+    jal mapperprg
+    or a0, s0, zero
+m5_cpu_bank_advance:
+    addiu s0, s0, 1
+    addiu s1, s1, 8
+    addiu s2, s2, 8
+    sltiu t0, s0, 4
+    bnez t0, m5_cpu_bank_next
+    addiu s3, s3, 8192
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
+EndProcedure

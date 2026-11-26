@@ -1,29 +1,9 @@
-"""Connect banked PRG storage to Anvil's existing mapper windows."""
+"""Check the N64 static memory layout."""
 
 import re
 
 
 RDRAM_CART_RESERVE = 0x80200000
-
-
-def stage_storage(name: str, source: str) -> str:
-    if name != "mappers":
-        return source
-    resident = "    MapCopy(@NesMapPrg(0)+slot*8192,CartPrg+bank*8192,8192)\n"
-    banked = """    CompilerIf #GAME_MAPPER=1
-      If (slot&1)=0
-        NesMmc1Bias(slot>>1)=CartPrg+(bank-slot)*8192-$8000
-      EndIf
-    CompilerElseIf #GAME_MAPPER=5 Or #GAME_MAPPER=228
-      If NesPrgBankLoad(@NesMapPrg(0)+slot*8192,bank)=0
-        WorkerError=22
-        ProcedureReturn
-      EndIf
-    CompilerElse
-""" + resident + "    CompilerEndIf\n"
-    if source.count(resident) != 1:
-        raise ValueError("mapper PRG storage hook changed")
-    return source.replace(resident, banked)
 
 
 def check_storage_layout(compiler_log: str) -> None:

@@ -1,0 +1,332 @@
+; Board-specific window geometry. The shared mapping primitives still handle
+; mirroring, window fill, and cartridge/CHR backing selection.
+ProcedureNaked.i ExtraMapperUpdate()
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    or s0, zero, zero
+  EndASM
+  CompilerIf #GAME_MAPPER=9
+    ASM
+      la t0, global_mapprgreg
+      ld a1, 0(t0)
+      andi a1, a1, 15
+      jal mapperprg
+      or a0, zero, zero
+      la t0, global_mapprgbytes
+      ld s1, 0(t0)
+      dsrl s1, s1, 13
+      daddiu s1, s1, -4
+      addiu s0, zero, 1
+nes_extra_update_mmc2_prg:
+      or a0, s0, zero
+      jal mapperprg
+      daddu a1, s0, s1
+      addiu s0, s0, 1
+      sltiu t0, s0, 4
+      bnez t0, nes_extra_update_mmc2_prg
+      nop
+      la t0, global_extralatch0
+      la t1, global_extraregs
+      ld t2, 0(t0)
+      dsll t2, t2, 3
+      daddu t2, t1, t2
+      ld s1, 0(t2)
+      la t0, global_extralatch1
+      ld t2, 0(t0)
+      daddiu t2, t2, 2
+      dsll t2, t2, 3
+      daddu t2, t1, t2
+      ld s2, 0(t2)
+      dsll s1, s1, 2
+      dsll s2, s2, 2
+    EndASM
+  CompilerElseIf #GAME_MAPPER=13
+    ASM
+      la t0, global_extrachr
+      ld s1, 0(t0)
+      andi s1, s1, 3
+      dsll s1, s1, 2
+nes_extra_update_cprom:
+      or a0, s0, zero
+      jal mapperprg
+      or a1, s0, zero
+      or a0, s0, zero
+      jal mapperchr
+      or a1, s0, zero
+      addiu a0, s0, 4
+      jal mapperchr
+      daddu a1, s0, s1
+      addiu s0, s0, 1
+      sltiu t0, s0, 4
+      bnez t0, nes_extra_update_cprom
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=206
+    ASM
+      la s1, global_mapregs
+      ld a1, 48(s1)
+      andi a1, a1, 15
+      jal mapperprg
+      or a0, zero, zero
+      ld a1, 56(s1)
+      andi a1, a1, 15
+      jal mapperprg
+      addiu a0, zero, 1
+      la t0, global_mapprgbytes
+      ld s2, 0(t0)
+      dsrl s2, s2, 13
+      daddiu a1, s2, -2
+      jal mapperprg
+      addiu a0, zero, 2
+      daddiu a1, s2, -1
+      jal mapperprg
+      addiu a0, zero, 3
+nes_extra_update_dxrom_pair:
+      sll t0, s0, 3
+      addu t0, s1, t0
+      ld s2, 0(t0)
+      andi s2, s2, 62
+      sll a0, s0, 1
+      jal mapperchr
+      or a1, s2, zero
+      sll a0, s0, 1
+      addiu a0, a0, 1
+      jal mapperchr
+      ori a1, s2, 1
+      addiu s0, s0, 1
+      sltiu t0, s0, 2
+      bnez t0, nes_extra_update_dxrom_pair
+      nop
+nes_extra_update_dxrom_single:
+      sll t0, s0, 3
+      addu t0, s1, t0
+      ld a1, 0(t0)
+      andi a1, a1, 63
+      jal mapperchr
+      addiu a0, s0, 2
+      addiu s0, s0, 1
+      sltiu t0, s0, 6
+      bnez t0, nes_extra_update_dxrom_single
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=71 Or #GAME_MAPPER=232
+    CompilerIf #GAME_MAPPER=71
+      ASM
+        la t0, global_mapprgreg
+        ld s1, 0(t0)
+        dsll s1, s1, 1
+        la t0, global_mapprgbytes
+        ld s2, 0(t0)
+        dsrl s2, s2, 13
+        daddiu s2, s2, -2
+      EndASM
+    CompilerElse
+      ASM
+        la t0, global_extraouter
+        ld s2, 0(t0)
+        dsll s2, s2, 3
+        la t0, global_mapprgreg
+        ld s1, 0(t0)
+        andi s1, s1, 3
+        dsll s1, s1, 1
+        daddu s1, s1, s2
+        daddiu s2, s2, 6
+      EndASM
+    CompilerEndIf
+    ASM
+nes_extra_update_prg_pairs:
+      or a0, s0, zero
+      jal mapperprg
+      daddu a1, s1, s0
+      addiu a0, s0, 2
+      jal mapperprg
+      daddu a1, s2, s0
+      addiu s0, s0, 1
+      sltiu t0, s0, 2
+      bnez t0, nes_extra_update_prg_pairs
+      nop
+      or s2, zero, zero
+    EndASM
+  CompilerElse
+    CompilerIf #GAME_MAPPER=228
+      ASM
+        la t0, global_extraouter
+        ld s3, 0(t0)
+        dsrl t0, s3, 11
+        andi t0, t0, 3
+        sltiu t1, t0, 3
+        bnez t1, nes_extra_update_228_chip
+        nop
+        addiu t0, zero, 2
+nes_extra_update_228_chip:
+        sll t0, t0, 5
+        dsrl t1, s3, 6
+        andi t1, t1, 31
+        addu s1, t0, t1
+        andi t0, s3, 32
+        bnez t0, nes_extra_update_228_selected
+        nop
+        andi s1, s1, 254
+nes_extra_update_228_selected:
+        sll s1, s1, 1
+        la t0, global_extrachr
+        ld t0, 0(t0)
+        andi t0, t0, 3
+        andi s2, s3, 15
+        sll s2, s2, 2
+        or s2, s2, t0
+        sll s2, s2, 3
+      EndASM
+    CompilerElseIf #GAME_MAPPER=234
+      ASM
+        la t0, global_extraregs
+        ld s3, 0(t0)
+        ld t0, 8(t0)
+        andi s1, s3, 15
+        dsrl t1, t0, 4
+        andi t2, s3, 64
+        sll t3, s3, 2
+        bnez t2, nes_extra_update_234_extended
+        andi s2, t3, 60
+        b nes_extra_update_234_selected
+        andi t1, t1, 3
+nes_extra_update_234_extended:
+        andi s1, s3, 14
+        andi t0, t0, 1
+        or s1, s1, t0
+        andi s2, t3, 56
+        andi t1, t1, 7
+nes_extra_update_234_selected:
+        or s2, s2, t1
+        la t0, global_extrachr
+        sd s2, 0(t0)
+        sll s1, s1, 2
+        sll s2, s2, 3
+      EndASM
+    CompilerElse
+      ASM
+        la t0, global_mapprgreg
+        ld t0, 0(t0)
+      EndASM
+      CompilerIf #GAME_MAPPER=79 Or #GAME_MAPPER=148
+        ASM
+          dsrl s1, t0, 3
+          andi s1, s1, 1
+          dsll s1, s1, 2
+          andi s2, t0, 7
+          dsll s2, s2, 3
+        EndASM
+      CompilerElseIf #GAME_MAPPER=144
+        ASM
+          andi s1, t0, 15
+          dsll s1, s1, 2
+          dsrl s2, t0, 4
+          andi s2, s2, 15
+          dsll s2, s2, 3
+        EndASM
+      CompilerElse
+        ASM
+          dsll s1, t0, 2
+        EndASM
+        CompilerIf #GAME_MAPPER=41
+          ASM
+            la t0, global_extrachr
+            ld s2, 0(t0)
+            dsll s2, s2, 3
+          EndASM
+        CompilerEndIf
+      CompilerEndIf
+    CompilerEndIf
+    ASM
+nes_extra_update_prg_four:
+      or a0, s0, zero
+      or t0, s0, zero
+    EndASM
+    CompilerIf #GAME_MAPPER=228
+      ASM
+        andi t1, s3, 32
+        beqz t1, nes_extra_update_228_slot
+        nop
+        andi t0, t0, 1
+nes_extra_update_228_slot:
+      EndASM
+    CompilerEndIf
+    ASM
+      jal mapperprg
+      daddu a1, s1, t0
+      addiu s0, s0, 1
+      sltiu t0, s0, 4
+      bnez t0, nes_extra_update_prg_four
+      nop
+    EndASM
+    CompilerIf #GAME_MAPPER=34
+      ASM
+        la t0, global_mapchr0
+        ld s1, 0(t0)
+        la t0, global_mapchr1
+        ld s2, 0(t0)
+        dsll s1, s1, 2
+        dsll s2, s2, 2
+      EndASM
+    CompilerEndIf
+  CompilerEndIf
+  CompilerIf #GAME_MAPPER=9 Or #GAME_MAPPER=34
+    ASM
+      or s0, zero, zero
+nes_extra_update_chr_pairs:
+      or a0, s0, zero
+      jal mapperchr
+      daddu a1, s1, s0
+      addiu a0, s0, 4
+      jal mapperchr
+      daddu a1, s2, s0
+      addiu s0, s0, 1
+      sltiu t0, s0, 4
+      bnez t0, nes_extra_update_chr_pairs
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER<>13 And #GAME_MAPPER<>206
+    ASM
+      or s0, zero, zero
+nes_extra_update_chr_eight:
+      or a0, s0, zero
+      jal mapperchr
+      daddu a1, s2, s0
+      addiu s0, s0, 1
+      sltiu t0, s0, 8
+      bnez t0, nes_extra_update_chr_eight
+      nop
+    EndASM
+  CompilerEndIf
+  CompilerIf #GAME_MAPPER=228 Or #GAME_MAPPER=234
+    CompilerIf #GAME_MAPPER=228
+      ASM
+        dsrl t0, s3, 13
+      EndASM
+    CompilerElse
+      ASM
+        dsrl t0, s3, 7
+      EndASM
+    CompilerEndIf
+    ASM
+      andi a0, t0, 1
+      jal mappermirror
+      xori a0, a0, 1
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    addiu a0, zero, 1
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
+EndProcedure

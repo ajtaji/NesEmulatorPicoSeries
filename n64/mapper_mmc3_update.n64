@@ -1,0 +1,110 @@
+ProcedureNaked MapperUpdate()
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+
+    la s0, global_mapregs
+    la t0, global_mapselect
+    ld s1, 0(t0)
+    la t0, global_mapprgbytes
+    ld s2, 0(t0)
+    dsrl s2, s2, 13
+    andi a0, s1, 64
+    srl a0, a0, 5
+    ld a1, 48(s0)
+    jal mapperprg
+    andi a1, a1, 63
+    andi a0, s1, 64
+    srl a0, a0, 5
+    xori a0, a0, 2
+    jal mapperprg
+    addiu a1, s2, -2
+    ld a1, 56(s0)
+    addiu a0, zero, 1
+    jal mapperprg
+    andi a1, a1, 63
+    addiu a0, zero, 3
+    jal mapperprg
+    addiu a1, s2, -1
+
+    andi s1, s1, 128
+    srl s1, s1, 5
+    move s2, zero
+mmc3_update_pair:
+    sll t0, s2, 2
+    daddu t0, t0, s0
+    ld a1, 0(t0)
+    addu a0, s1, s2
+    jal mapperchr
+    andi a1, a1, 254
+    sll t0, s2, 2
+    daddu t0, t0, s0
+    ld a1, 0(t0)
+    addu a0, s1, s2
+    addiu a0, a0, 1
+    jal mapperchr
+    ori a1, a1, 1
+    addiu s2, s2, 2
+    sltiu t0, s2, 4
+    bnez t0, mmc3_update_pair
+    nop
+
+    xori s1, s1, 4
+    move s2, zero
+mmc3_update_single:
+    sll t0, s2, 3
+    daddu t0, t0, s0
+    ld a1, 16(t0)
+    jal mapperchr
+    addu a0, s1, s2
+    addiu s2, s2, 1
+    sltiu t0, s2, 4
+    bnez t0, mmc3_update_single
+    nop
+
+  EndASM
+  CompilerIf #GAME_MAPPER=118
+    ASM
+      jal extrantrefresh
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_nesmapprg
+    la t1, global_prgbase
+    sd t0, 0(t1)
+    daddiu t2, t0, -32768
+    la t1, global_prgbias
+    sd t2, 0(t1)
+    la t1, global_workerprgbase
+    sd t0, 0(t1)
+    la t0, global_nesmapchr
+    la t1, global_neschrwindow
+    sd t0, 0(t1)
+    la t0, global_nesmappattern
+    la t1, global_pattern
+    sd t0, 0(t1)
+    la t0, global_mapchrram
+    ld t0, 0(t0)
+    sltu t0, zero, t0
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      addiu t0, zero, 1
+    EndASM
+  CompilerEndIf
+  ASM
+    la t1, global_chrwritable
+    sd t0, 0(t1)
+
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure

@@ -1,0 +1,478 @@
+ProcedureNaked M5FetchTile()
+  ASM
+    la a6, global_waddr
+    ld a7, 0(a6)
+    lw a5, global_m5ppumask-global_waddr+4(a6)
+    lw t0, global_m5split-global_waddr+4(a6)
+    lw t1, global_m5exmode-global_waddr+4(a6)
+    andi a5, a5, 24
+    andi t3, t0, 128
+    beqz t3, nes_m5_tile_nametable
+    sltiu t3, t1, 2
+    beqz t3, nes_m5_tile_nametable
+    lw t8, global_ppudot-global_waddr+4(a6)
+    beqz a5, nes_m5_tile_nametable
+    lw t9, global_wi-global_waddr+4(a6)
+    srl t8, t8, 3
+    addu t8, t8, t9
+    andi t9, t0, 31
+    sltu t9, t8, t9
+    srl t0, t0, 6
+    xor t0, t0, t9
+    andi t0, t0, 1
+    beqz t0, nes_m5_tile_nametable
+    andi t8, t8, 31
+
+    ; In split mode, use ExRAM tile and attribute addresses relative to the
+    ; split's vertical scroll. The pattern row still uses the guest fine Y.
+    lw t0, global_ppuline-global_waddr+4(a6)
+    lw t3, global_m5splitscroll-global_waddr+4(a6)
+    addu t0, t0, t3
+    addiu t3, zero, 240
+    divu t0, t3
+    la t9, global_m5ex
+    mfhi t0
+    srl t3, t0, 3
+    sll t2, t3, 5
+    addu t2, t2, t8
+    addu t2, t2, t9
+    lbu t2, 0(t2)
+    srl t1, t0, 5
+    sll t1, t1, 3
+    srl t0, t8, 2
+    addu t1, t1, t0
+    addu t1, t1, t9
+    lbu t1, 960(t1)
+    andi t3, t3, 2
+    sll t3, t3, 1
+    andi t8, t8, 2
+    or t3, t3, t8
+    srlv t3, t1, t3
+    lw a4, global_m5splitbank-global_waddr+4(a6)
+    b nes_m5_tile_direct
+    sll a4, a4, 2
+
+nes_m5_tile_nametable:
+    la t9, global_nt
+    andi t2, a7, 0x0fff
+    addu t2, t2, t9
+    lbu t2, 0(t2)
+    addiu t0, zero, 1
+    bne t1, t0, nes_m5_tile_normal
+    andi t8, a7, 1023
+    beqz a5, nes_m5_tile_normal
+    nop
+    la t0, global_m5ex
+    addu t0, t0, t8
+    lbu t0, 0(t0)
+    lw a4, global_m5chrhigh-global_waddr+4(a6)
+    srl t3, t0, 6
+    andi t0, t0, 63
+    sll a4, a4, 6
+    or a4, a4, t0
+    sll a4, a4, 2
+nes_m5_tile_direct:
+    lw t9, global_mapchrbytes-global_waddr+4(a6)
+    srl a7, a7, 11
+    andi a7, a7, 14
+    sll t2, t2, 4
+    or t2, t2, a7
+    srl t9, t9, 10
+    addiu t9, t9, -1
+    b nes_m5_tile_load
+    and a4, a4, t9
+
+nes_m5_tile_normal:
+    srl t8, a7, 4
+    srl t0, a7, 2
+    andi t3, a7, 0x0c00
+    andi t1, t8, 0x38
+    andi t0, t0, 7
+    or t3, t3, t1
+    or t3, t3, t0
+    ori t3, t3, 0x03c0
+    addu t3, t3, t9
+    lbu t3, 0(t3)
+    andi t8, t8, 4
+    andi t0, a7, 2
+    or t8, t8, t0
+    srlv t3, t3, t8
+    lw t0, global_ppuctrl-global_waddr+4(a6)
+    srl a7, a7, 11
+    andi a7, a7, 14
+    sll t2, t2, 4
+    or t2, t2, a7
+    andi t0, t0, 16
+    sll t0, t0, 8
+    or t2, t2, t0
+    srl a0, t2, 10
+    andi t2, t2, 1023
+    lw t0, global_m5ppucontrol-global_waddr+4(a6)
+    andi t0, t0, 32
+    beqz t0, nes_m5_tile_bank
+    or a1, zero, zero
+    bnez a5, nes_m5_tile_bank
+    addiu a1, zero, 1
+    ld a1, global_m5lastset-global_waddr(a6)
+nes_m5_tile_bank:
+    addiu sp, sp, -32
+    sd ra, 24(sp)
+    sd t2, 16(sp)
+    jal m5chrbank
+    sd t3, 8(sp)
+    or a4, a0, zero
+    ld t3, 8(sp)
+    ld t2, 16(sp)
+    ld ra, 24(sp)
+    addiu sp, sp, 32
+    la a6, global_waddr
+
+nes_m5_tile_load:
+    la t0, global_decoded
+    sll a4, a4, 10
+    addu t0, t0, a4
+    addu t0, t0, t2
+    lhu t0, 0(t0)
+    andi t3, t3, 3
+    sll t3, t3, 2
+    sll t9, t3, 8
+    or t3, t3, t9
+    sll t9, t3, 16
+    or t3, t3, t9
+    la t9, global_pixelspread
+    andi t1, t0, 255
+    srl t0, t0, 8
+    sll t1, t1, 2
+    sll t0, t0, 2
+    addu t1, t1, t9
+    addu t0, t0, t9
+    lw t1, 0(t1)
+    lw t0, 0(t0)
+    or t1, t1, t3
+    or t0, t0, t3
+    sd t1, global_wlo-global_waddr(a6)
+    jr ra
+    sd t0, global_whi-global_waddr(a6)
+  EndASM
+EndProcedure
+
+
+ProcedureNaked M5PpuRead(addr.i, dot.i)
+  ASM
+    la a2, global_m5lastread
+    ld t0, 0(a2)
+    dsubu t0, a1, t0
+    slti t0, t0, 9
+    bnez t0, nes_m5_ppu_matches
+    nop
+    addiu t0, zero, -1
+    sd zero, global_m5inframe-global_m5lastread(a2)
+    sd zero, global_m5matches-global_m5lastread(a2)
+    sd t0, global_m5lastaddr-global_m5lastread(a2)
+nes_m5_ppu_matches:
+    ld t0, global_m5matches-global_m5lastread(a2)
+    slti t1, t0, 2
+    beqz t1, nes_m5_ppu_scanline
+    daddiu t2, a0, -0x2000
+    sltiu t2, t2, 0x1000
+    beqz t2, nes_m5_ppu_match_store
+    or t3, zero, zero
+    ld t2, global_m5lastaddr-global_m5lastread(a2)
+    beq a0, t2, nes_m5_ppu_match_increment
+    nop
+    b nes_m5_ppu_match_store
+    nop
+nes_m5_ppu_match_increment:
+    daddiu t3, t0, 1
+nes_m5_ppu_match_store:
+    sd t3, global_m5matches-global_m5lastread(a2)
+nes_m5_ppu_stamp:
+    sd a1, 0(a2)
+    jr ra
+    sd a0, global_m5lastaddr-global_m5lastread(a2)
+
+nes_m5_ppu_scanline:
+    sd zero, global_m5matches-global_m5lastread(a2)
+    ld t0, global_mapirqclocks-global_m5lastread(a2)
+    ld t1, global_m5inframe-global_m5lastread(a2)
+    daddiu t0, t0, 1
+    sd t0, global_mapirqclocks-global_m5lastread(a2)
+    bnez t1, nes_m5_ppu_scanline_active
+    addiu t3, zero, 1
+    sd t3, global_m5inframe-global_m5lastread(a2)
+    sd zero, global_m5scanline-global_m5lastread(a2)
+    b nes_m5_ppu_update
+    sd zero, global_m5pending-global_m5lastread(a2)
+nes_m5_ppu_scanline_active:
+    ld t0, global_m5scanline-global_m5lastread(a2)
+    ld t1, global_m5irqtarget-global_m5lastread(a2)
+    daddiu t0, t0, 1
+    andi t0, t0, 255
+    sd t0, global_m5scanline-global_m5lastread(a2)
+    bne t0, t1, nes_m5_ppu_scanline_end
+    nop
+    beqz t1, nes_m5_ppu_scanline_end
+    nop
+    sd t3, global_m5pending-global_m5lastread(a2)
+    ld t1, global_mapirqassertions-global_m5lastread(a2)
+    daddiu t1, t1, 1
+    sd t1, global_mapirqassertions-global_m5lastread(a2)
+nes_m5_ppu_scanline_end:
+    addiu t1, zero, 240
+    beq t0, t1, nes_m5_ppu_reset
+    nop
+nes_m5_ppu_update:
+    addiu sp, sp, -32
+    sd ra, 24(sp)
+    sd a1, 16(sp)
+    b nes_m5_ppu_irq
+    sd a0, 8(sp)
+nes_m5_ppu_reset:
+    addiu sp, sp, -32
+    sd ra, 24(sp)
+    sd a1, 16(sp)
+    jal m5scanreset
+    sd a0, 8(sp)
+nes_m5_ppu_irq:
+    jal m5irqupdate
+    nop
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld ra, 24(sp)
+    addiu sp, sp, 32
+    la a2, global_m5lastread
+    b nes_m5_ppu_stamp
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked M5PpuNotice(addr.i, value.i)
+  ASM
+    addiu t0, zero, 0x2000
+    beq a0, t0, nes_m5_notice_ctrl
+    addiu t0, zero, 0x2001
+    beq a0, t0, nes_m5_notice_mask
+    addiu t0, zero, 0x4014
+    beq a0, t0, nes_m5_notice_dma
+    nop
+    jr ra
+    nop
+nes_m5_notice_ctrl:
+    la t0, global_m5ppucontrol
+    j m5chrupdate
+    sd a1, 0(t0)
+nes_m5_notice_dma:
+    j m5scanreset
+    nop
+nes_m5_notice_mask:
+    la t0, global_m5ppumask
+    ld t1, 0(t0)
+    andi t1, t1, 24
+    bnez t1, nes_m5_notice_mask_store
+    andi t1, a1, 24
+    beqz t1, nes_m5_notice_mask_store
+    nop
+    addiu sp, sp, -16
+    sd ra, 8(sp)
+    jal m5scanreset
+    sd a1, 0(sp)
+    ld a1, 0(sp)
+    ld ra, 8(sp)
+    addiu sp, sp, 16
+    la t0, global_m5ppumask
+    andi t1, a1, 24
+nes_m5_notice_mask_store:
+    bnez t1, nes_m5_notice_mask_done
+    sd a1, 0(t0)
+    addiu t1, zero, -1
+    sd zero, global_m5inframe-global_m5ppumask(t0)
+    sd t1, global_m5lastaddr-global_m5ppumask(t0)
+    sd zero, global_m5matches-global_m5ppumask(t0)
+nes_m5_notice_mask_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked M5PpuTicks(cycles.i)
+  ; Track the mapper-visible bus sequence without changing the renderer's
+  ; independent PPU position. Interior tile fetches retain the last bus stamp.
+  ASM
+    addiu sp, sp, -80
+    sd ra, 72(sp)
+    sd s7, 64(sp)
+    sd s6, 56(sp)
+    sd s5, 48(sp)
+    sd s4, 40(sp)
+    sd s3, 32(sp)
+    sd s2, 24(sp)
+    sd s1, 16(sp)
+    sd s0, 8(sp)
+    la s0, global_m5dots
+    dsll s1, a0, 1
+    daddu s1, s1, a0
+    ld t0, global_m5timer-global_m5dots(s0)
+    blez t0, nes_m5_tick_init
+    ld t1, global_m5timerrun-global_m5dots(s0)
+    beqz t1, nes_m5_tick_init
+    dsubu t0, t0, a0
+    bgtz t0, nes_m5_tick_init
+    sd t0, global_m5timer-global_m5dots(s0)
+    sd zero, global_m5timer-global_m5dots(s0)
+    sd zero, global_m5timerrun-global_m5dots(s0)
+    addiu t0, zero, 1
+    jal m5irqupdate
+    sd t0, global_m5timerflag-global_m5dots(s0)
+
+nes_m5_tick_init:
+    ld s2, global_ppuline-global_m5dots(s0)
+    ld s3, global_ppudot-global_m5dots(s0)
+    ld s4, global_ppuodd-global_m5dots(s0)
+    lw s5, global_ppumask-global_m5dots+4(s0)
+    blez s1, nes_m5_tick_finish
+    andi s5, s5, 24
+nes_m5_tick_loop:
+    addiu s6, zero, 341
+    or a5, zero, zero
+    beqz s5, nes_m5_tick_step
+    or s7, s6, zero
+    addiu t0, zero, 261
+    bne s2, t0, nes_m5_tick_visible
+    slti t2, s2, 240
+    beqz s4, nes_m5_tick_edges
+    nop
+    addiu s6, zero, 340
+    b nes_m5_tick_edges
+    or s7, s6, zero
+nes_m5_tick_visible:
+    beqz t2, nes_m5_tick_step
+    nop
+
+nes_m5_tick_edges:
+    slti t0, s3, 5
+    bnez t0, nes_m5_tick_fetch_edge
+    slti t0, s3, 337
+    beqz t0, nes_m5_tick_fetch_edge
+    nop
+    ld t0, global_m5matches-global_m5dots(s0)
+    ld t1, global_m5lastaddr-global_m5dots(s0)
+    or t0, t0, t1
+    bnez t0, nes_m5_tick_fetch_edge
+    nop
+    addiu s7, zero, 337
+    b nes_m5_tick_step
+    addiu a5, zero, 1
+nes_m5_tick_fetch_edge:
+    slti t0, s3, 339
+    beqz t0, nes_m5_tick_step
+    daddiu t0, s3, 1
+    ori s7, t0, 1
+
+nes_m5_tick_step:
+    dsubu t0, s7, s3
+    slt t1, s1, t0
+    beqz t1, nes_m5_tick_apply
+    nop
+    or t0, s1, zero
+nes_m5_tick_apply:
+    ld t1, 0(s0)
+    daddu s3, s3, t0
+    dsubu s1, s1, t0
+    daddu a1, t1, t0
+    beqz a5, nes_m5_tick_at_edge
+    sd a1, 0(s0)
+
+    ld t0, global_m5lastread-global_m5dots(s0)
+    dsubu t0, t1, t0
+    slti t0, t0, 9
+    bnez t0, nes_m5_tick_fast_last
+    daddiu t2, s3, -1
+    sd zero, global_m5inframe-global_m5dots(s0)
+nes_m5_tick_fast_last:
+    ori t2, t2, 1
+    slti t0, t2, 336
+    bnez t0, nes_m5_tick_fast_stamp
+    nop
+    addiu t2, zero, 335
+nes_m5_tick_fast_stamp:
+    dsubu t0, s3, t2
+    dsubu t0, a1, t0
+    sd t0, global_m5lastread-global_m5dots(s0)
+    sd zero, global_m5matches-global_m5dots(s0)
+    daddiu t0, t2, -257
+    sltiu t0, t0, 64
+    bnez t0, nes_m5_tick_fast_addr
+    or t1, zero, zero
+    andi t2, t2, 7
+    addiu t0, zero, 1
+    beq t2, t0, nes_m5_tick_fast_nt
+    addiu t0, zero, 3
+    bne t2, t0, nes_m5_tick_fast_addr
+    nop
+    b nes_m5_tick_fast_addr
+    addiu t1, zero, 0x23c0
+nes_m5_tick_fast_nt:
+    addiu t1, zero, 0x2000
+nes_m5_tick_fast_addr:
+    sd t1, global_m5lastaddr-global_m5dots(s0)
+
+nes_m5_tick_at_edge:
+    bne s3, s7, nes_m5_tick_next
+    nop
+    beq s3, s6, nes_m5_tick_line
+    slti t0, s3, 337
+    beqz t0, nes_m5_tick_nt
+    daddiu t0, s3, -257
+    sltiu t0, t0, 64
+    bnez t0, nes_m5_tick_read
+    or a0, zero, zero
+    andi t2, s3, 7
+    addiu t0, zero, 1
+    beq t2, t0, nes_m5_tick_nt
+    addiu t0, zero, 3
+    bne t2, t0, nes_m5_tick_read
+    nop
+    b nes_m5_tick_read
+    addiu a0, zero, 0x23c0
+nes_m5_tick_nt:
+    addiu a0, zero, 0x2000
+nes_m5_tick_read:
+    jal m5ppuread
+    nop
+    b nes_m5_tick_next
+    nop
+nes_m5_tick_line:
+    addiu s2, s2, 1
+    addiu t0, zero, 262
+    bne s2, t0, nes_m5_tick_next
+    or s3, zero, zero
+    or s2, zero, zero
+    xori s4, s4, 1
+nes_m5_tick_next:
+    bgtz s1, nes_m5_tick_loop
+    nop
+
+nes_m5_tick_finish:
+    ld t0, global_m5lastread-global_m5dots(s0)
+    ld t1, 0(s0)
+    dsubu t0, t1, t0
+    slti t0, t0, 9
+    bnez t0, nes_m5_tick_return
+    addiu t1, zero, -1
+    sd zero, global_m5inframe-global_m5dots(s0)
+    sd zero, global_m5matches-global_m5dots(s0)
+    sd t1, global_m5lastaddr-global_m5dots(s0)
+nes_m5_tick_return:
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    ld ra, 72(sp)
+    jr ra
+    addiu sp, sp, 80
+  EndASM
+EndProcedure

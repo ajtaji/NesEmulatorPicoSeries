@@ -1,0 +1,138 @@
+; The mapper-4 PPU bus has wired CIRAM and direct ROM pattern biases.
+ProcedureNaked.i PpuRead(addr.i)
+  ASM
+    andi a0, a0, 0x3FFF
+    sltiu t0, a0, 0x3F00
+    beqz t0, nes_mmc3_ppu_palette_read
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    la t0, global_mapdots
+    jal mappera12
+    ld a1, 0(t0)
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    daddiu sp, sp, 16
+    sltiu t0, a0, 0x2000
+    beqz t0, nes_mmc3_ppu_ciram_read
+    srl t0, a0, 10
+    sll t0, t0, 3
+    la t1, global_nesmmc3chrbias
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    daddu a0, a0, t0
+    jr ra
+    lbu a0, 0(a0)
+nes_mmc3_ppu_ciram_read:
+    andi t0, t0, 3
+    sll t0, t0, 3
+    la t1, global_mapntslots
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    sll t0, t0, 10
+    andi a0, a0, 1023
+    la t1, global_mapciram
+    daddu t0, t0, t1
+    daddu t0, t0, a0
+    jr ra
+    lbu a0, 0(t0)
+nes_mmc3_ppu_palette_read:
+    andi t0, a0, 0x13
+    addiu t1, zero, 0x10
+    bne t0, t1, nes_mmc3_ppu_palette_index
+    andi a0, a0, 31
+    addiu a0, a0, -16
+nes_mmc3_ppu_palette_index:
+    la t0, global_pal
+    daddu t0, t0, a0
+    jr ra
+    lbu a0, 0(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked PpuWrite(addr.i,value.i)
+  ASM
+    la t0, global_bgcacheaddr
+    la t1, global_rgblastkey
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    sd t2, 0(t1)
+    andi a0, a0, 0x3FFF
+    sltiu t0, a0, 0x3F00
+    beqz t0, nes_mmc3_ppu_palette_write
+    nop
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    la t0, global_mapdots
+    jal mappera12
+    ld a1, 0(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    sltiu t0, a0, 0x2000
+    beqz t0, nes_mmc3_ppu_ciram_write
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+    la t0, global_chrwritable
+    ld t0, 0(t0)
+    beqz t0, nes_mmc3_ppu_write_done
+    nop
+    j mapperchrwrite
+    nop
+nes_mmc3_ppu_ciram_write:
+    la t0, global_mapntslots
+    srl t1, a0, 10
+    andi t1, t1, 3
+    sll t1, t1, 3
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    andi t1, a0, 1023
+    sll a0, t0, 10
+    addu a0, a0, t1
+    la t2, global_mapciram
+    daddu t2, t2, a0
+    lbu t3, 0(t2)
+    beq t3, a1, nes_mmc3_ppu_write_restore
+    nop
+    sd t0, 24(sp)
+    sd t1, 32(sp)
+    sd t2, 40(sp)
+    jal nesinvalidatetilerow
+    nop
+    ld a1, 16(sp)
+    ld t0, 24(sp)
+    ld t1, 32(sp)
+    ld t2, 40(sp)
+    sb a1, 0(t2)
+    la t2, global_mapntslots
+    addiu t3, t2, 32
+    la a0, global_nt
+    daddu a0, a0, t1
+nes_mmc3_ppu_ciram_alias:
+    ld t1, 0(t2)
+    bne t1, t0, nes_mmc3_ppu_ciram_next
+    addiu t2, t2, 8
+    sb a1, 0(a0)
+nes_mmc3_ppu_ciram_next:
+    bne t2, t3, nes_mmc3_ppu_ciram_alias
+    addiu a0, a0, 1024
+nes_mmc3_ppu_write_restore:
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+nes_mmc3_ppu_write_done:
+    jr ra
+    nop
+nes_mmc3_ppu_palette_write:
+    andi t0, a0, 0x13
+    addiu t1, zero, 0x10
+    bne t0, t1, nes_mmc3_ppu_palette_store
+    andi a0, a0, 31
+    addiu a0, a0, -16
+nes_mmc3_ppu_palette_store:
+    j neswritepalette
+    andi a1, a1, 63
+  EndASM
+EndProcedure

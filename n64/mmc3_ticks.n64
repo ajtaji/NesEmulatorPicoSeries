@@ -1,0 +1,491 @@
+; Clock MMC3 fetch addresses even when the renderer is batching scanlines.
+; The worker synchronizes both clocks before changing PPU or mapper state.
+ProcedureNaked MapperPpuTicks(cycles.i)
+  ASM
+    sll a1, a0, 1
+    addu a1, a1, a0
+    la a2, global_mapdots
+    ld t1, global_ppumask-global_mapdots(a2)
+    andi t1, t1, 24
+    beqz t1, mmc3_fetch_with_edges
+    ld a3, global_ppuctrl-global_mapdots(a2)
+    andi t1, a3, 16
+    bnez t1, mmc3_fetch_with_edges
+    ld t1, global_mapa12-global_mapdots(a2)
+    bnez t1, mmc3_fetch_with_edges
+    ld t1, global_nesmmc3dot-global_mapdots(a2)
+    addu t2, t1, a1
+    sltiu t3, t2, 257
+    bnez t3, mmc3_fetch_low_commit
+    sltiu t3, t1, 321
+    beqz t3, mmc3_fetch_after_sprite
+    sltiu t3, t1, 257
+    bnez t3, mmc3_fetch_full_sprite
+    nop
+    b mmc3_fetch_with_edges
+    nop
+mmc3_fetch_after_sprite:
+    ; After sprite fetch, low BG can stay low across the next line boundary.
+    ld t0, global_nesmmc3line-global_mapdots(a2)
+    addiu t1, zero, 261
+    addiu t3, zero, 341
+    bne t0, t1, mmc3_fetch_low_width
+    nop
+    ld t1, global_nesmmc3odd-global_mapdots(a2)
+    subu t3, t3, t1
+mmc3_fetch_low_width:
+    sltu t1, t2, t3
+    bnez t1, mmc3_fetch_low_commit
+    nop
+    subu t2, t2, t3
+    sltiu t1, t2, 257
+    beqz t1, mmc3_fetch_with_edges
+    addiu t0, t0, 1
+    addiu t1, zero, 262
+    bne t0, t1, mmc3_fetch_low_line
+    nop
+    ld t1, global_nesmmc3odd-global_mapdots(a2)
+    xori t1, t1, 1
+    move t0, zero
+    sd t1, global_nesmmc3odd-global_mapdots(a2)
+mmc3_fetch_low_line:
+    sd t0, global_nesmmc3line-global_mapdots(a2)
+mmc3_fetch_low_commit:
+    sd t2, global_nesmmc3dot-global_mapdots(a2)
+    ld t1, 0(a2)
+    daddu t1, t1, a1
+    jr ra
+    sd t1, 0(a2)
+
+mmc3_fetch_full_sprite:
+    ; A complete 8x8 sprite phase at $1000 has one qualified rise
+    ; at most. Every later rise has only four low dots between slots.
+    andi a3, a3, 56
+    addiu t0, zero, 8
+    bne a3, t0, mmc3_fetch_with_edges
+    sltiu t0, t2, 321
+    bnez t0, mmc3_fetch_with_edges
+    ld a3, global_nesmmc3line-global_mapdots(a2)
+    sltiu t0, a3, 240
+    bnez t0, mmc3_fetch_sprite_width
+    addiu a4, zero, 341
+    addiu t0, zero, 261
+    bne a3, t0, mmc3_fetch_with_edges
+    nop
+    ld t0, global_nesmmc3odd-global_mapdots(a2)
+    subu a4, a4, t0
+mmc3_fetch_sprite_width:
+    sltu t0, t2, a4
+    bnez t0, mmc3_fetch_sprite_once
+    subu a5, t2, a4
+    sltiu t0, a5, 257
+    beqz t0, mmc3_fetch_with_edges
+    nop
+    move t2, a5
+    addiu a3, a3, 1
+    addiu t0, zero, 262
+    bne a3, t0, mmc3_fetch_sprite_line
+    nop
+    ld t0, global_nesmmc3odd-global_mapdots(a2)
+    move a3, zero
+    xori t0, t0, 1
+    sd t0, global_nesmmc3odd-global_mapdots(a2)
+mmc3_fetch_sprite_line:
+    sd a3, global_nesmmc3line-global_mapdots(a2)
+mmc3_fetch_sprite_once:
+    sd t2, global_nesmmc3dot-global_mapdots(a2)
+    ld t3, 0(a2)
+    dsubu t1, t3, t1
+    daddu t3, t3, a1
+    ld t0, global_maplowsince-global_mapdots(a2)
+    addiu a3, zero, 255
+    sd a3, global_mapspritebits-global_mapdots(a2)
+    sd t3, 0(a2)
+    daddiu t3, t1, 321
+    sd t3, global_maplowsince-global_mapdots(a2)
+    daddiu t2, t1, 261
+    dsubu t2, t2, t0
+    sltiu t2, t2, 10
+    bnez t2, mmc3_fetch_sprite_done
+    nop
+    j mapperclockirq
+    nop
+mmc3_fetch_sprite_done:
+    jr ra
+    nop
+
+mmc3_fetch_with_edges:
+    move a0, a1
+    move a6, a2
+    ld a1, global_nesmmc3line-global_mapdots(a6)
+    ld a2, global_nesmmc3dot-global_mapdots(a6)
+    ld a3, global_nesmmc3odd-global_mapdots(a6)
+    ld v0, 0(a6)
+    ld v1, global_maplowsince-global_mapdots(a6)
+    ld t8, global_mapa12-global_mapdots(a6)
+    ld t9, global_ppuctrl-global_mapdots(a6)
+    ld t1, global_ppumask-global_mapdots(a6)
+    andi t1, t1, 24
+    beqz t1, mmc3_fetch_next
+    nop
+    ori t9, t9, 256
+
+mmc3_fetch_next:
+    blez a0, mmc3_fetch_done
+    addiu t1, zero, 341
+    andi t2, t9, 256
+    beqz t2, mmc3_fetch_width
+    sltiu t2, a1, 240
+    bnez t2, mmc3_fetch_rendered
+    addiu t2, zero, 261
+    bne a1, t2, mmc3_fetch_width
+    nop
+    subu t1, t1, a3
+
+mmc3_fetch_rendered:
+    sltiu t2, a2, 257
+    bnez t2, mmc3_fetch_outside_sprites
+    sltiu t2, a2, 321
+    beqz t2, mmc3_fetch_outside_sprites
+    nop
+    ld t2, global_mapspritebits-global_mapdots(a6)
+    bnez t2, mmc3_fetch_sprite_high
+    addiu t0, zero, 321
+    beqz t8, mmc3_fetch_step
+    nop
+    b mmc3_fetch_single
+    nop
+mmc3_fetch_sprite_high:
+    xori t2, t2, 255
+    bnez t2, mmc3_fetch_single
+    sltiu t2, a2, 261
+    bnez t2, mmc3_fetch_single
+    nop
+    beqz t8, mmc3_fetch_single
+    addiu a5, zero, 320
+    sltu t2, a2, a5
+    beqz t2, mmc3_fetch_single
+    nop
+    b mmc3_fetch_bulk_phase
+    nop
+
+mmc3_fetch_outside_sprites:
+    sltiu t2, a2, 337
+    beqz t2, mmc3_fetch_width
+    andi t2, t9, 16
+    bnez t2, mmc3_fetch_high_bg
+    nop
+    bnez t8, mmc3_fetch_single
+    sltiu t2, a2, 257
+    bnez t2, mmc3_fetch_step
+    addiu t0, zero, 257
+    sltiu t2, a2, 321
+    beqz t2, mmc3_fetch_step
+    addiu t0, zero, 337
+    b mmc3_fetch_single
+    nop
+
+mmc3_fetch_high_bg:
+    beqz t8, mmc3_fetch_single
+    sltiu t2, a2, 256
+    beqz t2, mmc3_fetch_single
+    addiu a5, zero, 256
+mmc3_fetch_bulk_phase:
+    andi t2, a2, 7
+    sltiu t2, t2, 5
+    bnez t2, mmc3_fetch_single
+    nop
+    ; Consecutive rises in a uniform fetch region have four low dots.
+    subu t2, a5, a2
+    sltu t3, a0, t2
+    beqz t3, mmc3_fetch_bulk_length
+    nop
+    move t2, a0
+mmc3_fetch_bulk_length:
+    addu t0, a2, t2
+    addiu t3, t0, -1
+    srl t3, t3, 3
+    sll t3, t3, 3
+    addiu t3, t3, 1
+    sltu a4, a2, t3
+    beqz a4, mmc3_fetch_bulk_commit
+    subu t3, t3, a2
+    daddu v1, v0, t3
+    andi t3, t0, 7
+    sltiu a4, t3, 5
+    xori a4, a4, 1
+    sltiu t3, t3, 1
+    or t8, t3, a4
+mmc3_fetch_bulk_commit:
+    daddu v0, v0, t2
+    move a2, t0
+    b mmc3_fetch_next
+    subu a0, a0, t2
+
+mmc3_fetch_single:
+    beqz a2, mmc3_fetch_step
+    addiu t0, zero, 1
+    addiu t0, a2, -1
+    srl t0, t0, 2
+    sll t0, t0, 2
+    b mmc3_fetch_step
+    addiu t0, t0, 5
+mmc3_fetch_width:
+    move t0, t1
+mmc3_fetch_step:
+    subu t2, t0, a2
+    sltu t3, a0, t2
+    beqz t3, mmc3_fetch_step_length
+    nop
+    move t2, a0
+mmc3_fetch_step_length:
+    addu a2, a2, t2
+    subu a0, a0, t2
+    bne a2, t0, mmc3_fetch_next
+    daddu v0, v0, t2
+    bne a2, t1, mmc3_fetch_address
+    addiu t2, zero, 262
+    addiu a1, a1, 1
+    bne a1, t2, mmc3_fetch_next
+    move a2, zero
+    move a1, zero
+    b mmc3_fetch_next
+    xori a3, a3, 1
+
+mmc3_fetch_address:
+    addiu t2, zero, 257
+    bne a2, t2, mmc3_fetch_pattern
+    nop
+    ; Only dot 257 calls out. Other spans preserve all state in registers.
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a6, 40(sp)
+    sd v0, 48(sp)
+    sd v1, 56(sp)
+    sd t8, 64(sp)
+    sd t9, 72(sp)
+    jal mapperspritefetch
+    move a0, a1
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld a6, 40(sp)
+    ld v0, 48(sp)
+    ld v1, 56(sp)
+    ld t8, 64(sp)
+    ld t9, 72(sp)
+    daddiu sp, sp, 80
+mmc3_fetch_pattern:
+    andi t2, a2, 7
+    addiu t3, zero, 5
+    bne t2, t3, mmc3_fetch_level
+    move t0, zero
+    sltiu t2, a2, 257
+    bnez t2, mmc3_fetch_background
+    sltiu t2, a2, 321
+    beqz t2, mmc3_fetch_background
+    addiu t2, a2, -261
+    srl t2, t2, 3
+    ld t3, global_mapspritebits-global_mapdots(a6)
+    srlv t3, t3, t2
+    b mmc3_fetch_level
+    andi t0, t3, 1
+mmc3_fetch_background:
+    srl t0, t9, 4
+    andi t0, t0, 1
+mmc3_fetch_level:
+    beq t0, t8, mmc3_fetch_next
+    move t8, t0
+    bnez t0, mmc3_fetch_rise
+    nop
+    b mmc3_fetch_next
+    move v1, v0
+mmc3_fetch_rise:
+    dsubu t1, v0, v1
+    sltiu t1, t1, 10
+    bnez t1, mmc3_fetch_next
+    nop
+    la a7, mmc3_fetch_next
+    j mmc3_irq_update
+    nop
+
+mmc3_fetch_done:
+    sd a1, global_nesmmc3line-global_mapdots(a6)
+    sd a2, global_nesmmc3dot-global_mapdots(a6)
+    sd a3, global_nesmmc3odd-global_mapdots(a6)
+    sd v0, 0(a6)
+    sd v1, global_maplowsince-global_mapdots(a6)
+    sd t8, global_mapa12-global_mapdots(a6)
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperClockIrq()
+  ASM
+    move a7, ra
+mmc3_irq_update:
+    la t0, global_mapirqcount
+    ld t1, 0(t0)
+    ld t2, global_mapreload-global_mapirqcount(t0)
+    ld t3, global_mapirqclocks-global_mapirqcount(t0)
+    daddiu t3, t3, 1
+    sd t3, global_mapirqclocks-global_mapirqcount(t0)
+    beqz t1, mmc3_irq_reload
+    daddiu t1, t1, -1
+    beqz t2, mmc3_irq_counted
+    nop
+mmc3_irq_reload:
+    ld t1, global_mapirqlatch-global_mapirqcount(t0)
+mmc3_irq_counted:
+    sd t1, 0(t0)
+    bnez t1, mmc3_irq_done
+    sd zero, global_mapreload-global_mapirqcount(t0)
+    ld t1, global_mapirqenable-global_mapirqcount(t0)
+    beqz t1, mmc3_irq_done
+    ld t2, global_mapirq-global_mapirqcount(t0)
+    bnez t2, mmc3_irq_done
+    addiu t1, zero, 1
+    ld t2, global_mapirqassertions-global_mapirqcount(t0)
+    sd t1, global_mapirq-global_mapirqcount(t0)
+    daddiu t2, t2, 1
+    sd t2, global_mapirqassertions-global_mapirqcount(t0)
+mmc3_irq_done:
+    jr a7
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperA12(addr.i,dot.i)
+  ASM
+    srl a0, a0, 12
+    la t0, global_mapa12
+    ld t1, 0(t0)
+    andi a0, a0, 1
+    beq a0, t1, mmc3_a12_done
+    nop
+    sd a0, 0(t0)
+    bnez a0, mmc3_a12_rise
+    nop
+    jr ra
+    sd a1, global_maplowsince-global_mapa12(t0)
+mmc3_a12_rise:
+    ld t1, global_maplowsince-global_mapa12(t0)
+    dsubu t1, a1, t1
+    slti t1, t1, 10
+    bnez t1, mmc3_a12_done
+    nop
+    j mapperclockirq
+    nop
+mmc3_a12_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperSpriteFetch(line.i)
+  ASM
+    la t0, global_ppuctrl
+    ld t1, 0(t0)
+    andi t2, t1, 32
+    bnez t2, mmc3_sprite_tall
+    andi t1, t1, 8
+    sltu t1, zero, t1
+    subu t1, zero, t1
+    andi t1, t1, 255
+    la t0, global_mapspritebits
+    jr ra
+    sd t1, 0(t0)
+mmc3_sprite_tall:
+    addiu t0, zero, 261
+    bne a0, t0, mmc3_sprite_next_row
+    addiu a0, a0, 1
+    move a0, zero
+mmc3_sprite_next_row:
+    sltiu t0, a0, 240
+    beqz t0, mmc3_sprite_scan_oam
+    nop
+mmc3_sprite_visible:
+    la t0, global_oamcachedirty
+    ld t0, 0(t0)
+    beqz t0, mmc3_sprite_cached
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal ppubuildspritecache
+    sd a0, 8(sp)
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    daddiu sp, sp, 16
+mmc3_sprite_cached:
+    la t0, global_cachedcount
+    daddu t0, t0, a0
+    lbu t1, 0(t0)
+    move t3, zero
+    beqz t1, mmc3_sprite_store
+    sltiu t0, t1, 9
+    bnez t0, mmc3_sprite_count
+    sll a0, a0, 3
+    addiu t1, zero, 8
+mmc3_sprite_count:
+    la t0, global_cachedsprite
+    daddu t0, t0, a0
+    la a0, global_oam
+    addiu a0, a0, 1
+    daddu t1, t0, t1
+    addiu a1, zero, 1
+mmc3_sprite_next_cached:
+    lbu t2, 0(t0)
+    addiu t0, t0, 1
+    sll t2, t2, 2
+    daddu t2, a0, t2
+    lbu t2, 0(t2)
+    xori t2, t2, 1
+    andi t2, t2, 1
+    subu t2, zero, t2
+    and t2, t2, a1
+    or t3, t3, t2
+    bne t0, t1, mmc3_sprite_next_cached
+    sll a1, a1, 1
+mmc3_sprite_store:
+    xori t3, t3, 255
+    la t0, global_mapspritebits
+    jr ra
+    sd t3, 0(t0)
+
+    ; The renderer does not cache the row after the last visible row.
+mmc3_sprite_scan_oam:
+    la t0, global_oam
+    addiu t1, t0, 256
+    move t3, zero
+    addiu a1, zero, 1
+mmc3_sprite_next_oam:
+    lbu t2, 0(t0)
+    addiu t2, t2, 1
+    subu t2, a0, t2
+    sltiu t2, t2, 16
+    beqz t2, mmc3_sprite_skip_oam
+    lbu t2, 1(t0)
+    andi t2, t2, 1
+    bnez t2, mmc3_sprite_oam_bit
+    nop
+    or t3, t3, a1
+mmc3_sprite_oam_bit:
+    sll a1, a1, 1
+    sltiu t2, a1, 256
+    beqz t2, mmc3_sprite_store
+    nop
+mmc3_sprite_skip_oam:
+    addiu t0, t0, 4
+    bne t0, t1, mmc3_sprite_next_oam
+    nop
+    b mmc3_sprite_store
+    nop
+  EndASM
+EndProcedure

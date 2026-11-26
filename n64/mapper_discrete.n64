@@ -1,0 +1,335 @@
+; Discrete mapper register decoders. MapperUpdate publishes the selected
+; PRG, CHR and nametable windows through the shared native primitives.
+ProcedureNaked.i ExtraMapperWrite(addr.i,value.i,stamp.i)
+  CompilerIf #GAME_MAPPER=9
+    ASM
+      srl t0, a0, 12
+      sltiu t1, t0, 10
+      bnez t1, nes_extra9_ram
+      addiu t1, zero, 10
+      beq t0, t1, nes_extra9_prg
+      sltiu t1, t0, 15
+      beqz t1, nes_extra9_mirror
+      addiu t0, t0, -11
+      la t1, global_extraregs
+      sll t0, t0, 3
+      daddu t1, t1, t0
+      andi a1, a1, 31
+      b nes_extra_write_update
+      sd a1, 0(t1)
+nes_extra9_prg:
+      la t1, global_mapprgreg
+      andi a1, a1, 15
+      b nes_extra_write_update
+      sd a1, 0(t1)
+nes_extra9_mirror:
+      andi a0, a1, 1
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal mappermirror
+      xori a0, a0, 1
+      b nes_extra_write_update_saved
+      nop
+nes_extra9_ram:
+      addiu t0, a0, -24576
+      sltiu t0, t0, 8192
+      beqz t0, nes_extra_write_done
+      andi a0, a0, 8191
+      la t0, global_mapram
+      daddu t0, t0, a0
+      sb a1, 0(t0)
+    EndASM
+    CompilerIf #GAME_SAVE_BYTES>0
+      ASM
+        daddiu sp, sp, -16
+        sd ra, 0(sp)
+        jal nessavechanged
+        nop
+        b nes_extra_write_restore
+        nop
+      EndASM
+    CompilerElse
+      ASM
+        b nes_extra_write_done
+        nop
+      EndASM
+    CompilerEndIf
+  CompilerElseIf #GAME_MAPPER=13
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_done
+      andi t1, a1, 3
+      la t0, global_extrachr
+      b nes_extra_write_update
+      sd t1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=41
+    ASM
+      addiu t0, a0, -24576
+      sltiu t0, t0, 2048
+      bnez t0, nes_extra41_latch
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_done
+      nop
+      la t0, global_mapprgreg
+      ld t0, 0(t0)
+      sltiu t0, t0, 4
+      bnez t0, nes_extra_write_done
+      nop
+      la t0, global_extrachr
+      ld t1, 0(t0)
+      andi t1, t1, 12
+      andi a1, a1, 3
+      or t1, t1, a1
+      b nes_extra_write_update
+      sd t1, 0(t0)
+nes_extra41_latch:
+      la t0, global_mapprgreg
+      andi t1, a0, 7
+      sd t1, 0(t0)
+      la t0, global_extrachr
+      ld t1, 0(t0)
+      srl t2, a0, 1
+      andi t1, t1, 3
+      andi t2, t2, 12
+      or t1, t1, t2
+      sd t1, 0(t0)
+      srl a0, a0, 5
+      andi a0, a0, 1
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal mappermirror
+      xori a0, a0, 1
+      b nes_extra_write_update_saved
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=47
+    ASM
+      ori t0, zero, 0x6000
+      sltu t1, a0, t0
+      bnez t1, nes_extra_write_continue
+      andi t1, a0, 0x8000
+      bnez t1, nes_extra_write_continue
+      nop
+      la t0, global_mapramenable
+      ld t1, 0(t0)
+      beqz t1, nes_extra_write_done
+      ld t1, global_mapramprotect-global_mapramenable(t0)
+      bnez t1, nes_extra_write_done
+      andi t1, a1, 1
+      la t0, global_extraouter
+      b nes_extra_write_update
+      sd t1, 0(t0)
+nes_extra_write_continue:
+      jr ra
+      move a0, zero
+    EndASM
+  CompilerElseIf #GAME_MAPPER=71
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_done
+      ori t1, zero, 0x9000
+      la t0, global_extramode
+      bne a0, t1, nes_extra71_mode
+      addiu t1, zero, 1
+      sd t1, 0(t0)
+nes_extra71_mode:
+      ld t1, 0(t0)
+      ori t2, zero, 0xc000
+      sltu t2, a0, t2
+      beqz t1, nes_extra71_bank
+      nop
+      beqz t2, nes_extra71_bank
+      srl t1, a1, 4
+      andi t1, t1, 1
+      addiu a0, zero, 3
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal mappermirror
+      subu a0, a0, t1
+      b nes_extra_write_restore
+      nop
+nes_extra71_bank:
+      la t0, global_mapprgreg
+      b nes_extra_write_update
+      sd a1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=79
+    ASM
+      andi t0, a0, 0xe100
+      ori t1, zero, 0x4100
+      bne t0, t1, nes_extra_write_done
+      nop
+      la t0, global_mapprgreg
+      b nes_extra_write_update
+      sd a1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=118
+    ASM
+      andi a0, a0, 0xe001
+      ori t0, zero, 0xa000
+      xor a0, a0, t0
+      jr ra
+      sltiu a0, a0, 1
+    EndASM
+  CompilerElseIf #GAME_MAPPER=144 Or #GAME_MAPPER=148
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_done
+      nop
+      la t0, global_prgbias
+      ld t0, 0(t0)
+      daddu a0, a0, t0
+      lbu t0, 0(a0)
+      and a1, a1, t0
+    EndASM
+    CompilerIf #GAME_MAPPER=144
+      ASM
+        andi t0, t0, 1
+        or a1, a1, t0
+      EndASM
+    CompilerEndIf
+    ASM
+      la t0, global_mapprgreg
+      b nes_extra_write_update
+      sd a1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=206
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_done
+      andi t0, a0, 1
+      la t1, global_mapselect
+      bnez t0, nes_extra206_data
+      ld t2, 0(t1)
+      andi a1, a1, 7
+      b nes_extra_write_update
+      sd a1, 0(t1)
+nes_extra206_data:
+      andi t2, t2, 7
+      sll t2, t2, 3
+      la t1, global_mapregs
+      daddu t1, t1, t2
+      b nes_extra_write_update
+      sd a1, 0(t1)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=228
+    ASM
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra228_ram
+      nop
+      la t0, global_extraouter
+      sd a0, 0(t0)
+      la t0, global_extrachr
+      b nes_extra_write_update
+      sd a1, 0(t0)
+nes_extra228_ram:
+      addiu t0, a0, -16416
+      sltiu t0, t0, 8160
+      beqz t0, nes_extra_write_done
+      andi a0, a0, 3
+      la t0, global_extraregs
+      sll a0, a0, 3
+      daddu t0, t0, a0
+      andi a1, a1, 15
+      b nes_extra_write_done
+      sd a1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=232
+    ASM
+      ori t0, zero, 0xc000
+      sltu t0, a0, t0
+      bnez t0, nes_extra232_outer
+      andi t0, a1, 3
+      la t1, global_mapprgreg
+      b nes_extra_write_update
+      sd t0, 0(t1)
+nes_extra232_outer:
+      andi t0, a0, 0x8000
+      beqz t0, nes_extra_write_update
+      srl t1, a1, 3
+      la t0, global_cartsubmapper
+      ld t0, 0(t0)
+      addiu t2, zero, 1
+      bne t0, t2, nes_extra232_store
+      andi t1, t1, 3
+      srl t0, a1, 4
+      andi t0, t0, 1
+      srl t1, a1, 2
+      andi t1, t1, 2
+      or t1, t1, t0
+nes_extra232_store:
+      la t0, global_extraouter
+      b nes_extra_write_update
+      sd t1, 0(t0)
+    EndASM
+  CompilerElseIf #GAME_MAPPER=234
+    ASM
+      ori t0, zero, 0xff80
+      subu t0, a0, t0
+      sltiu t0, t0, 32
+      bnez t0, nes_extra234_store
+      ori t0, zero, 0xffe8
+      subu t0, a0, t0
+      sltiu t0, t0, 17
+      beqz t0, nes_extra_write_done
+      nop
+nes_extra234_store:
+      la t0, global_prgbias
+      ld t0, 0(t0)
+      daddu t0, t0, a0
+      lbu t0, 0(t0)
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal extrareadnotice
+      and a1, a1, t0
+      b nes_extra_write_restore
+      nop
+    EndASM
+  CompilerEndIf
+  CompilerIf #GAME_MAPPER<>118
+    ASM
+nes_extra_write_update:
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+nes_extra_write_update_saved:
+      jal mapperupdate
+      nop
+nes_extra_write_restore:
+      ld ra, 0(sp)
+      daddiu sp, sp, 16
+nes_extra_write_done:
+      jr ra
+      addiu a0, zero, 1
+    EndASM
+  CompilerEndIf
+EndProcedure
+
+CompilerIf #GAME_MAPPER=234
+ProcedureNaked ExtraReadNotice(addr.i,value.i)
+  ASM
+    la t0, global_extraregs
+    ori t1, zero, 0xff80
+    subu t1, a0, t1
+    sltiu t1, t1, 32
+    beqz t1, nes_extra234_secondary
+    ld t1, 0(t0)
+    andi t1, t1, 63
+    bnez t1, nes_extra234_read_done
+    nop
+    j mapperupdate
+    sd a1, 0(t0)
+nes_extra234_secondary:
+    ori t1, zero, 0xffe8
+    subu t1, a0, t1
+    sltiu t1, t1, 17
+    beqz t1, nes_extra234_read_done
+    andi a1, a1, 0x71
+    j mapperupdate
+    sd a1, 8(t0)
+nes_extra234_read_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf

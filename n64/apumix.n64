@@ -11,6 +11,8 @@ ProcedureNaked NesMixBlock(spans.i, dmc.i, count.i, volume.i, duty.i)
     sd s5, 48(sp)
     sd s6, 56(sp)
     sd s7, 64(sp)
+    sd fp, 120(sp)
+    la fp, global_apuseq
     sll s0, a0, 0
     sll s1, a1, 0
     or s2, a2, zero
@@ -40,6 +42,10 @@ ProcedureNaked NesMixBlock(spans.i, dmc.i, count.i, volume.i, duty.i)
     lhu t0, 0(t0)
     dsll s3, s3, 16
     or s3, s3, t0
+  EndASM
+  ; Sample range and capture statistics are only used by verification.
+  CompilerIf #VERIFY_FRAME>0
+    ASM
     la t0, global_apuminimum
     ld t0, 0(t0)
     sd t0, 80(sp)
@@ -47,6 +53,9 @@ ProcedureNaked NesMixBlock(spans.i, dmc.i, count.i, volume.i, duty.i)
     ld t0, 0(t0)
     sd t0, 88(sp)
     sd zero, 96(sp)
+    EndASM
+  CompilerEndIf
+  ASM
     la t0, global_apulastx
     ld t0, 0(t0)
     sd t0, 104(sp)
@@ -60,9 +69,8 @@ nes_mix_next:
     jal nesoscillatortick
     daddiu s0, s0, 2
 
-    la a2, global_apuseq
-    lw t0, 4(a2)
-    lw t1, 12(a2)
+    lw t0, 4(fp)
+    lw t1, 12(fp)
     srlv t0, s4, t0
     srlv t1, s4, t1
     andi t0, t0, 1
@@ -73,8 +81,7 @@ nes_mix_next:
     dsrlv t0, s3, t0
     andi t0, t0, 65535
 
-    la t1, global_noiseshift
-    lw t1, 4(t1)
+    lw t1, global_noiseshift-global_apuseq+4(fp)
     andi t1, t1, 1
     addiu t1, t1, -1
     ld a1, 112(sp)
@@ -85,13 +92,12 @@ nes_mix_next:
     srl t3, s4, 16
     bnez t3, nes_mix_triangle_mean
     sll t1, t1, 1
-    la t2, global_tridac
-    lw t2, 4(t2)
+    lw t2, global_tridac-global_apuseq+4(fp)
     sll a1, t2, 1
     addu t2, t2, a1
     sll t2, t2, 1
     addu t2, t2, t1
-    la t3, global_tndmix
+    daddiu t3, fp, global_tndmix-global_apuseq
 nes_mix_tnd_load:
     addu t3, t3, t2
     lhu t2, 0(t3)
@@ -101,33 +107,21 @@ nes_mix_tnd_load:
   CompilerIf #NES_AUDIO_RATE=20000
     ASM
     ; Q16 pole (65400/65536)^(48000/20000) rounds to 65210.
-    ; Subtract 326*y from y<<16 to retain the original signed truncation.
-    ld t0, 104(sp)
-    dsll t2, s5, 16
-    dsll t3, s5, 8
-    dsll t1, s5, 6
-    dsubu t2, t2, t3
-    dsubu t2, t2, t1
-    dsll t3, s5, 2
-    dsll t1, s5, 1
-    dsubu t2, t2, t3
-    dsubu t2, t2, t1
+    ori t1, zero, 65210
     EndASM
   CompilerElse
     ASM
-    ; y * 65400 = (y << 16) - (y << 7) - (y << 3).
-    daddu t1, s5, zero
-    ld t0, 104(sp)
-    dsll t2, t1, 16
-    dsll t3, t1, 7
-    dsll t1, t1, 3
-    dsubu t2, t2, t3
-    dsubu t2, t2, t1
+    ori t1, zero, 65400
     EndASM
   CompilerEndIf
   ASM
-    bgez t2, nes_mix_dc_positive
+    ; The signed 16-bit filter state times either pole fits signed 32 bits.
+    mult s5, t1
+    ld t0, 104(sp)
     dsubu t0, v0, t0
+    mflo t2
+    bgez t2, nes_mix_dc_positive
+    nop
     ori t1, zero, 65535
     daddu t2, t2, t1
 nes_mix_dc_positive:
@@ -151,6 +145,9 @@ nes_mix_store:
     addu t2, s6, t2
     sh t0, 0(t2)
     daddiu s7, s7, 1
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
     ld t2, 80(sp)
     slt t3, t0, t2
     beq t3, zero, nes_mix_check_max
@@ -167,6 +164,9 @@ nes_mix_check_nonzero:
     sltu t3, zero, t0
     daddu t2, t2, t3
     sd t2, 96(sp)
+    EndASM
+  CompilerEndIf
+  ASM
     daddiu s2, s2, -1
     bgtz s2, nes_mix_next
     daddiu s1, s1, 1
@@ -179,6 +179,9 @@ nes_mix_check_nonzero:
     sd t1, 0(t0)
     la t0, global_apuproduced
     sd s7, 0(t0)
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
     la t0, global_apuminimum
     ld t1, 80(sp)
     sd t1, 0(t0)
@@ -200,6 +203,9 @@ nes_mix_check_nonzero:
     addiu t1, zero, 4096
 nes_mix_capture:
     sd t1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     ld ra, 0(sp)
     ld s0, 8(sp)
     ld s1, 16(sp)
@@ -209,6 +215,7 @@ nes_mix_capture:
     ld s5, 48(sp)
     ld s6, 56(sp)
     ld s7, 64(sp)
+    ld fp, 120(sp)
     jr ra
     daddiu sp, sp, 128
 nes_mix_triangle_mean:

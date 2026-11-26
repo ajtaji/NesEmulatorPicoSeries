@@ -1,0 +1,476 @@
+; VRC6 scanline IRQ prescaler runs in thirds of a CPU cycle.
+ProcedureNaked VrcIrqTicks(cycles.i)
+  ASM
+    la t0, global_vrcirqenable
+    ld t1, 0(t0)
+    beqz t1, vrc_tick_exit
+    ld t1, global_vrcirqmode-global_vrcirqenable(t0)
+    bnez t1, vrc_tick_clock
+    dsll t1, a0, 1
+    ld t2, global_vrcprescaler-global_vrcirqenable(t0)
+    daddu t1, t1, a0
+    dsubu t2, t2, t1
+    move a0, zero
+    bgtz t2, vrc_tick_prescaled
+    nop
+vrc_tick_prescale:
+    daddiu t2, t2, 341
+    blez t2, vrc_tick_prescale
+    daddiu a0, a0, 1
+vrc_tick_prescaled:
+    sd t2, global_vrcprescaler-global_vrcirqenable(t0)
+vrc_tick_clock:
+    blez a0, vrc_tick_exit
+    ld t1, global_vrcirqcounter-global_vrcirqenable(t0)
+    ld t2, global_vrcirqlatch-global_vrcirqenable(t0)
+    addiu a1, zero, 255
+    addiu a2, zero, 1
+vrc_tick_counter:
+    dsubu t3, a1, t1
+    slt a3, t3, a0
+    beqz a3, vrc_tick_store
+    nop
+    dsubu a0, a0, t3
+    ld a3, global_mapirqassertions-global_vrcirqenable(t0)
+    daddiu a0, a0, -1
+    daddiu a3, a3, 1
+    sd a2, global_mapirq-global_vrcirqenable(t0)
+    sd a3, global_mapirqassertions-global_vrcirqenable(t0)
+    bgtz a0, vrc_tick_counter
+    move t1, t2
+vrc_tick_store:
+    daddu t1, t1, a0
+    sd t1, global_vrcirqcounter-global_vrcirqenable(t0)
+vrc_tick_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked.i VrcIrqBudget()
+  ASM
+    la t0, global_vrcirqenable
+    ld t1, 0(t0)
+    beqz t1, vrc_budget_exit
+    addiu a0, zero, 128
+    ld t1, global_mapirq-global_vrcirqenable(t0)
+    bnez t1, vrc_budget_exit
+    addiu a0, zero, 1
+    ld t1, global_vrcirqcounter-global_vrcirqenable(t0)
+    ld t2, global_vrcirqmode-global_vrcirqenable(t0)
+    addiu a0, zero, 256
+    bnez t2, vrc_budget_bound
+    dsubu a0, a0, t1
+    ld t1, global_vrcprescaler-global_vrcirqenable(t0)
+    daddiu a0, a0, -1
+    addiu t2, zero, 341
+    dmult a0, t2
+    mflo a0
+    daddiu t1, t1, 2
+    daddu a0, a0, t1
+    addiu t2, zero, 3
+    ddiv a0, t2
+    mflo a0
+vrc_budget_bound:
+    slti t1, a0, 129
+    bnez t1, vrc_budget_floor
+    nop
+    addiu a0, zero, 128
+vrc_budget_floor:
+    bgtz a0, vrc_budget_exit
+    nop
+    addiu a0, zero, 1
+vrc_budget_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked N1Ticks(cycles.i)
+  ASM
+    la t0, global_n1irqenable
+    ld t1, 0(t0)
+    beqz t1, n163_tick_exit
+    ld t1, global_n1irqcounter-global_n1irqenable(t0)
+    slti t2, t1, 0x7FFF
+    beqz t2, n163_tick_exit
+    daddu t1, t1, a0
+    slti t2, t1, 0x7FFF
+    bnez t2, n163_tick_store
+    nop
+    addiu t1, zero, 0x7FFF
+    addiu t2, zero, 1
+    ld t3, global_mapirqassertions-global_n1irqenable(t0)
+    sd t2, global_mapirq-global_n1irqenable(t0)
+    daddiu t3, t3, 1
+    sd t3, global_mapirqassertions-global_n1irqenable(t0)
+n163_tick_store:
+    sd t1, global_n1irqcounter-global_n1irqenable(t0)
+n163_tick_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked.i N1Budget()
+  ASM
+    la t0, global_n1irqenable
+    ld t1, 0(t0)
+    beqz t1, n163_budget_exit
+    addiu a0, zero, 128
+    ld t1, global_n1irqcounter-global_n1irqenable(t0)
+    slti t2, t1, 0x7FFF
+    beqz t2, n163_budget_exit
+    ld t2, global_mapirq-global_n1irqenable(t0)
+    bnez t2, n163_budget_exit
+    addiu a0, zero, 1
+    addiu a0, zero, 0x7FFF
+    dsubu a0, a0, t1
+    slti t1, a0, 129
+    bnez t1, n163_budget_exit
+    nop
+    addiu a0, zero, 128
+n163_budget_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked VrcRegisterWrite(addr.i, value.i)
+  ASM
+    la t0, global_cartmapper
+    ld t1, 0(t0)
+    addiu t2, zero, 26
+    bne t1, t2, vrc_write_decode
+    andi t0, a0, 0xF003
+    andi t1, t0, 1
+    andi t2, t0, 2
+    sll t1, t1, 1
+    srl t2, t2, 1
+    andi t0, t0, 0xF000
+    or t1, t1, t2
+    or t0, t0, t1
+vrc_write_decode:
+    ori t1, zero, 0x9000
+    subu t1, t0, t1
+    sltiu t1, t1, 0x2003
+    bnez t1, vrc_write_audio
+    srl t1, t0, 12
+    addiu t1, t1, -8
+    sltiu t2, t1, 8
+    beqz t2, vrc_write_exit
+    sll t1, t1, 2
+    la t2, vrc_write_table
+    addu t2, t2, t1
+    lw t2, 0(t2)
+    jr t2
+    nop
+vrc_write_table:
+    .word vrc_write_prg16, vrc_write_exit, vrc_write_exit, vrc_write_mirror
+    .word vrc_write_prg8, vrc_write_chr_low, vrc_write_chr_high, vrc_write_irq
+vrc_write_audio:
+    j vrcsoundwrite
+    move a0, t0
+vrc_write_prg16:
+    la t0, global_vrcprg16
+    andi t1, a1, 15
+    j mapperupdate
+    sd t1, 0(t0)
+vrc_write_prg8:
+    la t0, global_vrcprg8
+    andi t1, a1, 31
+    j mapperupdate
+    sd t1, 0(t0)
+vrc_write_chr_low:
+    b vrc_write_chr
+    andi t0, t0, 3
+vrc_write_chr_high:
+    andi t0, t0, 3
+    ori t0, t0, 4
+vrc_write_chr:
+    sll t0, t0, 3
+    la t1, global_mapregs
+    addu t0, t0, t1
+    j mapperupdate
+    sd a1, 0(t0)
+vrc_write_mirror:
+    ; Only $B003 reaches this group after the audio-range check.
+    srl a0, a1, 2
+    andi a0, a0, 3
+    sltiu t0, a0, 2
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd a1, 8(sp)
+    jal mappermirror
+    xor a0, a0, t0
+    ld a0, 8(sp)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la t0, global_vrcwarned
+    srl t1, a0, 7
+    andi t1, t1, 1
+    sd t1, global_mapramenable-global_vrcwarned(t0)
+    andi t1, a0, 0x13
+    beqz t1, vrc_write_exit
+    ld t1, 0(t0)
+    bnez t1, vrc_write_exit
+    addiu t1, zero, 1
+    j neswarnvrcmirroring
+    sd t1, 0(t0)
+vrc_write_irq:
+    andi t1, t0, 3
+    la t0, global_vrcirqlatch
+    beqz t1, vrc_write_latch
+    addiu t1, t1, -1
+    beqz t1, vrc_write_control
+    addiu t1, t1, -1
+    bnez t1, vrc_write_exit
+    ld t1, global_vrcirqafterack-global_vrcirqlatch(t0)
+    sd t1, global_vrcirqenable-global_vrcirqlatch(t0)
+    jr ra
+    sd zero, global_mapirq-global_vrcirqlatch(t0)
+vrc_write_latch:
+    jr ra
+    sd a1, 0(t0)
+vrc_write_control:
+    andi t1, a1, 1
+    sd t1, global_vrcirqafterack-global_vrcirqlatch(t0)
+    srl t1, a1, 1
+    srl t2, a1, 2
+    andi t1, t1, 1
+    andi t2, t2, 1
+    sd t1, global_vrcirqenable-global_vrcirqlatch(t0)
+    sd t2, global_vrcirqmode-global_vrcirqlatch(t0)
+    beqz t1, vrc_write_ack
+    ld t1, 0(t0)
+    sd t1, global_vrcirqcounter-global_vrcirqlatch(t0)
+    daddiu t1, zero, 341
+    sd t1, global_vrcprescaler-global_vrcirqlatch(t0)
+vrc_write_ack:
+    sd zero, global_mapirq-global_vrcirqlatch(t0)
+vrc_write_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked.i N1Read(addr.i)
+  ASM
+    andi t0, a0, 0xF800
+    addiu t1, t0, -0x4800
+    beqz t1, n163_read_sound
+    addiu t1, t0, -0x5000
+    beqz t1, n163_read_irq_low
+    addiu t1, t0, -0x5800
+    la t0, global_n1irqcounter
+    bnez t1, n163_read_open
+    nop
+    ld t1, 0(t0)
+    ld t2, global_n1irqenable-global_n1irqcounter(t0)
+    dsrl a0, t1, 8
+    andi a0, a0, 127
+    dsll t2, t2, 7
+    jr ra
+    or a0, a0, t2
+n163_read_irq_low:
+    la t0, global_n1irqcounter
+    ld a0, 0(t0)
+    jr ra
+    andi a0, a0, 255
+n163_read_sound:
+    la t0, global_n1address
+    ld t1, 0(t0)
+    la t2, global_n1ram
+    andi t3, t1, 127
+    addu t2, t2, t3
+    andi t1, t1, 128
+    beqz t1, n163_read_exit
+    lbu a0, 0(t2)
+    addiu t3, t3, 1
+    andi t3, t3, 127
+    ori t3, t3, 128
+    jr ra
+    sd t3, 0(t0)
+n163_read_open:
+    la t0, global_nesopenbus
+    ld a0, 0(t0)
+n163_read_exit:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+; Each N163 logical table sources a CIRAM page or a read-only CHR ROM bank.
+ProcedureNaked N1Nametable(table.i, value.i)
+  ASM
+    sll t0, a0, 3
+    la t1, global_n1ntbank
+    la t2, global_mapntslots
+    addu t1, t1, t0
+    addu t2, t2, t0
+    slti t0, a1, 0xE0
+    bnez t0, n163_nt_chr
+    sll t3, a0, 10
+    andi t0, a1, 1
+    addiu a2, zero, -1
+    sd a2, 0(t1)
+    sd t0, 0(t2)
+    sll t0, t0, 10
+    la a1, global_mapciram
+    b n163_nt_copy
+    addu a1, a1, t0
+n163_nt_chr:
+    addiu t0, a0, 2
+    sd a1, 0(t1)
+    sd t0, 0(t2)
+    la t0, global_mapchrbytes
+    ld t1, 0(t0)
+    ld t0, global_cartchr-global_mapchrbytes(t0)
+    dsll a1, a1, 10
+    daddiu t1, t1, -1
+    and a1, a1, t1
+    addu a1, a1, t0
+n163_nt_copy:
+    la a0, global_nt
+    addu a0, a0, t3
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal mapcopy
+    addiu a2, zero, 1024
+    la t0, global_mapmirrormode
+    addiu t1, zero, -1
+    sd t1, 0(t0)
+    sd t1, global_bgcacheaddr-global_mapmirrormode(t0)
+    sd t1, global_rgblastkey-global_mapmirrormode(t0)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+
+ProcedureNaked.i N1RomNametable(addr.i)
+  ASM
+    srl t1, a0, 7
+    andi t1, t1, 24
+    la t0, global_n1ntbank
+    addu t0, t0, t1
+    ld t1, 0(t0)
+    slt a0, t1, zero
+    jr ra
+    xori a0, a0, 1
+  EndASM
+EndProcedure
+
+ProcedureNaked N1RegisterWrite(addr.i, value.i)
+  ASM
+    ori t0, zero, 0x8000
+    slt t0, a0, t0
+    beqz t0, n163_write_banks
+    andi t1, a0, 0xF800
+    addiu t0, t1, -0x4800
+    beqz t0, n163_write_audio
+    addiu t0, t1, -0x5000
+    beqz t0, n163_write_irq_low
+    addiu t2, t1, -0x5800
+    la t0, global_n1irqcounter
+    bnez t2, n163_write_done
+    nop
+    ld t1, 0(t0)
+    dsrl t2, a1, 7
+    andi a1, a1, 127
+    dsll a1, a1, 8
+    andi t1, t1, 255
+    b n163_write_irq_value
+    sd t2, global_n1irqenable-global_n1irqcounter(t0)
+n163_write_irq_low:
+    la t0, global_n1irqcounter
+    ld t1, 0(t0)
+    andi t1, t1, 0x7F00
+n163_write_irq_value:
+    or t1, t1, a1
+    sd t1, 0(t0)
+    jr ra
+    sd zero, global_mapirq-global_n1irqcounter(t0)
+n163_write_audio:
+    j n1soundramwrite
+    move a0, a1
+n163_write_banks:
+    ori t0, zero, 0xC000
+    slt t0, a0, t0
+    bnez t0, n163_write_chr
+    srl t0, a0, 11
+    ori t2, zero, 0xE000
+    slt t2, a0, t2
+    bnez t2, n163_write_nametable
+    andi t0, t0, 3
+    ori t2, zero, 0xE000
+    beq t1, t2, n163_write_prg0
+    ori t2, zero, 0xE800
+    beq t1, t2, n163_write_prg1
+    ori t2, zero, 0xF000
+    beq t1, t2, n163_write_prg2
+    ori t2, zero, 0xF800
+    bne t1, t2, n163_write_done
+    nop
+    la t0, global_n1address
+    jr ra
+    sd a1, 0(t0)
+n163_write_prg0:
+    la t0, global_n1prg
+    srl t1, a1, 6
+    andi t1, t1, 1
+    sd t1, global_n1mute-global_n1prg(t0)
+    b n163_write_prg
+    nop
+n163_write_prg1:
+    la t0, global_n1prg
+    andi t1, a1, 0xC0
+    sd t1, global_n1chrramoff-global_n1prg(t0)
+    b n163_write_prg
+    daddiu t0, t0, 8
+n163_write_prg2:
+    la t0, global_n1prg
+    daddiu t0, t0, 16
+n163_write_prg:
+    andi a1, a1, 63
+    j mapperupdate
+    sd a1, 0(t0)
+n163_write_nametable:
+    j n1nametable
+    move a0, t0
+n163_write_chr:
+    slti t1, a1, 0xE0
+    bnez t1, n163_write_chr_bank
+    andi t0, t0, 7
+    la t1, global_n1warnedchr
+    ld t2, 0(t1)
+    bnez t2, n163_write_chr_bank
+    ld t2, global_n1chrramoff-global_n1warnedchr(t1)
+    srl t3, a0, 14
+    andi t3, t3, 1
+    addiu t3, t3, 6
+    dsrlv t2, t2, t3
+    andi t2, t2, 1
+    bnez t2, n163_write_chr_bank
+    addiu t2, zero, 1
+    sd t2, 0(t1)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd t0, 8(sp)
+    jal neswarnn163patterns
+    sd a1, 16(sp)
+    ld ra, 0(sp)
+    ld t0, 8(sp)
+    ld a1, 16(sp)
+    daddiu sp, sp, 32
+n163_write_chr_bank:
+    sll t0, t0, 3
+    la t1, global_mapregs
+    addu t0, t0, t1
+    j mapperupdate
+    sd a1, 0(t0)
+n163_write_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure

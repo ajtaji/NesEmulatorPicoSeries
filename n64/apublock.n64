@@ -2,7 +2,7 @@
 ; level. Period, envelope, and duty stay fixed until the block is rendered.
 ; MMC1 synchronizes often at mapper commits and PPU ports. Accumulate
 ; stable oscillator spans between those writes before entering the mixer.
-CompilerIf #GAME_MAPPER=1
+CompilerIf #GAME_MAPPER=1 Or (#NES_RUNTIME_ROM And #GAME_MAPPER=4)
   #NES_APU_BLOCK=64
 CompilerElse
   #NES_APU_BLOCK=16
@@ -26,6 +26,149 @@ nes_flush_osc_done:
   EndASM
 EndProcedure
 
+CompilerIf #NES_AUDIO_RATE=20000
+#NES_APU_BLOCK_AUDIO_MASK = #HOST_AUDIO_FRAMES - 1
+ProcedureNaked.i NesPulseBlockVolume(ch.i)
+  ASM
+    sll t0, a0, 3
+    la t1, global_apulength
+    addu t1, t1, t0
+    ld t1, 0(t1)
+    blez t1, nes_pulse_block_silent
+    or v0, zero, zero
+    la t1, global_apuperiod
+    addu t1, t1, t0
+    ld t1, 0(t1)
+    slti t2, t1, 8
+    bnez t2, nes_pulse_block_silent
+    sll t0, a0, 2
+    la t2, global_apureg
+    addu t2, t2, t0
+    lbu t2, 1(t2)
+    andi t0, t2, 7
+    dsrlv t0, t1, t0
+    andi t2, t2, 8
+    bnez t2, nes_pulse_block_down
+    daddu t2, t1, t0
+    b nes_pulse_block_gate
+    nop
+nes_pulse_block_down:
+    dsubu t2, t1, t0
+    sltiu t0, a0, 1
+    dsubu t2, t2, t0
+nes_pulse_block_gate:
+    slti t2, t2, 2048
+    bnez t2, nes_pulse_block_volume
+    nop
+nes_pulse_block_silent:
+    jr ra
+    nop
+nes_pulse_block_volume:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal apuvolume
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    jr ra
+    or v0, a0, zero
+  EndASM
+EndProcedure
+
+ProcedureNaked NesRenderBlock()
+  ASM
+    la t0, global_nesaudioblockcount
+    ld t1, 0(t0)
+    beqz t1, nes_render_block_return
+    nop
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    or s0, t1, zero
+    jal nespulseblockvolume
+    or a0, zero, zero
+    or s1, v0, zero
+    jal nespulseblockvolume
+    addiu a0, zero, 1
+    sll t0, v0, 8
+    la t1, global_apulength
+    ld t1, 24(t1)
+    blez t1, nes_render_block_duty
+    or s1, s1, t0
+    jal apuvolume
+    addiu a0, zero, 2
+    sll t0, a0, 16
+    or s1, s1, t0
+nes_render_block_duty:
+    la t0, global_apureg
+    lbu t1, 0(t0)
+    lbu t2, 4(t0)
+    lui t3, 0xf91e
+    ori t3, t3, 0x0602
+    srl t1, t1, 6
+    srl t2, t2, 6
+    sll t1, t1, 3
+    sll t2, t2, 3
+    srlv t1, t3, t1
+    srlv t2, t3, t2
+    andi t1, t1, 255
+    andi t2, t2, 255
+    sll t2, t2, 8
+    or a4, t1, t2
+    la t0, global_apuperiod
+    ld t0, 16(t0)
+    slti t0, t0, 2
+    beqz t0, nes_render_block_mix
+    nop
+    la t0, global_apulength
+    ld t0, 16(t0)
+    blez t0, nes_render_block_mix
+    nop
+    la t0, global_apulinear
+    ld t0, 0(t0)
+    blez t0, nes_render_block_mix
+    lui t0, 1
+    or a4, a4, t0
+nes_render_block_mix:
+    la a0, global_nesspancycles
+    la a1, global_nesspandmc
+    or a2, s0, zero
+    jal nesmixblock
+    or a3, s1, zero
+    la t0, global_nesaudioblockcount
+    sd zero, 0(t0)
+    la t0, global_apuproduced
+    ld a0, 0(t0)
+    la t1, global_apusamples
+    sd a0, 0(t1)
+    andi t0, a0, #NES_APU_BLOCK_AUDIO_MASK
+    sltu t0, t0, s0
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    beqz t0, nes_render_block_return
+    daddiu sp, sp, 32
+    j hostqueueaudio
+    nop
+nes_render_block_return:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked NesAudioBoundary()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal nesrenderblock
+    nop
+    ld ra, 0(sp)
+    j nesoscillatorflush
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+CompilerElse
 Procedure NesRenderBlock()
   Protected v0.i, v1.i, nv.i, duty0.i, duty1.i, completed.i, ultrasonic.i
   If NesAudioBlockCount=0 : ProcedureReturn : EndIf
@@ -49,15 +192,8 @@ Procedure NesRenderBlock()
   If (ApuProduced & (#HOST_AUDIO_FRAMES-1))<completed : HostQueueAudio(ApuProduced) : EndIf
 EndProcedure
 
-Procedure NesQueueSample()
-  NesSpanCycles(NesAudioBlockCount)=NesOscPending
-  NesSpanDmc(NesAudioBlockCount)=DmcLevel
-  NesOscPending=0
-  NesAudioBlockCount=NesAudioBlockCount+1
-  If NesAudioBlockCount=#NES_APU_BLOCK : NesRenderBlock() : EndIf
-EndProcedure
-
 Procedure NesAudioBoundary()
   NesRenderBlock()
   NesOscillatorFlush()
 EndProcedure
+CompilerEndIf

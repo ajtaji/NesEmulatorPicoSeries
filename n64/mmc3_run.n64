@@ -1,0 +1,83 @@
+; Keep the run-window scheduler in VR4300 code. Display, input, and
+; persistence run at the same guest frame handoff as the shared path.
+ProcedureNaked.i NesRunMapper4(start.i)
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    move s1, a0
+    la s0, global_cpucycles
+nes_mmc3_run_window:
+    ld t0, global_stopped-global_cpucycles(s0)
+    ld t1, global_workererror-global_cpucycles(s0)
+    or t0, t0, t1
+    bnez t0, nes_mmc3_run_stop
+    nop
+    jal mappercpubudget
+    nop
+    jal nesramcpuwindow
+    move a1, zero
+
+    ld a0, 0(s0)
+    ld t0, global_nesstatushorizon-global_cpucycles(s0)
+    slt t0, t0, a0
+    beqz t0, nes_mmc3_run_stalls
+    ld t0, global_nescpuhorizon-global_cpucycles(s0)
+    slt t0, t0, a0
+    beqz t0, nes_mmc3_run_stalls
+    nop
+    jal nesmmc3advancecputime
+    nop
+nes_mmc3_run_stalls:
+    ld t0, global_workerdmccycles-global_cpucycles(s0)
+    ld t1, global_nesseendmc-global_cpucycles(s0)
+    dsubu t1, t0, t1
+    blez t1, nes_mmc3_run_interrupts
+    ld a0, 0(s0)
+    sd t0, global_nesseendmc-global_cpucycles(s0)
+    daddu a0, a0, t1
+    jal nesmmc3advancecputime
+    sd a0, 0(s0)
+    b nes_mmc3_run_stalls
+    nop
+nes_mmc3_run_interrupts:
+    ld t0, global_workernmi-global_cpucycles(s0)
+    ld t1, global_nesseennmi-global_cpucycles(s0)
+    beq t0, t1, nes_mmc3_run_irq
+    ori a0, zero, 0xFFFA
+    sd t0, global_nesseennmi-global_cpucycles(s0)
+    b nes_mmc3_run_interrupt
+    nop
+nes_mmc3_run_irq:
+    ld t0, global_workerirq-global_cpucycles(s0)
+    ld t1, global_mapirq-global_cpucycles(s0)
+    or t0, t0, t1
+    beqz t0, nes_mmc3_run_frames
+    ld t0, global_fi-global_cpucycles(s0)
+    bnez t0, nes_mmc3_run_frames
+    ori a0, zero, 0xFFFE
+nes_mmc3_run_interrupt:
+    jal cpuinterrupt
+    nop
+nes_mmc3_run_frames:
+    ld a0, global_workerframes-global_cpucycles(s0)
+    ld t0, global_nesdeliveredframe-global_cpucycles(s0)
+    beq a0, t0, nes_mmc3_run_window
+    nop
+    jal neshostguestframe
+    move a1, s1
+    beqz a0, nes_mmc3_run_window
+    nop
+    b nes_mmc3_run_exit
+    nop
+nes_mmc3_run_stop:
+    move a0, zero
+nes_mmc3_run_exit:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure

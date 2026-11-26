@@ -1,0 +1,287 @@
+; A12 IRQ counters for boards built against the common mapper core.
+ProcedureNaked MapperClockIrq()
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      la t0, global_extrairqmode
+      ld t0, 0(t0)
+      bnez t0, nes_shared_irq_done
+      nop
+      j extraramboclock
+      addiu a0, zero, 2
+    EndASM
+  CompilerElse
+    ASM
+      la t0, global_mapirqcount
+      ld t1, 0(t0)
+      ld t2, global_mapreload-global_mapirqcount(t0)
+      ld t3, global_mapirqclocks-global_mapirqcount(t0)
+      daddiu t3, t3, 1
+      sd t3, global_mapirqclocks-global_mapirqcount(t0)
+      beqz t1, nes_shared_irq_reload
+      daddiu t1, t1, -1
+      beqz t2, nes_shared_irq_publish
+      nop
+nes_shared_irq_reload:
+      ld t1, global_mapirqlatch-global_mapirqcount(t0)
+nes_shared_irq_publish:
+      sd t1, 0(t0)
+      bnez t1, nes_shared_irq_done
+      sd zero, global_mapreload-global_mapirqcount(t0)
+      ld t1, global_mapirqenable-global_mapirqcount(t0)
+      beqz t1, nes_shared_irq_done
+      ld t2, global_mapirq-global_mapirqcount(t0)
+      bnez t2, nes_shared_irq_done
+      addiu t1, zero, 1
+      ld t2, global_mapirqassertions-global_mapirqcount(t0)
+      sd t1, global_mapirq-global_mapirqcount(t0)
+      daddiu t2, t2, 1
+      sd t2, global_mapirqassertions-global_mapirqcount(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+nes_shared_irq_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperA12(addr.i,dot.i)
+  ASM
+    la t0, global_mapa12
+    srl a0, a0, 12
+    ld t1, 0(t0)
+    andi a0, a0, 1
+    beq a0, t1, nes_shared_a12_done
+    nop
+    sd a0, 0(t0)
+    bnez a0, nes_shared_a12_rise
+    nop
+    jr ra
+    sd a1, global_maplowsince-global_mapa12(t0)
+nes_shared_a12_rise:
+    ld t1, global_maplowsince-global_mapa12(t0)
+    dsubu t1, a1, t1
+  EndASM
+  CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+    ASM
+      slti t1, t1, 30
+    EndASM
+  CompilerElse
+    ASM
+      slti t1, t1, 10
+    EndASM
+  CompilerEndIf
+  ASM
+    bnez t1, nes_shared_a12_done
+    nop
+    j mapperclockirq
+    nop
+nes_shared_a12_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperRegNotice(reg.i)
+  ASM
+    la t0, global_nesa12board
+    ld t0, 0(t0)
+    beqz t0, nes_shared_reg_done
+    addiu t0, a0, -6
+    sltiu t0, t0, 2
+    beqz t0, nes_shared_reg_done
+    nop
+    la t0, global_ppuv
+    ld a0, 0(t0)
+    la t0, global_mapdots
+    ld a1, 0(t0)
+    j mappera12
+    andi a0, a0, 0x3fff
+nes_shared_reg_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperSpriteFetch(line.i)
+  ASM
+    la t0, global_ppuctrl
+    ld t1, 0(t0)
+    andi t2, t1, 32
+    bnez t2, nes_shared_sprite_tall
+    andi t1, t1, 8
+    sltu t1, zero, t1
+    subu t3, zero, t1
+    b nes_shared_sprite_store
+    andi t3, t3, 255
+nes_shared_sprite_tall:
+    la t0, global_ppupreline
+    ld t0, 0(t0)
+    bne t0, a0, nes_shared_sprite_scan
+    addiu a0, a0, 1
+    move a0, zero
+nes_shared_sprite_scan:
+    la t0, global_oam
+    addiu t1, t0, 256
+    addiu a1, zero, 1
+    move t3, zero
+nes_shared_sprite_next:
+    lbu t2, 0(t0)
+    addiu t2, t2, 1
+    subu t2, a0, t2
+    sltiu t2, t2, 16
+    beqz t2, nes_shared_sprite_skip
+    lbu t2, 1(t0)
+    andi t2, t2, 1
+    bnez t2, nes_shared_sprite_bit
+    nop
+    or t3, t3, a1
+nes_shared_sprite_bit:
+    sll a1, a1, 1
+    sltiu t2, a1, 256
+    beqz t2, nes_shared_sprite_complete
+    nop
+nes_shared_sprite_skip:
+    addiu t0, t0, 4
+    bne t0, t1, nes_shared_sprite_next
+    nop
+nes_shared_sprite_complete:
+    xori t3, t3, 255
+nes_shared_sprite_store:
+    la t0, global_mapspritebits
+    jr ra
+    sd t3, 0(t0)
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperPpuTicks(cycles.i)
+  ASM
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    jal ppudotsfor
+    nop
+    move s0, a0
+    la s6, global_mapdots
+    la t0, global_ppuline
+    ld s1, 0(t0)
+    ld s2, global_ppudot-global_ppuline(t0)
+    ld s3, global_ppuodd-global_ppuline(t0)
+    ld s7, global_ppupreline-global_ppuline(t0)
+nes_shared_tick_next:
+    blez s0, nes_shared_tick_done
+    addiu s4, zero, 341
+    ld t0, global_ppumask-global_mapdots(s6)
+    andi t0, t0, 24
+    beqz t0, nes_shared_tick_step
+    move s5, s4
+    sltiu t0, s1, 240
+    bnez t0, nes_shared_tick_visible
+    nop
+    bne s1, s7, nes_shared_tick_step
+    nop
+    beqz s3, nes_shared_tick_visible
+    nop
+    addiu s4, zero, 340
+    move s5, s4
+nes_shared_tick_visible:
+    sltiu t0, s2, 337
+    beqz t0, nes_shared_tick_step
+    nop
+    beqz s2, nes_shared_tick_edge
+    addiu s5, zero, 1
+    addiu s5, s2, -1
+    srl s5, s5, 2
+    sll s5, s5, 2
+    addiu s5, s5, 5
+nes_shared_tick_edge:
+    ld t0, global_ppuctrl-global_mapdots(s6)
+    andi t0, t0, 16
+    bnez t0, nes_shared_tick_step
+    ld t0, global_mapa12-global_mapdots(s6)
+    bnez t0, nes_shared_tick_step
+    sltiu t0, s2, 257
+    beqz t0, nes_shared_tick_after
+    nop
+    b nes_shared_tick_step
+    addiu s5, zero, 257
+nes_shared_tick_after:
+    sltiu t0, s2, 321
+    bnez t0, nes_shared_tick_step
+    nop
+    addiu s5, zero, 337
+nes_shared_tick_step:
+    subu t0, s5, s2
+    sltu t1, s0, t0
+    beqz t1, nes_shared_tick_commit
+    nop
+    move t0, s0
+nes_shared_tick_commit:
+    ld t1, 0(s6)
+    addu s2, s2, t0
+    dsubu s0, s0, t0
+    daddu t1, t1, t0
+    bne s2, s5, nes_shared_tick_next
+    sd t1, 0(s6)
+    bne s2, s4, nes_shared_tick_fetch
+    addiu t0, zero, 257
+    move s2, zero
+    addiu s1, s1, 1
+    ld t0, global_ppulinecount-global_mapdots(s6)
+    bne s1, t0, nes_shared_tick_next
+    nop
+    ld t0, global_ppuoddtoggle-global_mapdots(s6)
+    move s1, zero
+    b nes_shared_tick_next
+    xor s3, s3, t0
+nes_shared_tick_fetch:
+    bne s2, t0, nes_shared_tick_pattern
+    nop
+    jal mapperspritefetch
+    move a0, s1
+nes_shared_tick_pattern:
+    andi t0, s2, 7
+    addiu t1, zero, 5
+    bne t0, t1, nes_shared_tick_address
+    move a0, zero
+    sltiu t0, s2, 257
+    bnez t0, nes_shared_tick_bg
+    sltiu t0, s2, 321
+    beqz t0, nes_shared_tick_bg
+    addiu t0, s2, -261
+    srl t0, t0, 3
+    ld t1, global_mapspritebits-global_mapdots(s6)
+    srlv t1, t1, t0
+    andi t1, t1, 1
+    b nes_shared_tick_address
+    sll a0, t1, 12
+nes_shared_tick_bg:
+    ld t0, global_ppuctrl-global_mapdots(s6)
+    andi t0, t0, 16
+    sll a0, t0, 8
+nes_shared_tick_address:
+    jal mappera12
+    ld a1, 0(s6)
+    b nes_shared_tick_next
+    nop
+nes_shared_tick_done:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    jr ra
+    daddiu sp, sp, 80
+  EndASM
+EndProcedure

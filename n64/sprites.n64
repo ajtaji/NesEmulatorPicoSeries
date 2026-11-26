@@ -192,6 +192,14 @@ nes_sprite_eval_count:
     sd t2, 0(t1)
 
 nes_sprite_eval_enter:
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      j nesmmc3drawsprites
+      nop
+    EndASM
+  CompilerElse
+  ASM
     addiu sp, sp, -56
     sd ra, 48(sp)
     sd s0, 40(sp)
@@ -260,6 +268,14 @@ nes_sprite_eval_address:
     bne a1, a5, nes_sprite_eval_roster
     addiu a6, a6, 8
 
+  EndASM
+  CompilerIf #GAME_MAPPER=9
+    ASM
+      jal neslatchspriterows
+      or a0, s0, zero
+    EndASM
+  CompilerEndIf
+  ASM
     jal ppuclearsprites
     nop
     andi t0, s1, 16
@@ -287,12 +303,38 @@ nes_sprite_eval_draw:
     nop
     addiu a3, zero, 3
 nes_sprite_eval_draw_args:
-    addu t0, s5, s0
-    ld t1, 0(t0)
-    la t0, global_pattern
-    lw t0, 4(t0)
-    addu t0, t0, t1
-    lhu a0, 0(t0)
+  EndASM
+  CompilerIf #GAME_MAPPER=9
+    ASM
+      la t0, global_extraspritebits
+      addu t0, t0, s0
+      ld a0, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+      addu t0, s5, s0
+      ld t1, 0(t0)
+    EndASM
+    CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+      ASM
+        andi t0, t1, 0x1c00
+        srl t0, t0, 7
+        la t2, global_nesmmc3patternbias
+        addu t0, t0, t2
+        lw t0, 4(t0)
+      EndASM
+    CompilerElse
+      ASM
+        la t0, global_pattern
+        lw t0, 4(t0)
+      EndASM
+    CompilerEndIf
+    ASM
+      addu t0, t0, t1
+      lhu a0, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     addu t0, s3, s0
     ld a1, 0(t0)
     jal nesdrawspriterow
@@ -310,4 +352,121 @@ nes_sprite_eval_done:
     jr ra
     addiu sp, sp, 56
   EndASM
+  CompilerEndIf
 EndProcedure
+
+CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+ProcedureNaked NesMmc3DrawSprites(line.i, count.i, mask.i)
+  ; Roster order is priority order. Draw back to front and keep the first
+  ; sprite's index and X for the guest status deadline.
+  ASM
+    sll t0, a0, 3
+    la t1, global_cachedsprite
+    addu t1, t1, t0
+    lbu t0, 0(t1)
+    la t2, global_sprindex
+    sd t0, 0(t2)
+    la a4, global_oam
+    sll t0, t0, 2
+    addu t0, t0, a4
+    lbu t0, 3(t0)
+    la t2, global_sprx
+    sd t0, 0(t2)
+    andi t0, a2, 16
+    bnez t0, nes_mmc3_sprite_draw_setup
+    nop
+    j ppuclearsprites
+    nop
+
+nes_mmc3_sprite_draw_setup:
+    addiu sp, sp, -64
+    sd ra, 56(sp)
+    sd s6, 48(sp)
+    sd s5, 40(sp)
+    sd s4, 32(sp)
+    sd s3, 24(sp)
+    sd s2, 16(sp)
+    sd s1, 8(sp)
+    sd s0, 0(sp)
+    addu s0, t1, a1
+    or s1, t1, zero
+    addiu s2, a0, -1
+    la t0, global_ppuctrl
+    ld s3, 0(t0)
+    or s4, a4, zero
+    andi t0, a2, 4
+    sltiu s5, t0, 1
+    sll s5, s5, 3
+    la s6, global_nesmmc3patternbias
+    jal ppuclearsprites
+    nop
+
+nes_mmc3_sprite_draw:
+    addiu s0, s0, -1
+    lbu v0, 0(s0)
+    sll t0, v0, 2
+    addu t0, t0, s4
+    lwu t3, 0(t0)
+    andi t1, s3, 32
+    srl t1, t1, 2
+    addiu t1, t1, 7
+    srl t2, t3, 24
+    subu t2, s2, t2
+    srl a5, t3, 8
+    andi a5, a5, 255
+    srl t8, t3, 16
+    andi t8, t8, 255
+    andi t0, a5, 128
+    beqz t0, nes_mmc3_sprite_draw_vflip
+    andi a1, t3, 255
+    subu t2, t1, t2
+nes_mmc3_sprite_draw_vflip:
+    andi t3, s3, 8
+    sltiu t0, t1, 8
+    bnez t0, nes_mmc3_sprite_draw_row
+    sll t3, t3, 9
+    andi t3, t8, 1
+    sll t3, t3, 12
+    andi t8, t8, 254
+    srl t0, t2, 3
+    addu t8, t8, t0
+    andi t2, t2, 7
+nes_mmc3_sprite_draw_row:
+    sll t8, t8, 4
+    sll t2, t2, 1
+    addu t8, t8, t3
+    addu t2, t2, t8
+    andi t0, t2, 0x1c00
+    srl t0, t0, 7
+    addu t0, t0, s6
+    lw t0, 4(t0)
+    addu t0, t0, t2
+    lhu a0, 0(t0)
+    andi a2, a5, 3
+    sll a2, a2, 2
+    andi t0, a5, 32
+    sll t0, t0, 1
+    or a2, a2, t0
+    ori a2, a2, 16
+    bnez v0, nes_mmc3_sprite_emit
+    addiu a3, zero, 1
+    ori a2, a2, 128
+    addiu a3, zero, 3
+nes_mmc3_sprite_emit:
+    jal nesdrawspriterow
+    or a4, s5, zero
+    bne s0, s1, nes_mmc3_sprite_draw
+    nop
+    ld s0, 0(sp)
+    ld s1, 8(sp)
+    ld s2, 16(sp)
+    ld s3, 24(sp)
+    ld s4, 32(sp)
+    ld s5, 40(sp)
+    ld s6, 48(sp)
+    ld ra, 56(sp)
+    jr ra
+    addiu sp, sp, 64
+  EndASM
+EndProcedure
+CompilerEndIf

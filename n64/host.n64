@@ -20,8 +20,16 @@ CompilerIf #VERIFY_FRAME>0
   Global HostAiQueued.i, HostAiEmpty.i, HostAiUnderruns.i, HostAiReported.i, HostAiReadyOnEmpty.i, HostLastEmptyFrame.i
 CompilerEndIf
 
+CompilerIf #NES_MEASURE_QUEUE
+  Global HostTelemetryEnabled.i
+  Global HostAiStarvations.i, HostAiLastStarvation.i, HostAudioDropped.i
+CompilerEndIf
+
 XIncludeFile "stereo.n64"
 
+CompilerIf #VERIFY_FRAME=0
+  XIncludeFile "host_audio_queue.n64"
+CompilerElse
 Procedure HostQueueAudio(produced.i)
   Protected dst.i
   If HostAiBase = 0 : ProcedureReturn : EndIf
@@ -56,6 +64,7 @@ Procedure HostQueueAudio(produced.i)
     CompilerEndIf
   Wend
 EndProcedure
+CompilerEndIf
 
 Procedure HostAudioPoll()
   CompilerIf #NES_APU_BLOCKED

@@ -115,7 +115,8 @@ NesOpcodeSlow:
                    "  AccessPhase = 3\n  CpuFetchAddress()\n" + write)
         if source.count(handler) != 1:
             raise ValueError(f"2A03 absolute ST{reg} handler changed")
-        entry = "NesStoreAbsolute:\n" if mapper == 1 and opcode == "8D" else ""
+        threaded_store = mapper == 1 or (mapper == 4 and runtime)
+        entry = "NesStoreAbsolute:\n" if threaded_store and opcode == "8D" else ""
         source = source.replace(handler, handler.replace(write, entry + f"""  CompilerIf #NES_BG_EXPANDED
     NesWriteAbsolute(Ea,{reg},${opcode})
   CompilerElse
@@ -124,6 +125,37 @@ NesOpcodeSlow:
 """))
     declaration = "Declare NesWriteAbsolute(addr.i, value.i, writeOp.i)"
     source = f"CompilerIf #NES_BG_EXPANDED\n{declaration}\nCompilerEndIf\n" + source
+    if runtime and mapper == 4:
+        # The MMC3 span covers every legal opcode and can return rejected
+        # opcodes to the same portable dispatch table. Skip the boot table.
+        boot_lookup = """    sd $a1, 0($t3)
+    sll $t0, $a0, 2
+    la $t1, nes_opcode_table
+    addu $t0, $t0, $t1
+    lw $t0, 0($t0)
+    jr $t0
+    nop
+    .align 2"""
+        direct_entry = """    b nes_thread_enter
+    sd $a1, 0($t3)
+    .word 0,0,0,0,0,0
+    .align 2"""
+        if source.count(boot_lookup) != 1:
+            raise ValueError("runtime MMC3 CPU boot dispatch changed")
+        source = source.replace(boot_lookup, direct_entry)
+        source, count = re.subn(r"^Procedure\.i CpuInterrupt\(vector\.i\)\n.*?^EndProcedure",
+                                'XIncludeFile "../n64/mmc3_cpu_interrupt.n64"', source,
+                                flags=re.M | re.S)
+        if count != 1:
+            raise ValueError("2A03 interrupt entry changed")
+        # While a mapper IRQ is pending, the scheduler may run multiple
+        # instructions with I set. Poll immediately when an instruction clears it.
+        for opcode in ("28", "40", "58"):
+            op = re.compile(rf"(^Op{opcode}:.*?)(^  CpuNextOp\()", re.M | re.S)
+            source, count = op.subn(r"\1  If FI=0 And NesMmc3IrqPending() : CpuEndWindow() : EndIf\n\2", source)
+            if count != 1:
+                raise ValueError(f"2A03 IRQ unmask opcode {opcode} changed")
+        source = "Declare CpuEndWindow()\nDeclare.i NesMmc3IrqPending()\n" + source
     # MMC5 and mapper 234 can attach read side effects to the PRG window.
     if mapper in (5, 234):
         return cache_window_registers(source)
@@ -136,4 +168,5 @@ NesOpcodeSlow:
     if mapper == 1:
         source = source.replace("NesPollPtr=PrgBias+PC", "NesPollPtr=PC")
         source = re.sub(r"PeekA\((NesPollPtr(?:\+\d+)?)\)", r"PeekA(NesMmc1Pointer(\1))", source)
-    return stage_fill(stage_thread(source, mapper, has_waits, chain_nrom, mmc1_20k), program, runtime and mapper in (0, 1))
+    return stage_fill(stage_thread(source, mapper, has_waits, chain_nrom, mmc1_20k, runtime),
+                      program, runtime and mapper in (0, 1))

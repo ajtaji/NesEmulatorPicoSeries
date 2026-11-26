@@ -1,0 +1,208 @@
+; Drive the NES DMC timer and fetch bytes through the shared cartridge bus.
+ProcedureNaked ApuDmcFetch()
+  ASM
+    la t0, global_dmcempty
+    ld t1, 0(t0)
+    beqz t1, nes_fetch_return
+    nop
+    la t0, global_dmcbytes
+    ld t1, 0(t0)
+    blez t1, nes_fetch_return
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t0, global_dmcaddress
+    jal workerread
+    ld a0, 0(t0)
+    la t0, global_dmcbuffer
+    sd a0, 0(t0)
+    la t0, global_dmcempty
+    sd zero, 0(t0)
+    la t0, global_workerdmccycles
+    ld t1, 0(t0)
+    daddiu t1, t1, 4
+    sd t1, 0(t0)
+    la t0, global_dmcaddress
+    ld t1, 0(t0)
+    lui t2, 1
+    daddiu t1, t1, 1
+    bne t1, t2, nes_fetch_address
+    nop
+    ori t1, zero, 0x8000
+nes_fetch_address:
+    sd t1, 0(t0)
+    la t0, global_dmcbytes
+    ld t1, 0(t0)
+    daddiu t1, t1, -1
+    bnez t1, nes_fetch_done
+    sd t1, 0(t0)
+    la t1, global_apureg
+    lbu t2, 16(t1)
+    andi t3, t2, 64
+    beqz t3, nes_fetch_irq
+    andi t2, t2, 128
+    lbu t2, 19(t1)
+    lbu t1, 18(t1)
+    sll t2, t2, 4
+    sll t1, t1, 6
+    addiu t2, t2, 1
+    ori t3, zero, 0xc000
+    addu t1, t1, t3
+    sd t2, 0(t0)
+    la t0, global_dmcaddress
+    b nes_fetch_done
+    sd t1, 0(t0)
+nes_fetch_irq:
+    beqz t2, nes_fetch_done
+    nop
+    la t0, global_dmcirq
+    addiu t1, zero, 1
+    sd t1, 0(t0)
+nes_fetch_done:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+nes_fetch_return:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+CompilerIf #GAME_MAPPER=4
+ProcedureNaked NesDmcEdge()
+  ASM
+    la t0, global_dmctimer
+    ld t1, 0(t0)
+nes_dmc_clock:
+    bgtz t1, nes_dmc_return
+    lbu t2, global_apureg-global_dmctimer+16(t0)
+    andi t2, t2, 15
+    sll t2, t2, 1
+    daddiu t3, t0, global_dmctable-global_dmctimer
+    addu t2, t3, t2
+    lhu t2, 0(t2)
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    ld t2, global_dmcshift-global_dmctimer(t0)
+    ld t3, global_dmcsilent-global_dmctimer(t0)
+    bnez t3, nes_dmc_shift
+    andi t3, t2, 1
+    ld a0, global_dmclevel-global_dmctimer(t0)
+    beqz t3, nes_dmc_down
+    nop
+    slti a1, a0, 126
+    beqz a1, nes_dmc_shift
+    daddiu a0, a0, 2
+    b nes_dmc_shift
+    sd a0, global_dmclevel-global_dmctimer(t0)
+nes_dmc_down:
+    slti a1, a0, 2
+    bnez a1, nes_dmc_shift
+    daddiu a0, a0, -2
+    sd a0, global_dmclevel-global_dmctimer(t0)
+nes_dmc_shift:
+    dsrl t2, t2, 1
+    sd t2, global_dmcshift-global_dmctimer(t0)
+    ld t2, global_dmcbits-global_dmctimer(t0)
+    daddiu t2, t2, -1
+    bnez t2, nes_dmc_clock
+    sd t2, global_dmcbits-global_dmctimer(t0)
+    addiu t2, zero, 8
+    sd t2, global_dmcbits-global_dmctimer(t0)
+    ld t2, global_dmcempty-global_dmctimer(t0)
+    bnez t2, nes_dmc_silence
+    addiu t3, zero, 1
+    sd zero, global_dmcsilent-global_dmctimer(t0)
+    ld t2, global_dmcbuffer-global_dmctimer(t0)
+    sd t2, global_dmcshift-global_dmctimer(t0)
+    sd t3, global_dmcempty-global_dmctimer(t0)
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal apudmcfetch
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la t0, global_dmctimer
+    b nes_dmc_clock
+    ld t1, 0(t0)
+nes_dmc_silence:
+    b nes_dmc_clock
+    sd t3, global_dmcsilent-global_dmctimer(t0)
+nes_dmc_return:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerElse
+ProcedureNaked NesDmcEdge()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+nes_dmc_clock:
+    la t0, global_dmctimer
+    ld t1, 0(t0)
+    bgtz t1, nes_dmc_return
+    nop
+    la t2, global_apureg
+    lbu t2, 16(t2)
+    andi t2, t2, 15
+    sll t2, t2, 1
+    la t3, global_dmctable
+    addu t2, t3, t2
+    lhu t2, 0(t2)
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    la t0, global_dmcshift
+    ld t1, 0(t0)
+    la t2, global_dmcsilent
+    ld t2, 0(t2)
+    bnez t2, nes_dmc_shift
+    andi t2, t1, 1
+    la t3, global_dmclevel
+    ld a0, 0(t3)
+    beqz t2, nes_dmc_level_down
+    nop
+    slti a1, a0, 126
+    beqz a1, nes_dmc_shift
+    daddiu a0, a0, 2
+    b nes_dmc_shift
+    sd a0, 0(t3)
+nes_dmc_level_down:
+    slti a1, a0, 2
+    bnez a1, nes_dmc_shift
+    daddiu a0, a0, -2
+    sd a0, 0(t3)
+nes_dmc_shift:
+    dsrl t1, t1, 1
+    sd t1, 0(t0)
+    la t1, global_dmcbits
+    ld t2, 0(t1)
+    daddiu t2, t2, -1
+    bnez t2, nes_dmc_clock
+    sd t2, 0(t1)
+    addiu t2, zero, 8
+    sd t2, 0(t1)
+    la t1, global_dmcempty
+    ld t2, 0(t1)
+    la t3, global_dmcsilent
+    bnez t2, nes_dmc_silence
+    nop
+    sd zero, 0(t3)
+    la t2, global_dmcbuffer
+    ld t2, 0(t2)
+    sd t2, 0(t0)
+    addiu t2, zero, 1
+    jal apudmcfetch
+    sd t2, 0(t1)
+    b nes_dmc_clock
+    nop
+nes_dmc_silence:
+    addiu t2, zero, 1
+    b nes_dmc_clock
+    sd t2, 0(t3)
+nes_dmc_return:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+CompilerEndIf

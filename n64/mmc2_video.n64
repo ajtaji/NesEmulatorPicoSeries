@@ -1,0 +1,133 @@
+ProcedureNaked ExtraLatchRead(addr.i)
+  ASM
+    addiu t0, zero, 0x0fd8
+    beq a0, t0, nes_mmc2_lower
+    or t1, zero, zero
+    addiu t0, zero, 0x0fe8
+    beq a0, t0, nes_mmc2_lower
+    addiu t1, zero, 1
+    daddiu t0, a0, -0x1fd8
+    sltiu t0, t0, 8
+    bnez t0, nes_mmc2_upper
+    or t1, zero, zero
+    daddiu t0, a0, -0x1fe8
+    sltiu t0, t0, 8
+    beqz t0, nes_mmc2_latch_done
+    addiu t1, zero, 1
+nes_mmc2_upper:
+    la t0, global_extralatch1
+    b nes_mmc2_latch_update
+    nop
+nes_mmc2_lower:
+    la t0, global_extralatch0
+nes_mmc2_latch_update:
+    ld t2, 0(t0)
+    beq t1, t2, nes_mmc2_latch_done
+    nop
+    j mapperupdate
+    sd t1, 0(t0)
+nes_mmc2_latch_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked PpuFetchTile()
+  ; Fetch from the old pattern bank before allowing the latch to remap it.
+  ASM
+    la a0, global_waddr
+    ld t0, 0(a0)
+    la a1, global_nt
+    la a2, global_pixelspread
+    andi t1, t0, 0x0fff
+    addu t1, a1, t1
+    lbu t2, 0(t1)
+    srl t8, t0, 4
+    srl t3, t0, 2
+    andi t1, t0, 0x0c00
+    andi t9, t8, 0x38
+    andi t3, t3, 7
+    or t1, t1, t9
+    or t1, t1, t3
+    ori t1, t1, 0x03c0
+    addu t1, a1, t1
+    lbu t3, 0(t1)
+    andi t8, t8, 4
+    andi t9, t0, 2
+    or t8, t8, t9
+    srlv t3, t3, t8
+    andi t3, t3, 3
+    sll t3, t3, 2
+    sll t9, t3, 8
+    or t3, t3, t9
+    sll t9, t3, 16
+    or t3, t3, t9
+    lw t8, global_ppuctrl-global_waddr+4(a0)
+    lw t1, global_pattern-global_waddr+4(a0)
+    srl t0, t0, 12
+    andi t0, t0, 7
+    andi t8, t8, 16
+    sll t8, t8, 8
+    sll t2, t2, 4
+    or t2, t2, t8
+    or a4, t2, t0
+    ori a4, a4, 8
+    sll t0, t0, 1
+    or t2, t2, t0
+    addu t2, t1, t2
+    lhu t0, 0(t2)
+    andi t1, t0, 255
+    srl t0, t0, 8
+    sll t1, t1, 2
+    sll t0, t0, 2
+    addu t1, a2, t1
+    addu t0, a2, t0
+    lw t1, 0(t1)
+    lw t0, 0(t0)
+    or t1, t1, t3
+    or t0, t0, t3
+    sd t1, global_wlo-global_waddr(a0)
+    sd t0, global_whi-global_waddr(a0)
+    j extralatchread
+    or a0, a4, zero
+  EndASM
+EndProcedure
+
+ProcedureNaked NesLatchSpriteRows(count.i)
+  ; Read patterns in forward OAM order. The renderer composites the captured
+  ; pixels in reverse so that lower sprite indices win overlaps.
+  ASM
+    addiu sp, sp, -32
+    sd ra, 24(sp)
+    sd s2, 16(sp)
+    sd s1, 8(sp)
+    sd s0, 0(sp)
+    la s0, global_sprrow
+    la s1, global_extraspritebits
+    sll a0, a0, 3
+    addu s2, s0, a0
+nes_mmc2_sprite_read:
+    lw t0, 4(s0)
+    la t1, global_pattern
+    lw t1, 4(t1)
+    andi a0, t0, 0x1ff0
+    andi t2, t0, 14
+    srl t2, t2, 1
+    or a0, a0, t2
+    ori a0, a0, 8
+    addu t1, t1, t0
+    lhu t1, 0(t1)
+    sd t1, 0(s1)
+    jal extralatchread
+    addiu s1, s1, 8
+    addiu s0, s0, 8
+    bne s0, s2, nes_mmc2_sprite_read
+    nop
+    ld s0, 0(sp)
+    ld s1, 8(sp)
+    ld s2, 16(sp)
+    ld ra, 24(sp)
+    jr ra
+    addiu sp, sp, 32
+  EndASM
+EndProcedure

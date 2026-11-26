@@ -1,0 +1,162 @@
+; NesWrite publishes the CPU data bus before calling this cartridge route.
+ProcedureNaked NesWriteBoard(addr.i,value.i)
+  CompilerIf #GAME_MAPPER=0
+    ASM
+      jr ra
+      nop
+    EndASM
+  CompilerElse
+    CompilerIf #GAME_MAPPER=2 Or #GAME_MAPPER=66
+      ASM
+        andi t1, a0, 0x8000
+        beqz t1, nes_simple_bus_done
+        nop
+      EndASM
+    CompilerElse
+      ASM
+        la t0, global_mapmanaged
+        ld t1, 0(t0)
+        beqz t1, nes_simple_bus_done
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
+      la t0, global_cpucycles
+      ld t1, global_cpuinwindow-global_cpucycles(t0)
+      beqz t1, nes_simple_bus_ready
+      ld a2, 0(t0)
+      ld t1, global_nesrunstart-global_cpucycles(t0)
+      ld t2, global_budget-global_cpucycles(t0)
+      ld a2, global_left-global_cpucycles(t0)
+      daddu t1, t1, t2
+      dsubu a2, t1, a2
+      sd a2, 0(t0)
+nes_simple_bus_ready:
+    EndASM
+    CompilerIf #GAME_MAPPER=2 Or #GAME_MAPPER=66
+      ASM
+        ld t1, global_cartconflicts-global_cpucycles(t0)
+        beqz t1, nes_simple_bus_latch
+        ld t1, global_prgbias-global_cpucycles(t0)
+        addu t1, t1, a0
+        lbu t1, 0(t1)
+        and a1, a1, t1
+nes_simple_bus_latch:
+        j cartbank
+        move a0, a1
+      EndASM
+    CompilerElse
+      ASM
+        ; Advance APU and PPU with the old mapping before latching banks.
+        ld t1, global_accessphase-global_cpucycles(t0)
+        daddiu sp, sp, -32
+        sd ra, 0(sp)
+        sd a0, 8(sp)
+        sd a1, 16(sp)
+        jal workeradvance
+        daddu a0, a2, t1
+        la t0, global_cpucycles
+        ld a2, 0(t0)
+        ld t1, global_accessphase-global_cpucycles(t0)
+        ld a0, 8(sp)
+        ld a1, 16(sp)
+        jal mapperwrite
+        daddu a2, a2, t1
+        ld ra, 0(sp)
+        j cpuendwindow
+        daddiu sp, sp, 32
+      EndASM
+    CompilerEndIf
+    ASM
+nes_simple_bus_done:
+      jr ra
+      nop
+    EndASM
+  CompilerEndIf
+EndProcedure
+
+CompilerIf #GAME_MAPPER=2
+ProcedureNaked CartBank(value.i)
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    jal neshostus
+    sd a0, 8(sp)
+    sd a0, 16(sp)
+    la t0, global_cartbankcalls
+    ld t1, 0(t0)
+    ld t2, global_cartprgbanks-global_cartbankcalls(t0)
+    ld a0, 8(sp)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    daddiu t2, t2, -1
+    and a0, a0, t2
+    ld t1, global_cartprgselected-global_cartbankcalls(t0)
+    beq a0, t1, nes_uxrom_end_window
+    nop
+    jal cartprgswitch
+    nop
+    la t0, global_cartbankchanges
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+nes_uxrom_end_window:
+    jal cpuendwindow
+    nop
+    jal neshostus
+    nop
+    la t0, global_cartbankus
+    ld t1, 0(t0)
+    ld t2, 16(sp)
+    dsubu a0, a0, t2
+    daddu t1, t1, a0
+    sd t1, 0(t0)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure
+CompilerElseIf #GAME_MAPPER=66
+ProcedureNaked CartBank(value.i)
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    la t0, global_cartprgbanks
+    ld t1, 0(t0)
+    ld t2, global_cartprgselected-global_cartprgbanks(t0)
+    srl a0, a0, 4
+    andi a0, a0, 3
+    daddiu t1, t1, -1
+    and a0, a0, t1
+    beq a0, t2, nes_gxrom_chr
+    nop
+    jal cartprgswitch
+    nop
+nes_gxrom_chr:
+    la t0, global_cartchrbanks
+    ld t1, 0(t0)
+    ld t2, global_cartchrselected-global_cartchrbanks(t0)
+    ld a2, 8(sp)
+    daddiu t1, t1, -1
+    andi a2, a2, 3
+    and a2, a2, t1
+    beq a2, t2, nes_gxrom_end_window
+    sd a2, 16(sp)
+    la t0, global_cpucycles
+    ld a3, 0(t0)
+    ld t1, global_accessphase-global_cpucycles(t0)
+    move a1, zero
+    addiu a0, zero, 4
+    jal nesrpc
+    daddu a3, a3, t1
+    ld t1, 16(sp)
+    la t0, global_cartchrselected
+    sd t1, 0(t0)
+nes_gxrom_end_window:
+    ld ra, 0(sp)
+    j cpuendwindow
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure
+CompilerEndIf

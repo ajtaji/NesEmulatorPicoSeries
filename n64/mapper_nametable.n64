@@ -1,0 +1,122 @@
+; Nametable wiring for TxSROM, Tengen 158 and Sunsoft 4.
+ProcedureNaked ExtraNtRefresh()
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    move s0, zero
+    la s1, global_mapntslots
+    la s2, global_nt
+  EndASM
+  CompilerIf #GAME_MAPPER=118 Or #GAME_MAPPER=158
+    CompilerIf #GAME_MAPPER=118
+      ASM
+        la s3, global_mapregs
+      EndASM
+    CompilerElse
+      ASM
+        la s3, global_extraregs
+      EndASM
+    CompilerEndIf
+    ASM
+nes_extra_nt_page:
+      la t0, global_mapselect
+      ld t0, 0(t0)
+      andi t0, t0, 128
+      beqz t0, nes_extra_nt_pairs
+      srl t1, s0, 1
+      addiu t1, s0, 2
+nes_extra_nt_pairs:
+      sll t1, t1, 3
+      daddu t1, s3, t1
+      ld t1, 0(t1)
+      srl t1, t1, 7
+      andi t1, t1, 1
+      sd t1, 0(s1)
+    EndASM
+  CompilerElse
+    ASM
+nes_extra_nt_page:
+      ld t1, 0(s1)
+      la t0, global_extraflags
+      ld t0, 0(t0)
+      beqz t0, nes_extra_nt_ciram
+      andi t2, t1, 1
+      sll t2, t2, 3
+      la t0, global_extraregs
+      daddu t0, t0, t2
+      ld t2, 32(t0)
+      la t0, global_mapchrbytes
+      ld t0, 0(t0)
+      dsrl t0, t0, 10
+      daddiu t0, t0, -1
+      and t2, t2, t0
+      dsll t2, t2, 10
+      la t0, global_cartchr
+      ld t0, 0(t0)
+      b nes_extra_nt_copy
+      daddu a1, t0, t2
+    EndASM
+  CompilerEndIf
+  ASM
+nes_extra_nt_ciram:
+    la a1, global_mapciram
+    sll t1, t1, 10
+    daddu a1, a1, t1
+nes_extra_nt_copy:
+    move a0, s2
+    jal mapcopy
+    addiu a2, zero, 1024
+    addiu s0, s0, 1
+    addiu s1, s1, 8
+    sltiu t0, s0, 4
+    bnez t0, nes_extra_nt_page
+    addiu s2, s2, 1024
+    la t0, global_bgcacheaddr
+    la t1, global_rgblastkey
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    sd t2, 0(t1)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
+EndProcedure
+
+CompilerIf #GAME_MAPPER=68
+ProcedureNaked.i ExtraNtRead(addr.i)
+  ASM
+    srl t0, a0, 10
+    andi t0, t0, 3
+    sll t0, t0, 3
+    la t1, global_mapntslots
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    andi t0, t0, 1
+    sll t0, t0, 3
+    la t1, global_extraregs
+    daddu t0, t0, t1
+    ld t1, 32(t0)
+    la t0, global_mapchrbytes
+    ld t0, 0(t0)
+    dsrl t0, t0, 10
+    daddiu t0, t0, -1
+    and t1, t1, t0
+    dsll t1, t1, 10
+    la t0, global_cartchr
+    ld t0, 0(t0)
+    andi a0, a0, 1023
+    daddu t0, t0, t1
+    daddu t0, t0, a0
+    jr ra
+    lbu a0, 0(t0)
+  EndASM
+EndProcedure
+CompilerEndIf

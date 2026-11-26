@@ -1,32 +1,39 @@
-; MMC1 owns two physical nametables and can change their logical aliases
-; between PPU fetches. Recreate a horizontal row only when its tiles,
-; attributes or mapping have changed. The repeated half covers wraparound.
 ; A line is stale if its nametable row or the shared CHR/mirroring changed.
 Global NesVideoSerial.i=1, NesVideoReset.i=1
 Global Dim NesNameSerial.i(32)
 Global Dim NesLineSerial.i(240)
 Global Dim NesLineTag.i(240)
-Global Dim NesDirtyRows.a(64)
+CompilerIf #NES_MMC1_ROWS
+  Global Dim NesDirtyRows.a(64)
+CompilerEndIf
 
 Procedure NesInvalidateMap()
-  Protected i.i
   NesVideoSerial+=1 : NesVideoReset=NesVideoSerial
-  For i=0 To 7 : PokeI(@NesDirtyRows(0)+i*8,-1) : Next
+  CompilerIf #NES_MMC1_ROWS
+    Protected i.i
+    For i=0 To 7 : PokeI(@NesDirtyRows(0)+i*8,-1) : Next
+  CompilerEndIf
 EndProcedure
 
 Procedure NesInvalidateTileRow(addr.i)
   Protected row.i=(addr&1023)>>5
   NesVideoSerial+=1 : NesNameSerial(row)=NesVideoSerial
-  NesDirtyRows(row)=1 : NesDirtyRows(row+32)=1
+  CompilerIf #NES_MMC1_ROWS
+    NesDirtyRows(row)=1 : NesDirtyRows(row+32)=1
+  CompilerEndIf
   If (addr&1023)>=$3C0
     row=((addr>>3)&7)*4
     NesNameSerial(row)=NesVideoSerial : NesNameSerial(row+1)=NesVideoSerial
     NesNameSerial(row+2)=NesVideoSerial : NesNameSerial(row+3)=NesVideoSerial
-    PokeL(@NesDirtyRows(0)+row,$01010101)
-    PokeL(@NesDirtyRows(0)+32+row,$01010101)
+    CompilerIf #NES_MMC1_ROWS
+      PokeL(@NesDirtyRows(0)+row,$01010101)
+      PokeL(@NesDirtyRows(0)+32+row,$01010101)
+    CompilerEndIf
   EndIf
 EndProcedure
 
+CompilerIf #NES_MMC1_ROWS
+; Build the pair of aliased nametable rows for MMC1's expanded renderer.
 Procedure NesBuildMappedRow(row.i)
   Protected side.i, x.i, tile.i, attr.i, palette.i, slot.i
   For side=0 To 1
@@ -40,6 +47,7 @@ Procedure NesBuildMappedRow(row.i)
     Next
   Next
 EndProcedure
+CompilerEndIf
 
 ProcedureNaked NesReuseLine(endDot.i)
   ; A whole background line is reusable only if no sprite span drew pixels.
@@ -77,12 +85,28 @@ ProcedureNaked NesReuseLine(endDot.i)
     la t0, global_ppuctrl
     ld t0, 0(t0)
     andi t0, t0, 16
-    sll t0, t0, 1
-    la t1, global_mapchrslots
-    addu t0, t0, t1
-    ld t0, 0(t0)
-    sll t0, t0, 21
-    or a1, a1, t0
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ; MapperChr maintains a packed tag for each four-bank pattern table.
+    ASM
+      srl t0, t0, 1
+      la t1, global_nesmmc3chrtags
+      daddu t0, t0, t1
+      ld t1, 0(t0)
+      dsll t1, t1, 21
+      or a1, a1, t1
+    EndASM
+  CompilerElse
+    ASM
+      sll t0, t0, 1
+      la t1, global_mapchrslots
+      addu t0, t0, t1
+      ld t0, 0(t0)
+      sll t0, t0, 21
+      or a1, a1, t0
+    EndASM
+  CompilerEndIf
+  ASM
     ; One serial per coarse Y covers both vertical nametables conservatively.
     srl t0, a2, 2
     andi t0, t0, 248
@@ -116,6 +140,14 @@ nes_retained_compare:
     ; 32 coarse X increments preserve X and toggle the horizontal nametable.
     xori a2, a2, 0x400
     sd a2, 0(a6)
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      la t0, global_nesreusedindexrow
+      sd a0, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     jr ra
     nop
 nes_retained_replace:
@@ -133,4 +165,18 @@ nes_retained_render:
     j nesrenderto
     nop
   EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4 And #VERIFY_FRAME=0
+    ASM
+      ; Separate the following raster code from the threaded CPU entry
+      ; in the VR4300's direct-mapped instruction cache.
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+      .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    EndASM
+  CompilerEndIf
 EndProcedure

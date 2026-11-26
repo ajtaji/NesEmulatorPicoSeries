@@ -1,0 +1,385 @@
+; Poll stable RAM within one scheduled CPU window. Keep the read/branch
+; phase, instruction count, and bus value at the original window boundary.
+ProcedureNaked.i NesMmc3RamWaitBatch(n.i,coalesce.i,rule.i)
+  ASM
+    beqz a1, nes_wait_enter
+    nop
+    j nesramwaitbatch
+    nop
+nes_wait_enter:
+    ; A zero-page LDA and a sign branch need only A, N and Z. Keep
+    ; the short pair entirely in volatile registers.
+    srl t0, a2, 16
+    andi t0, t0, 0x1BF
+    addiu t1, zero, 1
+    bne t0, t1, nes_wait_general
+    sltiu t0, a0, 129
+    beqz t0, nes_wait_general
+    nop
+    j nesmmc3signwait
+    nop
+nes_wait_general:
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    sd fp, 72(sp)
+    move s0, a0
+    move s1, a2
+    move s6, a0
+    move s7, zero
+    move fp, zero
+
+    srl t0, s1, 19
+    andi t0, t0, 7
+    andi t1, s1, 65535
+    move t2, t1
+    beqz t0, nes_wait_addr_ready
+    addiu s3, zero, 3
+    addiu s3, zero, 4
+    addiu t3, zero, 3
+    beq t0, t3, nes_wait_addr_ready
+    andi t3, t0, 3
+    ; Modes 1/4 index by X and modes 2/5 index by Y.
+    sltiu t3, t0, 4
+    bnez t3, nes_wait_index_read
+    addiu t3, t0, -1
+    addiu t3, t0, -4
+nes_wait_index_read:
+    la t2, global_x
+    beqz t3, nes_wait_index_load
+    nop
+    la t2, global_y
+nes_wait_index_load:
+    ld t2, 0(t2)
+    addu t2, t1, t2
+nes_wait_addr_ready:
+    sltiu t3, t0, 3
+    beqz t3, nes_wait_abs
+    addiu s5, zero, 2
+    b nes_wait_address
+    andi t2, t2, 255
+nes_wait_abs:
+    addiu s5, zero, 3
+    xor t3, t1, t2
+    andi t3, t3, 0xFF00
+    sltu t3, zero, t3
+    addu s3, s3, t3
+    andi t2, t2, 65535
+    sltiu t3, t2, 8192
+    beqz t3, nes_wait_reject
+    nop
+nes_wait_address:
+    andi t2, t2, 2047
+    la a7, global_m
+    daddu a7, a7, t2
+    la t0, global_pc
+    ld s2, 0(t0)
+    srl s4, s1, 25
+    andi s4, s4, 1
+    addiu s4, s4, 3
+    srl t0, s1, 26
+    andi t0, t0, 1
+    beqz t0, nes_wait_read
+    nop
+
+    ; A branch at entry must use the prior read's flags, even after an IRQ.
+    la t0, global_fn
+    ld a3, 0(t0)
+    la t0, global_fz
+    ld a4, 0(t0)
+    la t0, global_fc
+    ld a5, 0(t0)
+    la t0, global_fv
+    jal nes_wait_condition
+    ld a6, 0(t0)
+    beqz t0, nes_wait_reject
+    subu s2, s2, s5
+    move s7, s4
+    addiu fp, zero, 1
+    subu s6, s6, s4
+    blez s6, nes_wait_branch_end
+    nop
+nes_wait_read:
+    lbu a7, 0(a7)
+    move a3, a7
+    move a4, a7
+    la t0, global_fc
+    ld a5, 0(t0)
+    la t0, global_fv
+    ld a6, 0(t0)
+    srl t8, s1, 16
+    andi t8, t8, 7
+    sltiu t0, t8, 4
+    bnez t0, nes_wait_read_flags
+    addiu t0, t8, -4
+    beqz t0, nes_wait_alu_acc
+    addiu t1, zero, 1
+    beq t0, t1, nes_wait_alu_x
+    addiu t1, zero, 2
+    beq t0, t1, nes_wait_alu_y
+    nop
+    la t0, global_a
+    ld t1, 0(t0)
+    and a4, t1, a7
+    b nes_wait_read_flags
+    sll a6, a7, 1
+nes_wait_alu_acc:
+    la t0, global_a
+    b nes_wait_cmp
+    nop
+nes_wait_alu_x:
+    la t0, global_x
+    b nes_wait_cmp
+    nop
+nes_wait_alu_y:
+    la t0, global_y
+nes_wait_cmp:
+    ld t1, 0(t0)
+    dsubu a3, t1, a7
+    move a4, a3
+    nor a5, a3, zero
+nes_wait_read_flags:
+    jal nes_wait_condition
+    nop
+    beqz t0, nes_wait_reject
+    nop
+
+    ; Charge all complete pairs before the final read or branch.
+    addu t0, s3, s4
+    addiu t1, s6, -1
+    divu t1, t0
+    mfhi t2
+    mflo t1
+    subu t0, s6, t2
+    addiu t0, t0, -1
+    addu s7, s7, t0
+    addu s7, s7, s3
+    sll t1, t1, 1
+    addu fp, fp, t1
+    addiu fp, fp, 1
+
+    la t0, global_fn
+    sd a3, 0(t0)
+    la t0, global_fz
+    sd a4, 0(t0)
+    la t0, global_fc
+    sd a5, 0(t0)
+    la t0, global_fv
+    sd a6, 0(t0)
+    addiu t0, zero, 1
+    beq t8, t0, nes_wait_write_acc
+    addiu t0, zero, 2
+    beq t8, t0, nes_wait_write_x
+    addiu t0, zero, 3
+    beq t8, t0, nes_wait_write_y
+    nop
+    b nes_wait_side_effects
+    nop
+nes_wait_write_acc:
+    la t0, global_a
+    b nes_wait_store_register
+    nop
+nes_wait_write_x:
+    la t0, global_x
+    b nes_wait_store_register
+    nop
+nes_wait_write_y:
+    la t0, global_y
+nes_wait_store_register:
+    sd a7, 0(t0)
+nes_wait_side_effects:
+    addiu t0, zero, 3
+    bne s5, t0, nes_wait_final_phase
+    nop
+    la t1, global_accessphase
+    sd t0, 0(t1)
+nes_wait_final_phase:
+    sltu t0, t2, s3
+    bnez t0, nes_wait_read_end
+    nop
+    addu s7, s7, s4
+    addiu fp, fp, 1
+nes_wait_branch_end:
+    addiu a7, zero, 254
+    b nes_wait_commit
+    subu a7, a7, s5
+nes_wait_read_end:
+    addu s2, s2, s5
+nes_wait_commit:
+    la t0, global_pc
+    sd s2, 0(t0)
+    la t0, global_nesopenbus
+    sd a7, 0(t0)
+    la t0, global_cpucycles
+    ld t1, 0(t0)
+    daddu t2, t1, s7
+    sd t2, 0(t0)
+    la t0, global_nesrunstart
+    sd t1, 0(t0)
+    la t0, global_budget
+    sd s0, 0(t0)
+    dsubu t1, s0, s7
+    la t0, global_left
+    sd t1, 0(t0)
+    la t0, global_cpuinwindow
+    sd zero, 0(t0)
+    la t0, global_nesinstructions
+    ld t1, 0(t0)
+    daddu t1, t1, fp
+    sd t1, 0(t0)
+    la t0, global_nesidlebatched
+    ld t1, 0(t0)
+    daddu t1, t1, fp
+    sd t1, 0(t0)
+    b nes_wait_restore
+    move a0, s7
+nes_wait_reject:
+    move t0, zero
+    move a0, s0
+nes_wait_restore:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    ld fp, 72(sp)
+    beq t0, zero, nes_wait_scalar
+    daddiu sp, sp, 80
+    jr ra
+    nop
+nes_wait_scalar:
+    j cpurun
+    nop
+
+nes_wait_condition:
+    srl t0, s1, 22
+    andi t0, t0, 7
+    srl t1, t0, 1
+    andi t0, t0, 1
+    beqz t1, nes_wait_negative
+    addiu t2, zero, 1
+    beq t1, t2, nes_wait_overflow
+    addiu t2, zero, 2
+    beq t1, t2, nes_wait_carry
+    andi t2, a4, 255
+    b nes_wait_compare_flag
+    sltiu t2, t2, 1
+nes_wait_negative:
+    b nes_wait_compare_flag
+    srl t2, a3, 7
+nes_wait_overflow:
+    b nes_wait_compare_flag
+    srl t2, a6, 7
+nes_wait_carry:
+    srl t2, a5, 8
+nes_wait_compare_flag:
+    xor t0, t0, t2
+    andi t0, t0, 1
+    jr ra
+    xori t0, t0, 1
+  EndASM
+EndProcedure
+
+ProcedureNaked.i NesMmc3SignWait(n.i,coalesce.i,rule.i)
+  ASM
+    la a1, global_pc
+    ld t0, 0(a1)
+    srl a3, a2, 22
+    andi a3, a3, 1
+    srl t9, a2, 25
+    andi t9, t9, 1
+    addiu t9, t9, 3
+    move a4, a0
+    move a5, zero
+    move a6, zero
+    srl t1, a2, 26
+    andi t1, t1, 1
+    beqz t1, mmc3_sign_read
+    nop
+    ld t1, global_fn-global_pc(a1)
+    srl t1, t1, 7
+    andi t1, t1, 1
+    bne t1, a3, mmc3_sign_scalar
+    subu a4, a4, t9
+    move a5, t9
+    addiu a6, zero, 1
+    blez a4, mmc3_sign_branch_entry
+    addiu t0, t0, -2
+mmc3_sign_read:
+    andi t1, a2, 255
+    la t2, global_m
+    daddu t1, t1, t2
+    lbu a7, 0(t1)
+    srl t1, a7, 7
+    bne t1, a3, mmc3_sign_scalar
+    addiu a4, a4, -1
+    addiu t1, zero, 3
+    bne t9, t1, mmc3_sign_div_seven
+    addiu t2, zero, 43
+    multu a4, t2
+    mflo t2
+    b mmc3_sign_charge
+    srl t2, t2, 8
+mmc3_sign_div_seven:
+    addiu t2, zero, 147
+    multu a4, t2
+    mflo t2
+    srl t2, t2, 10
+mmc3_sign_charge:
+    addiu t1, t9, 3
+    multu t1, t2
+    sd a7, global_a-global_pc(a1)
+    sd a7, global_fn-global_pc(a1)
+    sd a7, global_fz-global_pc(a1)
+    mflo t1
+    subu a4, a4, t1
+    addu a5, a5, t1
+    addiu a5, a5, 3
+    sll t2, t2, 1
+    addu a6, a6, t2
+    addiu a6, a6, 1
+    sltiu t1, a4, 3
+    beqz t1, mmc3_sign_branch_end
+    nop
+    b mmc3_sign_commit
+    addiu t0, t0, 2
+mmc3_sign_branch_end:
+    addu a5, a5, t9
+    addiu a6, a6, 1
+mmc3_sign_branch_entry:
+    addiu a7, zero, 252
+mmc3_sign_commit:
+    sd t0, 0(a1)
+    sd a7, global_nesopenbus-global_pc(a1)
+    ld t0, global_cpucycles-global_pc(a1)
+    sd t0, global_nesrunstart-global_pc(a1)
+    daddu t0, t0, a5
+    sd t0, global_cpucycles-global_pc(a1)
+    sd a0, global_budget-global_pc(a1)
+    dsubu t0, a0, a5
+    sd t0, global_left-global_pc(a1)
+    sd zero, global_cpuinwindow-global_pc(a1)
+    ld t0, global_nesinstructions-global_pc(a1)
+    ld t1, global_nesidlebatched-global_pc(a1)
+    daddu t0, t0, a6
+    daddu t1, t1, a6
+    sd t0, global_nesinstructions-global_pc(a1)
+    sd t1, global_nesidlebatched-global_pc(a1)
+    jr ra
+    move a0, a5
+mmc3_sign_scalar:
+    j cpurun
+    nop
+  EndASM
+EndProcedure

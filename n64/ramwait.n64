@@ -105,3 +105,7 @@ Procedure.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
   CpuCycles+=spent : NesInstructions+=count : NesIdleBatched+=count
   ProcedureReturn spent+skippedCycles
 EndProcedure
+
+CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  XIncludeFile "mmc3_wait.n64"
+CompilerEndIf

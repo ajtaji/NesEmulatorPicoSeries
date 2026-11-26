@@ -1,0 +1,168 @@
+; CPU windows stop before a mapper timer or an observable fetch edge.
+ProcedureNaked.i MapperCpuBudget()
+  CompilerIf #GAME_MAPPER=6 Or #GAME_MAPPER=69 Or #GAME_MAPPER=105
+    ASM
+      j extrabudget
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=19
+    ASM
+      j n1budget
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=24 Or #GAME_MAPPER=26
+    ASM
+      j vrcirqbudget
+      nop
+    EndASM
+  CompilerElseIf #GAME_MAPPER=5
+    ASM
+      la t0, global_mapirq
+      ld t1, 0(t0)
+      bnez t1, nes_mapper_budget_one
+      nop
+      la t0, global_m5timer
+      ld t2, global_m5timerrun-global_m5timer(t0)
+      beqz t2, nes_mapper_budget_mmc5_scan
+      ld t1, 0(t0)
+      blez t1, nes_mapper_budget_mmc5_scan
+      slti t2, t1, 128
+      beqz t2, nes_mapper_budget_mmc5_scan
+      nop
+      jr ra
+      move a0, t1
+nes_mapper_budget_mmc5_scan:
+      ld t1, global_m5irqenable-global_m5timer(t0)
+      beqz t1, nes_mapper_budget_full
+      nop
+      la t0, global_ppuline
+      ld t1, global_ppumask-global_ppuline(t0)
+      andi t1, t1, 24
+      beqz t1, nes_mapper_budget_full
+      ld t1, 0(t0)
+      sltiu t2, t1, 240
+      bnez t2, nes_mapper_budget_mmc5_dot
+      ld t2, global_ppupreline-global_ppuline(t0)
+      bne t1, t2, nes_mapper_budget_full
+      nop
+nes_mapper_budget_mmc5_dot:
+      ld t1, global_ppudot-global_ppuline(t0)
+      sltiu t2, t1, 5
+      bnez t2, nes_mapper_budget_one
+      addiu a0, zero, 341
+      b nes_mapper_budget_dots
+      subu a0, a0, t1
+    EndASM
+  CompilerElseIf #GAME_MAPPER=4 Or #GAME_MAPPER=47 Or #GAME_MAPPER=64 Or #GAME_MAPPER=118 Or #GAME_MAPPER=119 Or #GAME_MAPPER=158
+    CompilerIf #GAME_MAPPER=64 Or #GAME_MAPPER=158
+      ASM
+        la t0, global_extrairqmode
+        ld t1, 0(t0)
+        ld t2, global_extraflags-global_extrairqmode(t0)
+        ld t3, global_extrapending-global_extrairqmode(t0)
+        or t1, t1, t2
+        or t1, t1, t3
+        beqz t1, nes_mapper_budget_a12
+        nop
+        j extrabudget
+        nop
+nes_mapper_budget_a12:
+      EndASM
+    CompilerEndIf
+    ASM
+      la t0, global_mapirq
+      ld t1, global_mapirqenable-global_mapirq(t0)
+      beqz t1, nes_mapper_budget_full
+      ld t1, 0(t0)
+      bnez t1, nes_mapper_budget_one
+      nop
+      la t0, global_ppuline
+      ld t1, global_ppumask-global_ppuline(t0)
+      andi t1, t1, 24
+      beqz t1, nes_mapper_budget_full
+      ld t1, 0(t0)
+      ld t2, global_ppudot-global_ppuline(t0)
+      ld t3, global_ppuctrl-global_ppuline(t0)
+      andi t3, t3, 16
+      sltiu a1, t1, 240
+      beqz a1, nes_mapper_budget_vblank
+      nop
+    EndASM
+    CompilerIf #GAME_MAPPER<>4
+      ASM
+        beqz t3, nes_mapper_budget_bg_low
+        sltiu a1, t2, 5
+        bnez a1, nes_mapper_budget_one
+        nop
+        la a1, global_mapa12
+        ld a1, 0(a1)
+        beqz a1, nes_mapper_budget_one
+        nop
+        b nes_mapper_budget_sprite
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
+      b nes_mapper_budget_bg_low
+      nop
+nes_mapper_budget_vblank:
+      ld a1, global_ppupreline-global_ppuline(t0)
+      sltu a2, t1, a1
+      beqz a2, nes_mapper_budget_bg_low
+      subu a1, a1, t1
+      addiu a2, zero, 341
+      multu a1, a2
+      mflo a0
+      b nes_mapper_budget_dots
+      subu a0, a0, t2
+nes_mapper_budget_bg_low:
+      bnez t3, nes_mapper_budget_one
+      nop
+nes_mapper_budget_sprite:
+      sltiu t0, t2, 257
+      beqz t0, nes_mapper_budget_one
+      addiu a0, zero, 257
+      b nes_mapper_budget_dots
+      subu a0, a0, t2
+    EndASM
+  CompilerElse
+    ASM
+      b nes_mapper_budget_full
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_mapper_budget_dots:
+    blez a0, nes_mapper_budget_one
+    nop
+    la t0, global_cartpal
+    ld t0, 0(t0)
+    bnez t0, nes_mapper_budget_pal
+    addiu t1, zero, 3
+    divu a0, t1
+    mflo a0
+    b nes_mapper_budget_clamp
+    nop
+nes_mapper_budget_pal:
+    la t0, global_ppudotfrac
+    ld t0, 0(t0)
+    sll t1, a0, 2
+    addu a0, a0, t1
+    addiu a0, a0, 4
+    subu a0, a0, t0
+    sra a0, a0, 4
+nes_mapper_budget_clamp:
+    blez a0, nes_mapper_budget_one
+    sltiu t0, a0, 129
+    beqz t0, nes_mapper_budget_full
+    nop
+    jr ra
+    nop
+nes_mapper_budget_one:
+    jr ra
+    addiu a0, zero, 1
+nes_mapper_budget_full:
+    jr ra
+    addiu a0, zero, 128
+  EndASM
+EndProcedure

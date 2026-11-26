@@ -153,6 +153,10 @@ CompilerIf #NES_DMC_RASTER_DEADLINE
       WorkerAdvance(stamp)
     EndIf
   EndProcedure
+CompilerElseIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  Macro NesAdvanceCpuTime(stamp)
+    NesMmc3AdvanceCpuTime(stamp)
+  EndMacro
 CompilerElse
   Macro NesAdvanceCpuTime(stamp)
     WorkerAdvance(stamp)

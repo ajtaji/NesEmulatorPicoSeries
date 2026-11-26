@@ -37,6 +37,74 @@ nes_clear_sprite_done:
 EndProcedure"""
 
 
+CLEAR_DIRTY_GROUPS = """ProcedureNaked PpuClearSprites()
+  ASM
+    la t1, global_spritespan
+    ld t2, 0(t1)
+    ld t3, 8(t1)
+    ld t8, 16(t1)
+    ld t9, 24(t1)
+    or a0, t2, t3
+    or a1, t8, t9
+    or a0, a0, a1
+    beqz a0, nes_clear_sprite_groups_done
+    nop
+    la t0, global_spriteline
+    beqz t2, nes_clear_sprite_group_0_done
+    nop
+    sd zero, 0(t0)
+    sd zero, 8(t0)
+    sd zero, 16(t0)
+    sd zero, 24(t0)
+    sd zero, 32(t0)
+    sd zero, 40(t0)
+    sd zero, 48(t0)
+    sd zero, 56(t0)
+    sd zero, 0(t1)
+nes_clear_sprite_group_0_done:
+    beqz t3, nes_clear_sprite_group_1_done
+    nop
+    sd zero, 64(t0)
+    sd zero, 72(t0)
+    sd zero, 80(t0)
+    sd zero, 88(t0)
+    sd zero, 96(t0)
+    sd zero, 104(t0)
+    sd zero, 112(t0)
+    sd zero, 120(t0)
+    sd zero, 8(t1)
+nes_clear_sprite_group_1_done:
+    beqz t8, nes_clear_sprite_group_2_done
+    nop
+    sd zero, 128(t0)
+    sd zero, 136(t0)
+    sd zero, 144(t0)
+    sd zero, 152(t0)
+    sd zero, 160(t0)
+    sd zero, 168(t0)
+    sd zero, 176(t0)
+    sd zero, 184(t0)
+    sd zero, 16(t1)
+nes_clear_sprite_group_2_done:
+    beqz t9, nes_clear_sprite_group_3_done
+    nop
+    sd zero, 192(t0)
+    sd zero, 200(t0)
+    sd zero, 208(t0)
+    sd zero, 216(t0)
+    sd zero, 224(t0)
+    sd zero, 232(t0)
+    sd zero, 240(t0)
+    sd zero, 248(t0)
+    sd zero, 24(t1)
+nes_clear_sprite_group_3_done:
+nes_clear_sprite_groups_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure"""
+
+
 RENDER_SPAN = """Procedure PpuRender8Reference()
   Protected dot.i=PpuDot, mask.i=PpuMask, fine.i=PpuFineX
   Protected first.i=0, second.i=0, nextFirst.i, nextSecond.i, shift.i, v.i=PpuV
@@ -73,7 +141,7 @@ EndProcedure"""
 
 
 def replace_procedure(source: str, name: str, replacement: str) -> str:
-    result, count = re.subn(rf"^Procedure {name}\(.*?^EndProcedure$", lambda _: replacement,
+    result, count = re.subn(rf"^Procedure(?:\.\w+)? {name}\(.*?^EndProcedure$", lambda _: replacement,
                             source, flags=re.M | re.S)
     if count != 1:
         raise ValueError(f"PPU fast path expected one {name} procedure")
@@ -89,17 +157,64 @@ def native_chr_spread() -> str:
     return "\nDataSection\nNesChrBitSpread:\n" + data + "\nEndDataSection\n"
 
 
-def native_pixel_spread() -> str:
+def native_pixel_spread(mmc3_palette: bool) -> str:
     # Each decoded byte contains four 2-bit pixels, leftmost in bits 1:0.
     # Put that pixel in the high byte of the word for a big-endian store.
     values = [sum(((value >> (2 * pixel)) & 3) << (24 - 8 * pixel) for pixel in range(4))
               for value in range(256)]
-    data = "\n".join("  Data.l " + ",".join(f"${value:08X}" for value in values[i:i+8])
-                     for i in range(0, len(values), 8))
-    return "\nDataSection\nNesBgPixelSpread:\n" + data + "\nEndDataSection\n"
+    def words(palette):
+        return "\n".join("  Data.l " + ",".join(f"${value | palette:08X}" for value in values[i:i+8])
+                         for i in range(0, len(values), 8))
+    data = ["", "DataSection", "NesBgPixelSpread:", words(0)]
+    if mmc3_palette:
+        data.extend(words(palette) for palette in (0x04040404, 0x08080808, 0x0C0C0C0C))
+    return "\n".join([*data, "EndDataSection", ""])
 
 
-def stage_fastppu(name: str, source: str) -> str:
+def stage_fastppu(name: str, source: str, runtime_mmc3: bool = False) -> str:
+    if name in ("mapper_extra_bus", "mapper_adapters"):
+        procedure = "ExtraLatchRead" if name == "mapper_extra_bus" else "PpuFetchTile"
+        original = re.search(rf"^Procedure {procedure}\(.*?^EndProcedure$", source, re.M | re.S)
+        if original is None:
+            raise ValueError(f"PPU latch path expected {procedure}")
+        source = replace_procedure(source, procedure, "CompilerIf #GAME_MAPPER<>9\n" +
+                                   original[0] + "\nCompilerEndIf")
+        if name == "mapper_adapters":
+            original = re.search(r"^Procedure PpuSpritesRaw\(.*?^EndProcedure$", source, re.M | re.S)
+            if original is None:
+                raise ValueError("PPU latch path expected PpuSpritesRaw")
+            source = replace_procedure(source, "PpuSpritesRaw", """CompilerIf #GAME_MAPPER=9
+ProcedureNaked PpuSpritesRaw()
+  ASM
+    j ppuspritesreference
+    nop
+  EndASM
+EndProcedure
+CompilerElse
+""" + original[0] + "\nCompilerEndIf")
+        return source
+    if name == "mapper5_video":
+        original = re.search(r"^Procedure M5FetchTile\(.*?^EndProcedure$", source, re.M | re.S)
+        if original is None:
+            raise ValueError("PPU MMC5 tile path changed")
+        source = replace_procedure(source, "M5FetchTile",
+                                 'CompilerIf #GAME_MAPPER=5\nXIncludeFile "../n64/mmc5_video.n64"\n'
+                                 'CompilerElse\n' + original[0] + '\nCompilerEndIf')
+        for procedure in ("M5PpuRead", "M5PpuNotice", "M5PpuTicks"):
+            original = re.search(rf"^Procedure {procedure}\(.*?^EndProcedure$", source, re.M | re.S)
+            if original is None:
+                raise ValueError(f"PPU MMC5 path expected {procedure}")
+            source = replace_procedure(source, procedure, "CompilerIf #GAME_MAPPER<>5\n" +
+                                       original[0] + "\nCompilerEndIf")
+        return source
+    if name == "mapper9_video":
+        return ('CompilerIf #GAME_MAPPER=9\nXIncludeFile "../n64/mmc2_video.n64"\n'
+                'CompilerElse\n' + source + '\nCompilerEndIf\n')
+    if runtime_mmc3 and name == "ppu_bus_read":
+        return replace_procedure(source, "PpuRead", "Declare.i PpuRead(addr.i)")
+    if runtime_mmc3 and name == "ppu_bus_write":
+        return replace_procedure(source, "PpuWrite",
+                                 'XIncludeFile "../n64/mmc3_ppu_bus.n64"')
     if name == "ppu_bus_write":
         # Write notices and the address increment remain on the caller's path.
         source = source.replace("        PokeA(Chr+addr,value) : PpuDecode(addr)", """        CompilerIf #NES_BG_EXPANDED
@@ -118,7 +233,7 @@ def stage_fastppu(name: str, source: str) -> str:
         mapped = "      MapCiram(ntAddress)=value : offset=addr&1023"
         if source.count(mapped) != 1:
             raise ValueError("PPU CIRAM write changed")
-        source = source.replace(mapped, """      CompilerIf #NES_MMC1_ROWS
+        source = source.replace(mapped, """      CompilerIf #NES_RETAINED_ROWS
         If MapCiram(ntAddress)=value : ProcedureReturn : EndIf
         NesInvalidateTileRow(ntAddress)
       CompilerEndIf
@@ -144,6 +259,28 @@ def stage_fastppu(name: str, source: str) -> str:
     EndIf""")
     if name != "ppu":
         return source
+    if runtime_mmc3:
+        clock = "  If ExtraA12(CartMapper) : MapperPpuTicks(cycles) : EndIf\n"
+        if source.count(clock) != 1:
+            raise ValueError("PPU mapper clock changed")
+        source = source.replace(clock, "")
+        # Keep the shared reference fetchers consistent with the native
+        # renderer when they are used for diagnostics.
+        views = (
+            ("PeekU(Pattern+row)", "PeekU(NesMmc3PatternPointer(row))"),
+            ("PeekA(Chr+row)", "PeekA(NesMmc3ChrPointer(row))"),
+            ("PeekA(Chr+row+8)", "PeekA(NesMmc3ChrPointer(row+8))"),
+            ("PeekU(Pattern+SprRow(i))", "PeekU(NesMmc3PatternPointer(SprRow(i)))"),
+        )
+        # PpuDecode also reads raw patterns while loading the cartridge. Its
+        # replacement below continues decoding physical banks, before mapper init.
+        start = source.index("Procedure PpuFetchTileBase()")
+        fetchers = source[start:]
+        for old, new in views:
+            if fetchers.count(old) != 1:
+                raise ValueError(f"MMC3 reference pattern read changed: {old}")
+            fetchers = fetchers.replace(old, new)
+        source = source[:start] + fetchers
     source = replace_procedure(source, "PpuDecode", "") + native_chr_spread()
     # The indexed framebuffer and RDP palette replace Anvil's RGB row cache.
     # Its old buffers otherwise occupy part of the VR4300 stack on large MMC5 carts.
@@ -165,20 +302,21 @@ def stage_fastppu(name: str, source: str) -> str:
     source = source.replace("LinePixels.a(256)", "LinePixels.a(61455)")
     # The shared lookup is RGB565; VI and the texture palette use RGBA5551.
     source = replace_procedure(source, "PpuRgbLineRaw", "")
-    source = source.replace("    color=Rgb64(e+c)\n",
-                            "    color=Rgb64(e+c)\n    color=(color&$FFC0)|((color&31)<<1)|1\n")
+    source = replace_procedure(source, "PpuColours", "Declare PpuColours()")
     source = replace_procedure(source, "PpuBeginLine", """Procedure PpuBeginLine()
   ; DisplayWaitLine handles frame start and the sixteen-line audio cadence.
   If (PpuLine&15)=0 : DisplayWaitLine(PpuLine) : EndIf
   NesLineRow=NesIndexedPixels()+PpuLine*256
 EndProcedure""")
-    source = replace_procedure(source, "PpuClearSprites", CLEAR_SPRITES)
+    source = replace_procedure(source, "PpuClearSprites",
+                               CLEAR_DIRTY_GROUPS if runtime_mmc3 else CLEAR_SPRITES)
     source = replace_procedure(source, "PpuOverlay8", "")
     source = replace_procedure(source, "PpuBuildSpriteCache", "")
     source = replace_procedure(source, "PpuSpritesReference", "")
     source = replace_procedure(source, "PpuRender8Reference",
-                               "CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=9\n" + RENDER_SPAN +
-                               "\nCompilerElse\n" + native_pixel_spread() + "CompilerEndIf")
+                               "CompilerIf #GAME_MAPPER=9\n" + RENDER_SPAN +
+                               "\nCompilerElseIf #GAME_MAPPER<>5\n" +
+                               native_pixel_spread(runtime_mmc3) + "CompilerEndIf")
     # Finish the visible row and hblank together when the interval spans
     # both. Partial intervals keep the dot 256 and 257 edges distinct.
     visible = """    If PpuLine<240
@@ -194,7 +332,7 @@ EndProcedure""")
         EndIf
         step=endDot
         If step>256 : step=256 : EndIf
-        CompilerIf #NES_MMC1_ROWS
+        CompilerIf #NES_RETAINED_ROWS
           NesReuseLine(step)
         CompilerElse
           NesRenderTo(step)
@@ -225,6 +363,18 @@ EndProcedure""")
 """
     if source.count(visible_end) != 1:
         raise ValueError("PPU visible line-end site changed")
+    if runtime_mmc3:
+        source = source.replace(visible_end, "")
+        for procedure in ("PpuBeginLine", "PpuIncY"):
+            source = replace_procedure(source, procedure, f"Declare {procedure}()")
+        for procedure, declaration in (
+            ("PpuRegRead", "Declare.i PpuRegRead(addr.i)"),
+            ("PpuRegWrite", "Declare PpuRegWrite(addr.i,value.i)"),
+        ):
+            source = replace_procedure(source, procedure, declaration)
+        source += '\nXIncludeFile "../n64/mmc3_ppu_registers.n64"\n'
+        return replace_procedure(source, "PpuAdvanceReference",
+                                 'XIncludeFile "../n64/mmc3_ppu_raster.n64"')
     return source.replace(visible_end, "").replace(
         "Protected dots.i, edge.i, step.i, width.i, sample.i",
         "Protected dots.i, edge.i, step.i, width.i, startDot.i, endDot.i")

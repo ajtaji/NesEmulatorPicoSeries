@@ -185,7 +185,7 @@ def runtime_wait_source(mapper):
     table = [0] * 256
     for opcode, (action, mode) in READS.items():
         table[opcode] = (action << 3) | mode
-    lines = [f"#NES_NATIVE_RAM_WAIT = {int(mapper == 0)}", 'XIncludeFile "library/wait.n64"',
+    lines = [f"#NES_NATIVE_RAM_WAIT = {int(mapper in (0, 4))}", 'XIncludeFile "library/wait.n64"',
              "DataSection", "NesRuntimeWaitOpcodes:"]
     lines.extend("  Data.a " + ",".join(map(str, table[i:i + 16]))
                  for i in range(0, 256, 16))

@@ -1,6 +1,7 @@
 """Stage VRC6 and Namco 163 on the shared Anvil mapper and APU hooks."""
 
 from pathlib import Path
+import re
 
 from port_desktop import MAPPER_PATCHES
 
@@ -36,7 +37,48 @@ def stage_expansion(name: str, source: str) -> str:
     return apply_patches(name, source, MAPPER_PATCHES.get(name, []) + PPU_PATCHES.get(name, []))
 
 
-def expansion_source() -> str:
+def native_registers(source: str) -> str:
+    """Keep the existing SRAM and sound RAM persistence stores in place."""
+    replacements = {
+        "VrcIrqTicks": "",
+        "VrcIrqBudget": "",
+        "VrcWrite": """Procedure VrcWrite(addr.i, value.i)
+  If addr<$8000
+    If addr>=$6000 And MapRamEnable : MapRam(addr&8191)=value : EndIf
+    ProcedureReturn
+  EndIf
+  VrcRegisterWrite(addr,value)
+EndProcedure""",
+        "N1Ticks": "",
+        "N1Budget": "",
+        "N1Nametable": "",
+        "N1Read": "",
+        "N1RomNametable": "",
+        "N1Write": """Procedure N1Write(addr.i, value.i)
+  If addr>=$6000 And addr<$8000
+    MapRam(addr&8191)=value
+    ProcedureReturn
+  EndIf
+  N1RegisterWrite(addr,value)
+EndProcedure""",
+    }
+    for name, body in replacements.items():
+        source, count = re.subn(rf"^Procedure(?:\.i)? {name}\([^\n]*\)\n.*?^EndProcedure",
+                                lambda _: body, source, flags=re.M | re.S)
+        if count != 1:
+            raise ValueError(f"expansion register procedure {name} changed")
+    return 'XIncludeFile "../n64/expansion_registers.n64"\n' + source + """
+Procedure NesWarnVrcMirroring(value.i)
+  LpmDebugPrint("VRC6: unsupported nametable mode ($B003="+Str(value)+")")
+EndProcedure
+
+Procedure NesWarnN163Patterns()
+  LpmDebugPrint("N163: CHR-RAM pattern banking is unsupported")
+EndProcedure
+"""
+
+
+def expansion_source(mapper: int) -> str:
     source = SOURCE.read_text(encoding="utf-8")
     source = apply_patches(SOURCE.name, source, [
         ("EnableExplicit\n", "", 1),
@@ -47,8 +89,9 @@ def expansion_source() -> str:
         ('Say("N163: this game maps CHR-RAM patterns, which are not drawn yet") : Eol()',
          'LpmDebugPrint("N163: CHR-RAM pattern banking is unsupported")', 1),
     ])
-    return source + """
+    source += """
 Procedure.i N1RomNametable(addr.i)
   ProcedureReturn N1NtBank((addr>>10)&3)>=0
 EndProcedure
 """
+    return native_registers(source) if mapper in EXPANSION_MAPPERS else source

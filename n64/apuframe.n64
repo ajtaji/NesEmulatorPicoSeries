@@ -1,0 +1,206 @@
+; The PureMetal integer return register is a0. Keep v0 for the native mix gate.
+ProcedureNaked.i ApuVolume(ch.i)
+  ASM
+    sll t0, a0, 2
+    addiu t1, zero, 2
+    la t2, global_apureg
+    bne a0, t1, nes_apu_volume_reg
+    nop
+    addiu t0, zero, 12
+nes_apu_volume_reg:
+    addu t0, t0, t2
+    lbu t0, 0(t0)
+    andi t2, t0, 16
+    bnez t2, nes_apu_volume_fixed
+    andi v0, t0, 15
+    la t0, global_envdecay
+    sll t1, a0, 3
+    addu t0, t0, t1
+    ld v0, 0(t0)
+    jr ra
+    or a0, v0, zero
+nes_apu_volume_fixed:
+    jr ra
+    or a0, v0, zero
+  EndASM
+EndProcedure
+
+ProcedureNaked.i ApuTarget(ch.i)
+  ASM
+    la t0, global_apuperiod
+    sll t1, a0, 3
+    addu t0, t0, t1
+    ld t0, 0(t0)
+    la t1, global_apureg
+    sll t2, a0, 2
+    addu t1, t1, t2
+    lbu t1, 1(t1)
+    andi t2, t1, 7
+    dsrlv t2, t0, t2
+    andi t1, t1, 8
+    bnez t1, nes_apu_target_down
+    daddu v0, t0, t2
+    jr ra
+    or a0, v0, zero
+nes_apu_target_down:
+    dsubu t0, t0, t2
+    sltiu t2, a0, 1
+    dsubu v0, t0, t2
+    jr ra
+    or a0, v0, zero
+  EndASM
+EndProcedure
+
+; Clock the NES envelope, linear counter, length counters, and sweep.
+ProcedureNaked ApuQuarter()
+  ASM
+    la t0, global_envstart
+    la t1, global_envdiv
+    la t2, global_envdecay
+    la t3, global_apureg
+    or a0, zero, zero
+nes_env_next:
+    sll a1, a0, 2
+    xori a2, a0, 2
+    bnez a2, nes_env_reg
+    nop
+    addiu a1, zero, 12
+nes_env_reg:
+    addu a1, t3, a1
+    lbu a1, 0(a1)
+    ld a2, 0(t0)
+    bnez a2, nes_env_start
+    andi a3, a1, 15
+    ld a2, 0(t1)
+    bgtz a2, nes_env_div
+    daddiu a2, a2, -1
+    sd a3, 0(t1)
+    ld a2, 0(t2)
+    bgtz a2, nes_env_decay
+    daddiu a2, a2, -1
+    andi a1, a1, 32
+    beqz a1, nes_env_advance
+    nop
+    b nes_env_decay
+    addiu a2, zero, 15
+nes_env_start:
+    sd zero, 0(t0)
+    sd a3, 0(t1)
+    b nes_env_decay
+    addiu a2, zero, 15
+nes_env_div:
+    b nes_env_advance
+    sd a2, 0(t1)
+nes_env_decay:
+    sd a2, 0(t2)
+nes_env_advance:
+    addiu a0, a0, 1
+    addiu t0, t0, 8
+    addiu t1, t1, 8
+    sltiu a1, a0, 3
+    bnez a1, nes_env_next
+    addiu t2, t2, 8
+    la t0, global_apulinearreload
+    ld t1, 0(t0)
+    lbu t2, 8(t3)
+    la t3, global_apulinear
+    bnez t1, nes_linear_reload
+    andi t1, t2, 127
+    ld t1, 0(t3)
+    blez t1, nes_linear_hold
+    nop
+    daddiu t1, t1, -1
+nes_linear_reload:
+    sd t1, 0(t3)
+nes_linear_hold:
+    andi t2, t2, 128
+    bnez t2, nes_quarter_return
+    nop
+    sd zero, 0(t0)
+nes_quarter_return:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked ApuHalf()
+  ASM
+    la t0, global_apulength
+    la t1, global_apureg
+    or a0, zero, zero
+nes_length_next:
+    sll t2, a0, 2
+    addu t2, t2, t1
+    lbu t2, 0(t2)
+    xori t3, a0, 2
+    bnez t3, nes_length_hold
+    addiu t3, zero, 32
+    addiu t3, zero, 128
+nes_length_hold:
+    and t2, t2, t3
+    bnez t2, nes_length_advance
+    ld t3, 0(t0)
+    blez t3, nes_length_advance
+    daddiu t3, t3, -1
+    sd t3, 0(t0)
+nes_length_advance:
+    addiu a0, a0, 1
+    sltiu t2, a0, 4
+    bnez t2, nes_length_next
+    addiu t0, t0, 8
+
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    or s0, zero, zero
+nes_sweep_next:
+    jal aputarget
+    or a0, s0, zero
+    la t0, global_apureg
+    sll t1, s0, 2
+    addu t0, t0, t1
+    lbu t0, 1(t0)
+    sll t1, s0, 3
+    la t2, global_sweepdiv
+    addu t2, t2, t1
+    ld t3, 0(t2)
+    bnez t3, nes_sweep_update
+    andi a1, t0, 128
+    beqz a1, nes_sweep_update
+    andi a1, t0, 7
+    beqz a1, nes_sweep_update
+    slti a1, a0, 2048
+    beqz a1, nes_sweep_update
+    nop
+    la a1, global_apuperiod
+    addu a1, a1, t1
+    ld a2, 0(a1)
+    slti a2, a2, 8
+    bnez a2, nes_sweep_update
+    nop
+    sd a0, 0(a1)
+nes_sweep_update:
+    la a1, global_sweepreload
+    addu a1, a1, t1
+    beqz t3, nes_sweep_reload
+    ld a2, 0(a1)
+    bnez a2, nes_sweep_reload
+    daddiu t3, t3, -1
+    b nes_sweep_advance
+    sd t3, 0(t2)
+nes_sweep_reload:
+    srl t0, t0, 4
+    andi t0, t0, 7
+    sd t0, 0(t2)
+    sd zero, 0(a1)
+nes_sweep_advance:
+    addiu s0, s0, 1
+    sltiu t0, s0, 2
+    bnez t0, nes_sweep_next
+    nop
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure

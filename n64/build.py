@@ -18,7 +18,8 @@ from save_header import patch_save_header
 from rom_catalog import prg_views
 from port_desktop import CONTROLLER_PATCHES
 from stage_cpu import stage_cpu
-from stage_bus import stage_bus
+from stage_bus import stage_bus, stage_runtime_mmc3_bus
+from stage_simple_mapper import stage_simple_mapper
 from stage_audio import stage_audio, stage_oscillators
 from stage_mapper import stage_mapper
 from stage_fastppu import stage_fastppu
@@ -27,7 +28,7 @@ from stage_input import stage_input
 from stage_poll import poll_bank_size, poll_source, stage_poll
 from stage_ramwait import ram_wait_source, runtime_wait_source
 from stage_expansion import EXPANSION_MAPPERS, expansion_source, stage_expansion
-from stage_storage import check_storage_layout, stage_storage
+from stage_storage import check_storage_layout
 from stage_region import header_is_pal, render_region, stage_region
 
 # Forge uses target-specific file extensions. Stage the shared guest sources
@@ -75,6 +76,9 @@ def replay_source(controller_trace):
 
 def build(args, *, controller_trace=()):
     controller_trace = tuple(controller_trace)
+    telemetry = getattr(args, "telemetry", False)
+    if telemetry and args.check_frame:
+        raise ValueError("live telemetry requires the production audio queue")
     sdk = args.sdk.resolve()
     compiler = sdk / "PureMetalForge.exe"
     if not compiler.is_file():
@@ -112,13 +116,16 @@ def build(args, *, controller_trace=()):
     raster_deadline = mmc1_20k
     ram_wait, has_ram_waits = ram_wait_source(program, cart.mapper, chain_nrom)
     runtime_waits = runtime and cart.mapper in (0, 1, 4)
+    mmc1_rows = cart.mapper == 1 and (getattr(args, "runtime_chr_ram", False) if runtime
+                                     else not cart.chr and chr_size == 8192)
     settings = {
+        "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
         "HOST_AUDIO_FRAMES": 512,
-        "NES_MMC1_ROWS": int(cart.mapper == 1 and (getattr(args, "runtime_chr_ram", False) if runtime
-                                                   else not cart.chr and chr_size == 8192)),
+        "NES_MMC1_ROWS": int(mmc1_rows),
+        "NES_RETAINED_ROWS": int(mmc1_rows or (runtime and cart.mapper == 4)),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(cart.mapper) == 8192),
         "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(cart.mapper))),
@@ -162,7 +169,7 @@ def build(args, *, controller_trace=()):
     nop
 """)
             elif name.startswith("mapper"):
-                code = stage_storage(name, stage_mapper(name, code, cart.mapper, runtime))
+                code = stage_mapper(name, code, cart.mapper, runtime)
             elif name == "bridge":
                 for old, new, count in CONTROLLER_PATCHES["bridge"]:
                     if code.count(old) != count:
@@ -170,15 +177,19 @@ def build(args, *, controller_trace=()):
                     code = code.replace(old, new)
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
-            code = stage_audio(name, stage_fastppu(name, stage_region(name, code)), cart.mapper, audio_rate)
+            code = stage_audio(name, stage_fastppu(name, stage_region(name, code), runtime and cart.mapper == 4),
+                               cart.mapper, audio_rate)
             code = stage_sync(name, code, cart.mapper, chain_nrom, raster_deadline, runtime)
+            code = stage_simple_mapper(name, code, cart.mapper)
+            if name == "bridge" and runtime and cart.mapper == 4:
+                code = stage_runtime_mmc3_bus(code)
             # Board identity is fixed for the lifetime of this cartridge.
             code = code.replace("ExtraManaged(CartMapper)", "NesExtraBoard")
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
-            if save_bytes:
+            if save_bytes and not (runtime and cart.mapper == 4 and name == "mappers"):
                 code = stage_save(name, code, save)
             (guest / (name + ".pmi")).write_text(guest_names(code).replace('.pi4"', '.pmi"'), encoding="utf-8")
-        expansion = expansion_source()
+        expansion = expansion_source(cart.mapper)
         if save_bytes:
             expansion = stage_save("mapper_konami_namco", expansion, save)
         (guest / "mapper_konami_namco.pmi").write_text(guest_names(expansion), encoding="utf-8")
@@ -230,6 +241,7 @@ if __name__ == "__main__":
                         help="use four bank windows for 128 KiB SRAM (default: SummerCart64 linear mapping)")
     parser.add_argument("--persist-save", action=argparse.BooleanOptionalAction, default=None,
                         help="persist NES battery RAM in cartridge SRAM (default on for playable builds, off for verification)")
+    parser.add_argument("--telemetry", action="store_true", help="report live gameplay timing and AI starvation")
     parser.add_argument("--check-frame", type=int, default=0, help="stop on a guest frame for capture (0 keeps playing)")
     try:
         args = parser.parse_args()

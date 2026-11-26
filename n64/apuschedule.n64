@@ -3,6 +3,44 @@ ProcedureNaked ApuAdvance(dt.i)
   ASM
     blez a0, nes_apu_publish
     nop
+    ; Commit intervals that end before every external event without a stack
+    ; frame or a call to the generic oscillator/DMC advance.
+    la t0, global_apusampleleft
+    ld t1, 0(t0)
+    slt t2, a0, t1
+    beqz t2, nes_apu_full
+    ld t2, global_apuresetdelay-global_apusampleleft(t0)
+    bgtz t2, nes_apu_full
+    ld t2, global_dmctimer-global_apusampleleft(t0)
+    dsubu t2, t2, a0
+    blez t2, nes_apu_full
+    ld t3, global_apuframestep-global_apusampleleft(t0)
+    sltiu a1, t3, 3
+    bnez a1, nes_apu_subspan_step
+    sll t3, t3, 2
+    ld t3, global_apufive-global_apusampleleft(t0)
+    sltu t3, zero, t3
+    sll t3, t3, 2
+    addiu t3, t3, 12
+nes_apu_subspan_step:
+    la a1, nes_apu_frame_steps
+    addu a1, a1, t3
+    lw a1, 0(a1)
+    ld a1, 0(a1)
+    ld t3, global_apuframeclock-global_apusampleleft(t0)
+    daddu t3, t3, a0
+    slt a1, t3, a1
+    beqz a1, nes_apu_full
+    dsubu t1, t1, a0
+    ld a1, global_nesoscpending-global_apusampleleft(t0)
+    daddu a1, a1, a0
+    sd a1, global_nesoscpending-global_apusampleleft(t0)
+    sd t2, global_dmctimer-global_apusampleleft(t0)
+    sd t3, global_apuframeclock-global_apusampleleft(t0)
+    ; With no sample, DMC edge, or frame event, neither published value changed.
+    jr ra
+    sd t1, 0(t0)
+nes_apu_full:
     daddiu sp, sp, -80
     sd ra, 0(sp)
     sd s0, 8(sp)
@@ -19,6 +57,7 @@ ProcedureNaked ApuAdvance(dt.i)
     la s5, global_apuresetdelay
     la s6, global_apuframestep
     la s7, global_apufive
+    addiu s2, zero, -1
 nes_apu_next:
     ld t0, 0(s3)
     daddu s1, s0, zero
@@ -28,39 +67,27 @@ nes_apu_next:
     daddu s1, t0, zero
 nes_apu_reset_bound:
     blez t2, nes_apu_event_bound
-    ld t0, 0(s6)
+    nop
     slt t1, t2, s1
     beq t1, zero, nes_apu_event_bound
     nop
     daddu s1, t2, zero
 nes_apu_event_bound:
-    beq t0, zero, nes_apu_frame_1
-    addiu t1, t0, -1
-    beq t1, zero, nes_apu_frame_2
-    addiu t1, t0, -2
-    beq t1, zero, nes_apu_frame_3
+    bgez s2, nes_apu_frame_bound
+    ld t0, 0(s6)
+    sltiu t1, t0, 3
+    bnez t1, nes_apu_frame_selected
+    sll t0, t0, 2
     ld t1, 0(s7)
-    beq t1, zero, nes_apu_frame_4
-    nop
-    la t1, global_apustep5
-    b nes_apu_frame_selected
-    nop
-nes_apu_frame_1:
-    la t1, global_apustep1
-    b nes_apu_frame_selected
-    nop
-nes_apu_frame_2:
-    la t1, global_apustep2
-    b nes_apu_frame_selected
-    nop
-nes_apu_frame_3:
-    la t1, global_apustep3
-    b nes_apu_frame_selected
-    nop
-nes_apu_frame_4:
-    la t1, global_apustep4
+    sltu t1, zero, t1
+    sll t1, t1, 2
+    addiu t0, t1, 12
 nes_apu_frame_selected:
+    la t1, nes_apu_frame_steps
+    addu t1, t1, t0
+    lw t1, 0(t1)
     ld s2, 0(t1)
+nes_apu_frame_bound:
     ld t2, 0(s4)
     dsubu t2, s2, t2
     slt t1, t2, s1
@@ -81,13 +108,15 @@ nes_apu_tick_segment:
     sd zero, 0(s4)
     sd zero, 0(s6)
     ld t0, 0(s7)
-    beq t0, zero, nes_apu_check_event
+    beq t0, zero, nes_apu_reselect_sample
     nop
     jal nesaudioboundary
     nop
     jal apuquarter
     nop
     jal apuhalf
+    nop
+    b nes_apu_reselect_sample
     nop
 nes_apu_check_event:
     ld t0, 0(s4)
@@ -108,7 +137,7 @@ nes_apu_advance_event:
     ld t0, 0(s6)
     addiu t0, t0, 1
     addiu t1, t0, -4
-    bnez t1, nes_apu_check_sample
+    bnez t1, nes_apu_reselect_sample
     sd t0, 0(s6)
     ld t0, 0(s7)
     la t1, global_apuinhibit
@@ -125,22 +154,38 @@ nes_apu_end_sequence:
     daddiu t0, t0, -1
     sd t0, 0(s4)
     sd zero, 0(s6)
+nes_apu_reselect_sample:
+    addiu s2, zero, -1
 nes_apu_check_sample:
     ld t0, 0(s3)
     dsubu s0, s0, s1
     dsubu t0, t0, s1
     bnez t0, nes_apu_continue
     sd t0, 0(s3)
-    jal nesqueuesample
+    ; Append the same oscillator span and DAC level without entering the
+    ; mixer until the block fills.
+    ld t0, global_nesaudioblockcount-global_apusampleleft(s3)
+    ld t1, global_nesoscpending-global_apusampleleft(s3)
+    ld t2, global_dmclevel-global_apusampleleft(s3)
+    la t3, global_nesspandmc
+    addu t3, t3, t0
+    sb t2, 0(t3)
+    la t3, global_nesspancycles
+    sll t2, t0, 1
+    addu t3, t3, t2
+    sh t1, 0(t3)
+    sd zero, global_nesoscpending-global_apusampleleft(s3)
+    addiu t0, t0, 1
+    addiu t1, t0, -#NES_APU_BLOCK
+    bnez t1, nes_apu_fraction
+    sd t0, global_nesaudioblockcount-global_apusampleleft(s3)
+    jal nesrenderblock
     nop
-    la t0, global_apusamplefrac
-    la t1, global_apufracstep
-    la t2, global_apufracden
-    la t3, global_apusamplebase
-    ld a0, 0(t0)
-    ld a1, 0(t1)
-    ld a2, 0(t2)
-    ld a3, 0(t3)
+nes_apu_fraction:
+    ld a0, global_apusamplefrac-global_apusampleleft(s3)
+    ld a1, global_apufracstep-global_apusampleleft(s3)
+    ld a2, global_apufracden-global_apusampleleft(s3)
+    ld a3, global_apusamplebase-global_apusampleleft(s3)
     daddu a0, a0, a1
     slt a1, a0, a2
     bnez a1, nes_apu_save_fraction
@@ -148,7 +193,7 @@ nes_apu_check_sample:
     dsubu a0, a0, a2
     daddiu a3, a3, 1
 nes_apu_save_fraction:
-    sd a0, 0(t0)
+    sd a0, global_apusamplefrac-global_apusampleleft(s3)
     sd a3, 0(s3)
 nes_apu_continue:
     bgtz s0, nes_apu_next
@@ -176,5 +221,7 @@ nes_apu_publish:
     ld t0, 0(t0)
     jr ra
     sd t0, 0(t1)
+nes_apu_frame_steps:
+    .word global_apustep1, global_apustep2, global_apustep3, global_apustep4, global_apustep5
   EndASM
 EndProcedure

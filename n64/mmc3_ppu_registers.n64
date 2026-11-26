@@ -1,0 +1,217 @@
+; CPU $2000-$2007 ports after the CPU bus synchronizes the raster.
+ProcedureNaked PpuRegWrite(addr.i,value.i)
+  ASM
+    andi a0, a0, 7
+    la a2, global_ppubus
+    daddiu t0, zero, -1
+    sd a1, 0(a2)
+    sd t0, global_bgcacheaddr-global_ppubus(a2)
+    sd t0, global_rgblastkey-global_ppubus(a2)
+    ld t0, global_ppuwarmup-global_ppubus(a2)
+    blez t0, nes_ppu_write_dispatch
+    addiu t0, zero, 0x63
+    srlv t0, t0, a0
+    andi t0, t0, 1
+    bnez t0, nes_ppu_port_done
+    nop
+nes_ppu_write_dispatch:
+    la t0, nes_ppu_write_table
+    sll a0, a0, 2
+    daddu t0, t0, a0
+    lw t0, 0(t0)
+    jr t0
+    nop
+nes_ppu_write_table:
+    .word nes_ppu_write_ctrl, nes_ppu_write_mask, nes_ppu_port_done, nes_ppu_write_oamaddr
+    .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
+nes_ppu_write_ctrl:
+    ld t0, global_ppuctrl-global_ppubus(a2)
+    sd a1, global_ppuctrl-global_ppubus(a2)
+    xor t1, t0, a1
+    andi t1, t1, 32
+    beqz t1, nes_ppu_ctrl_scroll
+    addiu t2, zero, 1
+    sd t2, global_oamcachedirty-global_ppubus(a2)
+nes_ppu_ctrl_scroll:
+    ld t1, global_pput-global_ppubus(a2)
+    andi t2, a1, 3
+    sll t2, t2, 10
+    andi t1, t1, 0x73FF
+    or t1, t1, t2
+    sd t1, global_pput-global_ppubus(a2)
+    andi t0, t0, 128
+    bnez t0, nes_ppu_port_done
+    andi a1, a1, 128
+    beqz a1, nes_ppu_port_done
+    ld t1, global_ppustatus-global_ppubus(a2)
+    andi t1, t1, 128
+    beqz t1, nes_ppu_port_done
+    nop
+    ld t0, global_workernmi-global_ppubus(a2)
+    daddiu t0, t0, 1
+    jr ra
+    sd t0, global_workernmi-global_ppubus(a2)
+nes_ppu_write_mask:
+    ld t0, global_ppumask-global_ppubus(a2)
+    sd a1, global_ppumask-global_ppubus(a2)
+    andi t1, a1, 24
+    beqz t1, nes_ppu_mask_colours
+    nop
+    sd zero, global_nesblankuntouched-global_ppubus(a2)
+nes_ppu_mask_colours:
+    xor t0, t0, a1
+    andi t0, t0, 0xE1
+    beqz t0, nes_ppu_port_done
+    nop
+    j ppucolours
+    nop
+nes_ppu_write_oamaddr:
+    jr ra
+    sd a1, global_ppuoamaddr-global_ppubus(a2)
+nes_ppu_write_oam:
+    addiu t0, zero, 1
+    sd t0, global_oamcachedirty-global_ppubus(a2)
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    sb a1, 0(t1)
+    addiu t0, t0, 1
+    andi t0, t0, 255
+    jr ra
+    sd t0, global_ppuoamaddr-global_ppubus(a2)
+nes_ppu_write_scroll:
+    ld t0, global_ppuw-global_ppubus(a2)
+    ld t1, global_pput-global_ppubus(a2)
+    bnez t0, nes_ppu_scroll_high
+    xori t0, t0, 1
+    andi t1, t1, 0x7FE0
+    srl t2, a1, 3
+    or t1, t1, t2
+    andi t2, a1, 7
+    b nes_ppu_latch_write
+    sd t2, global_ppufinex-global_ppubus(a2)
+nes_ppu_scroll_high:
+    andi t1, t1, 0x0C1F
+    andi t2, a1, 0xF8
+    sll t2, t2, 2
+    andi t3, a1, 7
+    sll t3, t3, 12
+    or t1, t1, t2
+    b nes_ppu_latch_write
+    or t1, t1, t3
+nes_ppu_write_addr:
+    ld t0, global_ppuw-global_ppubus(a2)
+    ld t1, global_pput-global_ppubus(a2)
+    bnez t0, nes_ppu_addr_low
+    xori t0, t0, 1
+    andi t1, t1, 0xFF
+    andi t2, a1, 0x3F
+    sll t2, t2, 8
+    b nes_ppu_latch_write
+    or t1, t1, t2
+nes_ppu_addr_low:
+    andi t1, t1, 0x7F00
+    or t1, t1, a1
+    sd t1, global_ppuv-global_ppubus(a2)
+nes_ppu_latch_write:
+    sd t1, global_pput-global_ppubus(a2)
+    jr ra
+    sd t0, global_ppuw-global_ppubus(a2)
+nes_ppu_write_data:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal ppuwrite
+    ld a0, global_ppuv-global_ppubus(a2)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la a2, global_ppubus
+    j nes_ppu_port_increment
+    nop
+nes_ppu_port_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked.i PpuRegRead(addr.i)
+  ASM
+    andi a0, a0, 7
+    la a2, global_ppubus
+    addiu t0, zero, 2
+    beq a0, t0, nes_ppu_read_status
+    addiu t0, zero, 4
+    beq a0, t0, nes_ppu_read_oam
+    addiu t0, zero, 7
+    beq a0, t0, nes_ppu_read_data
+    nop
+    jr ra
+    ld a0, 0(a2)
+nes_ppu_read_status:
+    ld t0, global_ppustatus-global_ppubus(a2)
+    ld a0, 0(a2)
+    andi t1, t0, 0x7F
+    sd t1, global_ppustatus-global_ppubus(a2)
+    sd zero, global_ppuw-global_ppubus(a2)
+    andi t0, t0, 0xE0
+    andi a0, a0, 31
+    or a0, a0, t0
+    jr ra
+    sd a0, 0(a2)
+nes_ppu_read_oam:
+    ld t0, global_ppuoamaddr-global_ppubus(a2)
+    la t1, global_oam
+    daddu t1, t1, t0
+    lbu a0, 0(t1)
+    jr ra
+    sd a0, 0(a2)
+nes_ppu_read_data:
+    ld a0, global_ppuv-global_ppubus(a2)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a2, 16(sp)
+    andi a0, a0, 0x3FFF
+    sltiu t0, a0, 0x3F00
+    beqz t0, nes_ppu_read_palette
+    sd a0, 24(sp)
+    ld t0, global_ppubuffer-global_ppubus(a2)
+    jal ppuread
+    sd t0, 8(sp)
+    b nes_ppu_read_buffer
+    nop
+nes_ppu_read_palette:
+    jal ppuread
+    nop
+    ld a2, 16(sp)
+    ld t0, 0(a2)
+    andi t0, t0, 0xC0
+    or t1, a0, t0
+    ld t0, global_ppumask-global_ppubus(a2)
+    andi t0, t0, 1
+    beqz t0, nes_ppu_read_palette_mirror
+    nop
+    andi t1, t1, 0xF0
+nes_ppu_read_palette_mirror:
+    ld a0, 24(sp)
+    addiu a0, a0, -4096
+    jal ppuread
+    sd t1, 8(sp)
+nes_ppu_read_buffer:
+    ld a2, 16(sp)
+    sd a0, global_ppubuffer-global_ppubus(a2)
+    ld a0, 8(sp)
+    ld ra, 0(sp)
+    sd a0, 0(a2)
+    daddiu sp, sp, 32
+nes_ppu_port_increment:
+    ld t0, global_ppuctrl-global_ppubus(a2)
+    ld t1, global_ppuv-global_ppubus(a2)
+    andi t0, t0, 4
+    beqz t0, nes_ppu_port_increment_mask
+    addiu t1, t1, 1
+    addiu t1, t1, 31
+nes_ppu_port_increment_mask:
+    andi t1, t1, 0x7FFF
+    jr ra
+    sd t1, global_ppuv-global_ppubus(a2)
+  EndASM
+EndProcedure

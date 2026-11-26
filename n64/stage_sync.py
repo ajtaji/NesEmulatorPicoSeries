@@ -15,7 +15,11 @@ Procedure.i NesReadRegister(addr.i, stamp.i)
       ProcedureReturn PpuRegRead(2)
     EndIf
   CompilerEndIf
-  WorkerAdvance(stamp)
+  CompilerIf {native_mmc3}
+    If addr=$4015 : NesMmc3SyncApu(stamp) : Else : WorkerAdvance(stamp) : EndIf
+  CompilerElse
+    WorkerAdvance(stamp)
+  CompilerEndIf
   If addr<$4000
     result=PpuRegRead(addr&7)
     {read_notice}
@@ -51,6 +55,8 @@ Procedure NesWriteRegister(addr.i, value.i, stamp.i)
     Else
       WorkerAdvance(stamp)
     EndIf
+  CompilerElseIf {native_mmc3}
+    If addr<$4000 : WorkerAdvance(stamp) : Else : NesMmc3SyncApu(stamp) : EndIf
   CompilerElse
     WorkerAdvance(stamp)
   CompilerEndIf
@@ -100,6 +106,22 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dm
         WorkerAdvance(CpuCycles+AccessPhase)
       CompilerEndIf
       MapperWrite(addr,value,CpuCycles+AccessPhase)""")
+        if runtime and mapper == 4:
+            managed = "    If MapManaged\n      CpuNow()"
+            if source.count(managed) != 1:
+                raise ValueError("MMC3 managed bus write changed")
+            source = source.replace(managed, """    If MapManaged
+      ; CPU work RAM is outside the PPU and DMC address spaces.
+      If addr<$8000
+        MapperWrite(addr,value,0)
+        ProcedureReturn
+      EndIf
+      ; The select bits alone have no bus output or timing side effects.
+      If (addr&$E001)=$8000 And ((MapSelect!value)&$C0)=0
+        MapSelect=value
+        ProcedureReturn
+      EndIf
+      CpuNow()""")
         declarations = "Declare WorkerCommand(command.i, addr.i, value.i, stamp.i)"
         if source.count(declarations) != 1:
             raise ValueError("worker API declarations changed")
@@ -146,12 +168,16 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dm
             window = "addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))"
             bound = "(PpuMask&24)<>0 And stamp>WorkerClock"
         read_notice = "" if mapper == 1 else "MapperRegNotice(addr&7)"
-        mmc3_status = runtime and mapper == 4
-        status_compiler = "1" if mmc3_status else "#NES_PREDICTABLE_IRQ"
+        runtime_mmc3 = runtime and mapper == 4
+        if runtime_mmc3:
+            start = source.index("Procedure WorkerAdvance(")
+            end = source.index("EndProcedure", start) + len("EndProcedure")
+            source = source[:start] + 'XIncludeFile "../n64/mmc3_raster.n64"' + source[end:]
+        status_compiler = "1" if runtime_mmc3 else "#NES_PREDICTABLE_IRQ"
         status_condition = "addr<$4000 And (addr&7)=2"
-        if mmc3_status:
+        if runtime_mmc3:
             status_condition += " And MapIrqEnable=0"
-        access = REGISTER_ACCESS.format(window=window, bound=bound, read_notice=read_notice,
+        access = REGISTER_ACCESS.format(window=window, bound=bound, read_notice=read_notice, native_mmc3=int(runtime_mmc3),
                                         status_compiler=status_compiler, status_condition=status_condition)
         if mapper == 1:
             # MMC1 has no CPU timer or PPU register observer.

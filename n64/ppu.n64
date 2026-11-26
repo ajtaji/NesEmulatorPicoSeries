@@ -9,7 +9,7 @@ EndMacro
 Global NesBlankUntouched.i=1
 Declare PpuN64StoreSpan(dst.i, first.i, second.i)
 Declare PpuRgbLineRaw()
-CompilerIf #NES_MMC1_ROWS
+CompilerIf #NES_RETAINED_ROWS
   Declare NesReuseLine(endDot.i)
   Declare NesInvalidateTileRow(addr.i)
 CompilerEndIf
@@ -21,14 +21,14 @@ XIncludeFile "blank.n64"
 XIncludeFile "visible.n64"
 XIncludeFile "../anvil/ppu.pmi"
 XIncludeFile "sprites.n64"
-CompilerIf #NES_MMC1_ROWS
+CompilerIf #NES_RETAINED_ROWS
   XIncludeFile "mappedrows.n64"
 CompilerEndIf
 
 CompilerIf #GAME_MAPPER<>5 And #GAME_MAPPER<>9
 ProcedureNaked PpuRender8Reference()
   ; a0 = dot, a1 = mask, a2/a3 = current/next scroll address,
-  ; a4 = pattern-row base, a5 = packed row. MMC5 and MMC2 use
+  ; a4 = pattern-row base or MMC3 logical offset, a5 = packed row. MMC5 and MMC2 use
   ; the shared callback path.
   ASM
     la t0, global_ppudot
@@ -63,9 +63,19 @@ nes_span_fetch:
     srl t1, a2, 11
     andi t1, t1, 14
     or t0, t0, t1
-    la t1, global_pattern
-    lw t1, 4(t1)
-    daddu a4, t1, t0
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      or a4, t0, zero
+    EndASM
+  CompilerElse
+    ASM
+      la t1, global_pattern
+      lw t1, 4(t1)
+      daddu a4, t1, t0
+    EndASM
+  CompilerEndIf
+  ASM
     la a7, global_nt
     la t9, NesBgPixelSpread
     daddu a6, ra, zero
@@ -112,7 +122,7 @@ EndProcedure
 
 ProcedureNaked NesPackedBgTile()
   ; Shared native tile fetch. t0 holds the scroll address, a4 the pattern
-  ; row base, a7 the nametable base and t9 the pixel-spread table. Returns
+  ; row base or MMC3 logical offset, a7 the nametable base and t9 the pixel-spread table. Returns
   ; eight palette indices in a5 and preserves the other argument registers.
   ASM
     ; Fetch the decoded pattern first. Every palette aliases color zero to
@@ -122,6 +132,18 @@ ProcedureNaked NesPackedBgTile()
     lbu t2, 0(t2)
     sll t2, t2, 4
     daddu t2, a4, t2
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      andi t1, t2, 0x1c00
+      srl t1, t1, 7
+      la t3, global_nesmmc3patternbias
+      addu t1, t1, t3
+      lw t1, 4(t1)
+      addu t2, t1, t2
+    EndASM
+  CompilerEndIf
+  ASM
     lhu a5, 0(t2)
     beq a5, zero, nes_blank_bg_row
     srl t3, t0, 4
@@ -139,6 +161,25 @@ ProcedureNaked NesPackedBgTile()
     or t3, t3, t8
     srlv v0, v0, t3
     andi v0, v0, 3
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      sll v0, v0, 10
+      addu v0, t9, v0
+      andi t2, a5, 255
+      srl t3, a5, 8
+      sll t2, t2, 2
+      sll t3, t3, 2
+      addu t2, v0, t2
+      addu t3, v0, t3
+      lw t2, 0(t2)
+      lwu t3, 0(t3)
+      dsll32 t2, t2, 0
+      jr ra
+      or a5, t2, t3
+    EndASM
+  CompilerElse
+    ASM
     sll v0, v0, 2
     sll v1, v0, 8
     or v0, v0, v1
@@ -159,9 +200,178 @@ ProcedureNaked NesPackedBgTile()
     dsll32 t2, t2, 0
     jr ra
     or a5, t2, t3
+    EndASM
+  CompilerEndIf
+  ASM
 nes_blank_bg_row:
     jr ra
     nop
+  EndASM
+EndProcedure
+CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+ProcedureNaked NesMmc3BatchTile()
+  ; s6 holds the last attribute group of four tiles and s5 its palette pair.
+  ; a7 is based 16 KiB below the nametables so both the nametables and
+  ; the CHR bias table fit in signed displacements from one base.
+  ASM
+    andi t2, t0, 0xfff
+    addu t2, a7, t2
+    lbu t2, 0x4000(t2)
+    andi v0, t0, 0x0c1c
+    sll t2, t2, 4
+    addu t2, a4, t2
+    andi t1, t2, 0x1c00
+    srl t1, t1, 7
+    addu t1, a7, t1
+    lw t1, global_nesmmc3patternbias-global_nt+0x4004(t1)
+    andi t8, t0, 2
+    addu t2, t1, t2
+    lhu a5, 0(t2)
+    beqz a5, nes_attr_batch_empty
+    nop
+    beq v0, s6, nes_attr_batch_palette
+    nop
+    or s6, v0, zero
+    srl t3, t0, 4
+    srl v1, v0, 2
+    andi v0, v0, 0xc00
+    andi v1, v1, 7
+    andi t1, t3, 0x38
+    or v0, v0, v1
+    or v0, v0, t1
+    ori v0, v0, 0x3c0
+    addu t1, a7, v0
+    lbu s5, 0x4000(t1)
+    andi t3, t3, 4
+    srlv s5, s5, t3
+nes_attr_batch_palette:
+    srlv v0, s5, t8
+    andi v0, v0, 3
+      sll v0, v0, 10
+      addu v0, t9, v0
+      andi t2, a5, 255
+      srl t3, a5, 8
+      sll t2, t2, 2
+      sll t3, t3, 2
+      addu t2, v0, t2
+      addu t3, v0, t3
+      lw t2, 0(t2)
+      lwu t3, 0(t3)
+      dsll32 t2, t2, 0
+      jr ra
+      or a5, t2, t3
+nes_attr_batch_empty:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf
+
+CompilerElseIf #GAME_MAPPER=5
+ProcedureNaked PpuRender8Reference()
+  ; MMC5 computes split and extended-attribute fetches through PpuFetchTile.
+  ASM
+    addiu sp, sp, -80
+    sd ra, 72(sp)
+    sd s7, 64(sp)
+    sd s6, 56(sp)
+    sd s5, 40(sp)
+    sd s4, 32(sp)
+    sd s3, 24(sp)
+    sd s2, 16(sp)
+    sd s1, 8(sp)
+    sd s0, 0(sp)
+    la s7, global_ppudot
+    lw s0, 4(s7)
+    lw s1, global_ppumask-global_ppudot+4(s7)
+    lw s2, global_ppufinex-global_ppudot+4(s7)
+    lw s3, global_ppuv-global_ppudot+4(s7)
+    andi t1, s3, 31
+    addiu t2, zero, 31
+    bne t1, t2, nes_callback_next
+    addiu s6, s3, 1
+    andi s6, s3, 0x7fe0
+    xori s6, s6, 0x400
+nes_callback_next:
+    or s4, zero, zero
+    andi t0, s1, 8
+    beqz t0, nes_callback_clip
+    or s5, zero, zero
+    sd s3, global_waddr-global_ppudot(s7)
+    jal ppufetchtile
+    sd zero, global_wi-global_ppudot(s7)
+    lw s4, global_wlo-global_ppudot+4(s7)
+    beqz s2, nes_callback_clip
+    lw s5, global_whi-global_ppudot+4(s7)
+    sd s6, global_waddr-global_ppudot(s7)
+    addiu t1, zero, 1
+    jal ppufetchtile
+    sd t1, global_wi-global_ppudot(s7)
+    lw t2, global_wlo-global_ppudot+4(s7)
+    sltiu t0, s2, 4
+    bnez t0, nes_callback_shift
+    nop
+    or s4, s5, zero
+    or s5, t2, zero
+    lw t2, global_whi-global_ppudot+4(s7)
+    addiu s2, s2, -4
+    beqz s2, nes_callback_clip
+    nop
+nes_callback_shift:
+    sll s2, s2, 3
+    subu t0, zero, s2
+    srlv s4, s4, s2
+    sllv t1, s5, t0
+    or s4, s4, t1
+    srlv s5, s5, s2
+    sllv t2, t2, t0
+    or s5, s5, t2
+nes_callback_clip:
+    bnez s0, nes_callback_store
+    andi t0, s1, 2
+    bnez t0, nes_callback_store
+    nop
+    or s4, zero, zero
+    or s5, zero, zero
+nes_callback_store:
+    lw t0, global_neslinerow-global_ppudot+4(s7)
+    addu a0, t0, s0
+    or t1, s4, s5
+    bnez t1, nes_callback_write_pixels
+    or a1, s4, zero
+    b nes_callback_composite
+    sd zero, 0(a0)
+nes_callback_write_pixels:
+    jal ppun64storespan
+    or a2, s5, zero
+nes_callback_composite:
+    srl t1, s0, 3
+    addu t1, s7, t1
+    lbu t1, global_spritespan-global_ppudot(t1)
+    beqz t1, nes_callback_count
+    nop
+    jal ppuoverlay8
+    sd s0, global_woff-global_ppudot(s7)
+nes_callback_count:
+    ld t1, global_ppupixels-global_ppudot(s7)
+    daddiu t1, t1, 8
+    sd t1, global_ppupixels-global_ppudot(s7)
+    andi t1, s1, 24
+    beqz t1, nes_callback_done
+    nop
+    sd s6, global_ppuv-global_ppudot(s7)
+nes_callback_done:
+    ld s0, 0(sp)
+    ld s1, 8(sp)
+    ld s2, 16(sp)
+    ld s3, 24(sp)
+    ld s4, 32(sp)
+    ld s5, 40(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    ld ra, 72(sp)
+    jr ra
+    addiu sp, sp, 80
   EndASM
 EndProcedure
 CompilerEndIf
@@ -196,43 +406,76 @@ ProcedureNaked PpuOverlay8()
     ld a0, 0(t0)
     la t0, global_woff
     ld a1, 0(t0)
-    la t0, global_spriteline
-    daddu t0, t0, a0
-    ld a2, 0(t0)
     la t0, global_neslinerow
     lw t0, 4(t0)
     daddu a1, a1, t0
+nes_overlay_at:
+    ; Direct entry: a0 is the logical NES dot, a1 is its destination.
+    la t0, global_spriteline
+    daddu t0, t0, a0
+    ld a2, 0(t0)
     ld a3, 0(a1)
-    la t0, NesSpriteMasks
-    ld a4, 0(t0)
-    ld a5, 8(t0)
-    ld a6, 16(t0)
-    ld a7, 24(t0)
-    dsrl t0, a3, 1
-    or t0, t0, a3
-    and t0, t0, a4
-    dsll t8, t0, 7
-    and v1, t8, a2
-    ; The low seven bits plus 0x7F set bit 7 for any nonzero low bits.
-    ; The sums fit in a byte. OR restores original bit 7.
-    and t0, a2, a5
-    daddu t0, t0, a5
-    or t0, t0, a2
-    and t0, t0, a6
-    ; Behind-background sprite lanes select the sprite only through a
-    ; transparent background. Expand the surviving high bits to full bytes.
-    dsll t1, a2, 1
-    and t1, t1, t8
-    nor t1, t1, zero
-    and t0, t0, t1
-    dsrl t1, t0, 7
-    dsubu t1, t0, t1
-    or t0, t0, t1
-    and t1, a2, a7
-    and t1, t1, t0
-    nor t0, t0, zero
-    and t0, t0, a3
-    or t0, t0, t1
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      ; Sprite colors are either zero or CI8 indices 16-31. Bit 4
+      ; therefore gives an opacity selector without a general zero test.
+      la t0, NesSpriteMasks
+      ld a4, 0(t0)
+      ld a7, 24(t0)
+      dsrl t0, a3, 1
+      or t0, t0, a3
+      and t0, t0, a4
+      dsrl t1, a2, 6
+      and t1, t1, t0
+      nor t1, t1, zero
+      dsrl t8, a2, 4
+      and t8, t8, a4
+      and t8, t8, t1
+      dsll t1, t8, 8
+      dsubu t8, t1, t8
+      dsll t0, t0, 7
+      and v1, t0, a2
+      and t0, a2, a7
+      xor t0, t0, a3
+      and t0, t0, t8
+      xor t0, t0, a3
+    EndASM
+  CompilerElse
+    ASM
+      la t0, NesSpriteMasks
+      ld a4, 0(t0)
+      ld a5, 8(t0)
+      ld a6, 16(t0)
+      ld a7, 24(t0)
+      dsrl t0, a3, 1
+      or t0, t0, a3
+      and t0, t0, a4
+      dsll t8, t0, 7
+      and v1, t8, a2
+      ; The low seven bits plus 0x7F set bit 7 for any nonzero low bits.
+      ; The sums fit in a byte. OR restores original bit 7.
+      and t0, a2, a5
+      daddu t0, t0, a5
+      or t0, t0, a2
+      and t0, t0, a6
+      ; Behind-background sprite lanes select the sprite only through a
+      ; transparent background. Expand the surviving high bits to full bytes.
+      dsll t1, a2, 1
+      and t1, t1, t8
+      nor t1, t1, zero
+      and t0, t0, t1
+      dsrl t1, t0, 7
+      dsubu t1, t0, t1
+      or t0, t0, t1
+      and t1, a2, a7
+      and t1, t1, t0
+      nor t0, t0, zero
+      and t0, t0, a3
+      or t0, t0, t1
+    EndASM
+  CompilerEndIf
+  ASM
     sd t0, 0(a1)
     beq v1, zero, nes_sprite_done
     addiu t0, zero, 248

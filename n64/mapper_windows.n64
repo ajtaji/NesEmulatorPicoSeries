@@ -1,0 +1,416 @@
+; Shared mapper windows for boards using the copied PRG and CHR views.
+ProcedureNaked MapperPrg(slot.i,bank.i)
+  CompilerIf #GAME_MAPPER=47
+    ASM
+      la t0, global_extraouter
+      ld t0, 0(t0)
+      andi a1, a1, 15
+      dsll t0, t0, 4
+      or a1, a1, t0
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_mapprgbytes
+    ld t1, 0(t0)
+    dsrl t1, t1, 13
+  EndASM
+  CompilerIf #GAME_MAPPER=228
+    ASM
+      ddiv a1, t1
+      mfhi a1
+    EndASM
+  CompilerElse
+    ASM
+      daddiu t1, t1, -1
+      and a1, a1, t1
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_mapprgslots
+    sll t1, a0, 3
+    daddu t0, t0, t1
+    ld t1, 0(t0)
+    beq t1, a1, nes_shared_prg_done
+    nop
+  EndASM
+  CompilerIf #GAME_MAPPER=1 Or #GAME_MAPPER=4
+    ASM
+      sll t2, a0, 3
+    EndASM
+    CompilerIf #GAME_MAPPER=1
+      ASM
+        andi t1, a0, 1
+        bnez t1, nes_shared_prg_publish
+        srl t2, t2, 1
+        la t3, global_nesmmc1bias
+      EndASM
+    CompilerElse
+      ASM
+        la t3, global_nesmmc3bias
+      EndASM
+    CompilerEndIf
+    ASM
+      la t1, global_cartprg
+      ld t1, 0(t1)
+      daddu t3, t3, t2
+      dsubu t2, a1, a0
+      dsll t2, t2, 13
+      daddu t1, t1, t2
+      daddiu t1, t1, -32768
+      sd t1, 0(t3)
+nes_shared_prg_publish:
+      sd a1, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+      daddiu sp, sp, -32
+      sd ra, 0(sp)
+      sd t0, 8(sp)
+      sd a1, 16(sp)
+      la t1, global_nesmapprg
+      sll a0, a0, 13
+      daddu a0, a0, t1
+    EndASM
+    CompilerIf #GAME_MAPPER=5 Or #GAME_MAPPER=228
+      ASM
+        jal nesprgbankload
+        nop
+        bnez a0, nes_shared_prg_commit
+        nop
+        la t0, global_workererror
+        daddiu t1, zero, 22
+        b nes_shared_prg_restore
+        sd t1, 0(t0)
+      EndASM
+    CompilerElse
+      ASM
+        la t1, global_cartprg
+        ld t1, 0(t1)
+        dsll a1, a1, 13
+        daddu a1, a1, t1
+        jal mapcopy
+        addiu a2, zero, 8192
+      EndASM
+    CompilerEndIf
+    ASM
+nes_shared_prg_commit:
+      ld t0, 8(sp)
+      ld t1, 16(sp)
+      sd t1, 0(t0)
+nes_shared_prg_restore:
+      ld ra, 0(sp)
+      daddiu sp, sp, 32
+    EndASM
+  CompilerEndIf
+  ASM
+nes_shared_prg_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperChr(slot.i,bank.i)
+  CompilerIf #GAME_MAPPER=47
+    ASM
+      la t0, global_extraouter
+      ld t0, 0(t0)
+      andi a1, a1, 127
+      dsll t0, t0, 7
+      or a1, a1, t0
+    EndASM
+  CompilerElseIf #GAME_MAPPER=119
+    ASM
+      andi t0, a1, 64
+      beqz t0, nes_shared_chr_rom
+      nop
+      andi a1, a1, 7
+      b nes_shared_chr_lookup
+      ori a1, a1, 256
+nes_shared_chr_rom:
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_mapchrbytes
+    ld t1, 0(t0)
+    dsrl t1, t1, 10
+    daddiu t1, t1, -1
+    and a1, a1, t1
+nes_shared_chr_lookup:
+    la t0, global_mapchrslots
+    sll t1, a0, 3
+    daddu t0, t0, t1
+    ld t1, 0(t0)
+    beq t1, a1, nes_shared_chr_done
+    sll t1, a0, 10
+
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd t0, 8(sp)
+    sd a1, 16(sp)
+    sd t1, 24(sp)
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      andi t2, a1, 255
+      dsll t2, t2, 10
+    EndASM
+  CompilerElse
+    ASM
+      dsll t2, a1, 10
+    EndASM
+  CompilerEndIf
+  ASM
+    sd t2, 32(sp)
+    la a0, global_nesmapchr
+    daddu a0, a0, t1
+    la t0, global_cartchr
+    ld t0, 0(t0)
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      sltiu t3, a1, 256
+      bnez t3, nes_shared_chr_raw
+      nop
+      la t0, global_nesmapextrachrram
+nes_shared_chr_raw:
+    EndASM
+  CompilerEndIf
+  ASM
+    daddu a1, t0, t2
+    jal mapcopy
+    addiu a2, zero, 1024
+
+    ld t1, 24(sp)
+    ld t2, 32(sp)
+    la a0, global_nesmappattern
+    la a1, global_decoded
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      ld t3, 16(sp)
+      sltiu t3, t3, 256
+      bnez t3, nes_shared_chr_decoded
+      nop
+      la a1, global_nesmapextrapattern
+nes_shared_chr_decoded:
+    EndASM
+  CompilerEndIf
+  ASM
+    daddu a0, a0, t1
+    daddu a1, a1, t2
+    jal mapcopy
+    addiu a2, zero, 1024
+    ld t0, 8(sp)
+    ld t1, 16(sp)
+    sd t1, 0(t0)
+    la t0, global_bgcacheaddr
+    daddiu t1, zero, -1
+    sd t1, 0(t0)
+    la t0, global_rgblastkey
+    sd t1, 0(t0)
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+nes_shared_chr_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperMirror(mode.i)
+  ASM
+    la t0, global_mapfourscreen
+    ld t0, 0(t0)
+    beqz t0, nes_shared_mirror_mode
+    nop
+    addiu a0, zero, 4
+nes_shared_mirror_mode:
+    la t0, global_mapmirrormode
+    ld t1, 0(t0)
+    beq a0, t1, nes_shared_mirror_done
+    nop
+    sd a0, 0(t0)
+    ; Modes 0–4 each use one byte with two bits per logical table.
+    la t0, nes_shared_mirror_slots
+    sltiu t1, a0, 5
+    bnez t1, nes_shared_mirror_decode
+    nop
+    addiu a0, zero, 2
+nes_shared_mirror_decode:
+    daddu t0, t0, a0
+    lbu t0, 0(t0)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    move s0, t0
+    move s1, zero
+  EndASM
+  CompilerIf #NES_RETAINED_ROWS
+    ASM
+      jal nesinvalidatemap
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_shared_mirror_copy:
+    andi t1, s0, 3
+    sll t0, s1, 3
+    la t2, global_mapntslots
+    daddu t2, t2, t0
+    sd t1, 0(t2)
+    sll t1, t1, 10
+    sll t0, s1, 10
+    la a0, global_nt
+    la a1, global_mapciram
+    daddu a0, a0, t0
+    daddu a1, a1, t1
+    jal mapcopy
+    addiu a2, zero, 1024
+    addiu s1, s1, 1
+    sltiu t0, s1, 4
+    bnez t0, nes_shared_mirror_copy
+    srl s0, s0, 2
+
+    la t0, global_bgcacheaddr
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    la t0, global_rgblastkey
+    sd t2, 0(t0)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    daddiu sp, sp, 32
+nes_shared_mirror_done:
+    jr ra
+    nop
+nes_shared_mirror_slots:
+    .word 0x50440055, 0xE4000000
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperChrWrite(addr.i,value.i)
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    la t0, global_mapchrslots
+    srl t1, a0, 10
+    sll t1, t1, 3
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    sd t0, 24(sp)
+    la t1, global_cartchr
+    ld t1, 0(t1)
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      sltiu t2, t0, 256
+      bnez t2, nes_shared_chr_write_raw
+      nop
+      andi t0, t0, 7
+      la t1, global_nesmapextrachrram
+nes_shared_chr_write_raw:
+    EndASM
+  CompilerEndIf
+  ASM
+    dsll t0, t0, 10
+    andi t2, a0, 1023
+    daddu t0, t0, t2
+    daddu t0, t0, t1
+  EndASM
+  CompilerIf #NES_RETAINED_ROWS
+    ASM
+      lbu t1, 0(t0)
+      beq t1, a1, nes_shared_chr_write_done
+      nop
+      la t1, global_nesvideoserial
+      ld t2, 0(t1)
+      daddiu t2, t2, 1
+      sd t2, 0(t1)
+      la t1, global_nesvideoreset
+      sd t2, 0(t1)
+    EndASM
+  CompilerEndIf
+  ASM
+    sb a1, 0(t0)
+    la t1, global_neschrwindow
+    ld t1, 0(t1)
+    daddu t1, t1, a0
+    jal ppudecode
+    sb a1, 0(t1)
+
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    andi t0, a0, 0x1FF0
+    andi t1, a0, 7
+    sll t1, t1, 1
+    or t0, t0, t1
+    la t1, global_pattern
+    ld a3, 0(t1)
+    daddu t1, a3, t0
+    lhu a4, 0(t1)
+    andi t0, t0, 1023
+    move t1, a2
+    la t2, global_decoded
+  EndASM
+  CompilerIf #GAME_MAPPER=119
+    ASM
+      sltiu t3, a2, 256
+      bnez t3, nes_shared_chr_write_row
+      nop
+      andi t1, a2, 7
+      la t2, global_nesmapextrapattern
+nes_shared_chr_write_row:
+    EndASM
+  CompilerEndIf
+  ASM
+    dsll t1, t1, 10
+    daddu t2, t2, t1
+    daddu t2, t2, t0
+    sh a4, 0(t2)
+    daddu a3, a3, t0
+
+    la t1, global_neschrwindow
+    ld t1, 0(t1)
+    andi a0, a0, 1023
+    daddu a0, a0, t1
+    la t0, global_mapchrslots
+    addiu t2, t0, 64
+nes_shared_chr_alias:
+    ld t1, 0(t0)
+    bne t1, a2, nes_shared_chr_next
+    addiu t0, t0, 8
+    sb a1, 0(a0)
+    sh a4, 0(a3)
+nes_shared_chr_next:
+    addiu a0, a0, 1024
+    bne t0, t2, nes_shared_chr_alias
+    addiu a3, a3, 1024
+nes_shared_chr_write_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
+EndProcedure
+
+CompilerIf #GAME_MAPPER=119
+ProcedureNaked ExtraChrRamWrite(addr.i,value.i)
+  ASM
+    la t0, global_mapchrslots
+    srl t1, a0, 10
+    sll t1, t1, 3
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    slti t0, t0, 256
+    bnez t0, nes_tqrom_write_done
+    nop
+    j mapperchrwrite
+    nop
+nes_tqrom_write_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf

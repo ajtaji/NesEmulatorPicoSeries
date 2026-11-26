@@ -1,0 +1,25 @@
+; CNROM, AxROM and Color Dreams latch the value after the old PRG bank
+; has driven its bus-conflict bits. The bank and mirroring helpers publish
+; the new mapping together.
+ProcedureNaked MapperWrite(addr.i,value.i,stamp.i)
+  ASM
+    ori t0, zero, 0x8000
+    slt t0, a0, t0
+    bnez t0, nes_simple_mapper_ignored
+    nop
+    la t0, global_cartconflicts
+    ld t1, 0(t0)
+    beqz t1, nes_simple_mapper_latch
+    ld t1, global_prgbias-global_cartconflicts(t0)
+    addu t1, t1, a0
+    lbu t1, 0(t1)
+    and a1, a1, t1
+nes_simple_mapper_latch:
+    sd a1, global_mapprgreg-global_cartconflicts(t0)
+    j mapperupdate
+    sd a1, global_mapchr0-global_cartconflicts(t0)
+nes_simple_mapper_ignored:
+    jr ra
+    nop
+  EndASM
+EndProcedure

@@ -3,6 +3,53 @@
 import re
 
 
+MMC3_READ_LOWER = """    sltiu $t0, $a1, 0x4000
+    bnez $t0, nes_mmc3_read_peripheral
+    addiu $t0, $a1, -0x4015
+    sltiu $t0, $t0, 3
+    bnez $t0, nes_mmc3_read_peripheral
+    sltiu $t0, $a1, 0x6000
+    la $t1, global_nesopenbus
+    la $t2, global_mapramenable
+    bnez $t0, nes_mmc3_read_open
+    andi $a1, $a1, 0x1FFF
+    ld $t2, 0($t2)
+    beqz $t2, nes_mmc3_read_open
+    nop
+    la $t0, global_mapram
+    addu $t0, $t0, $a1
+    lbu $a0, 0($t0)
+    jr $ra
+    sd $a0, 0($t1)
+nes_mmc3_read_open:
+    ld $a0, 0($t1)
+    andi $a0, $a0, 0xFF
+    jr $ra
+    sd $a0, 0($t1)
+nes_mmc3_read_peripheral:
+    j nesreadperipheral
+    or $a0, $a1, $zero"""
+
+
+def stage_runtime_mmc3_bus(source: str) -> str:
+    """Replace generic decoding after the synchronized I/O hooks are staged."""
+    pattern = r"^Procedure\.i NesReadSlow\(addr\.i\)\n.*?^  ElseIf addr=\$4016\n(.*?)^EndProcedure"
+    replacement = r"Procedure.i NesReadPeripheral(addr.i)\n  Protected v.i\n  If addr=$4016\n\1EndProcedure"
+    source, count = re.subn(pattern, replacement, source, flags=re.M | re.S)
+    if count != 1:
+        raise ValueError("MMC3 peripheral read source changed")
+    tail = "nes_direct_nesread_slow:\n    j nesreadslow\n    nop"
+    if source.count(tail) != 1:
+        raise ValueError("MMC3 direct read fallback changed")
+    source, count = re.subn(r"^Procedure NesWrite\(addr\.i, value\.i\)\n.*?^EndProcedure",
+                            'XIncludeFile "../n64/mmc3_cpu_write.n64"', source,
+                            flags=re.M | re.S)
+    if count != 1:
+        raise ValueError("MMC3 CPU write source changed")
+    return source.replace("Declare.i NesReadSlow(addr.i)\n", "Declare.i NesReadPeripheral(addr.i)\n").replace(
+        tail, "nes_direct_nesread_slow:\n" + MMC3_READ_LOWER)
+
+
 def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -> str:
     """Emit a read from a1, returning in a0 and clobbering t0 through t2."""
     low_limit = 0x1FFF if pair else 0x2000
@@ -13,12 +60,14 @@ def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -
     ]
     if mapper == 5:
         instructions += [f"b {fallback}", "nop"]
-    elif mapper == 1:
+    elif mapper in (1, 4):
+        window = 0x4000 if mapper == 1 else 0x2000
+        slot_mask = 0x8000 - window
         if pair:
-            instructions += ["andi $t2, $a1, 0x3FFF", "xori $t2, $t2, 0x3FFF",
+            instructions += [f"andi $t2, $a1, {window-1}", f"xori $t2, $t2, {window-1}",
                              f"beq $t2, $zero, {fallback}", "nop"]
-        instructions += ["andi $t1, $a1, 0x4000", "srl $t1, $t1, 11",
-                         "la $t2, global_nesmmc1bias", "addu $t1, $t1, $t2",
+        instructions += [f"andi $t1, $a1, {slot_mask}", f"srl $t1, $t1, {window.bit_length()-4}",
+                         f"la $t2, global_nesmmc{'1' if mapper == 1 else '3'}bias", "addu $t1, $t1, $t2",
                          "ld $t1, 0($t1)", "addu $t1, $t1, $a1"]
         if pair:
             instructions += ["lbu $t2, 0($t1)", f"b {label}_finish", "lbu $a0, 1($t1)"]
@@ -74,9 +123,10 @@ def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -
 
 
 def stage_bus(source: str, mapper: int) -> str:
-    if mapper == 1:
-        source = source.replace("PeekA(PrgBase+addr-$8000)", "PeekA(NesMmc1Pointer(addr))")
-        source = source.replace("PeekA(WorkerPrgBase+addr-$8000)", "PeekA(NesMmc1Pointer(addr))")
+    if mapper in (1, 4):
+        pointer = "NesMmc1Pointer" if mapper == 1 else "NesMmc3Pointer"
+        source = source.replace("PeekA(PrgBase+addr-$8000)", f"PeekA({pointer}(addr))")
+        source = source.replace("PeekA(WorkerPrgBase+addr-$8000)", f"PeekA({pointer}(addr))")
     reads = [
         ("NesRead", ".i", "addr.i", """    andi $a1, $a0, 0xFFFF""",
          """    jr $ra

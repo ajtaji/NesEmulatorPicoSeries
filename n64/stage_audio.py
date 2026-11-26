@@ -67,12 +67,20 @@ def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) ->
     if name == "apu":
         if audio_rate == 20000:
             source = replace(source, "ApuOutput=ApuLastY*65400", "ApuOutput=ApuLastY*65210")
-        # The native oscillator path returns before the less frequent DMC edge.
-        # Keep DMC fetch, looping and IRQ side effects in the shared implementation.
-        begin = source.index("Procedure ApuTick(dt.i)")
-        dmc = source.index("  While DmcTimer<=0", begin)
-        source = source[:begin] + ('XIncludeFile "../n64/oscillators.n64"\n'
-                                   'Procedure NesDmcEdge()\n') + source[dmc:]
+            begin = source.index("Procedure.i ApuVolume(ch.i)")
+            end = source.index("Procedure ApuDmcFetch()", begin)
+            source = source[:begin] + 'XIncludeFile "../n64/apuframe.n64"\n' + source[end:]
+        if audio_rate == 20000 or mapper == 4:
+            begin = source.index("Procedure ApuDmcFetch()")
+            end = source.index("Procedure ApuMixSampleBase()", begin)
+            source = source[:begin] + ('XIncludeFile "../n64/apudmc.n64"\n'
+                                       'XIncludeFile "../n64/oscillators.n64"\n') + source[end:]
+        else:
+            # DMC cartridge reads and IRQ effects remain synchronous.
+            begin = source.index("Procedure ApuTick(dt.i)")
+            dmc = source.index("  While DmcTimer<=0", begin)
+            source = source[:begin] + ('XIncludeFile "../n64/oscillators.n64"\n'
+                                       'Procedure NesDmcEdge()\n') + source[dmc:]
         blocked = mapper not in IMMEDIATE_MIXERS
         source = f"#NES_APU_BLOCKED={int(blocked)}\n" + source
         if not blocked:

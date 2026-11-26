@@ -83,7 +83,7 @@ EndProcedure
 Procedure.i NesRuntimePoll(pc.i, value.i)
   Protected pointer.i, opcode.i, branch.i, cycles.i, origin.i, masked.i
   If pc<$8003 Or pc>$FFFD : ProcedureReturn 0 : EndIf
-  If ((pc-3)! (pc+1))&$4000 : ProcedureReturn 0 : EndIf
+  If ((pc-3)! (pc+1))&#NES_PRG_PROBE_MASK : ProcedureReturn 0 : EndIf
   pointer=NesRuntimePrgPointer(pc)
   opcode=PeekA(pointer-3) : branch=PeekA(pointer)
   If opcode<>$2C And opcode<>$AD : ProcedureReturn 0 : EndIf
@@ -91,7 +91,7 @@ Procedure.i NesRuntimePoll(pc.i, value.i)
   ; LDA PPUSTATUS / AND #mask / BNE or BEQ back to LDA.
   ; The read and branch stay inside the currently mapped CPU bank.
   If opcode=$AD And branch=$29
-    If pc>$FFFB Or (((pc-3)!(pc+3))&$4000) : ProcedureReturn 0 : EndIf
+    If pc>$FFFB Or (((pc-3)!(pc+3))&#NES_PRG_PROBE_MASK) : ProcedureReturn 0 : EndIf
     If PeekA(pointer+3)<>$F9 : ProcedureReturn 0 : EndIf
     branch=PeekA(pointer+2) : masked=value&PeekA(pointer+1)
     If branch=$F0

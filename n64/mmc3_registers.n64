@@ -1,0 +1,415 @@
+; Mapper 4 register writes enter after the CPU bus has synchronized devices.
+ProcedureNaked MapperWrite(addr.i,value.i,stamp.i)
+  ASM
+    andi t0, a0, 0x8000
+    beqz t0, mmc3_write_ram
+    andi t0, a0, 1
+    srl t1, a0, 12
+    andi t1, t1, 6
+    or t1, t1, t0
+    la t2, mmc3_write_table
+    sll t1, t1, 2
+    daddu t2, t2, t1
+    lw t2, 0(t2)
+    jr t2
+    nop
+mmc3_write_table:
+    .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect
+    .word mmc3_write_latch, mmc3_write_reload, mmc3_write_ack, mmc3_write_enable
+mmc3_write_select:
+    la t0, global_mapselect
+    ld t1, 0(t0)
+    sd a1, 0(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    beqz t1, mmc3_write_done
+    nop
+    j mapperupdate
+    nop
+mmc3_write_data:
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    la t1, global_mapregs
+    andi t2, t0, 7
+    sll t3, t2, 3
+    daddu t1, t1, t3
+    ld t3, 0(t1)
+    beq t3, a1, mmc3_write_done
+    sltiu t3, t2, 2
+    sd a1, 0(t1)
+    bnez t3, mmc3_write_chr_pair
+    andi a0, t0, 128
+    sltiu t3, t2, 6
+    beqz t3, mmc3_write_prg
+    srl a0, a0, 5
+    xori a0, a0, 4
+    addu a0, a0, t2
+    j mapperchr
+    addiu a0, a0, -2
+mmc3_write_chr_pair:
+    srl a0, a0, 5
+    sll t2, t2, 1
+    or a0, a0, t2
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    jal mapperchr
+    andi a1, a1, 254
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld ra, 0(sp)
+    addiu a0, a0, 1
+    daddiu sp, sp, 32
+    j mapperchr
+    ori a1, a1, 1
+mmc3_write_prg:
+    addiu a0, t2, -6
+    bnez a0, mmc3_write_prg_bank
+    andi a1, a1, 63
+    andi a0, t0, 64
+    srl a0, a0, 5
+mmc3_write_prg_bank:
+    j mapperprg
+    nop
+mmc3_write_mirror:
+    la t0, global_mapfourscreen
+    ld t1, 0(t0)
+    bnez t1, mmc3_write_done
+    andi a0, a1, 1
+    j mappermirror
+    xori a0, a0, 1
+mmc3_write_protect:
+    la t0, global_mapramenable
+    srl t1, a1, 7
+    srl t2, a1, 6
+    andi t1, t1, 1
+    andi t2, t2, 1
+    sd t1, 0(t0)
+    jr ra
+    sd t2, global_mapramprotect-global_mapramenable(t0)
+mmc3_write_latch:
+    la t0, global_mapirqlatch
+    jr ra
+    sd a1, 0(t0)
+mmc3_write_reload:
+    la t0, global_mapreload
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+mmc3_write_ack:
+    la t0, global_mapirqenable
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    jr ra
+    sd zero, 0(t0)
+mmc3_write_enable:
+    la t0, global_mapirqenable
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+mmc3_write_ram:
+    la t0, global_mapramenable
+    ld t1, 0(t0)
+    beqz t1, mmc3_write_done
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, mmc3_write_done
+    andi a0, a0, 8191
+    la t0, global_mapram
+    daddu t0, t0, a0
+  EndASM
+  CompilerIf #GAME_SAVE_BYTES>0
+    ASM
+      j nessavechanged
+      sb a1, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+      jr ra
+      sb a1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+mmc3_write_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+
+ProcedureNaked MapperPrg(slot.i,bank.i)
+  ASM
+    la t0, global_mapprgbytes
+    ld t1, 0(t0)
+    dsrl t1, t1, 13
+    addiu t1, t1, -1
+    and a1, a1, t1
+    sll t1, a0, 3
+    la t0, global_mapprgslots
+    daddu t0, t0, t1
+    ld t2, 0(t0)
+    beq t2, a1, mmc3_prg_done
+    subu a1, a1, a0
+    sll a1, a1, 13
+    la t2, global_cartprg
+    ld t2, 0(t2)
+    la t3, global_nesmmc3bias
+    daddu t3, t3, t1
+    daddu t2, t2, a1
+    daddiu t2, t2, -32768
+    sd t2, 0(t3)
+    sra a1, a1, 13
+    addu a1, a1, a0
+    sd a1, 0(t0)
+mmc3_prg_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperChr(slot.i,bank.i)
+  ASM
+    la t0, global_mapchrbytes
+    ld t1, 0(t0)
+    dsrl t1, t1, 10
+    addiu t1, t1, -1
+    and a1, a1, t1
+    sll t1, a0, 3
+    la t0, global_mapchrslots
+    daddu t0, t0, t1
+    ld t2, 0(t0)
+    beq t2, a1, mmc3_chr_done
+    nop
+    sd a1, 0(t0)
+    andi a2, a0, 4
+    sll a2, a2, 1
+    la t0, global_nesmmc3chrtags
+    daddu t0, t0, a2
+    ld t2, 0(t0)
+    andi a2, a0, 3
+    sll a2, a2, 3
+    ori t3, zero, 255
+    dsllv t3, t3, a2
+    nor t3, t3, zero
+    and t2, t2, t3
+    dsllv t3, a1, a2
+    or t2, t2, t3
+    sd t2, 0(t0)
+    la t0, global_bgcacheaddr
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    la t0, global_rgblastkey
+    sd t2, 0(t0)
+    la t0, global_mapchrram
+    ld t0, 0(t0)
+    bnez t0, mmc3_chr_ram
+    subu t2, a1, a0
+    sll t2, t2, 10
+    la t0, global_cartchr
+    ld t0, 0(t0)
+    la t3, global_nesmmc3chrbias
+    daddu t3, t3, t1
+    daddu t0, t0, t2
+    sd t0, 0(t3)
+    la t3, global_nesmmc3patternbias
+    daddu t3, t3, t1
+    la t0, global_decoded
+    daddu t0, t0, t2
+    jr ra
+    sd t0, 0(t3)
+
+mmc3_chr_ram:
+    la t0, global_nesmapchr
+    la t3, global_nesmmc3chrbias
+    daddu t3, t3, t1
+    sd t0, 0(t3)
+    la t2, global_nesmappattern
+    la t3, global_nesmmc3patternbias
+    daddu t3, t3, t1
+    sd t2, 0(t3)
+
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sll t3, a0, 10
+    sll t2, a1, 10
+    sd t3, 8(sp)
+    sd t2, 16(sp)
+    daddu a0, t0, t3
+    la t0, global_cartchr
+    ld t0, 0(t0)
+    daddu a1, t0, t2
+    jal mapcopy
+    addiu a2, zero, 1024
+    ld t3, 8(sp)
+    ld t2, 16(sp)
+    ld ra, 0(sp)
+    la a0, global_nesmappattern
+    la a1, global_decoded
+    daddu a0, a0, t3
+    daddu a1, a1, t2
+    addiu a2, zero, 1024
+    j mapcopy
+    daddiu sp, sp, 32
+mmc3_chr_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+XIncludeFile "mapper_mmc3_update.n64"
+
+ProcedureNaked MapperMirror(mode.i)
+  ASM
+    la t0, global_mapfourscreen
+    ld t0, 0(t0)
+    beqz t0, mmc3_mirror_mode
+    nop
+    addiu a0, zero, 4
+mmc3_mirror_mode:
+    la t0, global_mapmirrormode
+    ld t1, 0(t0)
+    beq a0, t1, mmc3_mirror_done
+    nop
+    sd a0, 0(t0)
+    ; Two bits per logical table, from the low bits upward.
+    la t0, mmc3_mirror_slots
+    daddu t0, t0, a0
+    lbu t0, 0(t0)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    move s0, t0
+    move s1, zero
+mmc3_mirror_copy:
+    andi t1, s0, 3
+    sll t0, s1, 3
+    la t2, global_mapntslots
+    daddu t2, t2, t0
+    sd t1, 0(t2)
+    sll t1, t1, 10
+    sll t0, s1, 10
+    la a0, global_nt
+    la a1, global_mapciram
+    daddu a0, a0, t0
+    daddu a1, a1, t1
+    jal mapcopy
+    addiu a2, zero, 1024
+    addiu s1, s1, 1
+    sltiu t0, s1, 4
+    bnez t0, mmc3_mirror_copy
+    srl s0, s0, 2
+
+    la t0, global_bgcacheaddr
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    la t0, global_rgblastkey
+    sd t2, 0(t0)
+    la t0, global_nesvideoserial
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    la t0, global_nesvideoreset
+    sd t1, 0(t0)
+
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    daddiu sp, sp, 32
+mmc3_mirror_done:
+    jr ra
+    nop
+mmc3_mirror_slots:
+    .word 0x50440055, 0xE4000000
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperRegNotice(reg.i)
+  ASM
+    sltiu t0, a0, 6
+    bnez t0, mmc3_reg_notice_done
+    sltiu t0, a0, 8
+    beqz t0, mmc3_reg_notice_done
+    nop
+    la t0, global_ppuv
+    ld a0, 0(t0)
+    la t0, global_mapdots
+    ld a1, 0(t0)
+    j mappera12
+    andi a0, a0, 0x3FFF
+mmc3_reg_notice_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked MapperChrWrite(addr.i,value.i)
+  ASM
+    la a2, global_mapchrslots
+    srl t0, a0, 10
+    sll t0, t0, 3
+    daddu t0, t0, a2
+    ld a3, 0(t0)
+    andi a4, a0, 1023
+    sll a5, a3, 10
+    la t0, global_cartchr
+    ld t0, 0(t0)
+    daddu t0, t0, a5
+    daddu t0, t0, a4
+    lbu t1, 0(t0)
+    beq t1, a1, mmc3_chr_write_done
+    nop
+    sb a1, 0(t0)
+
+    la t0, global_nesvideoserial
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    la t0, global_nesvideoreset
+    sd t1, 0(t0)
+
+    ; Decode this physical row once, then update each aliased window.
+    andi t0, a4, 0x3F7
+    la t1, global_cartchr
+    ld t1, 0(t1)
+    daddu t1, t1, a5
+    daddu t1, t1, t0
+    lbu t2, 0(t1)
+    lbu t3, 8(t1)
+    la t1, NesChrBitSpread
+    sll t2, t2, 1
+    sll t3, t3, 1
+    daddu t2, t2, t1
+    daddu t3, t3, t1
+    lhu t2, 0(t2)
+    lhu t3, 0(t3)
+    sll t3, t3, 1
+    or a6, t2, t3
+    andi t1, t0, 7
+    andi t0, t0, 0x3F0
+    sll t1, t1, 1
+    or a7, t0, t1
+    la t2, global_decoded
+    daddu t2, t2, a5
+    daddu t2, t2, a7
+    sh a6, 0(t2)
+
+    la t0, global_nesmapchr
+    la t1, global_nesmappattern
+    daddu t0, t0, a4
+    daddu t1, t1, a7
+    addiu t2, a2, 64
+mmc3_chr_write_alias:
+    ld t3, 0(a2)
+    bne t3, a3, mmc3_chr_write_next
+    addiu a2, a2, 8
+    sb a1, 0(t0)
+    sh a6, 0(t1)
+mmc3_chr_write_next:
+    addiu t0, t0, 1024
+    bne a2, t2, mmc3_chr_write_alias
+    addiu t1, t1, 1024
+mmc3_chr_write_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure

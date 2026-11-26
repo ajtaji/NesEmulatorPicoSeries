@@ -5,25 +5,22 @@ Global Dim NesIndexBlock.i(1024)
 Global NesDisplayBlock.i, NesLayoutChanged.i, NesIndexTicket.i
 Global Dim NesIndexPalette.i(1920)
 Global Dim NesPaletteChange.a(240)
-Procedure NesWritePalette(index.i, value.i)
-  Protected color.i, i.i
-  If Pal(index)=value : ProcedureReturn : EndIf
-  Pal(index)=value
-  ; The shared pixel mixer uses entry zero for every backdrop alias.
-  If (index&3)=0 And index<>0 : ProcedureReturn : EndIf
-  If PpuMask&1 : value=value&$30 : EndIf
-  color=Rgb64((PpuMask>>5)*64+value)
-  color=(color&$FFC0)|((color&31)<<1)|1
-  If RgbPal(index)=color : ProcedureReturn : EndIf
-  If index=0
-    For i=0 To 28 Step 4 : RgbPal(i)=color : Next
-  Else
-    RgbPal(index)=color
-  EndIf
-  RgbPairsDirty=1
-EndProcedure
+XIncludeFile "ppu_palette.n64"
 
+CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  Global NesReusedIndexRow.i
+CompilerEndIf
 ProcedureNaked PpuRgbLineRaw()
+  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    ASM
+      ; Retained pixels were already published to RDRAM on the prior frame.
+      ; Palette capture still runs for every completed scanline.
+      la t0, global_nesreusedindexrow
+      ld t1, 0(t0)
+      bnez t1, nes_index_row_written
+      sd zero, 0(t0)
+    EndASM
+  CompilerEndIf
   ASM
     ; A completed row is immutable until the next guest frame. Write it
     ; back while resident, including the final line of an unaligned row.

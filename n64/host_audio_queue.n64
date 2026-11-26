@@ -1,0 +1,130 @@
+; Most polls only check whether the next full descriptor is ready.
+; Allocate a call frame only when a buffer can actually be submitted.
+ProcedureNaked HostQueueAudio(produced.i)
+  ASM
+    la t0, global_hostaibase
+    ld t1, 0(t0)
+    beqz t1, nes_host_audio_return
+    ld t2, global_hostpcmread-global_hostaibase(t0)
+    ld t1, global_hostaudioready-global_hostaibase(t0)
+    bnez t1, nes_host_audio_diff
+    dsubu t3, a0, t2
+    slti t1, t3, #HOST_AUDIO_RESERVE
+    bnez t1, nes_host_audio_return
+    addiu t1, zero, 1
+    sd t1, global_hostaudioready-global_hostaibase(t0)
+nes_host_audio_diff:
+    bgez t3, nes_host_audio_capacity
+    nop
+    move t2, zero
+    move t3, a0
+    sd zero, global_hostpcmread-global_hostaibase(t0)
+nes_host_audio_capacity:
+    slti t1, t3, 4097
+    bnez t1, nes_host_audio_ready
+    daddiu t1, zero, #HOST_AUDIO_FRAMES
+    daddiu t2, a0, -4096
+    daddu t2, t2, t1
+    daddiu t2, t2, -1
+    dsubu t1, zero, t1
+    and t2, t2, t1
+  EndASM
+  CompilerIf #NES_MEASURE_QUEUE
+    ASM
+      ld t1, global_hostpcmread-global_hostaibase(t0)
+      dsubu t1, t2, t1
+      ld t3, global_hostaudiodropped-global_hostaibase(t0)
+      daddu t3, t3, t1
+      sd t3, global_hostaudiodropped-global_hostaibase(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+    dsubu t3, a0, t2
+    sd t2, global_hostpcmread-global_hostaibase(t0)
+nes_host_audio_ready:
+    slti t3, t3, #HOST_AUDIO_FRAMES
+    bnez t3, nes_host_audio_return
+    lui t1, 0xA450
+    lw t1, 12(t1)
+    bltz t1, nes_host_audio_return
+    nop
+
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    move s0, a0
+    move s1, t0
+nes_host_audio_submit:
+    ld t0, 0(s1)
+    ld t1, global_hostaislot-global_hostaibase(s1)
+    dsll t1, t1, 12
+    daddu s2, t0, t1
+    andi t0, t2, 4095
+    la a1, global_pcm
+    sll t0, t0, 1
+    daddu a1, a1, t0
+    jal hostcopystereo
+    move a0, s2
+    move a0, s2
+    jal lpmcachewritebackdata
+    ori a1, zero, #HOST_AUDIO_BYTES
+    lui t0, 0xA450
+    sll t1, s2, 3
+    srl t1, t1, 3
+    sw t1, 0(t0)
+  EndASM
+  CompilerIf #NES_MEASURE_QUEUE
+    ASM
+      ; An empty AI after the first submission was unable to play
+      ; continuously. Each refill closes one measured starvation.
+      ld t1, global_hostpcmread-global_hostaibase(s1)
+      beqz t1, nes_host_audio_measured
+      lw t2, 12(t0)
+      lui t1, 0x4000
+      and t2, t2, t1
+      bnez t2, nes_host_audio_measured
+      nop
+      ld t1, global_hostaistarvations-global_hostaibase(s1)
+      daddiu t1, t1, 1
+      sd t1, global_hostaistarvations-global_hostaibase(s1)
+      la t2, global_workerframes
+      ld t2, 0(t2)
+      sd t2, global_hostailaststarvation-global_hostaibase(s1)
+nes_host_audio_measured:
+    EndASM
+  CompilerEndIf
+  ASM
+    ori t1, zero, #HOST_AUDIO_BYTES
+    sw t1, 4(t0)
+
+    ld t2, global_hostpcmread-global_hostaibase(s1)
+    ld t1, global_hostaislot-global_hostaibase(s1)
+    daddiu t2, t2, #HOST_AUDIO_FRAMES
+    daddiu t1, t1, 1
+    sd t2, global_hostpcmread-global_hostaibase(s1)
+    sltiu t3, t1, #HOST_AUDIO_SLOTS
+    bnez t3, nes_host_audio_slot
+    nop
+    move t1, zero
+nes_host_audio_slot:
+    sd t1, global_hostaislot-global_hostaibase(s1)
+    dsubu t3, s0, t2
+    slti t3, t3, #HOST_AUDIO_FRAMES
+    bnez t3, nes_host_audio_restore
+    nop
+    lw t1, 12(t0)
+    bgez t1, nes_host_audio_submit
+    nop
+nes_host_audio_restore:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    daddiu sp, sp, 32
+nes_host_audio_return:
+    jr ra
+    nop
+  EndASM
+EndProcedure

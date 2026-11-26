@@ -1,8 +1,9 @@
 """Thread ordinary 2A03 instructions through fixed VR4300 registers.
 
-Device and mapper side effects use the portable bus. This span fetches
+Device and mapper side effects use the synchronized bus. This span fetches
 instructions from ordinary PRG and, on MMC1, from enabled cartridge RAM
-or mirrored internal RAM. Low-strobe controller reads shift the latched bit.
+or mirrored internal RAM. Runtime MMC3 also reads ordinary cartridge RAM
+operands. Low-strobe controller reads shift the latched bit.
 A rejected instruction goes to its original handler with the opcode fetched
 and the PC advanced exactly once. State is published at a fallback or the
 end of the CPU cycle window, before the scheduler checks IRQ and NMI.
@@ -11,12 +12,16 @@ end of the CPU cycle window, before the scheduler checks IRQ and NMI.
 import re
 
 
-def native_handlers(mapper=0, mmc1_20k=False):
+def native_handlers(mapper=0, mmc1_20k=False, runtime=False):
     handlers = {}
     common_reads = {}
+    schedule_operands = runtime and mapper == 4
+    ram_bias = "nesmmc1bias" if mmc1_20k else "nesmmc3bias" if runtime and mapper == 4 else None
 
-    def handler(op, length, cycles, body, phase=None):
-        code = [f"nes_native_{op:02x}:", *body, f"addiu $a1, $a1, {length}"]
+    def handler(op, length, cycles, body, phase=None, *, advance_pc=True):
+        code = [f"nes_native_{op:02x}:", *body]
+        if advance_pc:
+            code.append(f"addiu $a1, $a1, {length}")
         if phase is not None:
             code.append(f"addiu $v0, $zero, {phase}")
         code += ["b nes_thread_check", f"daddiu $a2, $a2, -{cycles}"]
@@ -27,7 +32,17 @@ def native_handlers(mapper=0, mmc1_20k=False):
             # $a3 points at the two prebiased MMC1 PRG halves.
             return ["andi $t1, $t0, 0x4000", "srl $t1, $t1, 11", "addu $t1, $t1, $a3",
                     "ld $t1, 0($t1)", "addu $t0, $t0, $t1"]
+        if mapper == 4:
+            return ["andi $t1, $t0, 0x6000", "srl $t1, $t1, 10", "addu $t1, $t1, $a3",
+                    "ld $t1, 0($t1)", "addu $t0, $t0, $t1"]
         return ["addu $t0, $t0, $a3"]
+
+    def fetch_word(high_reg):
+        # Both bytes are in the already-accepted ordinary fetch span.
+        # Load the high byte first to separate its load and shift.
+        low = "lbu $t1, 1($t0)"
+        high = f"lbu {high_reg}, 2($t0)"
+        return [high, low] if schedule_operands else [low, high]
 
     def operand(op, mode, *, write=False):
         if mode == "imm":
@@ -39,16 +54,20 @@ def native_handlers(mapper=0, mmc1_20k=False):
                 code += [f"addu $t0, $t0, {index}", "andi $t0, $t0, 0xFF"]
             code += ["addu $t0, $t0, $s1"]
         else:
-            code = ["lbu $t1, 1($t0)", "lbu $t2, 2($t0)", "sll $t2, $t2, 8",
+            code = [*fetch_word("$t2"), "sll $t2, $t2, 8",
                     "or $t1, $t1, $t2"]
             if mode in ("ind_x", "ind_y"):
                 code = ["lbu $t1, 1($t0)"]
                 if mode == "ind_x":
                     code += ["addu $t1, $t1, $a5", "andi $t1, $t1, 0xFF"]
                 code += ["addu $t2, $s1, $t1",
-                        "addiu $t1, $t1, 1", "andi $t1, $t1, 0xFF", "addu $t0, $s1, $t1",
-                        "lbu $t1, 0($t2)", "lbu $t2, 0($t0)", "sll $t2, $t2, 8",
-                        "or $t1, $t1, $t2"]
+                         "addiu $t1, $t1, 1", "andi $t1, $t1, 0xFF", "addu $t0, $s1, $t1"]
+                if schedule_operands:
+                    code += ["lbu $t0, 0($t0)", "lbu $t1, 0($t2)", "sll $t0, $t0, 8",
+                             "or $t1, $t1, $t0"]
+                else:
+                    code += ["lbu $t1, 0($t2)", "lbu $t2, 0($t0)", "sll $t2, $t2, 8",
+                             "or $t1, $t1, $t2"]
             indexed = mode in ("absx", "absy", "ind_y")
             if indexed:
                 index = "$a5" if mode == "absx" else "$a6"
@@ -63,6 +82,9 @@ def native_handlers(mapper=0, mmc1_20k=False):
                     code += ["andi $t1, $t0, 0x8000", "bne $t1, $zero, nes_native_mapper_serial",
                              "or $a0, $t0, $zero", "sltiu $t1, $t0, 0x2000",
                              "beq $t1, $zero, nes_absolute_store"]
+                elif runtime and mapper == 4 and op == 0x8d:
+                    code += ["sltiu $t1, $t0, 0x2000",
+                             "beqz $t1, nes_native_mmc3_select", "nop"]
                 else:
                     code += ["sltiu $t1, $t0, 0x2000", "beq $t1, $zero, nes_thread_slow"]
                 code += ["andi $t0, $t0, 0x7FF", "addu $t0, $t0, $s1"]
@@ -71,12 +93,12 @@ def native_handlers(mapper=0, mmc1_20k=False):
                 read = f"nes_native_{op:02x}_read"
                 # Low-strobe controller reads only shift the latched snapshot.
                 # A live read still goes through the asynchronous pad bridge.
-                serial = mapper == 1 and op in (0xad, 0xbd)
+                serial = mapper in (1, 4) and op in (0xad, 0xbd)
                 io = f"nes_native_{op:02x}_io" if serial else "nes_thread_slow"
                 lower = io
                 lower_test = "nop"
                 cartridge_ram = []
-                if mmc1_20k:
+                if ram_bias:
                     # The lower half here excludes mirrored CPU RAM. Preserve
                     # t0 for controller I/O and t2 for an indexed page penalty.
                     # Disabled SRAM uses the original bus path to regain open bus.
@@ -84,7 +106,7 @@ def native_handlers(mapper=0, mmc1_20k=False):
                     lower_test = "sltiu $t1, $t0, 0x6000"
                     cartridge_ram = [
                         lower + ":", f"bne $t1, $zero, {io}", "andi $t1, $t0, 0x1FFF",
-                        "ld $t0, global_mapramenable-global_nesmmc1bias($a3)",
+                        f"ld $t0, global_mapramenable-global_{ram_bias}($a3)",
                         "beq $t0, $zero, nes_thread_slow", "nop",
                         "la $t0, global_mapram", f"b {read}", "addu $t0, $t0, $t1",
                     ]
@@ -128,7 +150,13 @@ def native_handlers(mapper=0, mmc1_20k=False):
     def value_op(op, mode, code):
         length, cycles = modes[mode]
         phase = {"ind_x": 5, "ind_y": 4}.get(mode, 3 if mode.startswith("abs") else None)
-        handler(op, length, cycles, operand(op, mode) + code, phase)
+        read = operand(op, mode)
+        # The final native data load is past every bus fallback. Advance PC
+        # in its load-use gap before executing the register-only operation.
+        advance_early = schedule_operands and read[-1] in ("lbu $v1, 0($t0)", "lbu $v1, 1($t0)")
+        if advance_early:
+            read.append(f"addiu $a1, $a1, {length}")
+        handler(op, length, cycles, read + code, phase, advance_pc=not advance_early)
 
     def nz(reg):
         return [f"or $a7, {reg}, $zero", f"or $t8, {reg}, $zero"]
@@ -226,7 +254,7 @@ def native_handlers(mapper=0, mmc1_20k=False):
         handler(op, length, cycles + 2, operand(op, mode, write=True) +
                 ["lbu $v1, 0($t0)", f"addiu $v1, $v1, {change}", "andi $v1, $v1, 0xFF",
                  "sb $v1, 0($t0)", *nz("$v1")])
-    if mapper == 1:
+    if mapper in (1, 4):
         # Ordinary RMW instructions only use this path for internal RAM. MMIO
         # and mapper addresses go through both bus writes in the portable core.
         for base, operation in (
@@ -242,6 +270,14 @@ def native_handlers(mapper=0, mmc1_20k=False):
                 op = base + offset
                 handler(op, modes[mode][0], cycles, operand(op, mode, write=True) +
                         ["lbu $v1, 0($t0)", *operation, "sb $v1, 0($t0)", *nz("$v1")], phase)
+    if mapper == 4:
+        for op, mode, cycles, phase, delta in (
+            (0xCE, "abs", 3, 2, -1), (0xDE, "absx", 7, 6, -1),
+            (0xEE, "abs", 6, 5, 1), (0xFE, "absx", 7, 6, 1),
+        ):
+            handler(op, modes[mode][0], cycles, operand(op, mode, write=True) +
+                    ["lbu $v1, 0($t0)", f"addiu $v1, $v1, {delta}", "andi $v1, $v1, 255",
+                     "sb $v1, 0($t0)", *nz("$v1")], phase)
     # A branch that is not taken never reaches the portable core's
     # operand read. Fetch the displacement only on the taken path.
     for op, flag, mask, take_when_set, idle_offsets in (
@@ -257,17 +293,17 @@ def native_handlers(mapper=0, mmc1_20k=False):
                 f"{branch} $t1, $zero, {label}_not_taken",
                 "addiu $t1, $a1, 2", "lb $t2, 1($t0)"]
         for offset in idle_offsets:
-            if mapper != 1:
+            if mapper not in (1, 4):
                 code += [f"addiu $t0, $zero, {offset}", "beq $t2, $t0, nes_thread_slow", "nop"]
                 continue
             # Only the documented polling shapes need the portable handler.
-            # Crossing a physical half must use its ordinary mapped-bus check.
+            # Crossing a physical bank must use the ordinary mapped-bus check.
             skip = f"{label}_skip_{-offset}"
             back = -offset - 2
             first = 0xa5 if offset == -4 else 0xad
             code += [f"addiu $t1, $zero, {offset}", f"bne $t2, $t1, {skip}",
                      "andi $t1, $a1, 0x8000", f"beq $t1, $zero, {skip}",
-                     "andi $t1, $a1, 0x3fff", f"sltiu $t1, $t1, {back}",
+                     f"andi $t1, $a1, {0x3fff if mapper == 1 else 0x1fff}", f"sltiu $t1, $t1, {back}",
                      "bne $t1, $zero, nes_thread_slow", "nop", f"lbu $t1, -{back}($t0)",
                      f"xori $t1, $t1, {first}", "beq $t1, $zero, nes_thread_slow", "nop",
                      skip + ":", "addiu $t1, $a1, 2"]
@@ -280,9 +316,9 @@ def native_handlers(mapper=0, mmc1_20k=False):
         ]
         handlers[op] = "\n".join(code)
 
-    handlers[0x4C] = """nes_native_4c:
-lbu $t1, 1($t0)
-lbu $t2, 2($t0)
+    jump_word = "\n".join(fetch_word("$t2"))
+    handlers[0x4C] = f"""nes_native_4c:
+{jump_word}
 sll $t0, $t2, 8
 or $t1, $t1, $t0
 beq $a1, $t1, nes_thread_slow
@@ -333,39 +369,43 @@ daddiu $a2, $a2, -3
 nes_idle_repeat_count:"""
         repeats = bytes(max(0, (budget - 1) // 3) for budget in range(132))
         handlers[0x4C] += "\n" + "\n".join(f".word 0x{repeats[i:i+4].hex()}" for i in range(0, 132, 4))
-    handlers[0x20] = """nes_native_20:
-lbu $t1, 1($t0)
-lbu $v1, 2($t0)
+    stack_slot = "global_s-global_nesmmc3bias($a3)" if mapper == 4 else "0($t1)"
+    stack_pointer = "" if mapper == 4 else "la $t1, global_s\n"
+    jsr_address = ["addu $t0, $s1, $t2", "srl $v0, $a1, 8"]
+    if schedule_operands:
+        jsr_address.reverse()
+    jsr_word = "\n".join(fetch_word("$v1"))
+    jsr_stack_address = "\n".join(jsr_address)
+    handlers[0x20] = f"""nes_native_20:
+{jsr_word}
 sll $t0, $v1, 8
 or $a0, $t0, $t1
 addiu $a1, $a1, 2
-la $t1, global_s
-ld $t2, 0($t1)
-addu $t0, $s1, $t2
-srl $t2, $a1, 8
-sb $t2, 0x100($t0)
-ld $t2, 0($t1)
+{stack_pointer}ld $t2, {stack_slot}
+{jsr_stack_address}
+sb $v0, 0x100($t0)
 addiu $t2, $t2, -1
 andi $t2, $t2, 0xFF
 addu $t0, $s1, $t2
 sb $a1, 0x100($t0)
 addiu $t2, $t2, -1
 andi $t2, $t2, 0xFF
-sd $t2, 0($t1)
+sd $t2, {stack_slot}
 or $a1, $a0, $zero
 addiu $v0, $zero, 5
 b nes_thread_check
 daddiu $a2, $a2, -6"""
-    handlers[0x60] = """nes_native_60:
-la $t0, global_s
-ld $t2, 0($t0)
+    stack_slot = "global_s-global_nesmmc3bias($a3)" if mapper == 4 else "0($t0)"
+    stack_pointer = "" if mapper == 4 else "la $t0, global_s\n"
+    handlers[0x60] = f"""nes_native_60:
+{stack_pointer}ld $t2, {stack_slot}
 addiu $t2, $t2, 1
 andi $t2, $t2, 0xFF
 addu $t1, $s1, $t2
 lbu $a0, 0x100($t1)
 addiu $t2, $t2, 1
 andi $t2, $t2, 0xFF
-sd $t2, 0($t0)
+sd $t2, {stack_slot}
 addu $t1, $s1, $t2
 lbu $t2, 0x100($t1)
 sll $t2, $t2, 8
@@ -374,7 +414,110 @@ addiu $a1, $a1, 1
 andi $a1, $a1, 0xFFFF
 b nes_thread_check
 daddiu $a2, $a2, -6"""
+    if mapper == 4 and runtime:
+        handlers.update(mmc3_control_handlers())
     return handlers, ["\n".join(reader) for reader in common_reads.values()]
+
+
+def mmc3_control_handlers():
+    """Complete the runtime MMC3 opcode table with stack and control ops."""
+    def state(name):
+        return f"global_{name}-global_nesmmc3bias($a3)"
+
+    stack = state("s")
+
+    def push(value):
+        return [f"addu $t1, $s1, $t2", f"sb {value}, 0x100($t1)",
+                "addiu $t2, $t2, -1", "andi $t2, $t2, 0xFF"]
+
+    def pop(value):
+        return ["addiu $t2, $t2, 1", "andi $t2, $t2, 0xFF",
+                "addu $t1, $s1, $t2", f"lbu {value}, 0x100($t1)"]
+
+    status = ["andi $t0, $t8, 0x80", f"ld $t1, {state('fv')}",
+              "andi $t1, $t1, 0x80", "srl $t1, $t1, 1", "or $t0, $t0, $t1",
+              "ori $t0, $t0, 0x30", f"ld $t1, {state('fd')}",
+              "sll $t1, $t1, 3", "or $t0, $t0, $t1", f"ld $t1, {state('fi')}",
+              "sll $t1, $t1, 2", "or $t0, $t0, $t1", "srl $t1, $t9, 8",
+              "andi $t1, $t1, 1", "or $t0, $t0, $t1", "andi $t1, $a7, 0xFF",
+              "sltiu $t1, $t1, 1", "sll $t1, $t1, 1", "or $t0, $t0, $t1",
+              f"sd $t0, {state('tmp')}"]
+    restore_status = [
+        f"sd $t0, {state('tmp')}", "or $t8, $t0, $zero", "sll $t1, $t0, 1",
+        f"sd $t1, {state('fv')}", "andi $t9, $t0, 1", "sll $t9, $t9, 8",
+        "andi $a7, $t0, 2", "xori $a7, $a7, 2", "srl $t1, $t0, 3",
+        "andi $t1, $t1, 1", f"sd $t1, {state('fd')}", "srl $a0, $t0, 2",
+        "andi $a0, $a0, 1", f"sd $a0, {state('fi')}",
+    ]
+    def code(op, lines):
+        return "\n".join((f"nes_native_{op:02x}:", *lines))
+
+    def finish(cycles):
+        return ["b nes_thread_check", f"daddiu $a2, $a2, -{cycles}"]
+
+    def implied(op, cycles, lines):
+        return code(op, [*lines, "addiu $a1, $a1, 1", *finish(cycles)])
+
+    def poll_irq(cycles, flag_in_a0=False):
+        fallthrough = f"nes_mmc3_status_continue_{cycles}"
+        return [
+            *([f"bnez $a0, {fallthrough}", f"ld $t0, {state('mapirq')}"] if flag_in_a0
+              else [f"ld $t0, {state('mapirq')}"]),
+            f"beqz $t0, {fallthrough}", f"ld $t1, {state('budget')}",
+            # CpuEndWindow clears Left before CpuNextOp charges this opcode.
+            "dsubu $t1, $t1, $a2", f"sd $t1, {state('budget')}",
+            "b nes_thread_end", f"daddiu $a2, $zero, -{cycles}",
+            fallthrough + ":", *finish(cycles),
+        ]
+
+    return {
+        0x08: implied(0x08, 3, [f"ld $t2, {stack}", *status, *push("$t0"), f"sd $t2, {stack}"]),
+        0x78: implied(0x78, 2, ["addiu $t1, $zero, 1", f"sd $t1, {state('fi')}"]),
+        0xB8: implied(0xB8, 2, [f"sd $zero, {state('fv')}"]),
+        0xD8: implied(0xD8, 2, [f"sd $zero, {state('fd')}"]),
+        0xF8: implied(0xF8, 2, ["addiu $t1, $zero, 1", f"sd $t1, {state('fd')}"]),
+        0x00: code(0x00, [
+            "addiu $a1, $a1, 2", "andi $a1, $a1, 0xFFFF",
+            f"ld $t2, {stack}", "srl $t0, $a1, 8", *push("$t0"), *push("$a1"),
+            *status, *push("$t0"), f"sd $t2, {stack}",
+            "addiu $t0, $zero, 1", f"sd $t0, {state('fi')}",
+            # Both vector bytes always use the ordinary top PRG window.
+            "ld $t1, 24($a3)", "ori $t2, $zero, 0xFFFE", "addu $t1, $t1, $t2",
+            "lbu $v1, 1($t1)", "lbu $t0, 0($t1)", "sll $t1, $v1, 8",
+            "or $a1, $t0, $t1", *finish(7),
+        ]),
+        0x28: code(0x28, [
+            f"ld $t2, {stack}", *pop("$t0"), f"sd $t2, {stack}", *restore_status,
+            "addiu $a1, $a1, 1", *poll_irq(4, flag_in_a0=True),
+        ]),
+        0x40: code(0x40, [
+            f"ld $t2, {stack}", *pop("$t0"), *restore_status,
+            *pop("$a1"), f"sd $a1, {state('lo')}",
+            *pop("$t0"), f"sd $t0, {state('hi')}", f"sd $t2, {stack}",
+            "sll $t0, $t0, 8", "or $a1, $a1, $t0",
+            *poll_irq(6, flag_in_a0=True),
+        ]),
+        0x58: code(0x58, [
+            f"sd $zero, {state('fi')}", "addiu $a1, $a1, 1", *poll_irq(2),
+        ]),
+        0x6C: code(0x6C, [
+            "lbu $t2, 2($t0)", "lbu $t1, 1($t0)", "sll $t2, $t2, 8",
+            "or $t0, $t1, $t2", "sltiu $t1, $t0, 0x2000",
+            "bnez $t1, nes_mmc3_jump_ind_ram", "andi $t1, $t0, 0x8000",
+            # Device and SRAM reads retain the shared bus and timing path.
+            "beqz $t1, nes_thread_slow", "andi $t1, $t0, 0x6000",
+            "srl $t1, $t1, 10", "addu $t1, $t1, $a3", "ld $t1, 0($t1)",
+            "b nes_mmc3_jump_ind_read", "or $t2, $t0, $zero",
+            "nes_mmc3_jump_ind_ram:", "or $t1, $s1, $zero", "andi $t2, $t0, 0x7FF",
+            "nes_mmc3_jump_ind_read:", f"sd $t0, {state('ea')}",
+            # The high byte wraps within the first byte's guest page.
+            "andi $t0, $t2, 0xFF00", "addiu $a0, $t2, 1",
+            "andi $a0, $a0, 0xFF", "or $t0, $t0, $a0",
+            "addu $t2, $t2, $t1", "addu $t0, $t0, $t1",
+            "lbu $v1, 0($t0)", "lbu $t2, 0($t2)", "sll $t0, $v1, 8",
+            "or $a1, $t2, $t0", "addiu $v0, $zero, 4", *finish(5),
+        ]),
+    }
 
 
 
@@ -388,9 +531,9 @@ def table(labels):
 
 # Inputs are guest PC in t0 and decoded opcode in a0. Return the aligned
 # guest base in t0, the host bias in t1 and the safe fetch extent in t2.
-MMC1_EXEC_REGION = """andi $t1, $t0, 0x8000
+EXEC_REGION = """andi $t1, $t0, 0x8000
 bne $t1, $zero, nes_exec_prg
-andi $t1, $t0, 0x3fff
+andi $t1, $t0, {prg_mask}
 sltiu $t1, $t0, 0x2000
 bne $t1, $zero, nes_exec_ram
 andi $t1, $t0, 0x7ff
@@ -417,15 +560,15 @@ subu $t1, $t1, $t0
 b nes_exec_entry
 ori $t2, $zero, 0x7fd
 nes_exec_prg:
-sltiu $t1, $t1, 0x3ffd
+sltiu $t1, $t1, {prg_extent}
 beq $t1, $zero, nes_thread_portable
-andi $t0, $t0, 0xc000
-andi $t1, $t0, 0x4000
-srl $t1, $t1, 11
-la $t2, global_nesmmc1bias
+andi $t0, $t0, {prg_base_mask}
+andi $t1, $t0, {slot_mask}
+srl $t1, $t1, {slot_shift}
+la $t2, {bias}
 addu $t1, $t1, $t2
 ld $t1, 0($t1)
-ori $t2, $zero, 0x3ffd
+ori $t2, $zero, {prg_extent}
 nes_exec_entry:"""
 
 
@@ -480,14 +623,15 @@ nes_chain_exit:
 """
 
 
-def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nrom: bool = False, mmc1_20k: bool = False) -> str:
+def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nrom: bool = False,
+                 mmc1_20k: bool = False, runtime: bool = False) -> str:
     old_table = re.search(r"^nes_opcode_table:\n(?P<words>(?:    \.word .*\n)+)", source, re.M)
     if old_table is None:
         raise ValueError("VR4300 opcode table is missing")
     portable = re.findall(r"__ul_cpurun_\w+", old_table["words"])
     if len(portable) != 256:
         raise ValueError("VR4300 opcode table has wrong size")
-    handlers, readers = native_handlers(mapper, mmc1_20k)
+    handlers, readers = native_handlers(mapper, mmc1_20k, runtime)
     if any(portable[op] == "__ul_cpurun_illegal" for op in handlers):
         raise ValueError("Native opcode table covers an unsupported guest instruction")
     boot_table = ["nes_thread_enter" if op in handlers else portable[op] for op in range(256)]
@@ -498,11 +642,18 @@ def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nr
     live = (("left", "$a2"), ("prgbias", "$a3"), ("a", "$a4"), ("x", "$a5"),
             ("y", "$a6"), ("fz", "$a7"), ("fn", "$t8"), ("fc", "$t9"),
             ("nesinstructions", "$t3"), ("accessphase", "$v0"))
-    if mapper == 1:
+    banked = mapper in (1, 4)
+    window = 0x4000 if mapper == 1 else 0x2000
+    bias = "global_nesmmc1bias" if mapper == 1 else "global_nesmmc3bias"
+    if banked:
         live = tuple(reg for reg in live if reg[0] != "prgbias")
     load = "\n".join(f"la $t1, global_{name}\nld {reg}, 0($t1)" for name, reg in live)
-    if mapper == 1:
-        load += "\nla $a3, global_nesmmc1bias"
+    if banked:
+        load += f"\nla $a3, {bias}"
+    if mapper == 4:
+        # The bank-bias table and CPU scalars share the same small data range.
+        load = "\n".join([f"la $a3, {bias}"] +
+                         [f"ld {reg}, global_{name}-{bias}($a3)" for name, reg in live])
 
     # A mapper write exits the native span. Cache the bias of the current
     # contiguous region until the next opcode or its operands leave it. RAM
@@ -520,8 +671,11 @@ def stage_thread(source: str, mapper: int = 0, has_waits: bool = False, chain_nr
     save_region = ""
     restore_region = ""
     guest_pc = "or $a1, $t0, $zero"
-    if mapper == 1:
-        entry_guard = MMC1_EXEC_REGION
+    if banked:
+        entry_guard = EXEC_REGION.format(prg_mask=window-1, prg_extent=window-3,
+                                         prg_base_mask=0x10000-window,
+                                         slot_mask=0x8000-window,
+                                         slot_shift=window.bit_length()-4, bias=bias)
         stack_size = 48
         save_region = """sd $ra, 40($sp)
 sd $s2, 16($sp)
@@ -535,10 +689,31 @@ or $s4, $t2, $zero"""
         first_dispatch = "b nes_thread_dispatch\naddu $t0, $a1, $s3"
         next_fetch = ("nes_chain_fetch:\nsubu $t1, $a1, $s2\nsltu $t1, $t1, $s4\n"
                       "beq $t1, $zero, nes_thread_fetch\naddu $t0, $a1, $s3")
+    rebase = ""
+    if mapper == 4:
+        next_fetch = next_fetch.replace("nes_thread_fetch", "nes_thread_rebase")
+        # Crossing into another ROM bank can keep the live CPU registers.
+        # Border bytes still use the mapped bus for each operand.
+        rebase = """nes_thread_rebase:
+andi $t1, $a1, 0x8000
+beqz $t1, nes_thread_fetch
+andi $t1, $a1, 0x1fff
+sltiu $t1, $t1, 0x1ffd
+beqz $t1, nes_thread_fetch
+andi $s2, $a1, 0xe000
+andi $t1, $s2, 0x6000
+srl $t1, $t1, 10
+addu $t1, $t1, $a3
+ld $s3, 0($t1)
+ori $s4, $zero, 0x1ffd
+addu $t0, $a1, $s3
+b nes_thread_dispatch
+lbu $a0, 0($t0)
+"""
     check = "daddiu $t3, $t3, 1\n" + next_fetch
     dispatch_jump = "jr $t1\nor $v1, $a0, $zero"
     undo_charge = ""
-    if mapper == 1:
+    if banked:
         # The region subtraction fills the budget branch's delay slot. The
         # table load can publish open bus while the jump target is in flight.
         # Charge the opcode in the jump delay slot and undo it on fallback.
@@ -547,6 +722,8 @@ or $s4, $t2, $zero"""
         undo_charge = "daddiu $t3, $t3, -1\n"
     publish = (("pc", "$a1"), ("nesopenbus", "$v1")) + tuple(r for r in live if r[0] != "prgbias")
     store = "\n".join(f"la $t1, global_{name}\nsd {reg}, 0($t1)" for name, reg in publish)
+    if mapper == 4:
+        store = "\n".join(f"sd {reg}, global_{name}-{bias}($a3)" for name, reg in publish)
     thread = f"""nes_thread_enter:
 addiu $t0, $a1, -1
 andi $t0, $t0, 0xFFFF
@@ -575,7 +752,7 @@ andi $a1, $a1, 0xFFFF
 la $t0, nes_thread_portable
 b nes_thread_flush
 nop
-nes_thread_fetch:
+{rebase}nes_thread_fetch:
 la $t0, __ul_cpurun_slowfetch
 b nes_thread_flush
 nop
@@ -638,10 +815,11 @@ addiu $a1, $a1, 3
 b nes_thread_check
 addiu $a2, $zero, -4
 """
+    if mapper == 1 or (runtime and mapper == 4):
         # Rejoin STA after CpuFetchAddress with the high address byte on the
         # guest bus. The original store applies all side effects and retires once.
-        thread += """nes_absolute_store:
-sd $a0, global_ea-global_nesmmc1bias($a3)
+        thread += f"""nes_absolute_store:
+sd $a0, global_ea-{bias}($a3)
 srl $v1, $a0, 8
 addiu $a1, $a1, 3
 andi $a1, $a1, 0xffff
@@ -650,8 +828,31 @@ la $t0, __ul_cpurun_nesstoreabsolute
 b nes_thread_flush
 daddiu $t3, $t3, -1
 """
+    if runtime and mapper == 4:
+        # Same selector-only case as the runtime MMC3 bus. Mode changes and
+        # device writes still use the synchronized CPU bus.
+        thread += """nes_native_mmc3_select:
+andi $t1, $t0, 0xe001
+ori $t2, $zero, 0x8000
+bne $t1, $t2, nes_absolute_store
+or $a0, $t0, $zero
+ld $t1, global_mapselect-global_nesmmc3bias($a3)
+xor $t1, $t1, $a4
+andi $t1, $t1, 0xc0
+bnez $t1, nes_absolute_store
+nop
+sd $a4, global_mapselect-global_nesmmc3bias($a3)
+or $v1, $a4, $zero
+addiu $v0, $zero, 3
+addiu $a1, $a1, 3
+b nes_thread_check
+daddiu $a2, $a2, -4
+"""
+    # Separate the threaded entry from the scheduler's hot instruction-cache
+    # sets on the VR4300. The opcode table jumps over this unused space.
+    cache_gap = "    .word 0,0,0,0,0,0,0,0\n" * 16 if runtime and mapper == 4 else ""
     body = (
-        "nes_opcode_table:\n" + table(boot_table) + "\n" + assembly(thread) + "\n" +
+        "nes_opcode_table:\n" + table(boot_table) + "\n" + cache_gap + assembly(thread) + "\n" +
         "\n".join(assembly(code) for code in (*handlers.values(), *readers)) + "\n" +
         "nes_thread_portable_table:\n" + table(portable) + "\n" +
         "nes_thread_table:\n" + table(thread_table) + "\n"
