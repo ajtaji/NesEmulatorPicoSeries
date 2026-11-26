@@ -415,6 +415,9 @@ Procedure RunGame()
   CompilerIf #NES_CONSOLE_RECORD
     NesRecOpen()
     If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : NesRecRefused(2) : ProcedureReturn : EndIf
+    CompilerIf #NES_APU_SPLIT
+      NesSynInit(NesMmc3ApuClock)       ; as in the build without the record (below): the synthesis's start
+    CompilerEndIf
     If NesShowInit()=0 : NesRecRefused(3) : ProcedureReturn : EndIf
   CompilerElse
   If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf

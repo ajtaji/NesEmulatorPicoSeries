@@ -42,16 +42,16 @@ def triangle_mean_table(source: str) -> str:
 
 def stage_apu_split(source: str) -> str:
     """The runtime MMC3 cartridge's APU split (design note N.25): the timing in the hot unit, the
-    synthesis by block from its log. ApuDmcFetch / ApuTick give way to apusplit.n64 (the stubs into
-    the unit, the log, the synthesis); ApuAdvance moves into the unit; ApuWrite logs itself at its
-    end, after its effects, instead of opening the old sound boundary at its start."""
-    begin = source.index("Procedure ApuDmcFetch()")
-    end = source.index("Procedure ApuMixSampleBase()", begin)
+    synthesis by block from its log. ApuWrite logs itself at its end, after its effects, instead of
+    opening the old sound boundary at its start. The whole old sound path - ApuVolume, ApuTarget,
+    ApuQuarter, ApuHalf, ApuDmcFetch, ApuTick, ApuMixSampleBase and ApuAdvance - gives way to
+    apusplit.n64 (the stubs into the unit, the log, the synthesis): since N6 nothing calls the rest
+    of it (design note N.26a; the ApuMixSample adapter goes with it, in stage_audio below)."""
+    begin = source.index("Procedure.i ApuVolume(ch.i)")
+    end = source.index("Procedure ApuWrite(addr.i, value.i)", begin)
+    if "Procedure ApuAdvance(dt.i)" not in source[begin:end]:
+        raise ValueError("N64 audio staging expected ApuAdvance before ApuWrite")
     source = source[:begin] + 'XIncludeFile "../n64/apusplit.n64"\n' + source[end:]
-    scheduler = re.search(r"^Procedure ApuAdvance\(dt\.i\)\n.*?^EndProcedure$", source, re.M | re.S)
-    if not scheduler:
-        raise ValueError("N64 audio staging expected ApuAdvance")
-    source = replace(source, scheduler[0], "")
     source = replace(source, "  WorkerIrq=ApuFrameIrq|DmcIrq\nEndProcedure\nProcedure.i ApuReadStatus()",
                      "  NesApuLogWrite(r,value)\n  WorkerIrq=ApuFrameIrq|DmcIrq\nEndProcedure\n"
                      "Procedure.i ApuReadStatus()")
@@ -61,6 +61,14 @@ def stage_apu_split(source: str) -> str:
 def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000, split: bool = False) -> str:
     if name == "lookup_tables":
         return triangle_mean_table(source)
+    if split and name == "mapper_adapters":
+        # the split's synthesis mixes by block (apusynth.n64): the per-sample adapter has no caller
+        adapter = re.search(r"^Procedure ApuMixSample\(\)\n.*?^EndProcedure\n", source, re.M | re.S)
+        if not adapter:
+            raise ValueError("N64 audio staging expected ApuMixSample")
+        return replace(source, adapter[0], "")
+    if split and name == "mapper_state":
+        return replace(source, "Declare ApuMixSample()\n", "")
     if name == "bridge":
         shared = re.search(r"^Procedure\.i NesPost\(.*?^Procedure\.i NesRpc\(.*?^EndProcedure",
                            source, re.M | re.S)
@@ -83,13 +91,13 @@ def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000, sp
                          "      WorkerPpuUs=WorkerPpuUs+NesHostUs()-timer\n", "      PpuAdvance(dt)\n")
         return replace(source, "  QResult=0\n  If command=1", "  QResult=0\n  If command=0 : ProcedureReturn : EndIf\n  If command=1")
     if name == "apu":
+        if split:
+            return stage_apu_split(source)
         if audio_rate == 20000:
             source = replace(source, "ApuOutput=ApuLastY*65400", "ApuOutput=ApuLastY*65210")
             begin = source.index("Procedure.i ApuVolume(ch.i)")
             end = source.index("Procedure ApuDmcFetch()", begin)
             source = source[:begin] + 'XIncludeFile "../n64/apuframe.n64"\n' + source[end:]
-        if split:
-            return stage_apu_split(source)
         if audio_rate == 20000 or mapper == 4:
             begin = source.index("Procedure ApuDmcFetch()")
             end = source.index("Procedure ApuMixSampleBase()", begin)

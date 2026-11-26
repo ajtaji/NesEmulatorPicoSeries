@@ -38,6 +38,9 @@
 ; than the edge means the two clocks disagree: a loud stop (WorkerError 25).
 ;
 ; CHECKED BY: the oracle's full PCM capture byte for byte against the old path's (N.25's proof).
+; AT ITS PROPER COST (design note N.26a): the driver keeps a run's bookkeeping in registers and
+; calls the DMC replica only from the cycle it is due; the replica does its silent edges in closed
+; form. Same arithmetic, same order of operations: the same samples.
 ; ============================================================================
 
 ; NesSynState, byte offsets (8-byte slots unless said; the registers are bytes)
@@ -126,9 +129,17 @@ ProcedureNaked NesSynRender()
 ; s0-s7, fp kept; everything else clobbered.
 ; Registers: s0 the state, s3 the next log entry (0: none), s4 the cycle from which it applies
 ; before a sample (a step: its cycle; a write: its cycle + 1), s5 / s6 the limits, s1 the run's
-; length, s7 the run's first sample index.
+; length, s7 the run's first sample index, s2 the cycle from which the DMC replica must run
+; (syn_dmc_to's answer: the next edge, or while silent the next logged byte's edge).
+; THE RUN LOOP (design note N.26a, form 2): the run's bookkeeping lives in registers - a0 the
+; sample's cycle (AT), a1 the cadence's fraction, a2 the oscillators' tick point, a3 / a4 / a5 the
+; cadence constants (ApuFracStep, ApuFracDen, ApuSampleBase), a6 / a7 the span and level
+; pointers, t8 the samples this run may take (the count limit and the run's size), t9 the DMC
+; level - and is written back once at the run's end. A sample only calls the DMC replica when its
+; cycle has reached s2 (the slow path spills the run registers round the call).
+; Frame: 0 ra, 8-56 s0, s1, s3-s7, 64 s2, 72-136 the run registers while the replica runs.
 nes_syn_render:
-    daddiu sp, sp, -80
+    daddiu sp, sp, -144
     sd ra, 0(sp)
     sd s0, 8(sp)
     sd s1, 16(sp)
@@ -137,6 +148,7 @@ nes_syn_render:
     sd s5, 40(sp)
     sd s6, 48(sp)
     sd s7, 56(sp)
+    sd s2, 64(sp)
     move s5, a0
     move s6, a1
     la s0, global_nessynstate
@@ -160,55 +172,58 @@ syn_outer:
 syn_event_ready:
     ld s7, #NES_S_DONE(s0)          ; the run's first sample
     move s1, zero
-syn_run_next:
-    ld t0, #NES_S_DONE(s0)
-    slt t1, t0, s5
-    beqz t1, syn_run_end            ; the count limit
-    ld a0, #NES_S_AT(s0)            ; (delay slot) this sample's cycle
-    slt t1, s6, a0
-    bnez t1, syn_run_end            ; the cycle limit
-    slt t1, a0, s4
-    beqz t1, syn_run_end            ; the event comes first
+    dsubu t8, s5, s7                ; the samples the count limit leaves ...
+    blez t8, syn_run_end            ; ... none: the run is empty
+    slti t0, t8, #NES_SYN_RUN
+    bnez t0, syn_run_size
     nop
-    jal syn_dmc_to                  ; the DMC's edges up to and including this sample's cycle
+    addiu t8, zero, #NES_SYN_RUN    ; ... at most a run's size
+syn_run_size:
+    jal syn_dmc_due                 ; s2 = the cycle from which the replica must run
     nop
+    move s2, v0
     ld a0, #NES_S_AT(s0)
-    ld t0, #NES_S_TICK(s0)
-    dsubu t1, a0, t0                ; the span since the oscillators' last tick (<= 90)
-    sd a0, #NES_S_TICK(s0)
-    la t2, global_nessynspans
-    sll t3, s1, 1
-    addu t2, t2, t3
-    sh t1, 0(t2)
-    ld t1, #NES_S_DMCLEVEL(s0)      ; the DMC's level at this sample
-    la t2, global_nessynlevels
-    addu t2, t2, s1
-    sb t1, 0(t2)
-    ; the next sample's cycle (NesApuCount's cadence, apusplit.n64)
     ld a1, #NES_S_FRAC(s0)
-    la t2, global_apufracstep
-    ld t3, 0(t2)
-    daddu a1, a1, t3
-    la t2, global_apufracden
-    ld t3, 0(t2)
-    la t2, global_apusamplebase
-    ld a2, 0(t2)
-    slt t2, a1, t3
-    bnez t2, syn_cadence
-    nop
-    dsubu a1, a1, t3
-    daddiu a2, a2, 1
-syn_cadence:
-    sd a1, #NES_S_FRAC(s0)
-    daddu a0, a0, a2
-    sd a0, #NES_S_AT(s0)
-    ld t0, #NES_S_DONE(s0)
-    daddiu t0, t0, 1
-    sd t0, #NES_S_DONE(s0)
+    ld a2, #NES_S_TICK(s0)
+    la t0, global_apufracstep
+    ld a3, 0(t0)
+    la t0, global_apufracden
+    ld a4, 0(t0)
+    la t0, global_apusamplebase
+    ld a5, 0(t0)
+    la a6, global_nessynspans
+    la a7, global_nessynlevels
+    ld t9, #NES_S_DMCLEVEL(s0)
+syn_run_next:
+    slt t0, s6, a0
+    bnez t0, syn_run_close          ; the cycle limit
+    slt t0, a0, s4
+    beqz t0, syn_run_close          ; the event comes first
+    slt t0, a0, s2                  ; (delay slot) the DMC replica due at this sample?
+    beqz t0, syn_run_dmc
+    dsubu t1, a0, a2                ; (delay slot) the span since the oscillators' last tick (<= 90)
+syn_run_sample:
+    move a2, a0                     ; the tick point moves to this sample
+    sh t1, 0(a6)
+    sb t9, 0(a7)                    ; the DMC's level at this sample
+    ; the next sample's cycle (NesApuCount's cadence, apusplit.n64)
+    daddu a1, a1, a3
+    slt t0, a1, a4
+    bnez t0, syn_run_cadence
+    daddu a0, a0, a5                ; (delay slot) the base interval ...
+    dsubu a1, a1, a4
+    daddiu a0, a0, 1                ; ... plus one when the fraction carries
+syn_run_cadence:
+    daddiu a6, a6, 2
     daddiu s1, s1, 1
-    slti t1, s1, #NES_SYN_RUN
-    bnez t1, syn_run_next
-    nop
+    bne s1, t8, syn_run_next
+    daddiu a7, a7, 1
+syn_run_close:
+    sd a0, #NES_S_AT(s0)            ; the run's bookkeeping back into the state, once
+    sd a1, #NES_S_FRAC(s0)
+    sd a2, #NES_S_TICK(s0)
+    daddu t0, s7, s1
+    sd t0, #NES_S_DONE(s0)
 syn_run_end:
     beqz s1, syn_run_mixed
     move a0, s1                     ; (delay slot) the run's length
@@ -234,6 +249,29 @@ syn_run_mixed:
     daddiu t1, t1, 1
     b syn_outer
     sd t1, 0(t0)
+syn_run_dmc:
+    ; the slow path: the DMC's edges up to and including this sample's cycle (a0)
+    sd a1, 72(sp)
+    sd a2, 80(sp)
+    sd a3, 88(sp)
+    sd a4, 96(sp)
+    sd a5, 104(sp)
+    sd a6, 112(sp)
+    sd a7, 120(sp)
+    jal syn_dmc_to                  ; (a0 kept; v0 = the next cycle it is due)
+    sd t8, 128(sp)
+    move s2, v0
+    ld a1, 72(sp)
+    ld a2, 80(sp)
+    ld a3, 88(sp)
+    ld a4, 96(sp)
+    ld a5, 104(sp)
+    ld a6, 112(sp)
+    ld a7, 120(sp)
+    ld t8, 128(sp)
+    ld t9, #NES_S_DMCLEVEL(s0)      ; the level after the edges
+    b syn_run_sample
+    dsubu t1, a0, a2                ; (delay slot) the span
 syn_exit:
     ld ra, 0(sp)
     ld s0, 8(sp)
@@ -243,8 +281,9 @@ syn_exit:
     ld s5, 40(sp)
     ld s6, 48(sp)
     ld s7, 56(sp)
+    ld s2, 64(sp)
     jr ra
-    daddiu sp, sp, 80
+    daddiu sp, sp, 144
 
 ; ---- apply one log entry (s3; s0 the state). Called from the driver (its ra saved here).
 syn_apply:
@@ -497,12 +536,19 @@ syn_sweep_advance:
 ; moves the level by 2 within 0-127; the register shifts; the bit count down; at the byte's
 ; end the next byte from the DMC log if it was loaded at this very edge, else silent. Then the
 ; next edge is a period later (the period of the rate in force: a $4010 write is applied only
-; between calls, after the edges before it). A leaf: t0-t3, a1-a7 clobbered; a0 kept.
+; between calls, after the edges before it).
+; THE SILENT EDGES IN CLOSED FORM (design note N.26a, form 1): while silent the level holds and
+; an edge changes only the bit count, the shift register and the next edge's cycle; the silence
+; can end only at the edge of the DMC log's next byte (E). So the n edges up to lim = min(a0,
+; E - 1) are done at once - bits = ((bits - 1 - n) & 7) + 1, shift >> n (0 from n = 8: it holds
+; at most 8 bits), next = lim - (lim - next) mod period + period - and the loop runs only from E.
+; Out: v0 = the cycle from which the replica must next run (syn_dmc_due). A leaf: t0-t3, a1-a7,
+; v0, v1 clobbered; a0, t8 and t9 kept.
 syn_dmc_to:
     la t0, global_nessynstate
     ld t1, #NES_S_DMCNEXT(t0)
     slt t2, a0, t1
-    bnez t2, syn_dmc_return         ; the next edge is later
+    bnez t2, syn_dmc_due_at         ; the next edge is later
     nop
     lbu t2, #NES_S_REG+16(t0)
     andi t2, t2, 15
@@ -513,7 +559,54 @@ syn_dmc_to:
     ld a1, #NES_S_DMCSHIFT(t0)
     ld a2, #NES_S_DMCSILENT(t0)
     ld a3, #NES_S_DMCLEVEL(t0)
-    ld a4, #NES_S_DMCBITS(t0)
+    beqz a2, syn_dmc_edge           ; sounding: edge by edge
+    ld a4, #NES_S_DMCBITS(t0)       ; (delay slot)
+    ; silent: lim = a0, or the edge before the next logged byte's
+    move t3, a0
+    la a5, global_nesapudmctail
+    ld a6, 0(a5)
+    ld a7, global_nesapudmchead-global_nesapudmctail(a5)
+    beq a6, a7, syn_dmc_skip        ; no byte waiting
+    andi a7, a6, #NES_APU_DMC_ENTRIES-1
+    sll a7, a7, 3
+    la v1, global_nesapudmclog
+    addu a7, a7, v1
+    ld a7, 0(a7)
+    dsra a7, a7, 8                  ; E, the byte's edge
+    daddiu a7, a7, -1
+    slt v1, a7, t3
+    beqz v1, syn_dmc_skip
+    nop
+    move t3, a7                     ; lim = E - 1
+syn_dmc_skip:
+    dsubu a5, t3, t1                ; lim - next
+    bltz a5, syn_dmc_skipped        ; no edge up to lim
+    dsrl a6, a5, 31                 ; (delay slot) a valid 32-bit operand (below 2^31)?
+    bnez a6, syn_dmc_skip_wide
+    nop
+    divu a5, t2
+    b syn_dmc_skip_n
+    nop
+syn_dmc_skip_wide:
+    ddivu a5, t2
+syn_dmc_skip_n:
+    mflo a5
+    mfhi a6
+    daddiu a5, a5, 1                ; n, the edges up to lim
+    dsubu t1, t3, a6
+    daddu t1, t1, t2                ; next = lim - (lim - next) mod period + period
+    dsubu a4, a4, a5
+    daddiu a4, a4, -1
+    andi a4, a4, 7
+    daddiu a4, a4, 1                ; bits = ((bits - 1 - n) & 7) + 1
+    sltiu a6, a5, 8
+    bnez a6, syn_dmc_skipped
+    dsrlv a1, a1, a5                ; (delay slot) the shift register by n ...
+    move a1, zero                   ; ... empty from 8 on
+syn_dmc_skipped:
+    slt t3, a0, t1
+    bnez t3, syn_dmc_store          ; no edge left up to a0
+    nop
 syn_dmc_edge:
     bnez a2, syn_dmc_shift          ; silent: the level holds
     andi a5, a1, 1
@@ -563,11 +656,36 @@ syn_dmc_step:
     slt t3, a0, t1
     beqz t3, syn_dmc_edge
     nop
+syn_dmc_store:
     sd t1, #NES_S_DMCNEXT(t0)
     sd a1, #NES_S_DMCSHIFT(t0)
     sd a2, #NES_S_DMCSILENT(t0)
     sd a3, #NES_S_DMCLEVEL(t0)
+    b syn_dmc_due_at
     sd a4, #NES_S_DMCBITS(t0)
+
+; ---- syn_dmc_due: v0 = the cycle from which the replica must next run - its next edge while it
+; sounds; while silent the edge of the DMC log's next byte, or "never" with none (the log only
+; grows between renders, never during one). A leaf: t0-t3, v0 clobbered.
+syn_dmc_due:
+    la t0, global_nessynstate
+    ld t1, #NES_S_DMCNEXT(t0)
+syn_dmc_due_at:                     ; (t0 = the state, t1 = the next edge)
+    ld t2, #NES_S_DMCSILENT(t0)
+    beqz t2, syn_dmc_return         ; sounding: the next edge
+    move v0, t1
+    la t2, global_nesapudmctail
+    ld t3, 0(t2)
+    ld t2, global_nesapudmchead-global_nesapudmctail(t2)
+    daddiu v0, zero, -1
+    beq t3, t2, syn_dmc_return      ; no byte waiting: never
+    dsrl v0, v0, 1
+    andi t3, t3, #NES_APU_DMC_ENTRIES-1
+    sll t3, t3, 3
+    la t2, global_nesapudmclog
+    addu t3, t3, t2
+    ld v0, 0(t3)
+    dsra v0, v0, 8                  ; the byte's edge
 syn_dmc_return:
     jr ra
     nop

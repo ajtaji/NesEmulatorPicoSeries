@@ -11,6 +11,9 @@ Global Dim NesApuLog.i(#NES_APU_LOG_ENTRIES*2)
 Global Dim NesApuDmcLog.i(#NES_APU_DMC_ENTRIES)
 ; THE SAMPLE COUNT the host reads (ApuProduced): its next sample's APU cycle (NesApuCount below).
 Global NesApuSampleAt.i
+; THE FAST PATH'S TEST (unit/apu.n64, design note N.26a): the APU cycles from ApuFrameClock to the
+; frame sequencer's next event, or 0 while a $4017 reset counts down; kept by the unit only.
+Global NesApuQuiet.i
 
 ProcedureNaked ApuAdvance(dt.i)
   ; The body is in the hot unit (n64/unit/apu.n64, inside cpu6502.n64's procedure); outside
@@ -30,7 +33,7 @@ ProcedureNaked ApuDmcFetch()
 EndProcedure
 
 ProcedureNaked NesApuLogWrite(r.i, value.i)
-  ; Called at the end of the staged ApuWrite: the write into the log (n64/unit/apu_cold.n64).
+  ; Called at the end of the staged ApuWrite: the write into the log (n64/unit/apu.n64).
   ASM
     j u_apulogwrite
     nop
