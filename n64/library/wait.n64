@@ -91,8 +91,11 @@ Global Dim NesMmc3WaitCache.q(1024)
 Global NesMmc3WaitIndex.i, NesMmc3WaitRules.i
 Declare.i NesMmc3RamWaitBatch(n.i, coalesce.i, rule.i)
 
+; Word 0 of each bank's rule block is never a rule (slots start at 1). It holds the bank's PAGE BITS: bit p set
+; when the bank's 256-byte page p has a nonzero index byte (a rule or the 255 mark), so the look-up in the hot
+; unit (u_nesramwaitrule, unit/window.n64) reads the index byte only for a PC in such a page (design note N.47a).
 Procedure NesRuntimeIndexMmc3Waits()
-  Protected bank.i, pc.i, rule.i, slot.i, index.i, rules.i, base.i, limit.i, saved.i
+  Protected bank.i, pc.i, rule.i, slot.i, index.i, rules.i, base.i, limit.i, saved.i, pages.i
   ; Place the immutable index after the cart image, inside the same arena.
   ; Large images leave the existing bounded on-demand cache available.
   base=(CartChr+MapChrBytes+7)&~7
@@ -105,6 +108,7 @@ Procedure NesRuntimeIndexMmc3Waits()
     NesMmc3Bias(0)=CartPrg+(bank<<13)-$8000
     index=base+(bank<<13)-$8000
     slot=1
+    pages=0
     For pc=$8000 To $9FFF
       rule=NesRamWaitRule(pc)
       If rule=0
@@ -113,10 +117,13 @@ Procedure NesRuntimeIndexMmc3Waits()
         PokeA(index+pc,slot)
         PokeL(rules+(bank<<10)+slot*4,rule)
         slot+1
+        pages=pages|(1<<((pc>>8)&31))
       Else
         PokeA(index+pc,255)
+        pages=pages|(1<<((pc>>8)&31))
       EndIf
     Next
+    PokeL(rules+(bank<<10),pages)
   Next
   NesMmc3Bias(0)=saved
   NesMmc3WaitIndex=base : NesMmc3WaitRules=rules

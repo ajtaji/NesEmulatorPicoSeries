@@ -25,6 +25,15 @@ nes_mmc3_wait_scalar:
   ; runs it): none for a0 <= 0, Stopped, NesStall, the idle batching off or PC below $8000; else the immutable
   ; index (a byte a PRG address: 0 none, 255 the hashed cache, else a slot of the bank's rules). Keeps a0, a1,
   ; a5; clobbers t0-t3, a3.
+  ; C5 (design note N.47a): the index byte is read only when PC's 256-byte page holds a nonzero one. Word 0 of the
+  ; bank's rule block (never a rule: slots start at 1) has bit p set when page p of the bank does (written by
+  ; NesRuntimeIndexMmc3Waits, library/wait.n64). A page with the bit clear has only 0 bytes, so the result is the
+  ; same; the byte's D-miss, ~44 cycles at most window ends, and the guest code line its fill evicted, are gone.
+  ; THE PLAIN TWIN of the indexed part:
+  ;   block = NesMmc3WaitRules + bank * 1024
+  ;   If PeekL(block) >> ((PC >> 8) & 31) & 1 = 0 : rule = 0 : ProcedureReturn : EndIf
+  ;   slot = PeekA(NesMmc3WaitIndex + bank * 8192 + (PC & 8191))
+  ;   If slot = 0 : rule = 0 : ElseIf slot = 255 : (the hashed cache) : Else : rule = PeekL(block + slot * 4) : EndIf
 u_nesramwaitrule:
     blez a0, nes_mmc3_wait_none
     nop
@@ -42,25 +51,30 @@ u_nesramwaitrule:
     srl t1, t1, 10
     daddiu t1, t1, global_mapprgslots-global_pc
     addu t1, t1, t2
-    lw t1, 4(t1)
+    lw t1, 4(t1)                ; t1 = PC's bank (kept for the hashed cache, with t0 = PC)
     daddiu t2, t2, global_nesmmc3waitindex-global_pc
-    ld t3, 0(t2)
+    ld t3, 0(t2)                ; the index (0: not built, the hashed cache answers)
+    ld a3, global_nesmmc3waitrules-global_nesmmc3waitindex(t2)
     beqz t3, nes_mmc3_wait_cache_lookup
+    sll a2, t1, 10
+    daddu a3, a3, a2            ; a3 = the bank's rule block; its word 0 = the page bits
+    lw t2, 0(a3)
+    srl a2, t0, 8
+    srlv t2, t2, a2             ; bit (PC >> 8) & 31 (srlv takes the shift's low five bits)
+    andi t2, t2, 1
+    beqz t2, nes_mmc3_wait_none ; no rule in PC's page: no index byte read
     sll a2, t1, 13
-    andi a3, t0, 8191
     daddu t3, t3, a2
-    daddu t3, t3, a3
+    andi a2, t0, 8191
+    daddu t3, t3, a2
     lbu a2, 0(t3)
     beqz a2, nes_mmc3_wait_none
     addiu t3, zero, 255
     beq a2, t3, nes_mmc3_wait_cache_lookup  ; the hashed cache (cold part, unit/cold.n64: 0 cycles in SMB3)
     sll a2, a2, 2
-    ld t2, global_nesmmc3waitrules-global_nesmmc3waitindex(t2)
-    sll t1, t1, 10
-    daddu t2, t2, t1
-    daddu t2, t2, a2
+    daddu a3, a3, a2
     jr ra
-    lw a2, 0(t2)
+    lw a2, 0(a3)
 nes_mmc3_wait_none:
     jr ra
     move a2, zero
