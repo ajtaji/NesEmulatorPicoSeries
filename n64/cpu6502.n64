@@ -241,8 +241,9 @@ c65_next:
     EndASM
   CompilerEndIf
   ASM
-    blez a2, c65_end         ; the window is spent
+    blez a2, c65_wend        ; the window is spent: its end, in place where nothing is observable (N.46)
     subu t1, a1, s2          ; PC inside the fetch region, with its operands?
+c65_go:
     sltu t1, t1, s4
     beqz t1, c65_rebase
     addu t0, a1, s3          ; host address of the opcode
@@ -1716,23 +1717,9 @@ c65_op_08_rest:
     addiu a1, a1, 1
     b c65_next
     daddiu a2, a2, -3
-c65_op_0e_rest:
-    jal c65_rd_ea
-    nop
-    addiu v0, v0, 2
-    sll t9, v1, 1
-    b c65_rmw_write
-    addiu t0, zero, 6
 c65_op_16_rest:
     b c65_rmw_zp
     addiu a0, zero, 6
-c65_op_1e_rest:
-    jal c65_rd_ea
-    nop
-    addiu v0, v0, 2
-    sll t9, v1, 1
-    b c65_rmw_write
-    addiu t0, zero, 7
 c65_op_24_rest:
     sll t1, v1, 1
     sd t1, global_fv-global_nesmmc3bias(a3)
@@ -1748,14 +1735,6 @@ c65_op_28_rest:
     addiu a1, a1, 1
     b c65_irq_check
     addiu a0, zero, 4
-c65_op_2c_rest:
-    sll t1, v1, 1            ; V = bit 6
-    sd t1, global_fv-global_nesmmc3bias(a3)
-    and fp, s5, v1           ; Z from A AND value
-    beqz a2, c65_poll
-    or a0, v1, zero
-    b c65_next
-    daddiu a2, a2, -4
 c65_op_2e_rest:
     jal c65_rd_ea
     nop
@@ -1766,22 +1745,6 @@ c65_op_2e_rest:
     or t9, t9, t1
     b c65_rmw_write
     addiu t0, zero, 6
-c65_op_36_rest:
-    andi t2, t2, 1
-    sll t9, v1, 1
-    or t9, t9, t2
-    b c65_rmw_zp
-    addiu a0, zero, 6
-c65_op_3e_rest:
-    jal c65_rd_ea
-    nop
-    addiu v0, v0, 2
-    srl t1, t9, 8
-    andi t1, t1, 1
-    sll t9, v1, 1
-    or t9, t9, t1
-    b c65_rmw_write
-    addiu t0, zero, 7
 c65_op_40_rest:
     addu t1, s1, t2
     lbu t0, 0x100(t1)        ; P
@@ -1823,14 +1786,6 @@ c65_op_56_rest:
     srl t2, v1, 1
     b c65_store_zp
     addiu a0, zero, 6
-c65_op_5e_rest:
-    jal c65_rd_ea
-    nop
-    addiu v0, v0, 2
-    sll t9, v1, 8
-    srl fp, v1, 1
-    b c65_rmw_write_res
-    addiu t0, zero, 7
 c65_op_66_rest:
     andi t2, t2, 0x80
     srl t0, v1, 1
@@ -1838,12 +1793,6 @@ c65_op_66_rest:
     sll t9, v1, 8
     b c65_store_zp
     addiu a0, zero, 5
-c65_op_6a_rest:
-    srl s5, s5, 1
-    or s5, s5, t0
-    daddiu a2, a2, -2
-    b c65_nza
-    addiu a1, a1, 1
 c65_op_6c_rest:
     jal c65_rd_ea            ; the target's low byte
     nop
@@ -1874,13 +1823,6 @@ c65_op_70_rest:
     nop
     b c65_br_take
     nop
-c65_op_76_rest:
-    andi t2, t2, 0x80
-    srl t0, v1, 1
-    or t2, t2, t0
-    sll t9, v1, 8
-    b c65_store_zp
-    addiu a0, zero, 6
 c65_op_78_rest:
     b c65_next
     daddiu a2, a2, -2
@@ -2088,14 +2030,6 @@ c65_m_zpx:
     addu t1, t2, s1
     jr ra
     lbu v1, 0(t1)
-c65_m_zpy:
-    lbu t2, 1(t0)
-    addiu a1, a1, 2
-    addu t2, t2, s7
-    andi t2, t2, 0xFF
-    addu t1, t2, s1
-    jr ra
-    lbu v1, 0(t1)
 c65_m_abs:
     lbu t1, 1(t0)
     lbu v1, 2(t0)            ; the high operand byte is on the bus
@@ -2204,13 +2138,6 @@ c65_s_zpx:                   ; t1 = host address
     lbu t2, 1(t0)
     addiu a1, a1, 2
     addu t2, t2, s6
-    andi t2, t2, 0xFF
-    jr ra
-    addu t1, t2, s1
-c65_s_zpy:
-    lbu t2, 1(t0)
-    addiu a1, a1, 2
-    addu t2, t2, s7
     andi t2, t2, 0xFF
     jr ra
     addu t1, t2, s1
@@ -2380,6 +2307,7 @@ c65_end:
     sd t2, 0(t0)
     sd zero, global_cpuinwindow-global_cpucycles(t0)
     dsubu a0, t2, t1         ; ProcedureReturn CpuCycles - NesRunStart
+c65_restore:                 ; a3 = global_nesmmc3bias: the caller's registers back, and return
     ld s0, global_c65saves0-global_nesmmc3bias(a3)
     ld s1, global_c65saves1-global_nesmmc3bias(a3)
     ld s2, global_c65saves2-global_nesmmc3bias(a3)
@@ -2392,6 +2320,112 @@ c65_end:
     ld ra, global_c65savera-global_nesmmc3bias(a3)
     jr ra
     nop
+
+    ; --- the window's end in place (design note N.46, step C3) ------------------
+    ; WHAT: every window whose budget is spent (or that a device access closed) ends here. The run loop's work at
+    ; a window's end - the catch-up, the DMC stalls, the interrupts, the frame hand-over, the next budget and the
+    ; RAM-wait decision - is done here with the run loop's own procedures; where nothing the guest can observe
+    ; happens at this end, the next window opens as CpuRun opens it and the core goes on without leaving.
+    ; WHY: the core's exit and re-entry (publish and return, the run loop's tests, ten saves, the reload, the
+    ; fetch region rebuilt) were ~285 of a core window's ~410 cycles, ~200 times a guest frame (N.46).
+    ; WHY THE WINDOWS STILL END WHERE THEY DID: NMI and IRQs are taken at window ends, so the window grid is
+    ; where the guest's interrupts are accepted; each window ends at the same guest cycle as before, only its
+    ; end is cheaper. Only the run loop's caller-free state is touched here: everything is published first,
+    ; CpuCycles and CpuInWindow are what c65_end leaves, so every procedure called sees what the run loop's sees.
+    ; LEAVES (c65_leave, the run loop then repeats the catch-up at the same cycle - a no-op - and does the rest):
+    ; an NMI to take, an IRQ with I clear, a guest frame to hand over, a stop, a RAM-wait rule at PC (the run
+    ; loop batches it). Only the MMC3 run loop (c65_run_mapper4, through u_nesramcpuwindow / the waits'
+    ; fall-backs) enters CpuRun in this configuration; cpu6502.n64 is built for no other.
+    ; THE PLAIN TWIN (what the assembly computes):
+    ;   CpuCycles=NesRunStart+Budget-Left : CpuInWindow=0          ; as c65_end, the state published
+    ;   If CpuCycles>NesStatusHorizon And CpuCycles>NesCpuHorizon : NesMmc3AdvanceCpuTime(CpuCycles) : EndIf
+    ;   While WorkerDmcCycles>NesSeenDmc                             ; the DMC stalls, as the run loop applies them
+    ;     stalls=WorkerDmcCycles-NesSeenDmc : NesSeenDmc=WorkerDmcCycles
+    ;     CpuCycles+stalls : NesMmc3AdvanceCpuTime(CpuCycles)
+    ;   Wend
+    ;   If WorkerNmi<>NesSeenNmi Or ((WorkerIrq|MapIrq) And FI=0) Or WorkerFrames<>NesDeliveredFrame Or
+    ;      Stopped Or WorkerError : leave : EndIf
+    ;   n=MapperCpuBudget() : If NesRamWaitRule(PC) : leave : EndIf ; (u_nesramwaitrule: the window's own look-up)
+    ;   CpuCycles+NesStall : NesStall=0 : NesRunStart=CpuCycles : Budget=n : Left=n : CpuInWindow=1 : go on
+c65_wend:
+    jal c65_publish          ; the whole guest state, as c65_end publishes it
+    nop
+    la t0, global_cpucycles
+    ld t1, global_nesrunstart-global_cpucycles(t0)
+    ld t2, global_budget-global_cpucycles(t0)
+    daddu t1, t1, t2
+    dsubu a0, t1, a2         ; now = NesRunStart + Budget - Left
+    sd a0, 0(t0)
+    sd zero, global_cpuinwindow-global_cpucycles(t0)
+    ld t1, global_nesstatushorizon-global_cpucycles(t0)
+    slt t1, t1, a0
+    beqz t1, c65_wend_stalls ; a horizon still ahead: no catch-up (as the run loop)
+    ld t1, global_nescpuhorizon-global_cpucycles(t0)
+    slt t1, t1, a0
+    beqz t1, c65_wend_stalls
+    nop
+    jal u_nesmmc3advancecputime  ; the catch-up a window's end makes
+    nop
+c65_wend_stalls:
+    la t0, global_cpucycles
+    ld t1, global_workerdmccycles-global_cpucycles(t0)
+    ld t2, global_nesseendmc-global_cpucycles(t0)
+    dsubu t2, t1, t2
+    blez t2, c65_wend_pending
+    ld a0, 0(t0)
+    sd t1, global_nesseendmc-global_cpucycles(t0)
+    daddu a0, a0, t2         ; the stall's cycles
+    jal u_nesmmc3advancecputime
+    sd a0, 0(t0)
+    b c65_wend_stalls
+    nop
+c65_wend_pending:
+    ld t1, global_workernmi-global_cpucycles(t0)
+    ld t2, global_nesseennmi-global_cpucycles(t0)
+    bne t1, t2, c65_leave    ; an NMI to take
+    ld t1, global_workerirq-global_cpucycles(t0)
+    ld t2, global_mapirq-global_cpucycles(t0)
+    or t1, t1, t2
+    beqz t1, c65_wend_frame
+    ld t2, global_fi-global_cpucycles(t0)
+    beqz t2, c65_leave       ; an IRQ with I clear
+    nop
+c65_wend_frame:
+    ld t1, global_workerframes-global_cpucycles(t0)
+    ld t2, global_nesdeliveredframe-global_cpucycles(t0)
+    bne t1, t2, c65_leave    ; a guest frame for the host
+    ld t1, global_stopped-global_cpucycles(t0)
+    ld t2, global_workererror-global_cpucycles(t0)
+    or t1, t1, t2
+    bnez t1, c65_leave
+    nop
+    jal u_mappercpubudget    ; a0 = the next window's budget
+    nop
+    jal u_nesramwaitrule     ; a2 = the RAM-wait rule at PC (keeps a0)
+    move a1, zero
+    bnez a2, c65_leave       ; a wait loop: the run loop batches it
+    nop
+    la t0, global_cpucycles  ; the next window, as CpuRun(n) opens it
+    ld t1, 0(t0)
+    ld t2, global_nesstall-global_cpucycles(t0)
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    sd zero, global_nesstall-global_cpucycles(t0)
+    sd t1, global_nesrunstart-global_cpucycles(t0)
+    daddiu t2, zero, 1
+    sd t2, global_cpuinwindow-global_cpucycles(t0)
+    sd a0, global_budget-global_cpucycles(t0)
+    jal c65_in               ; the core's caller-saved registers (a2 = Left = n); A X Y FZ stayed in s5-s7, fp
+    sd a0, global_left-global_cpucycles(t0)
+    b c65_go                 ; the fetch region is still PC's: nothing has remapped it
+    subu t1, a1, s2
+c65_leave:                   ; the rest of this end is the run loop's: return to it as c65_end does
+    la a3, global_nesmmc3bias
+    la t0, global_cpucycles
+    ld t1, global_nesrunstart-global_cpucycles(t0)
+    ld a0, 0(t0)
+    b c65_restore
+    dsubu a0, a0, t1         ; CpuCycles - NesRunStart (read by no caller in this configuration)
 
     ; --- the fetch region and the slow fetch ----------------------------------
 c65_rebase:                  ; a1 = PC
@@ -2576,6 +2610,83 @@ c65_irq_none:
     b c65_next
     dsubu a2, a2, a0
 
+    ; the handler rests and addressing modes that run 0 cycles a guest frame in SMB3 (the C2 record replay's profile), out of
+    ; the hot span by measured heat for C3 (design note N.46); each is entered by a branch or jal and leaves
+    ; by one, so the move changes no path
+c65_op_0e_rest:
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 1
+    b c65_rmw_write
+    addiu t0, zero, 6
+c65_op_1e_rest:
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 1
+    b c65_rmw_write
+    addiu t0, zero, 7
+c65_op_2c_rest:
+    sll t1, v1, 1            ; V = bit 6
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    and fp, s5, v1           ; Z from A AND value
+    beqz a2, c65_poll
+    or a0, v1, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_36_rest:
+    andi t2, t2, 1
+    sll t9, v1, 1
+    or t9, t9, t2
+    b c65_rmw_zp
+    addiu a0, zero, 6
+c65_op_3e_rest:
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    srl t1, t9, 8
+    andi t1, t1, 1
+    sll t9, v1, 1
+    or t9, t9, t1
+    b c65_rmw_write
+    addiu t0, zero, 7
+c65_op_5e_rest:
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 8
+    srl fp, v1, 1
+    b c65_rmw_write_res
+    addiu t0, zero, 7
+c65_op_6a_rest:
+    srl s5, s5, 1
+    or s5, s5, t0
+    daddiu a2, a2, -2
+    b c65_nza
+    addiu a1, a1, 1
+c65_op_76_rest:
+    andi t2, t2, 0x80
+    srl t0, v1, 1
+    or t2, t2, t0
+    sll t9, v1, 8
+    b c65_store_zp
+    addiu a0, zero, 6
+c65_m_zpy:
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, s7
+    andi t2, t2, 0xFF
+    addu t1, t2, s1
+    jr ra
+    lbu v1, 0(t1)
+c65_s_zpy:
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, s7
+    andi t2, t2, 0xFF
+    jr ra
+    addu t1, t2, s1
 c65_illegal:                 ; an undocumented opcode stops the CPU
     daddiu t3, t3, -1        ; it does not count as executed
     jal c65_rd_ea            ; BadOpcode = NesRead(PC)

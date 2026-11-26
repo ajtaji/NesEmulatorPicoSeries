@@ -5,8 +5,27 @@
 ; SMB3, frames 0-3600) to make room for the bus handlers; each block is entered by a branch and leaves by one, so its
 ; place changes no path, only which I-cache set it occupies.
 
-; ---- the RAM-wait cache's miss (from unit/window.n64): decode the rule, fill the cache entry ----
+; ---- the RAM-wait rule's hashed cache (from unit/window.n64, u_nesramwaitrule's leaf): used when the image left
+; no room for the immutable index, or for a PC whose bank has more than 254 rules; 0 cycles a guest frame in SMB3
+; (the C2 record replay's profile), moved here by C3 (N.46). In: t0 = PC, t1 = its PRG bank; out: a2 = the rule (0: none), by jr ra
+; to u_nesramwaitrule's caller. The miss decodes the rule (the compiled NesRamWaitRule) and fills the entry; it
+; keeps a0, a1 and a5 (u_nesramcpuwindow's link) as the leaf promises. ----
   ASM
+nes_mmc3_wait_cache_lookup:
+    sll t2, t1, 16
+    or t2, t2, t0
+    srl t3, t0, 6
+    xor t3, t3, t0
+    xor t3, t3, t1
+    andi t3, t3, 1023
+    sll t3, t3, 3
+    la t1, global_nesmmc3waitcache
+    addu t3, t3, t1
+    lw t1, 0(t3)
+    bne t1, t2, nes_mmc3_wait_miss
+    lw a2, 4(t3)
+    jr ra
+    nop
 nes_mmc3_wait_miss:
     daddiu sp, sp, -48
     sd ra, 32(sp)
@@ -14,6 +33,7 @@ nes_mmc3_wait_miss:
     sd a1, 16(sp)
     sd t3, 8(sp)
     sd t2, 0(sp)
+    sd a5, 40(sp)
     jal nesramwaitrule
     or a0, t0, zero
     or a2, a0, zero
@@ -21,11 +41,117 @@ nes_mmc3_wait_miss:
     ld t3, 8(sp)
     ld a1, 16(sp)
     ld a0, 24(sp)
+    ld a5, 40(sp)
     ld ra, 32(sp)
     sw t2, 0(t3)
     sw a2, 4(t3)
-    b nes_mmc3_wait_decoded
+    jr ra
     daddiu sp, sp, 48
+  EndASM
+
+; ---- mmc3_sign_coalesce: whole periods of like idle windows skipped (C3, design note N.46) ----
+; WHAT: u_nesmmc3signwait, about to commit a full (128-cycle) window of an `LDA zp / Bxx` wait, first skips every
+; whole period of the window pattern that would follow it unchanged: NesRamWaitPeriods' row for the loop's
+; branch cycles and the phase the window starts in (258 cycles / 86 instructions without a page cross) - the
+; table and the rule the reference's own coalescing (ramwait.n64, NesRamWaitBatch's `coalesce`) uses.
+; WHY EXACT: between two device accesses nothing changes the state these windows read, so each would repeat
+; the same steps, and each end would do only what the catch-up's fast path does: CpuCycles, WorkerClock = that
+; end, both horizons -1. That holds while (1) both horizons are behind the window's start (so every end calls
+; the catch-up), (2) no IRQ is asserted and no sample plays (the budget stays 128, no stall), (3) every end is
+; before H = min(the render limit + 1, the APU limit, the A12 fetch limit while the IRQ is enabled) - all three
+; known (none -1). The budget is 128 at every skipped start: with the IRQ counting, a fetch limit ahead means 40
+; or more rises to go, so (count - 1) x 10 dots >= 384 and the budget is the full window. NMI, IRQ, frame and
+; stop tests at those ends see the state unchanged. The window at the run's end is then batched as the caller
+; computed it (the phase is the same after whole periods), from the later start.
+; THE PLAIN TWIN:
+;   If NesStatusHorizon<CpuCycles And NesCpuHorizon<CpuCycles And MapIrq=0 And WorkerIrq=0 And DmcBytes=0 And
+;      RenderLimit>=0 And ApuLimit>=0 And (MapIrqEnable=0 Or FetchLimit>=0)
+;     h=Min(RenderLimit+1,ApuLimit) : If MapIrqEnable : h=Min(h,FetchLimit) : EndIf
+;     row=((branchCycles-3)*2+atBranch)*4 : loops=(h-1-CpuCycles)/PeekU(?NesRamWaitPeriods+row)
+;     If loops>0
+;       CpuCycles+loops*PeekU(?NesRamWaitPeriods+row) : WorkerClock=CpuCycles
+;       NesStatusHorizon=-1 : NesCpuHorizon=-1
+;       NesInstructions+loops*PeekU(?NesRamWaitPeriods+row+2) : NesIdleBatched+(the same)
+;     EndIf
+;   EndIf
+; In: a0 = 128, a1 = @PC, a2 = the rule (bit 26: the window starts at the branch), t9 = the branch's cycles.
+; Keeps a0, a1, a5, a6, t9 (the caller's window); clobbers t1-t3, t8, a3, a4. Back to mmc3_sign_window.
+  ASM
+mmc3_sign_coalesce:
+    la t8, global_cpucycles
+    ld t2, 0(t8)                    ; s, this window's start
+    ld t3, global_nesstatushorizon-global_cpucycles(t8)
+    slt t3, t3, t2
+    beqz t3, mmc3_sign_window       ; a horizon ahead: the ends would not all catch up
+    ld t3, global_nescpuhorizon-global_cpucycles(t8)
+    slt t3, t3, t2
+    beqz t3, mmc3_sign_window
+    ld t3, global_mapirq-global_cpucycles(t8)
+    ld a3, global_workerirq-global_cpucycles(t8)
+    or t3, t3, a3
+    ld a3, global_dmcbytes-global_cpucycles(t8)
+    or t3, t3, a3
+    bnez t3, mmc3_sign_window       ; an IRQ asserted, or a sample playing
+    nop
+    la t1, global_nesmmc3apuclock
+    ld t3, global_nesmmc3renderlimit-global_nesmmc3apuclock(t1)
+    bltz t3, mmc3_sign_window       ; not known
+    daddiu t3, t3, 1                ; an end may be AT the render limit (the catch-up syncs past it)
+    ld a3, global_nesmmc3apulimit-global_nesmmc3apuclock(t1)
+    bltz a3, mmc3_sign_window
+    slt a4, a3, t3
+    beqz a4, mmc3_coalesce_fetch
+    nop
+    move t3, a3
+mmc3_coalesce_fetch:
+    ld a3, global_mapirqenable-global_nesmmc3apuclock(t1)
+    beqz a3, mmc3_coalesce_count
+    ld a3, global_nesmmc3fetchlimit-global_nesmmc3apuclock(t1)
+    bltz a3, mmc3_sign_window
+    slt a4, a3, t3
+    beqz a4, mmc3_coalesce_count
+    nop
+    move t3, a3
+mmc3_coalesce_count:
+    dsubu t3, t3, t2
+    daddiu t3, t3, -1               ; the cycles the skipped ends may cover: every end < H
+    blez t3, mmc3_sign_window
+    addiu a3, t9, -3                ; the period's row: the read is 3 cycles (LDA zp)
+    sll a3, a3, 1
+    srl a4, a2, 26
+    andi a4, a4, 1
+    addu a3, a3, a4
+    sll a3, a3, 2
+    la a4, nesramwaitperiods
+    addu a3, a3, a4
+    lhu a4, 0(a3)                   ; the period's cycles
+    lhu a3, 2(a3)                   ; its instructions
+    ddivu t3, a4
+    mflo t3                         ; whole periods
+    nop
+    nop
+    blez t3, mmc3_sign_window
+    nop
+    dmultu t3, a4
+    mflo a4                         ; the cycles skipped
+    nop
+    nop
+    dmultu t3, a3
+    mflo a3                         ; the instructions they retire
+    daddu t2, t2, a4
+    sd t2, 0(t8)                    ; CpuCycles: the window at the run's end starts here
+    la t1, global_workerclock
+    sd t2, 0(t1)                    ; the last skipped end's catch-up
+    daddiu t3, zero, -1
+    sd t3, global_nesstatushorizon-global_cpucycles(t8)
+    sd t3, global_nescpuhorizon-global_cpucycles(t8)
+    ld t3, global_nesinstructions-global_cpucycles(t8)
+    daddu t3, t3, a3
+    sd t3, global_nesinstructions-global_cpucycles(t8)
+    ld t3, global_nesidlebatched-global_cpucycles(t8)
+    daddu t3, t3, a3
+    b mmc3_sign_window
+    sd t3, global_nesidlebatched-global_cpucycles(t8)
   EndASM
 
 ; ---- u_apuwrite: the staged ApuWrite's timing half, in assembly (N7, design note N.40 (4)) ----
