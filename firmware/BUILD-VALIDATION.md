@@ -54,11 +54,9 @@ No download contains commercial game ROMs or private speaker pairing details.
 
 ## Binary provenance
 
-The v0.1.0 Git tag remains its original source snapshot; it has not been moved.
-All nine binaries were rebuilt on October 28, 2026 from source snapshot
-[37af1e6](https://github.com/ajtaji/NesEmulatorPicoSeries/tree/37af1e6): the Qw/ST
-Pad through the shared library, the Four Score and the Pico Plus 2 W image are new
-since [1e7017b](https://github.com/ajtaji/NesEmulatorPicoSeries/tree/1e7017b), where the
+All nine binaries were rebuilt on October 28, 2026 from this repository's source
+of that day: the Qw/ST Pad through the shared library, the Four Score and the Pico
+Plus 2 W image are new since the earlier build, which brought the
 mapper additions, PAL mode and the TrueType boot menu, and since then MMC5 ExRAM
 attributes and sound, N163 nametables from CHR ROM, and $4015 reads answered
 on core 0, are in every image.

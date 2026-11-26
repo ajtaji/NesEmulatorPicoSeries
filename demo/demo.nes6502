@@ -3,7 +3,7 @@
 ;  CHR RAM (mapper 2), 32 KB of program.
 ;
 ;  BUILDING IT NEEDS THE PUREMETAL FORGE COMPILER BUILD OF 2026-11-04 OR
-;  LATER (commit a3098475d: the .nes6502 board, ProcedureInterrupt and
+;  LATER (the .nes6502 board, ProcedureInterrupt and
 ;  DataSection on the 6502, the 6502 optimiser, strings on the 6502 that fit
 ;  its 2 KB of RAM, and Asc(Mid()) of a text in quotes at a fixed cost, which
 ;  the marquee needs to keep its frame); an earlier compiler refuses this

@@ -1,6 +1,6 @@
 Physical Nintendo 64 / SummerCart64, 2026-11-25. PureMetal NES 20 kHz audio comparison.
 Image SHA-256 3abe8085734f9a81af2aa1a522feea2301ff63fee3b34442355d1a2f6df56d36. All 8,912,896 bytes matched the console cart readback.
-Controls use 256 sample pairs per DMA. The release in commit 2812f77 uses 512. The guest inputs are identical within each game.
+Controls use 256 sample pairs per DMA. The release uses 512. The guest inputs are identical within each game.
 FPS uses 46,875,000 CP0 Count ticks per second. Underruns are observed AI queue-empty transitions. Startup is counted separately.
 
 Stage                     Guest frames    FPS    Active gaps    Pre-window gaps    Coalesced pictures

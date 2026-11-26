@@ -20,8 +20,8 @@ instead of rebuilding the text list every frame. See
 ## Build
 
 An explicit checkout of [Anvil](https://github.com/ajtaji/Anvil) supplies the
-Neon Arcade, Vulkan, MMU and BCM2711 device libraries. The dependency used
-for this port is commit `b79122db24f361eded4f076a6da48e4dd429d63d`.
+Neon Arcade, Vulkan, MMU and BCM2711 device libraries. Build against
+Anvil's main branch.
 Use `PureMetalForge.exe --compile`; the build helper invokes that compiler.
 
 ```powershell

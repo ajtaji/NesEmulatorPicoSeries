@@ -2,7 +2,6 @@
   "date": "2026-10-16",
   "target": "Raspberry Pi 4 BCM2711 / Anvil build 281",
   "abi": "1.7",
-  "anvil_dependency": "b79122db24f361eded4f076a6da48e4dd429d63d",
   "compiler_sha256": "297a34050a009c1b866f692b2b7284c03dbc0f5385345a7cd8e2297c05be1e06",
   "tests": [
     {

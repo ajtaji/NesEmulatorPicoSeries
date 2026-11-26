@@ -1,7 +1,6 @@
 {
   "date": "2026-10-16",
   "target": "Pi 4 / Anvil build 281 ABI 1.7",
-  "baseline_commit": "6cbc403ca5bc1551f9a81e653867ae9fa820ba74",
   "supported_mappers": [
     0,
     1,

@@ -1,7 +1,7 @@
 # Modular output validation — 2026-10-16
 
 Output API version 1 separates device callbacks from frame ownership and PCM
-production. CPU, PPU, APU, and SBC codec source files match commit `df6baf0`.
+production. CPU, PPU, APU, and SBC codec source files are unchanged by the refactor.
 The refactor moves ST7796/SPI/DMA operations into a video backend and exposes
 generic audio callbacks/status while preserving the Bluetooth transport/codec
 algorithms and its existing queue allowance.

@@ -31,7 +31,7 @@ Bluetooth speaker with the speaker builds.
 
 ## Building
 
-> Needs the PureMetal Forge compiler build of 2026-11-04 or later (commit a3098475d).
+> Needs the PureMetal Forge compiler build of 2026-11-04 or later.
 
 ```
 PureMetalForge.exe --compile demo/demo.nes6502 -o demo/PureMetalDemo.hex
