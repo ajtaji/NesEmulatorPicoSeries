@@ -1,5 +1,15 @@
 ; Keep the run-window scheduler in VR4300 code. Display, input, and
 ; persistence run at the same guest frame handoff as the shared path.
+CompilerIf #NES_CPU_ASM
+; The loop lives in cpu6502.n64, beside the CPU core it calls every window, so the two
+; cannot share instruction-cache sets.
+ProcedureNaked.i NesRunMapper4(start.i)
+  ASM
+    j c65_run_mapper4
+    nop
+  EndASM
+EndProcedure
+CompilerElse
 ProcedureNaked.i NesRunMapper4(start.i)
   ASM
     daddiu sp, sp, -32
@@ -81,3 +91,4 @@ nes_mmc3_run_exit:
     daddiu sp, sp, 32
   EndASM
 EndProcedure
+CompilerEndIf

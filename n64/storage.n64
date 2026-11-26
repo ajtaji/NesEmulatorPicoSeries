@@ -1,6 +1,9 @@
 ; RDRAM from $80200000 starts with the VI buffers. Preserve their fixed pool
 ; and the crash display above $803C0000. The Expansion Pak is optional.
-#NES_CART_LOW = $FFFFFFFF80280000
+; The arena starts 4 KB above the VI buffers' end: a PRG image is a whole number of 8 KB banks,
+; so at an 8 KB boundary its last page ($FFxx: the vectors and interrupt code) would fall on the
+; same D-cache sets as the top of the host stack ($801FFxxx), which every compiled call touches.
+#NES_CART_LOW = $FFFFFFFF80281000
 #NES_CART_LOW_END = $FFFFFFFF803B0000
 #NES_CART_HIGH = $FFFFFFFF80400000
 #NES_CART_HIGH_END = $FFFFFFFF807C0000

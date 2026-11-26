@@ -150,6 +150,7 @@ def build(args, *, controller_trace=()):
         raise ValueError("the CPU trace is a runtime-MMC3 verification build")
     settings = {
         "NES_CPU_TRACE": int(cpu_trace),
+        "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
