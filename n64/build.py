@@ -191,8 +191,13 @@ def build(args, *, controller_trace=()):
     console_record = getattr(args, "console_record", False)
     if console_record and not (rdp_show and not args.check_frame):
         raise ValueError("the console record is built into the playable runtime-MMC3 cart only (no verify frame)")
+    # the console record hashing every shown picture (a test cart that runs by itself; its own record area)
+    record_pictures = getattr(args, "record_every_picture", False)
+    if record_pictures and not console_record:
+        raise ValueError("--record-every-picture is a form of the console record (--console-record)")
     settings = {
         "NES_CONSOLE_RECORD": int(console_record),
+        "NES_REC_PICTURES_ALL": int(record_pictures),
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
         "NES_PPU_CHECK": int(ppu_check),
@@ -366,6 +371,9 @@ if __name__ == "__main__":
                              "--old-show: the old renderer's picture of the frame, the reference) (needs --check-frame)")
     parser.add_argument("--console-record", action="store_true",
                         help="the playable cart keeps a record of its run in the flash cart's memory (console_record.n64)")
+    parser.add_argument("--record-every-picture", action="store_true",
+                        help="with --console-record: every shown picture hashed into the record, buttons or not, in "
+                             "its own record area (a test cart that runs by itself)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:

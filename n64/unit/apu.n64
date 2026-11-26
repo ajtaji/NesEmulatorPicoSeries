@@ -32,8 +32,50 @@
 ; The twin it is checked against: the old path (apuschedule.n64, the shared ApuTick), which made
 ; the reference recordings; the proof is the instruction digests and the PCM byte for byte (N.25).
 
-  ASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+; ---- the console record's timing of the APU's time advance (console_record.n64, the work split:
+; NesRecT(4) ticks, NesRecT(5) calls). In the record build only, every way in - the unit's jal and
+; the stub ApuAdvance - comes here first: one call counted, ra, Count and the synthesis's ticks so
+; far kept in NesRecT(10-12) (the advance is never re-entered: nothing it calls advances the APU),
+; the body called, then Count again; the ticks less any synthesis that ran inside it (a log's
+; render for room, counted as synthesis in NesRecT(9)) added to NesRecT(4). Registers: t0-t3,
+; which the body clobbers too (the header's Out); a0 / a1 reach the body as the caller set them.
 u_apuadvance:
+    la t0, global_nesrect
+    ld t1, 40(t0)
+    daddiu t1, t1, 1
+    sd t1, 40(t0)                   ; NesRecT(5): one call more
+    sd ra, 88(t0)                   ; NesRecT(11): the caller
+    ld t1, 72(t0)
+    sd t1, 96(t0)                   ; NesRecT(12): the synthesis's ticks so far
+    mfc0 t1, $9                     ; Count at entry
+    jal apu_advance_body
+    sd t1, 80(t0)                   ; (delay slot) NesRecT(10)
+    mfc0 t1, $9                     ; Count after
+    la t0, global_nesrect
+    ld t2, 80(t0)
+    subu t1, t1, t2                 ; ticks (low 32 bits) ...
+    dsll32 t1, t1, 0
+    dsrl32 t1, t1, 0                ; ... zero-extended
+    ld t2, 72(t0)
+    ld t3, 96(t0)
+    dsubu t2, t2, t3                ; synthesis inside the advance
+    dsubu t1, t1, t2
+    ld t2, 32(t0)
+    daddu t2, t2, t1
+    sd t2, 32(t0)                   ; NesRecT(4): the APU timing's ticks
+    ld ra, 88(t0)
+    jr ra
+    nop
+apu_advance_body:
+    EndASM
+  CompilerElse
+    ASM
+u_apuadvance:
+    EndASM
+  CompilerEndIf
+  ASM
     la t0, global_apuframeclock     ; one base for the fast path (all scalars, within 16 bits)
     blez a0, apu_publish_frame      ; nothing to advance: publish the IRQ line only, as before
     ld t1, global_nesapuquiet-global_apuframeclock(t0)

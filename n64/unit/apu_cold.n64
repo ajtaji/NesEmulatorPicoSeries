@@ -25,6 +25,16 @@
 ; a0 = dt > 0, NesMmc3ApuClock = the interval's start. A segment ends at dt's end, the reset's
 ; end or the next step, whichever is first. Per segment: the DMC run, then the reset / the step.
 apu_frame_path:
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      la t0, global_nesrect           ; the console record: one segment-path advance (NesRecT(6)); t0 / t1,
+      ld t1, 48(t0)                   ; set again below
+      daddiu t1, t1, 1
+      sd t1, 48(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     daddiu sp, sp, -48
     sd ra, 0(sp)
     sd s0, 8(sp)
@@ -253,6 +263,16 @@ u_apudmcfetch:
     ld a0, 0(t0)
     la t0, global_dmcbuffer
     sd a0, 0(t0)
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      la t0, global_nesrect           ; the console record: one DMC byte fetched (NesRecT(7)); t0 / t1, set
+      ld t1, 56(t0)                   ; again below
+      daddiu t1, t1, 1
+      sd t1, 56(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     la t0, global_dmcempty
     sd zero, 0(t0)
     la t0, global_workerdmccycles

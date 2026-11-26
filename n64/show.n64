@@ -76,9 +76,11 @@ CompilerIf #NES_CONSOLE_RECORD
   ; THE CONSOLE RECORD'S WORK SPLIT (console_record.n64, version 3): Count ticks and counts since the power-on, each
   ; part where it runs - 0 band closes (NesShowBand), 1 fallback lines (NesFbCatchUp and the unit's timed calls
   ; below), 2 the fallback list (NesShowFallback), 3 the hand-over (NesShowPoll, NesShowFrameEnd, NesShowDrain), 4
-  ; ApuAdvance's full path, 5 / 6 ApuAdvance calls / full-path calls, 7 DMC bytes fetched, 8 PPU bus writes. Read by
-  ; NesRecFrame once a frame (the differences are the frame's parts).
-  Global Dim NesRecT.i(10)
+  ; the APU timing (u_apuadvance, unit/apu.n64), 5 / 6 its calls / of them the segment path (a frame-sequencer step
+  ; or a $4017 reset inside the interval), 7 DMC bytes fetched (u_apudmcfetch), 8 PPU bus writes, 9 the sound's
+  ; synthesis (apusynth.n64, nes_syn_timed); 10-12 the timed advance's own scratch. Read by NesRecFrame once a frame
+  ; (the differences are the frame's parts).
+  Global Dim NesRecT.i(16)
   Declare NesRecPicture(frame.i, fb.i, fbl.i)   ; the record's picture hashes (console_record.n64)
 CompilerEndIf
 
@@ -589,7 +591,7 @@ EndProcedure
 ; A buffer to draw into: wait 0 only if one is free now; 1 as HostPresent(1) did - sleep on the VI / AI interrupts
 ; until one frees, unless the sound reserve runs low (then 0: the frame is not shown); 2 until one frees.
 CompilerIf #NES_CONSOLE_RECORD
-  Global NesRecWait.i, NesRecWaitFrom.i ; the console record (console_record.n64): Count ticks slept here for a buffer
+  Global NesRecWait.i, NesRecWaitFrom.i, NesRecWaitSyn.i ; the console record (console_record.n64): Count ticks slept here for a buffer
   Global NesRecKept.i                   ; 1 once the record's header read back from the flash cart (the bands' colour)
 CompilerEndIf
 Procedure.i NesShowGetFb(wait.i)
@@ -597,14 +599,15 @@ Procedure.i NesShowGetFb(wait.i)
   fb = LpmDisplayTryGet()
   If fb Or wait = 0 : ProcedureReturn fb : EndIf
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecWaitFrom = LpmCpuCount()
+    NesRecWaitFrom = LpmCpuCount() : NesRecWaitSyn = NesRecT(9)
   CompilerEndIf
   seen = LpmIrqSeen(#LPM_WAKE_VI | #LPM_WAKE_AI)
   Repeat
     fb = LpmDisplayTryGet()
     CompilerIf #NES_CONSOLE_RECORD
       If fb Or (wait = 1 And HostAudioReady And ApuProduced - HostPcmRead < #HOST_AUDIO_RESERVE)
-        NesRecWait + ((LpmCpuCount() - NesRecWaitFrom) & $FFFFFFFF)
+        NesRecWait + ((LpmCpuCount() - NesRecWaitFrom) & $FFFFFFFF) - (NesRecT(9) - NesRecWaitSyn)   ; a block
+        ; synthesised while waiting is work, not sleep
       EndIf
     CompilerEndIf
     If fb : ProcedureReturn fb : EndIf
@@ -725,9 +728,10 @@ EndProcedure
 ; A check point: the frame before the current one, if its turn has come.
 Procedure NesShowPoll(wait.i)
   CompilerIf #NES_CONSOLE_RECORD
-    Protected tr.i = LpmCpuCount(), w0.i = NesRecWait
+    Protected tr.i = LpmCpuCount(), w0.i = NesRecWait, s0.i = NesRecT(9)
     If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
-    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)   ; the sleep for a buffer is the record's own column
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)   ; the sleep for a buffer is the record's
+    ; own column, the sound's synthesis (an AI block rendered while waiting) its own part
   CompilerElse
     If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
   CompilerEndIf
@@ -785,7 +789,8 @@ CompilerEndIf
 Procedure NesShowFrameEnd()
   Protected p.i = NesShowCur, q.i = NesShowCur ! 1, fb.i, tr.i, w0.i
   CompilerIf #NES_CONSOLE_RECORD
-    tr = LpmCpuCount() : w0 = NesRecWait
+    Protected s0.i                      ; the record: the synthesis's ticks at the start
+    tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
   CompilerEndIf
   NesFbCountP(p) = NesFbN : NesFbOverP(p) = NesFbOver : NesFbFirstP(p) = NesFbFirst : NesShowEnded(p) = 1
   NesFbHead = (NesFbFirst + NesFbN) % #NES_FB_ROWS
@@ -822,7 +827,7 @@ Procedure NesShowFrameEnd()
   NesShowSet(q)
   NesFbGuard = NesFbCountP(p)             ; this frame's rows, until it is drawn (NesFbSlot, NesFbWait)
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)
   CompilerEndIf
 EndProcedure
 
@@ -840,7 +845,8 @@ EndProcedure
 Procedure NesShowDrain()
   Protected p.i = NesShowCur, n.i, fb.i, tr.i, w0.i
   CompilerIf #NES_CONSOLE_RECORD
-    tr = LpmCpuCount() : w0 = NesRecWait
+    Protected s0.i                      ; the record: the synthesis's ticks at the start
+    tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
   CompilerEndIf
   LpmRspqSync()
   NesShowFinish(p ! 1, 2)
@@ -858,7 +864,7 @@ Procedure NesShowDrain()
   LpmRdpFinish()
   NesShowBusy = 0 : NesShowStat(4) + 1
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)
   CompilerEndIf
 EndProcedure
 

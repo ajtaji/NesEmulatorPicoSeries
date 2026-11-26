@@ -104,11 +104,51 @@ Procedure NesSynInit(now.i)
   NesApuLogHead=0 : NesApuLogTail=0 : NesApuDmcHead=0 : NesApuDmcTail=0
 EndProcedure
 
+CompilerIf #NES_CONSOLE_RECORD
+  ; THE CONSOLE RECORD'S TIMING OF THE SYNTHESIS (console_record.n64, the work split: NesRecT(9)). In
+  ; the record build only, both ways in reach the driver through nes_syn_timed: Count before and after,
+  ; the difference (zero-extended 32 bits) added to NesRecT(9). s0 holds Count over the call (the
+  ; driver keeps s0, as the compiled ABI); t0-t2 after it, which the driver clobbers anyway.
+  ProcedureNaked NesSynTimed()
+    ASM
+nes_syn_timed:
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      sd s0, 8(sp)
+      mfc0 s0, $9                   ; Count at entry
+      jal nes_syn_render
+      nop
+      mfc0 t1, $9                   ; Count after
+      la t0, global_nesrect
+      subu t1, t1, s0
+      dsll32 t1, t1, 0
+      dsrl32 t1, t1, 0
+      ld t2, 72(t0)
+      daddu t2, t2, t1
+      sd t2, 72(t0)
+      ld ra, 0(sp)
+      ld s0, 8(sp)
+      jr ra
+      daddiu sp, sp, 16
+    EndASM
+  EndProcedure
+CompilerEndIf
+
 ProcedureNaked NesSynRenderTo(n.i)
   ; render until n samples are done (a0 = n; no cycle limit)
   ASM
     daddiu a1, zero, -1
-    j nes_syn_render
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      j nes_syn_timed               ; the record build: timed (above)
+    EndASM
+  CompilerElse
+    ASM
+      j nes_syn_render
+    EndASM
+  CompilerEndIf
+  ASM
     dsrl a1, a1, 1
   EndASM
 EndProcedure
@@ -118,7 +158,17 @@ ProcedureNaked NesSynRenderTime(t.i)
   ASM
     move a1, a0
     daddiu a0, zero, -1
-    j nes_syn_render
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      j nes_syn_timed               ; the record build: timed (above)
+    EndASM
+  CompilerElse
+    ASM
+      j nes_syn_render
+    EndASM
+  CompilerEndIf
+  ASM
     dsrl a0, a0, 1
   EndASM
 EndProcedure
