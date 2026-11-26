@@ -64,11 +64,29 @@ nes_map_copy_done:
 EndProcedure"""
 
 
+def replace_once(source: str, old: str, new: str) -> str:
+    if source.count(old) != 1:
+        raise ValueError(f"N64 mapper staging expected one {old.strip()!r}")
+    return source.replace(old, new)
+
+
 def stage_mapper(name: str, source: str, mapper: int = 0, runtime: bool = False) -> str:
     for constant, (array, size) in WINDOWS.items():
         source = re.sub(rf"^#{constant}=\$[0-9A-F]+$",
                         f"Global Dim {array}.a({size})", source, flags=re.M)
         source = re.sub(rf"#{constant}\b", f"@{array}(0)", source)
+    # Work RAM of boards this cartridge is not built for. A cartridge is built for one mapper
+    # (CartMapper = #GAME_MAPPER; the runtime loader refuses any other), and these arrays are
+    # reached only by their boards' code, so they keep one element elsewhere: MMC5's 128 KB
+    # (mapper5's procedures, entered only when CartMapper = 5) and the 32 KB of mappers 6 and 69
+    # (their register and bus paths; the shared init's clear loop is the only other user).
+    if name == "mapper_state" and mapper != 5:
+        source = replace_once(source, "Global Dim M5Ram.a(131072)", "Global Dim M5Ram.a(0)")
+    if mapper not in (6, 69):
+        if name == "mapper_extra_state":
+            source = replace_once(source, "Global Dim ExtraRam.a(32768)", "Global Dim ExtraRam.a(0)")
+        if name == "mapper_extra":
+            source = replace_once(source, "For i=0 To 32767 : ExtraRam(i)=0 : Next", "ExtraRam(0)=0")
     if name == "mapper_extra_bus" and mapper == 119:
         for procedure in ("ExtraChrRamMap", "ExtraChrRamWrite"):
             first = source.index(f"Procedure {procedure}(")
