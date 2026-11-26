@@ -45,9 +45,9 @@ def main():
       'RaspberryPi4/Lib/v3dqpu.pi4','RaspberryPi4/Lib/v3d.pi4',
       'RaspberryPi4/Lib/neon.pi4','Anvil/Graphics/Vulkan/vk_api.pbi',
       'Anvil/Graphics/Vulkan/vk_spirv_fixtures.pbi',
-      'Anvil/Graphics/Vulkan/vk_v3d_shader.pi4','RaspberryPi4/Board/vulkan_dma.pi4',
-      'Anvil/Graphics/Vulkan/vk_v3d_backend.pi4',
-      'Anvil/Graphics/Vulkan/neon_vk_chrome.pi4']
+      'RaspberryPi4/Lib/Vulkan/vk_v3d_shader.pi4','RaspberryPi4/Board/vulkan_dma.pi4',
+      'RaspberryPi4/Lib/Vulkan/vk_v3d_backend.pi4',
+      'Anvil/Graphics/Vulkan/neon_vk_chrome.pbi']
     if a.bluetooth_peer_wrapper:
         includes += ['RaspberryPi4/Lib/gpio.pi4']
     source=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
