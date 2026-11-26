@@ -55,7 +55,8 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   Global Dim NesMmc3ChrTags.i(2)
   ; NesUnitData: the hot unit's own state (design note, section N.4), one window reached from one
   ; base register at these byte offsets. U_SPLIT is a 240-bit map of the split (fallback) lines;
-  ; U_BANDS holds the frame's band records, 32 bytes each (unit/ppu.n64 describes both).
+  ; U_BANDOAM the OAM snapshot of the open band, U_OAMSNAPS the snapshots taken this frame
+  ; (unit/ppu.n64 describes them).
   #NES_U_BANDOPEN = 0
   #NES_U_BANDFIRST = 8
   #NES_U_BANDV = 16
@@ -65,21 +66,41 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   #NES_U_DRAWST = 48
   #NES_U_BANDLOST = 56
   #NES_U_SPLIT = 64
+  #NES_U_BANDOAM = 96
+  #NES_U_OAMSNAPS = 104
   #NES_U_BANDMAX = 32
-  #NES_U_REC_FIRST = 128
-  #NES_U_REC_END = 136
-  #NES_U_REC_V = 144
-  #NES_U_REC_STATE = 152
   ; NesUnitData is not a declared array: its #NES_UNIT_BYTES are a window into NesUnitSpace, chosen
   ; at load (NesUnitPlace) so that its D-cache sets (8 KB, 16-byte lines, 512 sets) are clear of
   ; guest RAM's and of the host stack's working top. Where the compiler places arrays is not the
-  ; program's to choose; which bytes of these 9 KB it uses is. NesUnitBase holds the address.
-  #NES_UNIT_BYTES = 1168
+  ; program's to choose; which bytes of these 8 KB it uses is. NesUnitBase holds the address.
+  #NES_UNIT_BYTES = 112
   Global Dim NesUnitSpace.a(8192+#NES_UNIT_BYTES+16)
   Global Dim NesUnitSets.a(512)
   Global NesUnitBase.i
+  ; THE BAND LOG (step N4; design note, section N.15): the frame's band records, #NES_BAND_BYTES
+  ; each, written by the band cut in the unit's cold part (unit/ppu_cold.n64), and the OAM
+  ; snapshots they name, 256 bytes each. Read by the emitter (the CPU twin today, the RSP next);
+  ; never by the hot code. 16-byte aligned for the RSP's DMA; NesBandBase / NesOamBase hold the
+  ; addresses. A record, 8-byte fields:
+  ;   +0 first line   +8 end line (exclusive)   +16 v at the first line's dot 0
+  ;   +24 PPUCTRL | PPUMASK << 8 | fine X << 16 | t << 32        +32 the mirroring (MapMirrorMode)
+  ;   +40 the OAM snapshot's index   +48 the eight 1 KB CHR banks (MapChrSlots), a byte each
+  ;   +56 zero   +64 the 32 palette bytes (Pal)
+  #NES_BAND_BYTES = 96
+  #NES_B_FIRST = 0
+  #NES_B_END = 8
+  #NES_B_V = 16
+  #NES_B_STATE = 24
+  #NES_B_MIRROR = 32
+  #NES_B_OAM = 40
+  #NES_B_BANKS = 48
+  #NES_B_PAL = 64
+  Global Dim NesBandSpace.a(#NES_U_BANDMAX*#NES_BAND_BYTES+16)
+  Global Dim NesOamSpace.a(#NES_U_BANDMAX*256+16)
+  Global NesBandBase.i, NesOamBase.i
   CompilerIf #NES_PPU_CHECK
     Global Dim NesPpuCheck.i(16)
+    Global Dim NesPpuCheckImage.i(80)  ; two band-input images of 312 bytes (unit/ppu_check.n64)
   CompilerEndIf
   Macro NesMmc3ChrPointer(address)
     (NesMmc3ChrBias((address)>>10)+(address))
@@ -215,6 +236,11 @@ EndProcedure
 ; load refused) if there is no such run.
 Procedure NesUnitPlace()
   Protected i.i, a.i, start.i, run.i, space.i, sets.i=#NES_UNIT_BYTES/16
+  ; The band log and its OAM snapshots (cold; the band cut reads OAM and the palette 8 bytes at a
+  ; time, so both must be 8-byte aligned: refused loudly otherwise, WorkerError 23).
+  NesBandBase=(@NesBandSpace(0)+15)&~15
+  NesOamBase=(@NesOamSpace(0)+15)&~15
+  If (@Oam(0)|@Pal(0))&7 : WorkerError=23 : ProcedureReturn : EndIf
   For i=0 To 511 : NesUnitSets(i)=0 : Next
   For a=@M(0) To @M(0)+2047 Step 16 : NesUnitSets((a>>4)&511)=1 : Next
   a=(NesStackPointer()-512)&~15
@@ -333,8 +359,16 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   XIncludeFile "mmc3_run.n64"
 CompilerEndIf
 
+CompilerIf #NES_PPU_CHECK
+Procedure NesPpuCheckReport()           ; the checking build's words (unit/ppu_check.n64), at the run's end
+  Protected i.i, s.s="NES PPU CHECK"
+  For i=0 To 15 : s=s+" "+Str(NesPpuCheck(i)) : Next
+  LpmDebugPrint(s)
+EndProcedure
+CompilerEndIf
+
 Procedure RunGame()
-  Protected stalls.i, lastFrame.i, start.i
+  Protected stalls.i, lastFrame.i, start.i, i.i
   If HostBegin()=0 : LpmDebugPrint("NES display init failed") : ProcedureReturn : EndIf
   LpmDmaInit()
   CompilerIf #NES_MEASURE_QUEUE
@@ -354,7 +388,14 @@ Procedure RunGame()
   LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
   start=LpmCpuCount()
   CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
-    If NesRunMapper4(start) : ProcedureReturn : EndIf
+    i=NesRunMapper4(start)
+    CompilerIf #NES_PPU_CHECK
+      NesPpuCheckReport()
+    CompilerEndIf
+    CompilerIf #NES_TWIN_CHECK
+      NesTwinReport()
+    CompilerEndIf
+    If i : ProcedureReturn : EndIf
   CompilerElse
     While Stopped=0 And WorkerError=0
       CompilerIf #NES_CHAIN_WINDOWS

@@ -36,20 +36,32 @@
 ;   The checking build (#NES_PPU_CHECK, unit/ppu_check.n64) compares the two
 ;   at every draw and stops the guest on the first difference.
 ;
-; THE BANDS (NesUnitData; the emitter of step N4 is their consumer)
-;   A band is a run of whole visible lines over which every PPU input of the background picture is
-;   unchanged: PPUCTRL, PPUMASK, fine X, t, the CHR banks, the mirroring, the palette and the name
-;   tables. Its v advances line by line by the fixed rule (IncY, then t's horizontal bits). A band
+; THE BANDS (NesUnitData and the band log, nes.n64; the emitter of step N4 is their consumer)
+;   A band is a run of whole visible lines over which every PPU input of the picture is unchanged:
+;   PPUCTRL, PPUMASK, fine X, t, the CHR banks, the mirroring, the palette, the name tables and
+;   OAM. Its v advances line by line by the fixed rule (IncY, then t's horizontal bits). A band
 ;   opens at the first line that begins while none is open; u_ppucut closes it BEFORE any write of
-;   such an input is applied (PpuRegWrite $2000/$2001/$2005/$2006/$2007, a $2007 read, MapperChr and
-;   MapperMirror on a change), and line 240 closes the frame's last band. A cut at dot 0 ends the
-;   band before that line; at dots 1-255 the line is split (a bit in U_SPLIT, the fallback lines of
-;   step N5) and the band ends before it; at dot 256 or later the line is complete and is the band's
-;   last. A record (32 bytes at U_BANDS): first line, end line, v at the first line, and
-;   PPUCTRL | PPUMASK << 8 | fine X << 16 | t << 32 at the close. 32 records a frame; more count
-;   in U_BANDLOST. The checking build proves the cut list complete: at every line inside an open
-;   band it recomputes a signature of all those inputs and the predicted v, and stops on a change
-;   that no cut announced.
+;   such an input is applied (PpuRegWrite $2000 when PPUCTRL or t changes, $2001 on a change,
+;   $2005/$2006/$2007, a $2007 read, MapperChr and MapperMirror on a change), and line 240 closes
+;   the frame's last band. A cut at dot 0 ends the band before that line; at dots 1-255 the line is
+;   split (a bit in U_SPLIT, the fallback lines of step N5) and the band ends before it; at dot 256
+;   or later the line is complete and is the band's last.
+;   OAM is cut differently, from the renderer's own rule: a line's sprites are evaluated and drawn
+;   from OAM at the line's dot 0, so a write to OAM ($2004, or an OAM DMA, whose copy is the shared
+;   worker's) changes the picture from the NEXT line on, never in the middle of one. Every such
+;   write sets OamCacheDirty; the line that begins with it set ends the band before itself (cold
+;   part, ppu_line_oam) unless the band opened at that line. So OAM writes split no line, and one
+;   OAM snapshot, taken when the band opens (ppu_band_oam: the frame's last snapshot if OAM still
+;   equals it, else a new one), is valid for the whole band.
+;   The record (#NES_BAND_BYTES at NesBandBase, written at the close in the cold part): first and
+;   end line, v at the first line, PPUCTRL | PPUMASK << 8 | fine X << 16 | t << 32, the mirroring,
+;   the snapshot's index, the eight CHR bank numbers, the 32 palette bytes - every input as it was
+;   over the band's lines, since every change of them is cut first. 32 records a frame; a band
+;   beyond them, or one that found no free snapshot, counts in U_BANDLOST.
+;   The checking build proves it: at every line inside an open band it recomputes a signature of
+;   the inputs and the predicted v (codes 3, 4), compares the inputs with OAM byte for byte against
+;   their image at the band's first line (6), and at every close compares the record and its
+;   snapshot with that image (7) and its v with the v the renderer started the band with (8).
 ;
 ; REGISTERS in u_ppuadvance (its frame saves ra, s0-s7): s0 dots still to advance, s1 line, s2 dot,
 ;   s3 the interval's end dot on this line, s4 = global_ppuline (the PPU scalars by offset),
@@ -110,6 +122,7 @@ ppu_line_band_open:
     sd t1, #NES_U_BANDOPEN(s6)      ; this line opens a band
     sd s1, #NES_U_BANDFIRST(s6)
     ld t0, global_ppuv-global_ppuline(s4)
+    jal ppu_band_oam                ; the OAM its sprites are drawn from (cold part)
     sd t0, #NES_U_BANDV(s6)         ; the scroll of its first line
   EndASM
   CompilerIf #NES_PPU_CHECK
@@ -137,9 +150,17 @@ ppu_line_eval:
     ld t1, 0(t0)
     beqz t1, ppu_line_cached
     nop
-    jal ppubuildspritecache         ; OAM's Y bytes changed since the lists were built
-    nop
+    b ppu_line_oam                  ; OAM was written since the last line began (cold part): the
+    nop                             ; band ends before this line, then the lists are rebuilt
 ppu_line_cached:
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_line            ; the band's inputs, OAM included, as at its first line
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
     la t0, global_cachedcount
     daddu t0, t0, s1
     lbu a1, 0(t0)                   ; a1 = candidates on this line
@@ -540,25 +561,28 @@ nes_ppu_write_table:
     .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
 nes_ppu_write_ctrl:
     ld t0, global_ppuctrl-global_ppubus(a2)
-    beq t0, a1, nes_ppu_ctrl_store
-    move a3, ra
-    jal u_ppucut                    ; PPUCTRL changes: the band ends first
+    ld t2, global_pput-global_ppubus(a2)
+    andi t1, a1, 3
+    sll t1, t1, 10
+    andi t3, t2, 0x73FF
+    or t1, t1, t3                   ; t1 = t with this write's name-table bits
+    xor t2, t2, t1
+    xor t3, t0, a1
+    or t2, t2, t3
+    beqz t2, nes_ppu_ctrl_store     ; neither PPUCTRL nor t changes (a write of the same value can
+    move a3, ra                     ; still change t, after a $2006 write set its bits otherwise)
+    jal u_ppucut                    ; PPUCTRL or t changes: the band ends first
     nop
     move ra, a3
 nes_ppu_ctrl_store:
     sd a1, global_ppuctrl-global_ppubus(a2)
-    xor t1, t0, a1
-    andi t1, t1, 32
-    beqz t1, nes_ppu_ctrl_scroll
-    addiu t2, zero, 1
-    sd t2, global_oamcachedirty-global_ppubus(a2)
-nes_ppu_ctrl_scroll:
-    ld t1, global_pput-global_ppubus(a2)
-    andi t2, a1, 3
-    sll t2, t2, 10
-    andi t1, t1, 0x73FF
-    or t1, t1, t2
     sd t1, global_pput-global_ppubus(a2)
+    xor t2, t0, a1
+    andi t2, t2, 32
+    beqz t2, nes_ppu_ctrl_nmi
+    addiu t3, zero, 1
+    sd t3, global_oamcachedirty-global_ppubus(a2)
+nes_ppu_ctrl_nmi:
     andi t0, t0, 128
     bnez t0, nes_ppu_port_done
     andi a1, a1, 128

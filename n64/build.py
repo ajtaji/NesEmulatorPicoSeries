@@ -166,6 +166,9 @@ def build(args, *, controller_trace=()):
     cpu_trace = getattr(args, "cpu_trace", False)
     a12_check = getattr(args, "a12_check", False)
     ppu_check = getattr(args, "ppu_check", False)
+    twin_check = getattr(args, "twin_check", False)
+    if twin_check and not (runtime and cart.mapper == 4 and args.check_frame):
+        raise ValueError("the emitter twin's check is a runtime-MMC3 verification build")
     if ppu_check and not (runtime and cart.mapper == 4 and args.check_frame):
         raise ValueError("the PPU check is a runtime-MMC3 verification build")
     if a12_check and not (runtime and cart.mapper == 4 and args.check_frame):
@@ -176,6 +179,7 @@ def build(args, *, controller_trace=()):
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
         "NES_PPU_CHECK": int(ppu_check),
+        "NES_TWIN_CHECK": int(twin_check),
         "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
@@ -320,6 +324,9 @@ if __name__ == "__main__":
                         help="checking build: the exact and the analytic A12 walks compared at every call (needs --check-frame)")
     parser.add_argument("--ppu-check", action="store_true",
                         help="checking build: the PPU state machine against the renderer and the band rule (needs --check-frame)")
+    parser.add_argument("--twin-check", action="store_true",
+                        help="checking build: the RDP emitter's CPU twin draws every band into a second picture, compared "
+                             "with the renderer's (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:

@@ -12,10 +12,17 @@
 ;          equals the band's at its first line - so every change of them was cut first;
 ;   3      the same lines: v equals the band rule from the line before (IncY, then t's horizontal
 ;          bits, when rendering is on; unchanged when it is off).
+;   6      at every line inside an open band, after the OAM rule: the inputs the renderer draws the
+;          line from (as 4, with OAM's 256 bytes, CHR as the bank numbers) equal their image at
+;          the band's first line, byte for byte;
+;   7      at every record the band cut writes: the record with its OAM snapshot equals that image;
+;   8 / 9  the record's v and first line are the renderer's v and line at the band's first line.
 ; On the first failure the record NesPpuCheck (64-bit words) keeps: 1 the code above, 2 the guest
 ; frame, 3 line, 4 dot, 5 the value found (renderer / actual), 6 the value expected (state machine /
-; rule). Counts: 0 draws, 7 band lines, 10 sprite rows, 11 sprite-0 hits raised. Words 8 and 9 hold the open band's
-; signature and the last line's v. The guest CPU is then stopped (Stopped = 1).
+; rule). Counts: 0 draws, 7 band lines, 10 sprite rows, 11 sprite-0 hits raised, 12 band lines
+; compared with OAM, 13 records compared. Words 8 and 9 hold the open band's signature and the last
+; line's v, 14 and 15 the v and line at the open band's first line. The guest CPU is then stopped
+; (Stopped = 1). NesPpuCheckReport prints them at the run's end.
 ;
 ; REGISTERS: called from u_ppuadvance, s4 = global_ppuline, s6 = NesUnitData. ppu_check_draw keeps
 ; v0 and a7 (the state machine's results, stored after it) and clobbers t0-t2, a0-a2.
@@ -185,6 +192,194 @@ ppu_chk_sig_pal:
     daddiu t2, t2, 1
     bne t2, t3, ppu_chk_sig_pal
     nop
+    jr ra
+    nop
+
+; ---- the band record (step N4): codes 6-9 ----
+; An image of a band's inputs, 39 doublewords (312 bytes), in the band log's own form: +0 PPUCTRL |
+; PPUMASK << 8 | fine X << 16 | t << 32, +8 the mirroring, +16 the eight CHR bank numbers (a byte
+; each), +24 the 32 palette bytes, +56 the 256 bytes of OAM. NesPpuCheckImage holds image A (the
+; band's first line, from the live state) at +0 and image B (the line or record compared) at +320.
+ppu_check_line:                     ; at every line inside a band, after the OAM rule (ppu_line_oam)
+    move a3, ra
+    la a0, global_nesppucheckimage
+    ld t0, #NES_U_BANDFIRST(s6)
+    bne t0, s1, ppu_chk_line_cmp
+    nop
+    jal ppu_chk_live                ; the band's first line: image A
+    nop
+    la t2, global_nesppucheck
+    ld t0, global_ppuv-global_ppuline(s4)
+    sd t0, 112(t2)                  ; word 14: the renderer's v at the band's first line
+    sd s1, 120(t2)                  ; word 15: that line
+    jr a3
+    nop
+ppu_chk_line_cmp:
+    jal ppu_chk_live                ; image B: this line's inputs
+    daddiu a0, a0, 320
+    la a0, global_nesppucheckimage
+    jal ppu_chk_cmp
+    daddiu a1, a0, 320
+    la t2, global_nesppucheck
+    ld t0, 96(t2)
+    daddiu t0, t0, 1
+    sd t0, 96(t2)                   ; word 12: band lines compared with OAM
+    move ra, a3
+    beqz v0, ppu_chk_line_out
+    move a1, v0                     ; found: the first differing doubleword + 1
+    move a2, zero
+    j ppu_check_fail
+    addiu a0, zero, 6               ; 6: an input (or OAM) changed inside a band with no cut
+ppu_chk_line_out:
+    jr ra
+    nop
+
+ppu_check_record:                   ; at every record written (ppu_cut_close), t2 = the record;
+    daddiu sp, sp, -64              ; keeps a0-a7, t0, t1 as the cut's callers need
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd t0, 40(sp)
+    sd t1, 48(sp)
+    sd t2, 56(sp)
+    move a1, t2
+    la a0, global_nesppucheckimage
+    jal ppu_chk_rec                 ; image B: the record and its OAM snapshot
+    daddiu a0, a0, 320
+    la a0, global_nesppucheckimage
+    jal ppu_chk_cmp                 ; against image A
+    daddiu a1, a0, 320
+    la t2, global_nesppucheck
+    ld t0, 104(t2)
+    daddiu t0, t0, 1
+    sd t0, 104(t2)                  ; word 13: records compared
+    move a1, v0
+    move a2, zero
+    bnez v0, ppu_chk_rec_fail
+    addiu a0, zero, 7               ; 7: the record differs from the band's inputs
+    ld t3, 56(sp)
+    ld a1, #NES_B_V(t3)
+    ld a2, 112(t2)
+    bne a1, a2, ppu_chk_rec_fail
+    addiu a0, zero, 8               ; 8: the record's v is not the renderer's at the first line
+    ld a1, #NES_B_FIRST(t3)
+    ld a2, 120(t2)
+    bne a1, a2, ppu_chk_rec_fail
+    addiu a0, zero, 9               ; 9: the record's first line is not the band's
+    b ppu_chk_rec_out
+    nop
+ppu_chk_rec_fail:
+    jal ppu_check_fail
+    nop
+ppu_chk_rec_out:
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld t0, 40(sp)
+    ld t1, 48(sp)
+    jr ra
+    daddiu sp, sp, 64
+
+ppu_chk_live:                       ; leaf: a0 = the image to fill from the live state
+    la v1, global_ppuctrl           ; clobbers t3, t8, t9, v0, v1
+    ld t9, 0(v1)
+    la v1, global_ppumask
+    ld t8, 0(v1)
+    dsll t8, t8, 8
+    or t9, t9, t8
+    la v1, global_ppufinex
+    ld t8, 0(v1)
+    dsll t8, t8, 16
+    or t9, t9, t8
+    la v1, global_pput
+    ld t8, 0(v1)
+    dsll32 t8, t8, 0
+    or t9, t9, t8
+    sd t9, 0(a0)
+    la v1, global_mapmirrormode
+    ld t9, 0(v1)
+    sd t9, 8(a0)
+    la v1, global_mapchrslots
+    move v0, a0
+    daddiu t3, a0, 8
+ppu_chk_live_bank:
+    ld t9, 0(v1)
+    sb t9, 16(v0)
+    daddiu v0, v0, 1
+    bne v0, t3, ppu_chk_live_bank
+    daddiu v1, v1, 8
+    la v1, global_pal
+    daddiu v0, a0, 24
+    daddiu t3, a0, 56
+ppu_chk_live_pal:
+    ld t9, 0(v1)
+    sd t9, 0(v0)
+    daddiu v0, v0, 8
+    bne v0, t3, ppu_chk_live_pal
+    daddiu v1, v1, 8
+    la v1, global_oam
+    daddiu t3, a0, 312
+ppu_chk_live_oam:
+    ld t9, 0(v1)
+    sd t9, 0(v0)
+    daddiu v0, v0, 8
+    bne v0, t3, ppu_chk_live_oam
+    daddiu v1, v1, 8
+    jr ra
+    nop
+
+ppu_chk_rec:                        ; leaf: a0 = the image to fill, a1 = a band record
+    ld t9, #NES_B_STATE(a1)         ; clobbers t3, t9, v0, v1
+    sd t9, 0(a0)
+    ld t9, #NES_B_MIRROR(a1)
+    sd t9, 8(a0)
+    ld t9, #NES_B_BANKS(a1)
+    sd t9, 16(a0)
+    move v1, a1
+    move v0, a0
+    daddiu t3, a0, 32
+ppu_chk_rec_pal:
+    ld t9, #NES_B_PAL(v1)
+    sd t9, 24(v0)
+    daddiu v0, v0, 8
+    bne v0, t3, ppu_chk_rec_pal
+    daddiu v1, v1, 8
+    ld v1, #NES_B_OAM(a1)
+    dsll v1, v1, 8
+    la t9, global_nesoambase
+    ld t9, 0(t9)
+    daddu v1, v1, t9                ; the band's OAM snapshot
+    daddiu v0, a0, 56
+    daddiu t3, a0, 312
+ppu_chk_rec_oam:
+    ld t9, 0(v1)
+    sd t9, 0(v0)
+    daddiu v0, v0, 8
+    bne v0, t3, ppu_chk_rec_oam
+    daddiu v1, v1, 8
+    jr ra
+    nop
+
+ppu_chk_cmp:                        ; leaf: v0 = 0 when the images at a0 and a1 are equal, else the
+    move v0, zero                   ; first differing doubleword + 1. Clobbers t3, t8, t9
+    addiu t3, zero, 39
+ppu_chk_cmp_word:
+    dsll t9, v0, 3
+    daddu t8, a0, t9
+    ld t8, 0(t8)
+    daddu t9, a1, t9
+    ld t9, 0(t9)
+    bne t8, t9, ppu_chk_cmp_diff
+    daddiu v0, v0, 1
+    bne v0, t3, ppu_chk_cmp_word
+    nop
+    jr ra
+    move v0, zero
+ppu_chk_cmp_diff:
     jr ra
     nop
 

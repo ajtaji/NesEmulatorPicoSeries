@@ -23,11 +23,90 @@ ppu_line_frame:                     ; line 0 opens a frame: clear its band log a
     daddiu t2, s6, #NES_U_SPLIT     ; (t1 = 1 is kept for the band open)
     sd zero, #NES_U_BANDCOUNT(s6)
     sd zero, #NES_U_BANDLOST(s6)
+    sd zero, #NES_U_OAMSNAPS(s6)
     sd zero, 0(t2)
     sd zero, 8(t2)
     sd zero, 16(t2)
     sd zero, 24(t2)
     b ppu_line_band_open
+    nop
+
+ppu_band_oam:
+    ; A band opens: the OAM its lines' sprites are drawn from. The frame's last snapshot when OAM
+    ; still equals it, else a new one (at most #NES_U_BANDMAX a frame; with none free the band
+    ; gets index #NES_U_BANDMAX and its close counts it lost). In: s6 = NesUnitData. Out:
+    ; U_BANDOAM. Clobbers t0-t3, t8, t9, v0, v1. OAM is 8-byte aligned (NesUnitPlace refuses
+    ; a build where it is not).
+    ld t0, #NES_U_OAMSNAPS(s6)
+    la t1, global_nesoambase
+    ld t1, 0(t1)                    ; t1 = the snapshots
+    la t2, global_oam
+    beqz t0, ppu_oam_new            ; none yet this frame
+    dsll v0, t0, 8
+    daddu v0, v0, t1
+    daddiu v0, v0, -256             ; v0 = the last snapshot
+    move v1, t2
+    daddiu t8, t2, 256
+ppu_oam_cmp:
+    ld t3, 0(v1)
+    ld t9, 0(v0)
+    bne t3, t9, ppu_oam_new         ; OAM differs from it
+    daddiu v1, v1, 8
+    bne v1, t8, ppu_oam_cmp
+    daddiu v0, v0, 8
+    daddiu t0, t0, -1               ; the same: the band names the last snapshot
+    jr ra
+    sd t0, #NES_U_BANDOAM(s6)
+ppu_oam_new:
+    sltiu t3, t0, #NES_U_BANDMAX
+    beqz t3, ppu_oam_none
+    dsll v0, t0, 8
+    daddu v0, v0, t1                ; the next free snapshot
+    move v1, t2
+    daddiu t8, t2, 256
+ppu_oam_copy:
+    ld t3, 0(v1)
+    daddiu v1, v1, 8
+    sd t3, 0(v0)
+    bne v1, t8, ppu_oam_copy
+    daddiu v0, v0, 8
+    sd t0, #NES_U_BANDOAM(s6)
+    daddiu t0, t0, 1
+    jr ra
+    sd t0, #NES_U_OAMSNAPS(s6)
+ppu_oam_none:
+    addiu t3, zero, #NES_U_BANDMAX
+    jr ra
+    sd t3, #NES_U_BANDOAM(s6)
+
+ppu_line_oam:
+    ; OAM was written since the last line began (OamCacheDirty). This line's sprites are the first
+    ; drawn from the new OAM, so the band ends before it and the next one opens here - unless the
+    ; band opened at this line, whose snapshot is already this OAM. Then the per-line lists are
+    ; rebuilt, as the hot path did. Registers as at ppu_line_eval (u_ppuadvance's).
+    ld t0, #NES_U_BANDFIRST(s6)
+    beq t0, s1, ppu_line_oam_lists
+    move v0, s6
+    jal ppu_cut_close               ; the band ends before this line
+    move t3, s1
+    addiu t1, zero, 1
+    sd t1, #NES_U_BANDOPEN(s6)      ; this line opens the next
+    sd s1, #NES_U_BANDFIRST(s6)
+    ld t0, global_ppuv-global_ppuline(s4)
+    jal ppu_band_oam
+    sd t0, #NES_U_BANDV(s6)
+  EndASM
+  CompilerIf #NES_PPU_CHECK
+    ASM
+      jal ppu_check_band
+      move a0, zero                 ; a0 = 0: a band opens here
+    EndASM
+  CompilerEndIf
+  ASM
+ppu_line_oam_lists:
+    jal ppubuildspritecache
+    nop
+    b ppu_line_cached
     nop
 ppu_s0_row:
     ; Sprite 0's row on this line, as the renderer fetches it (NesMmc3DrawSprites).
@@ -224,24 +303,37 @@ ppu_cut_split:
     sllv v1, v1, t2
     or t9, t9, v1
     sb t9, #NES_U_SPLIT(t8)         ; U_SPLIT bit (line): a fallback line
-ppu_cut_close:                      ; v0 = NesUnitData, t3 = the line the band ends before
+ppu_cut_close:
+    ; The open band ends before line t3: its record (the band log, nes.n64). Every input is read
+    ; at the close, BEFORE the change that cut it is applied, so it is the value the band's lines
+    ; were drawn with. In: v0 = NesUnitData, t3 = the line the band ends before. Clobbers t2, t3,
+    ; t8, t9, v0, v1 only (u_ppucut's callers keep a0-a7, t0, t1). Palette and OAM 8-byte aligned.
     ld t8, #NES_U_BANDOPEN(v0)
     beqz t8, ppu_cut_done
     ld t9, #NES_U_BANDFIRST(v0)
     sd zero, #NES_U_BANDOPEN(v0)
     sltu t8, t9, t3
     beqz t8, ppu_cut_done           ; no complete line in it: no record
+    ld t8, #NES_U_BANDOAM(v0)
+    sltiu t2, t8, #NES_U_BANDMAX
+    beqz t2, ppu_cut_lost           ; no OAM snapshot was free when it opened
     ld t8, #NES_U_BANDCOUNT(v0)
     sltiu t2, t8, #NES_U_BANDMAX
     beqz t2, ppu_cut_lost
     dsll t2, t8, 5
-    daddu t2, t2, v0                ; the record
-    sd t9, #NES_U_REC_FIRST(t2)
-    sd t3, #NES_U_REC_END(t2)
-    ld t9, #NES_U_BANDV(v0)
-    sd t9, #NES_U_REC_V(t2)
+    dsll v1, t8, 6
+    daddu t2, t2, v1                ; count x 96
+    la v1, global_nesbandbase
+    ld v1, 0(v1)
+    daddu t2, t2, v1                ; t2 = the record
     daddiu t8, t8, 1
     sd t8, #NES_U_BANDCOUNT(v0)
+    sd t9, #NES_B_FIRST(t2)
+    sd t3, #NES_B_END(t2)
+    ld t9, #NES_U_BANDV(v0)
+    sd t9, #NES_B_V(t2)
+    ld t9, #NES_U_BANDOAM(v0)
+    sd t9, #NES_B_OAM(t2)
     la v1, global_ppuctrl
     ld t9, 0(v1)
     la v1, global_ppumask
@@ -256,8 +348,67 @@ ppu_cut_close:                      ; v0 = NesUnitData, t3 = the line the band e
     ld t8, 0(v1)
     dsll32 t8, t8, 0
     or t9, t9, t8
-    jr ra
-    sd t9, #NES_U_REC_STATE(t2)
+    sd t9, #NES_B_STATE(t2)
+    la v1, global_mapmirrormode
+    ld t9, 0(v1)
+    sd t9, #NES_B_MIRROR(t2)
+    la v1, global_mapchrslots       ; the eight 1 KB CHR banks (64-bit each), a byte each
+    ld t9, 0(v1)
+    sb t9, #NES_B_BANKS(t2)
+    ld t9, 8(v1)
+    sb t9, #NES_B_BANKS+1(t2)
+    ld t9, 16(v1)
+    sb t9, #NES_B_BANKS+2(t2)
+    ld t9, 24(v1)
+    sb t9, #NES_B_BANKS+3(t2)
+    ld t9, 32(v1)
+    sb t9, #NES_B_BANKS+4(t2)
+    ld t9, 40(v1)
+    sb t9, #NES_B_BANKS+5(t2)
+    ld t9, 48(v1)
+    sb t9, #NES_B_BANKS+6(t2)
+    ld t9, 56(v1)
+    sb t9, #NES_B_BANKS+7(t2)
+    sd zero, #NES_B_BANKS+8(t2)
+    la v1, global_pal               ; the 32 palette bytes
+    ld t9, 0(v1)
+    sd t9, #NES_B_PAL(t2)
+    ld t9, 8(v1)
+    sd t9, #NES_B_PAL+8(t2)
+    ld t9, 16(v1)
+    sd t9, #NES_B_PAL+16(t2)
+    ld t9, 24(v1)
+  EndASM
+  CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK
+    ASM
+      sd t9, #NES_B_PAL+24(t2)
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+    EndASM
+    CompilerIf #NES_PPU_CHECK
+      ASM
+        jal ppu_check_record        ; the record against the band's inputs (unit/ppu_check.n64)
+        nop
+      EndASM
+    CompilerEndIf
+    CompilerIf #NES_TWIN_CHECK
+      ASM
+        jal nestwinbandcall         ; the CPU twin of the emitter, t2 = the record (twin.n64)
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
+      ld ra, 0(sp)
+      jr ra
+      daddiu sp, sp, 16
+    EndASM
+  CompilerElse
+    ASM
+      jr ra
+      sd t9, #NES_B_PAL+24(t2)
+    EndASM
+  CompilerEndIf
+  ASM
 ppu_cut_lost:
     ld t8, #NES_U_BANDLOST(v0)
     daddiu t8, t8, 1
