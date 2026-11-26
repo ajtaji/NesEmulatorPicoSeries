@@ -17,9 +17,10 @@
 ;   at +$C100 (the 64 KB to the library's crash display is free in its map). Set 1's area, the four band-input
 ;   slots, the fallback palettes: below the stack (NesShowArea1, NesShowNtSpace, NesFbPalSpace).
 ;
-; THE FALLBACK LINES (the lines the bands cannot draw): split lines (a cut at dots 1-255: NesFbCatchUp), the lines
-; of a band that cannot be recorded, and the lines where the sprite-priority quirk can show (both decided at the
-; line's start, ppu_live_sprites / ppu_live_empty in the cold part). The old renderer's own assembly draws each into
+; THE FALLBACK LINES (the lines no record draws; design note N.60 made split lines records of their own - rspband.n64,
+; NesSegFirst / NesSegDraw / NesSegPublish - and the sprite-priority quirk the bands' own): a split line when the
+; frame's records or segment entries are used up (NesFbCatchUp), and the lines of a band that cannot be recorded
+; (decided at the line's start, ppu_live_sprites / ppu_live_empty in the cold part). The old renderer's own assembly draws each into
 ; a slot (NesFbSlot), NesFbPublish writes the row and the line's palette back at its dot 256, and the frame's list
 ; (NesShowFallback) copies the slots into the picture after the last band, as the old blit drew each line.
 ;
@@ -45,6 +46,7 @@ Global Dim NesFbPalSpace.u(#NES_FB_ROWS*32+8)  ; a row's palette, 64 bytes
 Global Dim NesFbLine.i(2*#NES_FB_ROWS)   ; each set's fallback lines, in order
 Global Dim NesShowOamKeep.a(256+8)
 
+Global NesShowSetupP.i                 ; the frame set the RSP program's areas were last set up for
 Global NesShowProg.i, NesShowCur.i, NesShowBusy.i, NesShowNtBase.i, NesShowNtNext.i
 Global Dim NesShowArea.i(2)             ; KSEG1: the frame areas
 Global Dim NesShowTlut.i(2)             ; KSEG1: the TLUT sets
@@ -199,6 +201,41 @@ ProcedureNaked NesFbPublish()
   EndASM
 EndProcedure
 
+; NesLiveDraw / NesLivePublish - the unit's calls on a line it does not leave to the bands (U_LIVE not 0): a split
+; line drawn by a record of its own (U_LIVE = 1, design note N.60: rspband.n64's NesSegDraw / NesSegPublishCall) or a
+; fallback line of the old path (U_LIVE = its slot: NesRenderTo / NesFbPublish). Each clobbers no more than the old
+; path's routine does (a0 = the end dot for the draw).
+ProcedureNaked NesLiveDraw()
+  ASM
+    la t0, global_nesunitbase
+    ld t0, 0(t0)
+    ld t0, #NES_U_LIVE(t0)
+    addiu t1, zero, 1
+    bne t0, t1, nes_live_draw_old
+    nop
+    j nessegdraw
+    nop
+nes_live_draw_old:
+    j nesrenderto
+    nop
+  EndASM
+EndProcedure
+ProcedureNaked NesLivePublish()
+  ASM
+    la t0, global_nesunitbase
+    ld t0, 0(t0)
+    ld t0, #NES_U_LIVE(t0)
+    addiu t1, zero, 1
+    bne t0, t1, nes_live_publish_old
+    nop
+    j nessegpublishcall
+    nop
+nes_live_publish_old:
+    j nesfbpublish
+    nop
+  EndASM
+EndProcedure
+
 CompilerIf #NES_CONSOLE_RECORD
 ; THE CONSOLE RECORD'S TIMED CALLS (console_record.n64, the work split's part 1). In the record build only, the unit
 ; calls these instead of the three renderer routines it runs on a fallback line - the line's spans (NesRenderTo, at
@@ -215,7 +252,7 @@ ProcedureNaked NesRecRenderTo()          ; a0 = the end dot, as NesRenderTo
     sd ra, 0(sp)
     mfc0 t0, $9                      ; Count at entry
     sd t0, 8(sp)
-    jal nesrenderto
+    jal neslivedraw
     nop
     j nes_rec_fb_tail
     nop
@@ -227,7 +264,7 @@ ProcedureNaked NesRecFbPublish()         ; as NesFbPublish
     sd ra, 0(sp)
     mfc0 t0, $9
     sd t0, 8(sp)
-    jal nesfbpublish
+    jal neslivepublish
     nop
     j nes_rec_fb_tail
     nop
@@ -478,6 +515,7 @@ Procedure NesShowSet(p.i)               ; the current frame takes set p (its sta
   NesFbFirst = NesFbHead
   NesFbRowBase = NesFbRows : NesFbPalBase = NesFbPals
   NesFbLineBase = @NesFbLine(p * #NES_FB_ROWS)
+  NesSegFrame(p)                        ; the split lines' segment pool of set p (rspband.n64, N.60)
 EndProcedure
 
 Procedure.i NesShowInit()
@@ -506,6 +544,8 @@ Procedure.i NesShowInit()
   NesShowProg = LpmRspqProgram(LpmCartFile(1), space)
   If NesShowProg = 0 : LpmDebugPrint("NES SHOW REFUSED: LpmRspqProgram") : ProcedureReturn 0 : EndIf
   NesShowDone(1) = 1                    ; no frame before the first
+  NesShowSetupP = -1
+  NesSegInit(NesShowNtBase)
   NesShowSet(0)
   CompilerIf #NES_SHOW_CHECK
     NesShowChr(1) = 0 : NesShowChr(2) = 0 ; (the load's own row writes are not the guest's)
@@ -528,7 +568,8 @@ Procedure NesShowBand(rec.i)
   ; background layer (nbbg, run only with PPUMASK bit 3 set), so a band whose background is off - every band of a
   ; frame drawn with rendering off - needs no copy: no slot is taken (its fence does not move) and the job names
   ; slot 0's address, which it does not read. The copy was ~14,000 of a band close's ~16,000 ticks.
-  If (PeekI(rec + #NES_B_STATE) >> 8) & 8
+  ; A SPLIT LINE'S RECORD (design note N.60) carries its own name-table bytes in its segments: no copy either.
+  If (PeekI(rec + #NES_B_STATE) >> 8) & 8 And PeekL(rec + #NES_B_BANKS + 8) = 0
     s = NesShowNtNext : NesShowNtNext = (s + 1) & 3
     f = NesShowNtFence(s)                 ; the slot's last job has read it
     If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
@@ -542,7 +583,12 @@ Procedure NesShowBand(rec.i)
   NesShowStat(9) + t0 : NesShowStat(10) + 1
   If t0 > NesShowStat(11) : NesShowStat(11) = t0 : EndIf
   b = NesShowBands(p)
+  ; NES_RSP_SETUP names the band's name-table slot and the frame set's areas: a split line's record reads no slot, so
+  ; it needs none when the set's areas are the ones the program has (NesShowSetupP)
+  If s >= 0 Or PeekL(rec + #NES_B_BANKS + 8) = 0 Or NesShowSetupP <> p
+  NesShowSetupP = p
   LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, nt & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
+  EndIf
   LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b)
   f = LpmRspqFence()
   NesShowRecFence(idx) = f : NesShowFence(p) = f
@@ -888,6 +934,7 @@ Procedure NesShowReport()
   LpmDebugPrint(s)
   LpmDebugPrint("NES SHOW FRAMES SHOWN " + Str(NesShowStat(0)) + " NOT SHOWN " + Str(NesShowStat(1)) + " COALESCED " + Str(NesShowStat(14)) + " FALLBACK LINES " + Str(NesShowStat(5)) + " MOST A FRAME " + Str(NesShowStat(6)) + " SPLIT " + Str(NesShowStat(7)) + " LOST BANDS " + Str(NesShowStat(8)))
   LpmDebugPrint("NES SHOW BAND CLOSE TICKS " + Str(NesShowStat(9)) + " BANDS " + Str(NesShowStat(10)) + " MOST " + Str(NesShowStat(11)) + " WAITS " + Str(NesShowStat(3)) + " DRAINS " + Str(NesShowStat(4)) + " RSP CLOCKS " + Str(NesShowStat(12)) + " MOST A FRAME " + Str(NesShowStat(13)))
+  NesSegReport()
   CompilerIf #NES_SHOW_CHECK
     LpmDebugPrint("NES SHOW CHR ROW WRITES " + Str(NesShowChr(2)) + " TICKS " + Str(NesShowChr(1)))
   CompilerEndIf

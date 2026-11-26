@@ -28,6 +28,19 @@ ppu_line_frame:                     ; line 0 opens a frame: clear its band log a
     sd zero, 8(t2)
     sd zero, 16(t2)
     sd zero, 24(t2)
+  EndASM
+  CompilerIf #NES_TWIN_CHECK And #NES_RDP_SHOW=0
+    ASM
+      la t0, global_nessegbasep     ; N.60: the checking builds' segment pool from its start (they wait at line 240)
+      ld t2, 0(t0)
+      la t0, global_nessegnext
+      sd t2, 0(t0)
+      daddiu t2, t2, 6144                  ; #NES_SEG_POOL x #NES_SEG_BYTES
+      la t0, global_nessegend
+      sd t2, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     b ppu_line_band_open
     nop
 
@@ -230,56 +243,11 @@ ppu_live_empty:
       b ppu_adv_draw
       nop
 ppu_live_sprites:
-      ; N5: a line with sprites (a1 their count 1-8, a2 PPUMASK, s1 the line; a1 / a2 kept for the draw). A
-      ; fallback line when its band cannot be recorded, or when the priority quirk can show: a behind-background
-      ; sprite i and a front sprite j > i in the roster (CachedSprite: OAM indices in OAM order) whose 8-pixel x
-      ; ranges overlap. (The twin's test is per pixel; this one is a superset of it, from the roster alone - the
-      ; old renderer's pixels are right on any line, so a line taken needlessly costs time, never a pixel.) Uses
-      ; t0-t3, t8, t9, v0, v1.
+      ; N5 / N.60: a line with sprites (a1 their count 1-8, a2 PPUMASK, s1 the line; a1 / a2 kept for the draw) is a
+      ; fallback line of the old path only when its band cannot be recorded. (The sprite-priority quirk is the
+      ; band's own since N.60: the RSP's phase 2 draws it, rspband.n64rsp NesRspBandQ.)
       ld t0, #NES_U_LIVEBAND(s6)
       bnez t0, ppu_live_on
-      sltiu t0, a1, 2
-      bnez t0, ppu_adv_draw         ; one sprite: no pair
-      andi t0, a2, 16
-      beqz t0, ppu_adv_draw         ; sprites hidden: none drawn
-      sll t0, s1, 3
-      la t1, global_cachedsprite
-      daddu t1, t1, t0              ; t1 = sprite i's roster slot
-      daddu t2, t1, a1              ; t2 = the roster's end
-      la t3, global_oam
-ppu_quirk_i:
-      lbu t0, 0(t1)
-      sll t0, t0, 2
-      daddu t0, t0, t3              ; sprite i's OAM entry
-      lbu t8, 2(t0)
-      andi t8, t8, 32
-      beqz t8, ppu_quirk_inext      ; i in front of the background: it cannot hide a front sprite wrongly
-      nop
-      lbu t8, 3(t0)                 ; t8 = X of i
-      daddiu v0, t1, 1              ; v0 = sprite j's roster slot, j > i
-ppu_quirk_j:
-      beq v0, t2, ppu_quirk_inext
-      nop
-      lbu t9, 0(v0)
-      sll t9, t9, 2
-      daddu t9, t9, t3              ; sprite j's OAM entry
-      lbu v1, 2(t9)
-      andi v1, v1, 32
-      bnez v1, ppu_quirk_jnext      ; j behind as well
-      nop
-      lbu v1, 3(t9)                 ; X of j
-      subu v1, v1, t8
-      addiu v1, v1, 7
-      sltiu v1, v1, 15              ; -8 < X j - X i < 8: the ranges overlap
-      bnez v1, ppu_live_on
-      nop
-ppu_quirk_jnext:
-      b ppu_quirk_j
-      daddiu v0, v0, 1
-ppu_quirk_inext:
-      daddiu t1, t1, 1
-      daddiu t0, t2, -1
-      bne t1, t0, ppu_quirk_i       ; i = 0 .. count - 2
       nop
       b ppu_adv_draw
       nop
@@ -414,16 +382,46 @@ ppu_cut_split:
     addiu v1, zero, 1
     sllv v1, v1, t2
     or t9, t9, v1
-    sb t9, #NES_U_SPLIT(t8)         ; U_SPLIT bit (line): a fallback line
+    sb t9, #NES_U_SPLIT(t8)         ; U_SPLIT bit (line): a split line
   EndASM
+  CompilerIf #NES_TWIN_CHECK Or #NES_RDP_SHOW
+    ASM
+      ; N.60: a split line is drawn by a record of its own with segments (rspband.n64). A later cut on such a line
+      ; closes its open segment (the band before it is closed already: ppu_cut_close returns at once).
+      la t8, global_nessegon
+      ld t9, 0(t8)
+      beqz t9, ppu_cut_split_first
+      nop
+      la t8, global_nessegopen
+      b ppu_cut_close
+      sd zero, 0(t8)
+ppu_cut_split_first:
+    EndASM
+  CompilerEndIf
   CompilerIf #NES_RDP_SHOW
     ASM
-      ; N5: the line's first cut. Before the write is applied (the band's inputs still in force) the old renderer
-      ; draws the line's sprite row and its spans [0, dot) into a fallback slot (show.n64, NesFbCatchUp); the
-      ; line's later draws go on into that slot. Every register is kept (v0, t3 included).
       ld t8, #NES_U_LIVE(v0)
-      bnez t8, ppu_cut_close        ; a fallback line already
+      bnez t8, ppu_cut_close        ; a fallback line of the old path already (its band could not be recorded)
       nop
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_TWIN_CHECK Or #NES_RDP_SHOW
+    ASM
+      ; the line's first cut, before the write is applied: segment 0 and the line's sprite state (NesSegFirst keeps
+      ; every register but t8, t9, v1). v1 = 0: no record or segment entries free - the old path below.
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal nessegfirst
+      nop
+      ld ra, 0(sp)
+      bnez v1, ppu_cut_close
+      daddiu sp, sp, 16
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; THE OLD PATH (N5): the old renderer draws the line's sprite row and its spans [0, dot) into a fallback slot
+      ; (show.n64, NesFbCatchUp); the line's later draws go on into that slot. Every register is kept.
       daddiu sp, sp, -16
       sd ra, 0(sp)
       jal nesfbcatchupcall

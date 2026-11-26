@@ -429,6 +429,9 @@ Procedure RunGame()
   CompilerIf #NES_APU_SPLIT
     NesSynInit(NesMmc3ApuClock)         ; the synthesis from the APU's power-on state (apusynth.n64)
   CompilerEndIf
+  CompilerIf #NES_TWIN_CHECK
+    NesSegInit(0)                       ; the split lines' segment pool (rspband.n64, design note N.60)
+  CompilerEndIf
   CompilerIf #NES_RSP_CHECK
     NesRspInit()
   CompilerEndIf
@@ -451,6 +454,7 @@ Procedure RunGame()
     CompilerEndIf
     CompilerIf #NES_TWIN_CHECK
       NesTwinReport()
+      NesSegReport()
     CompilerEndIf
     CompilerIf #NES_WB_MEASURE
       NesWbReport()

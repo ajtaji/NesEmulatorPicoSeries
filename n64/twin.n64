@@ -38,16 +38,18 @@
 ;   SET_COMBINE, a colour or SET_TEXTURE_IMAGE when a primitive was drawn since the last one; SYNC_TILE before a
 ;   SET_TILE / SET_TILE_SIZE of a tile used since the last one (probe case 25: SET_TILE with no sync draws
 ;   wrong); SYNC_LOAD before a load when TMEM was loaded or sampled since the last one.
-; THE LINES IT DOES NOT DRAW, each counted: the split lines (U_SPLIT: a change in the middle of the line, step
-; N5's fallback lines, the old renderer draws them); the lines of a band beyond the 32 records (U_BANDLOST);
-; the lines where the NES's sprite-priority quirk shows (a lower-index behind-background sprite's opaque pixel
-; over a higher-index front sprite's: draw order cannot give it; the design's fallback, I.3).
+; SINCE DESIGN NOTE N.60: a split line (U_SPLIT: a change in the middle of the line) is a record of its own whose
+; background is its SEGMENTS (rspband.n64: each a run of 8-dot spans drawn under one state, with its name-table
+; bytes), and the sprite-priority quirk is drawn by THE PHASE-2 RULE: a front sprite is drawn only where no behind
+; sprite of lower index selected on that line is opaque (its blockers' pixels cut out, each run left a rectangle).
+; THE LINES IT DOES NOT DRAW, counted: lines of no record (a band beyond the 32 records, or a split line when no
+; record or segment entry was free: the old renderer's).
 CompilerIf #NES_TWIN_CHECK
 
 CompilerIf #NES_RSP_CHECK                           ; room for the RSP checking build's areas (rspband.n64)
   #NES_TWIN_WORDS = 4096
 CompilerElse
-  #NES_TWIN_WORDS = 8192
+  #NES_TWIN_WORDS = 6144                           ; (the frame maximum is 2,076: room for the split lines, N.60)
 CompilerEndIf
 Global Dim NesTwinCmd.i(#NES_TWIN_WORDS)           ; the frame's command words, (w0 << 32) | w1
 Global NesTwinN.i, NesTwinOver.i                    ; words written; words that did not fit
@@ -72,6 +74,7 @@ Global Dim NesTwinDrawn.i(240)                      ; bit i: sprite i drawn on l
 Global Dim NesTwinLine.a(240)                       ; 1 a band drew the line, 2 the priority quirk shows on it
 Global Dim NesTwinSeen.a(256)
 Global Dim NesTwinBehind.a(256)
+Global Dim NesTwinBlk.i(64)                         ; a front sprite's blockers (N.60, the phase-2 rule)
 Global Dim NesTwinBandKeys.i(512)                   ; the distinct pairs of the band
 Global NesTwinBandKeyN.i
 ; statistics (NesTwinReport): [0] frames compared, then per range (0 all, 1 frames >= 900, 2 the slow sections
@@ -180,6 +183,30 @@ Procedure.i NesTwinRow(rec.i, a.i)
   ProcedureReturn PeekU(@Decoded(0) + (PeekA(rec + #NES_B_BANKS + ((a >> 10) & 7)) << 10) + (a & $3FF))
 EndProcedure
 
+; A split line's segment (design note N.60, rspband.n64): the decoded row of pattern address a under the segment's
+; eight bank numbers (packed, slot 0 in the top byte, as the entry's +88).
+Procedure.i NesTwinRowB(banks.i, a.i)
+  ProcedureReturn PeekU(@Decoded(0) + (((banks >> (56 - 8 * ((a >> 10) & 7))) & 255) << 10) + (a & $3FF))
+EndProcedure
+
+; THE PRIORITY RULE's data (N.60): behind sprite k's opaque pixels on line L, bit c = screen x x_k + c (k's own
+; columns), nothing left of x 8 when PPUMASK bit 2 is clear, nothing at x >= 256.
+Procedure.i NesTwinOpq(rec.i, oam.i, k.i, L.i, h.i, ctrl.i, mask.i)
+  Protected tile.i, at.i, x0.i, r.i, a.i, row.i, c.i, x.i, p.i, om.i
+  tile = PeekA(oam + k * 4 + 1) : at = PeekA(oam + k * 4 + 2) : x0 = PeekA(oam + k * 4 + 3)
+  r = L - 1 - PeekA(oam + k * 4) : If at & 128 : r = h - 1 - r : EndIf
+  If h = 8 : a = ((ctrl & 8) << 9) | (tile << 4) | (r << 1) : Else : a = ((tile & 1) << 12) | (((tile & 254) + (r >> 3)) << 4) | ((r & 7) << 1) : EndIf
+  row = NesTwinRow(rec, a)
+  For c = 0 To 7
+    x = x0 + c
+    If x < 256 And (x >= 8 Or mask & 4)
+      If at & 64 : p = (row >> ((7 - c) * 2)) & 3 : Else : p = (row >> (c * 2)) & 3 : EndIf
+      If p : om = om | (1 << c) : EndIf
+    EndIf
+  Next
+  ProcedureReturn om
+EndProcedure
+
 Procedure NesTwinBases()
   If NesTwinPic = 0
     NesTwinPic = (@NesTwinPicSpace(0) + 63) & ~63
@@ -191,6 +218,8 @@ Procedure NesTwinBand(rec.i)
   Protected idx.i, first.i, last.i, st.i, ctrl.i, mask.i, fx.i, t.i, oam.i, h.i, i.i, j.i, k.i, p.i, c.i, b.i
   Protected v.i, L.i, L1.i, n.i, fy.i, x0.i, xs.i, xe.i, xmin.i, vj.i, tile.i, attr.i, pal.i, a.i, key.i, slot.i
   Protected tl.i, col.i, empty.i, r.i, y.i, at.i, x.i, row.i, cnt.i, phase.i, half.i, r0.i, ta.i, run.i, flip.i
+  Protected bspr.i, nb.i, seg.i, sn.i, sk.i, k0.i, k1.i, sfx.i, sctrl.i, smask.i, sv.i, sbanks.i, xlo.i, xhi.i, pj.i
+  Protected am.i, om.i, c1.i, blkL.i, dx.i
   NesTwinBases()
   idx = (rec - NesBandBase) / #NES_BAND_BYTES
   If idx = 0                                              ; the frame's first band: the RDP's state unknown
@@ -257,6 +286,7 @@ Procedure NesTwinBand(rec.i)
     EndIf
     NesTwinDrawn(L) = 0
   Next
+  bspr = 0
   If mask & 16
     For L = first To last - 1
       cnt = 0
@@ -264,7 +294,9 @@ Procedure NesTwinBand(rec.i)
         r = L - 1 - PeekA(oam + i * 4)
         If r >= 0 And r < h And cnt < 8 : NesTwinDrawn(L) = NesTwinDrawn(L) | (1 << i) : cnt + 1 : EndIf
       Next
-      ; the priority quirk: the lowest-index opaque sprite pixel is behind and a higher-index front one is opaque
+      bspr = bspr | NesTwinDrawn(L)                         ; the sprites that meet the band
+      ; the priority quirk's lines, counted (N.60: drawn by the phase-2 rule below, not left out): the lowest-index
+      ; opaque sprite pixel is behind and a higher-index front one is opaque
       For x = 0 To 255 : NesTwinSeen(x) = 0 : Next
       For i = 0 To 63
         If (NesTwinDrawn(L) >> i) & 1
@@ -292,7 +324,44 @@ Procedure NesTwinBand(rec.i)
   ; -- the three layers --
   For phase = 0 To 2
     If phase = 1
-      If mask & 8
+      If mask & 8 And PeekL(rec + #NES_B_BANKS + 8)
+        ; A SPLIT LINE'S RECORD (N.60): its background is its segments, each a one-line strip of the spans [k0, k1)
+        ; under the segment's own v, fine X, PPUCTRL, PPUMASK, banks and name-table bytes: tile j = T(p - k0 + j) at
+        ; x 8j - fine X, cut to [xlo, xhi); the rectangles written after each segment.
+        NesTwinDescriptors(0)
+        sn = PeekL(rec + #NES_B_BANKS + 8)
+        L = first
+        For sk = 0 To sn - 1
+          seg = ((PeekL(rec + #NES_B_BANKS + 12) & $1FFFFFFF) | $A0000000) + sk * 96
+          k0 = PeekA(seg + 80) : k1 = PeekA(seg + 81) : sfx = PeekA(seg + 82) & 7 : sctrl = PeekA(seg + 83)
+          smask = PeekA(seg + 84) : sv = PeekU(seg + 86) : sbanks = PeekQ(seg + 88)
+          xlo = k0 * 8 : If k0 = 0 And (smask & 2) = 0 : xlo = 8 : EndIf
+          xhi = k1 * 8
+          fy = (sv >> 12) & 7
+          For j = 0 To 32
+            x0 = j * 8 - sfx : xs = x0 : xe = x0 + 8
+            If xs < xlo : xs = xlo : EndIf
+            If xe > xhi : xe = xhi : EndIf
+            If xe > xs
+              NesTwinF(9) + 1
+              pj = (((sv & 31) | ((sv >> 5) & 32)) - k0 + j) & 63
+              tile = PeekA(seg + pj)
+              attr = PeekA(seg + 64 + (pj >> 2))
+              pal = (attr >> (((sv >> 4) & 4) | (pj & 2))) & 3
+              a = ((sctrl & 16) << 8) | (tile << 4)
+              If NesTwinRowB(sbanks, a | (fy << 1)) = 0
+                NesTwinF(8) + 1
+              Else
+                key = (((sbanks >> (56 - 8 * ((a >> 10) & 7))) & 255) << 10) | (a & $3E0)
+                slot = NesTwinPair(key)
+                NesTwinTexRect(xs, xe, L, L + 1, pal, (tile & 1) * 8 + (xs - x0), slot * 8 + fy, 1, 1)
+                NesTwinF(7) + 1
+              EndIf
+            EndIf
+          Next
+          NesTwinFlush()
+        Next
+      ElseIf mask & 8
         NesTwinDescriptors(0)
         xmin = 0 : If (mask & 2) = 0 : xmin = 8 : EndIf
         L = first
@@ -339,15 +408,66 @@ Procedure NesTwinBand(rec.i)
           xs = x0 : If (mask & 4) = 0 And xs < 8 : xs = 8 : EndIf
           xe = x0 + 8 : If xe > 256 : xe = 256 : EndIf
           flip = Bool(at & 128)
+          ; THE PRIORITY RULE (N.60): a front sprite is drawn only where no behind sprite of lower index selected on the
+          ; same line is opaque. Its BLOCKERS: behind sprites k < i that meet the band with |x_k - x_i| < 8. A line on
+          ; which a blocker is selected is drawn alone, each run of the pixels the blockers leave a rectangle.
+          nb = 0
+          If phase = 2
+            For k = 0 To i - 1
+              dx = PeekA(oam + k * 4 + 3) - x0
+              If PeekA(oam + k * 4 + 2) & 32 And (bspr >> k) & 1 And dx > -8 And dx < 8 : NesTwinBlk(nb) = k : nb + 1 : EndIf
+            Next
+          EndIf
           L = first
           While L < last And xe > xs
             If ((NesTwinDrawn(L) >> i) & 1) = 0 : L + 1 : Continue : EndIf
             r = L - 1 - y : If flip : r = h - 1 - r : EndIf
             half = r >> 3
+            blkL = 0
+            For k = 0 To nb - 1 : If (NesTwinDrawn(L) >> NesTwinBlk(k)) & 1 : blkL = 1 : EndIf : Next
+            If blkL
+              If h = 8 : ta = tile : a = ((ctrl & 8) << 9) | (ta << 4) : Else : ta = (tile & 254) + half : a = ((tile & 1) << 12) | (ta << 4) : EndIf
+              If NesTwinRow(rec, a | ((r & 7) << 1))
+                am = ((1 << (xe - x0)) - 1) & ~((1 << (xs - x0)) - 1)
+                For k = 0 To nb - 1
+                  If (NesTwinDrawn(L) >> NesTwinBlk(k)) & 1
+                    om = NesTwinOpq(rec, oam, NesTwinBlk(k), L, h, ctrl, mask)
+                    dx = PeekA(oam + NesTwinBlk(k) * 4 + 3) - x0
+                    If dx >= 0 : om = (om << dx) & 255 : Else : om = om >> (-dx) : EndIf
+                    am = am & ~om
+                  EndIf
+                Next
+                If am
+                  NesTwinDescriptors(4)
+                  key = (PeekA(rec + #NES_B_BANKS + ((a >> 10) & 7)) << 10) | (a & $3E0)
+                  slot = NesTwinPair(key)
+                  c = 0
+                  While c < 8
+                    If (am >> c) & 1
+                      c1 = c + 1
+                      While c1 < 8 And (am >> c1) & 1 : c1 + 1 : Wend
+                      If at & 64
+                        NesTwinTexRect(x0 + c, x0 + c1, L, L + 1, at & 3, (ta & 1) * 8 + 7 - c, slot * 8 + (r & 7), -1, 1 - 2 * flip)
+                      Else
+                        NesTwinTexRect(x0 + c, x0 + c1, L, L + 1, at & 3, (ta & 1) * 8 + c, slot * 8 + (r & 7), 1, 1 - 2 * flip)
+                      EndIf
+                      NesTwinF(10) + 1
+                      c = c1
+                    Else
+                      c + 1
+                    EndIf
+                  Wend
+                EndIf
+              EndIf
+              L + 1 : Continue
+            EndIf
             L1 = L + 1
             While L1 < last And ((NesTwinDrawn(L1) >> i) & 1)
               r0 = L1 - 1 - y : If flip : r0 = h - 1 - r0 : EndIf
               If (r0 >> 3) <> half : Break : EndIf
+              blkL = 0
+              For k = 0 To nb - 1 : If (NesTwinDrawn(L1) >> NesTwinBlk(k)) & 1 : blkL = 1 : EndIf : Next
+              If blkL : Break : EndIf
               L1 + 1
             Wend
             If h = 8 : ta = tile : a = ((ctrl & 8) << 9) | (ta << 4) : Else : ta = (tile & 254) + half : a = ((tile & 1) << 12) | (ta << 4) : EndIf
@@ -487,19 +607,13 @@ Procedure NesTwinFrame()
     LpmRdpForget() : LpmRdpTmemReset()
     For y = y0 To y0 + #NES_TWIN_STRIP - 1
       If NesPaletteChange(y) : pal = @NesIndexPalette(y * 8) : EndIf
+      ; N.60: split lines (drawn by records of their own) and the priority quirk's lines (the phase-2 rule) are
+      ; compared as every other line; only a line no record drew is left out (counted)
       split = (PeekA(NesUnitBase + #NES_U_SPLIT + (y >> 3)) >> (y & 7)) & 1
-      If split
-        NesTwinF(1) + 1
-      ElseIf NesTwinLine(y) = 0
+      If split : NesTwinF(1) + 1 : EndIf
+      If NesTwinLine(y) = 2 : NesTwinF(2) + 1 : EndIf
+      If NesTwinLine(y) = 0
         NesTwinF(3) + 1
-      ElseIf NesTwinLine(y) = 2
-        NesTwinF(2) + 1
-        q = ((NesTwinPic & $1FFFFFFF) | $A0000000) + ((y - y0) * 320 + 32) * 2   ; compared, counted apart
-        row = NesIndexedPixels() + y * 256
-        For x = 0 To 255
-          k = PeekA(row + x)
-          If (PeekU(pal + (k & 31) * 2) ! PeekU(q + x * 2)) & $FFFE : NesTwinF(15) + 1 : EndIf
-        Next
       Else
         NesTwinF(4) + 1
         row = NesIndexedPixels() + y * 256

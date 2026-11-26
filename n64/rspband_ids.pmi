@@ -10,4 +10,6 @@
 #NES_RSP_SEG_SYNA = 3                  ; the synthesis's pass A: the log's events into records
 #NES_RSP_SEG_SYNB = 4                  ; its pass B: the samples
 #NES_RSP_SEG_SYNC = 5                  ; its DMC pass (run between A and B): the DMC replica's level a sample
-#NES_RSP_WORDS = 4096                 ; the frame command area: doublewords (frames >= 900: at most 1,480; the title more)
+#NES_RSP_SEG_S = 6                     ; a split line's background: its segments, and a band's end after segment 7 (N.60)
+#NES_RSP_SEG_Q = 7                     ; the front sprites under the priority rule (N.60)
+#NES_RSP_WORDS = 4096                  ; the frame command area: doublewords (frames >= 900: at most 1,480; the title more)

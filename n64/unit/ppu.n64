@@ -265,7 +265,7 @@ ppu_adv_draw_call:
       EndASM
     CompilerElse
       ASM
-        jal nesrenderto             ; spans ceil8(dot) .. a0
+        jal neslivedraw             ; spans ceil8(dot) .. a0: the old renderer's, or a split record's (show.n64)
         nop
       EndASM
     CompilerEndIf
@@ -273,6 +273,17 @@ ppu_adv_draw_call:
 ppu_draw_none:
     EndASM
   CompilerElse
+    CompilerIf #NES_TWIN_CHECK
+      ASM
+        la t1, global_nessegon        ; N.60: a split line drawn by a record notes the spans (rspband.n64); keeps
+        ld t1, 0(t1)                  ; a0 and t0
+        beqz t1, ppu_draw_seg_no
+        nop
+        jal nessegdraw
+        nop
+ppu_draw_seg_no:
+      EndASM
+    CompilerEndIf
     ASM
       jal nesreuseline              ; the renderer draws spans ceil8(dot) .. a0
       sd t0, #NES_U_DRAWST(s6)      ; the status before the draw
@@ -342,7 +353,7 @@ ppu_adv_publish:
       EndASM
     CompilerElse
       ASM
-        jal nesfbpublish
+        jal neslivepublish          ; the old path's slot, or a split record's end (show.n64)
         nop
       EndASM
     CompilerEndIf
@@ -354,6 +365,17 @@ ppu_adv_published:
       jal ppurgblineraw             ; the renderer publishes the line
       nop
     EndASM
+    CompilerIf #NES_TWIN_CHECK
+      ASM
+        la t0, global_nessegon        ; N.60: a split line drawn by a record: its record and job (rspband.n64)
+        ld t0, 0(t0)
+        beqz t0, ppu_publish_seg_no
+        nop
+        jal nessegpublishcall
+        nop
+ppu_publish_seg_no:
+      EndASM
+    CompilerEndIf
   CompilerEndIf
   ASM
     addiu t0, zero, 239
