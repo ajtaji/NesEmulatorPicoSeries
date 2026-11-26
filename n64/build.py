@@ -187,7 +187,12 @@ def build(args, *, controller_trace=()):
                 and not (twin_check or rsp_check or ppu_check or wb_measure))
     if show_check and not (runtime and cart.mapper == 4 and args.check_frame) or old_show and not (runtime and cart.mapper == 4):
         raise ValueError("the show check and the old show are runtime-MMC3 builds (the check a verification build)")
+    # N9: the console record (console_record.n64), only in the playable cart that shows the RSP's picture
+    console_record = getattr(args, "console_record", False)
+    if console_record and not (rdp_show and not args.check_frame):
+        raise ValueError("the console record is built into the playable runtime-MMC3 cart only (no verify frame)")
     settings = {
+        "NES_CONSOLE_RECORD": int(console_record),
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
         "NES_PPU_CHECK": int(ppu_check),
@@ -357,6 +362,8 @@ if __name__ == "__main__":
     parser.add_argument("--show-check", action="store_true",
                         help="checking build: every frame finished at its end and its shown picture hashed (with "
                              "--old-show: the old renderer's picture of the frame, the reference) (needs --check-frame)")
+    parser.add_argument("--console-record", action="store_true",
+                        help="the playable cart keeps a record of its run in the flash cart's memory (console_record.n64)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:

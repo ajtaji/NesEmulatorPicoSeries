@@ -1,0 +1,275 @@
+; console_record.n64 - THE CONSOLE RECORD of the playable cart (design note, step N9).
+;
+; WHAT IT KEEPS: what the console cart is built to tell while the game is played - frames shown and not shown, sound
+; underruns, the frame time in Count ticks (46.875 MHz; the whole period from one guest frame's end to the next, and
+; the emulator's own work in it: the period less the time slept waiting for a free picture buffer, NesShowGetFb),
+; the worst and the mean of each and a histogram in 1 ms steps; the RSP's clocks a frame as its program reports them
+; (the status word +8 of each frame's area, summed by show.n64 in NesShowStat 12 / 13); the RDP's four counters
+; (DPC CLOCK, BUFBUSY, PIPEBUSY, TMEM, 24 bits at the RCP clock, read straight from the RDP once a guest frame - the
+; library has no call for them); the show's own counts (waits, drains, fallback lines, bands); the controller seen;
+; and why the emulator stopped, if it did.
+;
+; WHERE: the flash cart's SDRAM (a SummerCart64), which the coordinator dumps over USB after the run, the console
+; off: SDRAM 0x01600000 - 0x01688FFF (KSEG1 $B1600000), used by no other cart of the project. The cart asks the SC64
+; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable). On
+; anything that is not an SC64 nothing is written and the game runs the same.
+;   +$0000   the header, 16 words: "NESC", the ROM's CRC (the cartridge's word at $10), the version, the power-ons
+;            seen, the run slot this power-on writes
+;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x $11000:
+;            +0      the summary, #NES_REC_WORDS words (the #R_ list below); "NRUN" in word 0 once it is valid
+;            +$1000  the series: one entry of 4 words for every 60 guest frames (about a second), up to 4,096
+;                    (68 minutes): shown | not shown << 8 | underruns << 16 | frames with a button held << 24;
+;                    the worst period; the worst work; the RSP's clocks in those 60 frames
+;   rdp-tools\console_record.py decodes it.
+;
+; HOW IT STAYS OUT OF THE GAME'S WAY: everything is counted in RAM once a guest frame (NesRecFrame, called from
+; NesHostGuestFrame - compiled code at the frame's wrap, outside the hot unit); once every 60 guest frames the summary
+; words that changed and the window's 4 series words go out, a PI write each (LpmDebugIoWrite), a few dozen at most.
+; Nothing here is read by the emulator, so the guest runs the same with or without the record.
+;
+; A RUN THAT ENDS: the owner switching off loses at most the last 60 frames' counts. The emulator stopping (NES STOP)
+; writes state 3 with the stop's reason and the whole summary at once (NesRecStop), then the screen turns red.
+
+#NES_REC = $B1600000                    ; KSEG1: cartridge $11600000 = SDRAM 0x01600000
+#NES_REC_MAGIC = $4E455343              ; "NESC"
+#NES_REC_RUN_MAGIC = $4E52554E          ; "NRUN"
+#NES_REC_VERSION = 1
+#NES_REC_SLOTS = 8
+#NES_REC_SLOT = $11000                  ; a run slot: summary 4 KB + series 64 KB
+#NES_REC_SERIES = $1000                 ; the series, from the slot's start
+#NES_REC_SERIES_MAX = 4096              ; entries of 16 bytes
+#NES_REC_WORDS = 192
+#NES_REC_WINDOW = 60                    ; guest frames an entry
+#NES_REC_MS = 46875                     ; Count ticks a millisecond
+; the summary's words
+#R_MAGIC = 0
+#R_BOOT = 1
+#R_STATE = 2                            ; 1 started, 2 running (a guest frame seen), 3 the emulator stopped, 4 did not start
+#R_CODE = 3                             ; state 3: the bad opcode (0 none); state 4: 2 the cartridge, 3 the show's set-up
+#R_PC = 4                               ; state 3: the 6502's PC
+#R_WORKER = 5                           ; state 3: WorkerError
+#R_FRAMES = 6                           ; guest frames run
+#R_SHOWN = 7                            ; pictures shown (NesShowStat 0)
+#R_NOTWORDS = 8                         ; not shown: the frame's words or fallback rows did not fit (1)
+#R_NOTSOUND = 9                         ; not shown: the sound reserve ran low, the picture was skipped (14)
+#R_OVER = 10                            ; shown after a drain (2)
+#R_STARVE = 11                          ; sound underruns: the AI ran empty (HostAiStarvations)
+#R_STARVELAST = 12                      ; the guest frame of the last
+#R_DROPPED = 13                         ; sound samples dropped (HostAudioDropped)
+#R_PSUM = 14                            ; the frame period, Count ticks: sum (lo, hi), max, the frame of the max
+#R_PMAX = 16
+#R_PMAXF = 17
+#R_WSUM = 18                            ; the work (the period less the sleep for a buffer): sum (lo, hi), max, its frame
+#R_WMAX = 20
+#R_WMAXF = 21
+#R_MEASURED = 22                        ; periods measured (the frames after the first)
+#R_RSPSUM = 23                          ; the RSP's clocks: sum (lo, hi), the most in a frame
+#R_RSPMAX = 25
+#R_DPC = 26                             ; the RDP's counters, sums (lo, hi): CLOCK 26, BUFBUSY 28, PIPEBUSY 30, TMEM 32
+#R_PIPEMAX = 34                         ; PIPEBUSY: the most in a guest frame
+#R_WAITS = 35                           ; show.n64's counts: waits for a record or a row (3), drains (4), fallback lines (5),
+#R_DRAINS = 36                          ; the most in a frame (6), split lines (7), lost bands (8), bands (10), the most
+#R_FBLINES = 37                         ; Count ticks a band's close took (11)
+#R_FBMOST = 38
+#R_SPLIT = 39
+#R_LOST = 40
+#R_BANDS = 41
+#R_BANDMAX = 42
+#R_HELD = 43                            ; guest frames with a button held, pad 1 or 2
+#R_PADS = 44                            ; the last buttons: pad 1 | pad 2 << 8 (NES order: A B Select Start Up Down Left Right)
+#R_ENTRIES = 45                         ; series entries written
+#R_UPDATES = 46                         ; times the summary went out
+#R_SLEEP = 49                          ; Count ticks slept for a buffer, all told (lo, hi)
+#R_PHIST = 64                           ; the period's histogram: words 64-127, 1 ms each, the last 63 ms and over
+#R_WHIST = 128                          ; the work's histogram: words 128-191
+; THE SC64'S OWN REGISTERS (the hardware carts' RsScCmd / RsScEnable)
+#NES_SC_ST = $BFFF0000
+#NES_SC_D0 = $BFFF0004
+#NES_SC_D1 = $BFFF0008
+#NES_SC_IDR = $BFFF000C
+#NES_SC_KEY = $BFFF0010
+#NES_SC_ID = $53437632                  ; "SCv2"
+#NES_SC_WAIT = 4687500                  ; 100 ms of Count
+
+Global NesRecOn.i, NesRecBase.i, NesRecScD1.i
+Global NesRecLast.i, NesRecLastWait.i, NesRecFirst.i
+Global NesRecPSum.i, NesRecWSum.i, NesRecRspSeen.i, NesRecShownSeen.i, NesRecNotSeen.i, NesRecStarveSeen.i
+Global NesRecWinP.i, NesRecWinW.i, NesRecWinHeld.i
+Global Dim NesRecDpcLast.i(4)
+Global Dim NesRecDpcSum.i(4)
+Global Dim NesRecW.i(#NES_REC_WORDS)    ; the summary as counted
+Global Dim NesRecShadow.i(#NES_REC_WORDS) ; the summary as last written
+
+; A command to the SC64: 1 done, 0 refused, -1 still busy after 100 ms; its DATA1 in NesRecScD1.
+Procedure.i NesRecScCmd(cmd.i, d0.i, d1.i)
+  Protected t.i, st.i
+  LpmDebugIoWrite(#NES_SC_D0, d0) : LpmDebugIoWrite(#NES_SC_D1, d1)
+  LpmDebugIoWrite(#NES_SC_ST, cmd)
+  t = LpmCpuCount()
+  Repeat
+    st = LpmDebugIoRead(#NES_SC_ST) & $FFFFFFFF
+    If (st & $80000000) = 0 : Break : EndIf
+    If ((LpmCpuCount() - t) & $FFFFFFFF) >= #NES_SC_WAIT : NesRecScD1 = -1 : ProcedureReturn -1 : EndIf
+  ForEver
+  NesRecScD1 = LpmDebugIoRead(#NES_SC_D1) & $FFFFFFFF
+  If st & $40000000 : ProcedureReturn 0 : EndIf
+  ProcedureReturn 1
+EndProcedure
+
+; The SC64 unlocked and its ROM space made writable (config 1, "ROM write enable"). 0 when an SC64 refused it.
+; Without the SC64's identifier nothing is switched and 1 is returned: whether a write lands is then decided by
+; reading the header back (NesRecOpen) - the project's emulator answers $000C000C there and keeps cartridge writes
+; without being asked; a cart with no writable ROM space keeps nothing and says so.
+Procedure.i NesRecScEnable()
+  Protected id.i, r.i
+  LpmDebugIoWrite(#NES_SC_KEY, 0)
+  LpmDebugIoWrite(#NES_SC_KEY, $5F554E4C)                ; "_UNL"
+  LpmDebugIoWrite(#NES_SC_KEY, $4F434B5F)                ; "OCK_"
+  id = LpmDebugIoRead(#NES_SC_IDR) & $FFFFFFFF
+  If id <> #NES_SC_ID
+    LpmDebugPrint("NES RECORD: no SummerCart64 identifier ($" + Hex(id) + "): nothing switched, the write is tried")
+    ProcedureReturn 1
+  EndIf
+  r = NesRecScCmd($63, 1, 0)                             ; read config 1
+  If r = 1 And NesRecScD1 = 0 : NesRecScCmd($43, 1, 1) : EndIf   ; set it
+  r = NesRecScCmd($63, 1, 0)
+  If r <> 1 Or NesRecScD1 <> 1
+    LpmDebugPrint("NES RECORD: the SC64 did not allow ROM writes (" + Str(r) + ", " + Str(NesRecScD1) + "), nothing kept")
+    ProcedureReturn 0
+  EndIf
+  ProcedureReturn 1
+EndProcedure
+
+; At start (RunGame, the display and the interrupts up): the header found or made, this power-on's slot cleared.
+Procedure NesRecOpen()
+  Protected crc.i, boots.i, slot.i, k.i
+  NesRecOn = 0
+  If NesRecScEnable() = 0 : ProcedureReturn : EndIf
+  crc = LpmDebugIoRead($B0000010)
+  If LpmDebugIoRead(#NES_REC) <> #NES_REC_MAGIC Or LpmDebugIoRead(#NES_REC + 4) <> crc Or LpmDebugIoRead(#NES_REC + 8) <> #NES_REC_VERSION
+    LpmDebugIoWrite(#NES_REC, 0)                         ; a fresh record (another ROM's or none): the magic last
+    For k = 1 To 15 : LpmDebugIoWrite(#NES_REC + k * 4, 0) : Next
+    For k = 0 To #NES_REC_SLOTS - 1 : LpmDebugIoWrite(#NES_REC + $1000 + k * #NES_REC_SLOT, 0) : Next   ; no old run
+    LpmDebugIoWrite(#NES_REC + 4, crc)
+    LpmDebugIoWrite(#NES_REC + 8, #NES_REC_VERSION)
+    LpmDebugIoWrite(#NES_REC, #NES_REC_MAGIC)
+    If LpmDebugIoRead(#NES_REC) <> #NES_REC_MAGIC
+      LpmDebugPrint("NES RECORD: the write to the flash cart did not land, nothing kept") : ProcedureReturn
+    EndIf
+  EndIf
+  boots = LpmDebugIoRead(#NES_REC + 12) + 1
+  slot = (boots - 1) % #NES_REC_SLOTS
+  LpmDebugIoWrite(#NES_REC + 12, boots)
+  LpmDebugIoWrite(#NES_REC + 16, slot)
+  NesRecBase = #NES_REC + $1000 + slot * #NES_REC_SLOT
+  LpmDebugIoWrite(NesRecBase, 0)                         ; the slot not valid while it is cleared
+  For k = 1 To #NES_REC_WORDS - 1
+    LpmDebugIoWrite(NesRecBase + k * 4, 0) : NesRecW(k) = 0 : NesRecShadow(k) = 0
+  Next
+  NesRecW(#R_BOOT) = boots : NesRecW(#R_STATE) = 1
+  LpmDebugIoWrite(NesRecBase + #R_BOOT * 4, boots) : NesRecShadow(#R_BOOT) = boots
+  LpmDebugIoWrite(NesRecBase + #R_STATE * 4, 1) : NesRecShadow(#R_STATE) = 1
+  LpmDebugIoWrite(NesRecBase, #NES_REC_RUN_MAGIC)
+  NesRecOn = 1
+  LpmDebugPrint("NES RECORD: flash cart SDRAM $01600000, power-on " + Str(boots) + ", slot " + Str(slot))
+EndProcedure
+
+; The summary out: every word that changed since it last went out, a PI write each.
+Procedure NesRecPutAll()
+  Protected k.i, v.i
+  For k = 1 To #NES_REC_WORDS - 1
+    v = NesRecW(k) & $FFFFFFFF
+    If v <> NesRecShadow(k) : LpmDebugIoWrite(NesRecBase + k * 4, v) : NesRecShadow(k) = v : EndIf
+  Next
+EndProcedure
+
+Procedure NesRecSplit(k.i, v.i)          ; a 64-bit count into words k (low) and k + 1 (high)
+  NesRecW(k) = v & $FFFFFFFF : NesRecW(k + 1) = (v >> 32) & $FFFFFFFF
+EndProcedure
+
+; The counts the game keeps itself, copied into the summary; the window's series entry; the summary out.
+Procedure NesRecFlush(frame.i, entry.i)
+  Protected a.i, k.i, n.i, x.i
+  NesRecW(#R_FRAMES) = frame
+  NesRecW(#R_SHOWN) = NesShowStat(0) : NesRecW(#R_NOTWORDS) = NesShowStat(1) : NesRecW(#R_NOTSOUND) = NesShowStat(14)
+  NesRecW(#R_OVER) = NesShowStat(2)
+  NesRecW(#R_STARVE) = HostAiStarvations : NesRecW(#R_STARVELAST) = HostAiLastStarvation : NesRecW(#R_DROPPED) = HostAudioDropped
+  NesRecSplit(#R_PSUM, NesRecPSum) : NesRecSplit(#R_WSUM, NesRecWSum)
+  NesRecSplit(#R_RSPSUM, NesShowStat(12)) : NesRecW(#R_RSPMAX) = NesShowStat(13)
+  For k = 0 To 3 : NesRecSplit(#R_DPC + 2 * k, NesRecDpcSum(k)) : Next
+  NesRecW(#R_WAITS) = NesShowStat(3) : NesRecW(#R_DRAINS) = NesShowStat(4) : NesRecW(#R_FBLINES) = NesShowStat(5)
+  NesRecW(#R_FBMOST) = NesShowStat(6) : NesRecW(#R_SPLIT) = NesShowStat(7) : NesRecW(#R_LOST) = NesShowStat(8)
+  NesRecW(#R_BANDS) = NesShowStat(10) : NesRecW(#R_BANDMAX) = NesShowStat(11)
+  NesRecSplit(#R_SLEEP, NesRecWait)
+  If entry And NesRecW(#R_ENTRIES) < #NES_REC_SERIES_MAX
+    a = NesRecBase + #NES_REC_SERIES + NesRecW(#R_ENTRIES) * 16
+    n = NesShowStat(0) - NesRecShownSeen : If n > 255 : n = 255 : EndIf
+    x = n
+    n = NesShowStat(1) + NesShowStat(14) - NesRecNotSeen : If n > 255 : n = 255 : EndIf
+    x = x | (n << 8)
+    n = HostAiStarvations - NesRecStarveSeen : If n > 255 : n = 255 : EndIf
+    x = x | (n << 16) | ((NesRecWinHeld & 255) << 24)
+    LpmDebugIoWrite(a, x)
+    LpmDebugIoWrite(a + 4, NesRecWinP)
+    LpmDebugIoWrite(a + 8, NesRecWinW)
+    LpmDebugIoWrite(a + 12, (NesShowStat(12) - NesRecRspSeen) & $FFFFFFFF)
+    NesRecW(#R_ENTRIES) + 1
+  EndIf
+  If entry
+    NesRecShownSeen = NesShowStat(0) : NesRecNotSeen = NesShowStat(1) + NesShowStat(14)
+    NesRecStarveSeen = HostAiStarvations : NesRecRspSeen = NesShowStat(12)
+    NesRecWinP = 0 : NesRecWinW = 0 : NesRecWinHeld = 0
+  EndIf
+  NesRecW(#R_UPDATES) + 1
+  NesRecPutAll()
+EndProcedure
+
+; Once a guest frame, at its wrap (NesHostGuestFrame): the period since the last wrap, the work in it, the RDP's
+; counters, the pads; every #NES_REC_WINDOW frames the summary and a series entry out.
+Procedure NesRecFrame(frame.i)
+  Protected now.i, d.i, w.i, ms.i, k.i, c.i, v.i
+  If NesRecOn = 0 : ProcedureReturn : EndIf
+  now = LpmCpuCount() & $FFFFFFFF
+  If NesRecFirst = 0                                     ; the first guest frame: the readings to measure from
+    NesRecFirst = 1
+    NesRecW(#R_STATE) = 2
+    For k = 0 To 3 : NesRecDpcLast(k) = PeekL($A4100010 + 4 * k) & $FFFFFF : Next
+  Else
+    d = (now - NesRecLast) & $FFFFFFFF
+    w = d - (NesRecWait - NesRecLastWait)
+    If w < 0 : w = 0 : EndIf
+    NesRecPSum + d : NesRecWSum + w : NesRecW(#R_MEASURED) + 1
+    If d > NesRecW(#R_PMAX) : NesRecW(#R_PMAX) = d : NesRecW(#R_PMAXF) = frame : EndIf
+    If w > NesRecW(#R_WMAX) : NesRecW(#R_WMAX) = w : NesRecW(#R_WMAXF) = frame : EndIf
+    If d > NesRecWinP : NesRecWinP = d : EndIf
+    If w > NesRecWinW : NesRecWinW = w : EndIf
+    ms = d / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
+    NesRecW(#R_PHIST + ms) + 1
+    ms = w / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
+    NesRecW(#R_WHIST + ms) + 1
+    For k = 0 To 3
+      c = PeekL($A4100010 + 4 * k) & $FFFFFF              ; DPC CLOCK, BUFBUSY, PIPEBUSY, TMEM
+      v = (c - NesRecDpcLast(k)) & $FFFFFF
+      NesRecDpcSum(k) + v : NesRecDpcLast(k) = c
+      If k = 2 And v > NesRecW(#R_PIPEMAX) : NesRecW(#R_PIPEMAX) = v : EndIf
+    Next
+  EndIf
+  NesRecLast = now : NesRecLastWait = NesRecWait
+  If (NesController | NesController2) <> 0 : NesRecW(#R_HELD) + 1 : NesRecWinHeld + 1 : EndIf
+  NesRecW(#R_PADS) = (NesController & 255) | ((NesController2 & 255) << 8)
+  If frame % #NES_REC_WINDOW = 0 : NesRecFlush(frame, 1) : EndIf
+EndProcedure
+
+; The emulator stopped (RunGame's NES STOP): its reason, and the whole summary out now.
+Procedure NesRecStop()
+  If NesRecOn = 0 : ProcedureReturn : EndIf
+  NesRecW(#R_STATE) = 3 : NesRecW(#R_CODE) = BadOpcode : NesRecW(#R_PC) = PC : NesRecW(#R_WORKER) = WorkerError
+  NesRecFlush(WorkerFrames, 0)
+EndProcedure
+
+; The game did not start (2: the cartridge did not load, 3: the show's set-up refused).
+Procedure NesRecRefused(code.i)
+  If NesRecOn = 0 : ProcedureReturn : EndIf
+  NesRecW(#R_STATE) = 4 : NesRecW(#R_CODE) = code
+  NesRecPutAll()
+EndProcedure

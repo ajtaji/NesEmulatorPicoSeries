@@ -498,13 +498,24 @@ EndProcedure
 
 ; A buffer to draw into: wait 0 only if one is free now; 1 as HostPresent(1) did - sleep on the VI / AI interrupts
 ; until one frees, unless the sound reserve runs low (then 0: the frame is not shown); 2 until one frees.
+CompilerIf #NES_CONSOLE_RECORD
+  Global NesRecWait.i, NesRecWaitFrom.i ; the console record (console_record.n64): Count ticks slept here for a buffer
+CompilerEndIf
 Procedure.i NesShowGetFb(wait.i)
   Protected fb.i, seen.i
   fb = LpmDisplayTryGet()
   If fb Or wait = 0 : ProcedureReturn fb : EndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecWaitFrom = LpmCpuCount()
+  CompilerEndIf
   seen = LpmIrqSeen(#LPM_WAKE_VI | #LPM_WAKE_AI)
   Repeat
     fb = LpmDisplayTryGet()
+    CompilerIf #NES_CONSOLE_RECORD
+      If fb Or (wait = 1 And HostAudioReady And ApuProduced - HostPcmRead < #HOST_AUDIO_RESERVE)
+        NesRecWait + ((LpmCpuCount() - NesRecWaitFrom) & $FFFFFFFF)
+      EndIf
+    CompilerEndIf
     If fb : ProcedureReturn fb : EndIf
     If wait = 1 And HostAudioReady And ApuProduced - HostPcmRead < #HOST_AUDIO_RESERVE : ProcedureReturn 0 : EndIf
     seen = LpmIrqSleep(#LPM_WAKE_VI | #LPM_WAKE_AI, seen, #LPM_WAIT_TICK, 0, 0)

@@ -338,9 +338,15 @@ ProcedureNaked.i NesMmc3IrqPending()
 EndProcedure
 CompilerEndIf
 
+CompilerIf #NES_CONSOLE_RECORD
+  Declare NesRecFrame(frame.i)          ; the console record (console_record.n64)
+CompilerEndIf
 Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
   Protected elapsed.i
   NesDeliveredFrame=lastFrame : HostInputPoll() : HostAudioPoll()
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecFrame(lastFrame)
+  CompilerEndIf
   CompilerIf #GAME_SAVE_BYTES>0
     If NesSavePending : NesSaveFlush() : EndIf
   CompilerEndIf
@@ -377,6 +383,9 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   XIncludeFile "twin.n64"
   XIncludeFile "rspband.n64"
   XIncludeFile "show.n64"
+  CompilerIf #NES_CONSOLE_RECORD
+    XIncludeFile "console_record.n64"
+  CompilerEndIf
   XIncludeFile "mmc3_run.n64"
 CompilerEndIf
 
@@ -399,12 +408,18 @@ Procedure RunGame()
       sd t1, 0(t0)
     EndASM
   CompilerEndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecOpen()
+    If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : NesRecRefused(2) : ProcedureReturn : EndIf
+    If NesShowInit()=0 : NesRecRefused(3) : ProcedureReturn : EndIf
+  CompilerElse
   If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf
   CompilerIf #NES_RSP_CHECK
     NesRspInit()
   CompilerEndIf
   CompilerIf #NES_RDP_SHOW
     If NesShowInit()=0 : ProcedureReturn : EndIf
+  CompilerEndIf
   CompilerEndIf
   CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=0
     NesRuntimeIndexNromWaits()
@@ -472,6 +487,9 @@ Procedure RunGame()
     Wend
   CompilerEndIf
   LpmDebugPrint("NES STOP "+Str(BadOpcode)+" PC "+Str(PC)+" WORKER "+Str(WorkerError))
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecStop()                        ; the stop's reason into the console record
+  CompilerEndIf
   CompilerIf #NES_RDP_SHOW And #VERIFY_FRAME=0
     NesShowStopped()                    ; the console mark: the whole screen red (show.n64)
   CompilerEndIf
