@@ -2,13 +2,20 @@
 ; cputrace.n64 - the CPU checking build's instruction digests (#NES_CPU_TRACE).
 ;
 ; WHAT: after every guest instruction the 6502 state is folded into two running
-; 64-bit FNV-1a hashes, and each hash is kept per guest frame (WorkerFrames &
-; 4095), which the run dumps at its end:
-;   NesCpuTraceHash  -> NesCpuTraceFrames       the WINDOW digest (the first one);
-;   NesCpuTraceGuest -> NesCpuTraceGuestFrames  the GUEST digest (design note N.42).
+; 64-bit FNV-1a hashes, each kept in a table of 4,096 entries the run dumps at
+; its end:
+;   NesCpuTraceHash  -> NesCpuTraceFrames   the WINDOW digest (the first one), an
+;       entry per guest frame as the host saw it (WorkerFrames & 4095);
+;   NesCpuTraceGuest -> #NES_TRACE_GUEST_FRAMES  the GUEST digest (design note
+;       N.42), an entry per SLICE of guest time: 29,781 CPU cycles (one NTSC
+;       frame, rounded up), slice = the folded event's guest cycle / 29,781.
 ; Both fold the same terms but at a device write, where the window digest folds
 ; the window's two parts (Left, Budget) and the guest digest folds the guest's
-; cycle they stand for. Two runs of different builds (the assembly core against
+; cycle they stand for. WHY THE GUEST DIGEST'S ENTRIES ARE KEYED BY GUEST TIME:
+; WorkerFrames moves when the host's PPU catch-up crosses the frame's end, i.e.
+; at the first sync after it, so which instruction closes a "frame" entry
+; depends on where the host synced - a window quantity again. A slice of the
+; guest's own cycle count does not. Two runs of different builds (the assembly core against
 ; the reference interpreter, or a later tree against references recorded
 ; earlier) run the same fixed-input guest; the first frame whose entry differs
 ; is where they part. Nothing here changes guest state.
@@ -55,7 +62,9 @@
 ; address (32,768 bytes from $803B8000).
 #NES_TRACE_GUEST_FRAMES = $FFFFFFFF803B8000     ; = the lui / ori pair in nes_trace_store
 
+#NES_TRACE_SLICE = 29781                        ; = the daddiu in nes_trace_store
 Global NesCpuTraceHash.i, NesCpuTraceGuest.i, NesCpuTraceLast.i = -1, NesCpuTraceSteps.i
+Global NesCpuTraceSlot.i, NesCpuTraceSlotEnd.i = #NES_TRACE_SLICE   ; the current slice, the cycle it ends at
 Global Dim NesCpuTraceFrames.i(4096)
 
 ProcedureNaked NesCpuTraceGlobals()
@@ -153,8 +162,13 @@ ProcedureNaked NesCpuTraceStep()
     la t1, global_mapselect
     jal nes_trace_fold_ab
     ld t1, 0(t1)
+    la t1, global_nesrunstart         ; t2 = the instruction's guest cycle, for the slice
+    ld t1, 0(t1)
+    la t2, global_budget
+    ld t2, 0(t2)
+    daddu t2, t1, t2
     jal nes_trace_store
-    nop
+    dsubu t2, t2, a2
 nes_trace_step_done:
     ld t0, 0(sp)
     ld t1, 8(sp)
@@ -202,11 +216,34 @@ nes_trace_fold_ab:
     nop
     jr ra
     nop
-    ; store both digests and this frame's entry of each (t0, a3 the digests; t1, t2 scratch)
+    ; store both digests, the window digest's entry for this host frame and the guest digest's for this
+    ; slice of guest time (t0, a3 the digests; t2 the event's guest cycle; t1, a0 scratch - every caller
+    ; calls this last and restores a0)
 nes_trace_store:
     la t1, global_nescputracehash
     sd t0, 0(t1)
     sd a3, global_nescputraceguest-global_nescputracehash(t1)
+    la t1, global_nescputraceslot
+nes_trace_slot_test:
+    ld a0, global_nescputraceslotend-global_nescputraceslot(t1)
+    slt a0, t2, a0
+    bnez a0, nes_trace_slot_in        ; the cycle is inside the current slice
+    nop
+    ld a0, global_nescputraceslotend-global_nescputraceslot(t1)
+    daddiu a0, a0, 29781              ; #NES_TRACE_SLICE: the next slice
+    sd a0, global_nescputraceslotend-global_nescputraceslot(t1)
+    ld a0, 0(t1)
+    daddiu a0, a0, 1
+    b nes_trace_slot_test
+    sd a0, 0(t1)
+nes_trace_slot_in:
+    ld a0, 0(t1)
+    andi a0, a0, 4095
+    sll a0, a0, 3
+    lui t1, 0x803B                    ; #NES_TRACE_GUEST_FRAMES ($FFFFFFFF803B8000: lui sign-extends)
+    ori t1, t1, 0x8000
+    daddu a0, a0, t1
+    sd a3, 0(a0)
     la t1, global_nescputracesteps
     ld t2, 0(t1)
     daddiu t2, t2, 1
@@ -217,12 +254,8 @@ nes_trace_store:
     sll t1, t1, 3
     la t2, global_nescputraceframes
     addu t2, t1, t2
-    sd t0, 0(t2)
-    lui t2, 0x803B                    ; #NES_TRACE_GUEST_FRAMES ($FFFFFFFF803B8000: lui sign-extends)
-    ori t2, t2, 0x8000
-    daddu t1, t1, t2
     jr ra
-    sd a3, 0(t1)
+    sd t0, 0(t2)
   EndASM
 EndProcedure
 
@@ -250,8 +283,9 @@ ProcedureNaked NesCpuTraceRead(addr.i)
     ld t2, 0(t2)
     jal nes_trace_fold_ab
     daddu t1, t1, t2
+    la t2, global_cpucycles           ; t2 = the read's guest cycle (CpuNow set CpuCycles), for the slice
     jal nes_trace_store
-    nop
+    ld t2, 0(t2)
     ld t0, 0(sp)
     ld t1, 8(sp)
     ld t2, 16(sp)
@@ -310,7 +344,7 @@ ProcedureNaked NesCpuTraceWrite()
     dsubu t1, t1, t2                  ; NesRunStart + Budget - Left
 nes_trace_write_cycle:
     jal nes_trace_fold_b
-    nop
+    or t2, t1, zero                   ; t2 keeps the write's guest cycle, for the slice
     la t1, global_accessphase
     jal nes_trace_fold_b
     ld t1, 0(t1)
