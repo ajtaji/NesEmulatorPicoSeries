@@ -4,7 +4,13 @@
 ; so at an 8 KB boundary its last page ($FFxx: the vectors and interrupt code) would fall on the
 ; same D-cache sets as the top of the host stack ($801FFxxx), which every compiled call touches.
 #NES_CART_LOW = $FFFFFFFF80281000
-#NES_CART_LOW_END = $FFFFFFFF803B0000
+CompilerIf #NES_CPU_TRACE
+  ; the CPU checking build: the guest digest's per-frame entries take the top 32 KB below the crash display
+  ; (cputrace.n64), so the arena - and the show's / RSP's 64 KB above its end - end 32 KB lower
+  #NES_CART_LOW_END = #NES_TRACE_GUEST_FRAMES - $10000
+CompilerElse
+  #NES_CART_LOW_END = $FFFFFFFF803B0000
+CompilerEndIf
 #NES_CART_HIGH = $FFFFFFFF80400000
 #NES_CART_HIGH_END = $FFFFFFFF807C0000
 #NES_PRG_SLOT_BYTES = 8192

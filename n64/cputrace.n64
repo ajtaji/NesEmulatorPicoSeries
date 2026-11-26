@@ -1,27 +1,43 @@
 ; ============================================================================
-; cputrace.n64 - the CPU checking build's instruction digest (#NES_CPU_TRACE).
+; cputrace.n64 - the CPU checking build's instruction digests (#NES_CPU_TRACE).
 ;
-; WHAT: after every guest instruction the 6502 state is folded into a running
-; 64-bit FNV-1a hash, and the hash is kept per guest frame in
-; NesCpuTraceFrames (WorkerFrames & 4095), which the run dumps at its end.
-; Two builds - the assembly core (cpu6502.n64) and the reference compiled
-; interpreter - run the same fixed-input guest; the first frame whose entry
-; differs is where they part. Nothing here changes guest state.
+; WHAT: after every guest instruction the 6502 state is folded into two running
+; 64-bit FNV-1a hashes, and each hash is kept per guest frame (WorkerFrames &
+; 4095), which the run dumps at its end:
+;   NesCpuTraceHash  -> NesCpuTraceFrames       the WINDOW digest (the first one);
+;   NesCpuTraceGuest -> NesCpuTraceGuestFrames  the GUEST digest (design note N.42).
+; Both fold the same terms but at a device write, where the window digest folds
+; the window's two parts (Left, Budget) and the guest digest folds the guest's
+; cycle they stand for. Two runs of different builds (the assembly core against
+; the reference interpreter, or a later tree against references recorded
+; earlier) run the same fixed-input guest; the first frame whose entry differs
+; is where they part. Nothing here changes guest state.
 ;
-; WHAT IS FOLDED, per instruction (in this order):
+; WHAT IS FOLDED, per instruction (in this order, into both):
 ;   PC (16 bits), A, X, Y, S, P (N V 1 0 D I Z C built from the lazy flags),
 ;   the cycle count NesRunStart + Budget - Left, NesInstructions,
 ;   AccessPhase, the open bus byte, NesLatch, NesLatch2, NesStrobe, MapSelect.
 ; and per device access (from the bus, the same procedures in both builds):
-;   kind 1: a PPU / APU register read - address, CpuCycles + AccessPhase;
-;   kind 2: a timed device write or a work-RAM write - address, value,
-;           Left, Budget, AccessPhase.
+;   kind 1 (into both): a PPU / APU register read - address,
+;           CpuCycles + AccessPhase;
+;   kind 2: a timed device write or a work-RAM write - into both: 2, address,
+;           value; then the window digest: Left, Budget, AccessPhase; the guest
+;           digest: the guest cycle (NesRunStart + Budget - Left inside a CPU
+;           window, CpuCycles outside one), AccessPhase.
+; WHY TWO: the window digest also proves where the CPU windows end, which the
+; guest cannot observe; an optimisation that ends fewer windows (the $2007
+; burst) changes it while the guest stays the same. The guest digest proves the
+; guest only. They were recorded side by side once, the window digest equal to
+; its old references on every frame (N.42); the guest digest's references
+; were recorded in that run.
 ; An instruction is folded once: the step is skipped when NesInstructions has
 ; not moved since the last fold (a window that ends at the check folds the
 ; same instruction twice otherwise).
 ;
 ; HOW: plain integer code; the multiply's LO is read and two instructions
-; pass before the next multiply (the VR4300's HI/LO rule).
+; pass before the next multiply (the VR4300's HI/LO rule). Inside the three
+; procedures t0 holds the window digest, a3 the guest digest, a0 the FNV prime
+; $100000001B3 and t1 the term; the leaves fold t1 into one or both.
 ; Register use: NesCpuTraceStep and NesCpuTraceWrite are called from inside
 ; a CPU window with the guest state live in registers (the core's
 ; convention: a1 PC, a2 Left, a4 A, a5 X, a6 Y, a7 FZ, t8 FN, t9 FC, t3
@@ -30,7 +46,16 @@
 ; registers from the globals first.
 ; ============================================================================
 
-Global NesCpuTraceHash.i, NesCpuTraceLast.i = -1, NesCpuTraceSteps.i
+; WHERE the guest digest's 4,096 entries live: not among the variables (the trace build's variables end
+; 2.6 KB below the stack; a second 32 KB array runs 30 KB into it), but in the 32 KB just below the library's
+; crash display ($803C0000; its map: "$80200000 - $803BFFFF free for your fixed buffers"). In this build
+; storage.n64 ends the cartridge arena 32 KB lower, so the show's and the RSP's 64 KB above the arena's end
+; (rspband.n64, show.n64) move down with it and stop here; the arena's own checks keep a game image and
+; the MMC3 wait index below. Stored through KSEG0 like the window digest's array; the run dumps it by
+; address (32,768 bytes from $803B8000).
+#NES_TRACE_GUEST_FRAMES = $FFFFFFFF803B8000     ; = the lui / ori pair in nes_trace_store
+
+Global NesCpuTraceHash.i, NesCpuTraceGuest.i, NesCpuTraceLast.i = -1, NesCpuTraceSteps.i
 Global Dim NesCpuTraceFrames.i(4096)
 
 ProcedureNaked NesCpuTraceGlobals()
@@ -59,48 +84,25 @@ ProcedureNaked NesCpuTraceStep()
     sd t2, 16(sp)
     sd a0, 24(sp)
     sd ra, 32(sp)
+    sd a3, 40(sp)
     la t0, global_nescputracelast
     ld t1, 0(t0)
     beq t1, t3, nes_trace_step_done   ; this instruction is already folded
     nop
     sd t3, 0(t0)
-    la t0, global_nescputracehash
-    ld t0, 0(t0)
-    ori a0, zero, 0x100      ; the FNV-1a 64-bit prime $100000001B3
-    dsll32 a0, a0, 0
-    ori a0, a0, 0x1B3
+    jal nes_trace_load                ; t0 / a3 the two digests, a0 the prime
+    nop
+    jal nes_trace_fold_ab             ; PC
     andi t1, a1, 0xFFFF
-    nop
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; A
     or t1, a4, zero
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; X
     or t1, a5, zero
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; Y
     or t1, a6, zero
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     la t1, global_s
+    jal nes_trace_fold_ab             ; S
     ld t1, 0(t1)
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     ; P from the lazy flags
     andi t1, t8, 0x80
     la t2, global_fv
@@ -123,70 +125,34 @@ ProcedureNaked NesCpuTraceStep()
     sltiu t2, t2, 1
     sll t2, t2, 1
     or t1, t1, t2
+    jal nes_trace_fold_ab             ; P
     ori t1, t1, 0x20
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     ; the cycle count
     la t1, global_nesrunstart
     ld t1, 0(t1)
     la t2, global_budget
     ld t2, 0(t2)
     daddu t1, t1, t2
+    jal nes_trace_fold_ab             ; NesRunStart + Budget - Left
     dsubu t1, t1, a2
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; NesInstructions
     or t1, t3, zero
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; AccessPhase
     or t1, v0, zero
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
+    jal nes_trace_fold_ab             ; the open bus
     andi t1, v1, 0xFF
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     la t1, global_neslatch
+    jal nes_trace_fold_ab
     ld t1, 0(t1)
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     la t1, global_neslatch2
+    jal nes_trace_fold_ab
     ld t1, 0(t1)
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     la t1, global_nesstrobe
+    jal nes_trace_fold_ab
     ld t1, 0(t1)
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     la t1, global_mapselect
+    jal nes_trace_fold_ab
     ld t1, 0(t1)
-    xor t0, t0, t1
-    dmultu t0, a0
-    mflo t0
-    nop
-    nop
     jal nes_trace_store
     nop
 nes_trace_step_done:
@@ -195,10 +161,20 @@ nes_trace_step_done:
     ld t2, 16(sp)
     ld a0, 24(sp)
     ld ra, 32(sp)
+    ld a3, 40(sp)
     jr ra
     daddiu sp, sp, 48
 
-    ; t0 = (t0 ^ t1) * a0  (a leaf)
+    ; t0 = the window digest, a3 = the guest digest, a0 = the FNV prime (a leaf; t1 scratch)
+nes_trace_load:
+    la t1, global_nescputracehash
+    ld t0, 0(t1)
+    ld a3, global_nescputraceguest-global_nescputracehash(t1)
+    ori a0, zero, 0x100               ; the FNV-1a 64-bit prime $100000001B3
+    dsll32 a0, a0, 0
+    jr ra
+    ori a0, a0, 0x1B3
+    ; t0 = (t0 ^ t1) * a0  (a leaf: the window digest only)
 nes_trace_fold:
     xor t0, t0, t1
     dmultu t0, a0
@@ -206,10 +182,31 @@ nes_trace_fold:
     nop
     jr ra
     nop
-    ; store the hash and this frame's entry (t0 = hash; t1, t2 scratch)
+    ; a3 = (a3 ^ t1) * a0  (a leaf: the guest digest only)
+nes_trace_fold_b:
+    xor a3, a3, t1
+    dmultu a3, a0
+    mflo a3
+    nop
+    jr ra
+    nop
+    ; both: t0 = (t0 ^ t1) * a0, a3 = (a3 ^ t1) * a0  (a leaf)
+nes_trace_fold_ab:
+    xor t0, t0, t1
+    dmultu t0, a0
+    mflo t0
+    xor a3, a3, t1                    ; two instructions before the next multiply
+    nop
+    dmultu a3, a0
+    mflo a3
+    nop
+    jr ra
+    nop
+    ; store both digests and this frame's entry of each (t0, a3 the digests; t1, t2 scratch)
 nes_trace_store:
     la t1, global_nescputracehash
     sd t0, 0(t1)
+    sd a3, global_nescputraceguest-global_nescputracehash(t1)
     la t1, global_nescputracesteps
     ld t2, 0(t1)
     daddiu t2, t2, 1
@@ -219,13 +216,18 @@ nes_trace_store:
     andi t1, t1, 4095
     sll t1, t1, 3
     la t2, global_nescputraceframes
-    addu t1, t1, t2
+    addu t2, t1, t2
+    sd t0, 0(t2)
+    lui t2, 0x803B                    ; #NES_TRACE_GUEST_FRAMES ($FFFFFFFF803B8000: lui sign-extends)
+    ori t2, t2, 0x8000
+    daddu t1, t1, t2
     jr ra
-    sd t0, 0(t1)
+    sd a3, 0(t1)
   EndASM
 EndProcedure
 
-; A device read (kind 1). Called from compiled code (NesReadPeripheral).
+; A device read (kind 1). Called from the unit's u_nesreaddev (the assembly core) or compiled code
+; (NesReadPeripheral, the reference core). a0 the address.
 ProcedureNaked NesCpuTraceRead(addr.i)
   ASM
     daddiu sp, sp, -48
@@ -234,21 +236,19 @@ ProcedureNaked NesCpuTraceRead(addr.i)
     sd t2, 16(sp)
     sd a0, 24(sp)
     sd ra, 32(sp)
+    sd a3, 40(sp)
     or t2, a0, zero
-    la t0, global_nescputracehash
-    ld t0, 0(t0)
-    ori a0, zero, 0x100
-    dsll32 a0, a0, 0
-    ori a0, a0, 0x1B3
-    jal nes_trace_fold
+    jal nes_trace_load
+    nop
+    jal nes_trace_fold_ab
     ori t1, zero, 1
-    jal nes_trace_fold
+    jal nes_trace_fold_ab
     or t1, t2, zero
     la t1, global_cpucycles
     ld t1, 0(t1)
     la t2, global_accessphase
     ld t2, 0(t2)
-    jal nes_trace_fold
+    jal nes_trace_fold_ab
     daddu t1, t1, t2
     jal nes_trace_store
     nop
@@ -257,6 +257,7 @@ ProcedureNaked NesCpuTraceRead(addr.i)
     ld t2, 16(sp)
     ld a0, 24(sp)
     ld ra, 32(sp)
+    ld a3, 40(sp)
     jr ra
     daddiu sp, sp, 48
   EndASM
@@ -264,31 +265,29 @@ EndProcedure
 
 ; A device write (kind 2): a0 address, a1 value. Called from NesWrite's own
 ; assembly with ra saved by the caller; keeps every other register.
+; The window digest folds 2, address, value, Left, Budget, AccessPhase (as it always did); the guest digest
+; folds 2, address, value, the guest cycle, AccessPhase. The guest cycle is the one the write path itself
+; stamps the write with (unit/write.n64, nes_mmc3_bus_write_timed): NesRunStart + Budget - Left inside a
+; CPU window, CpuCycles outside one.
 ProcedureNaked NesCpuTraceWrite()
   ASM
     daddiu sp, sp, -48
     sd t0, 0(sp)
     sd t1, 8(sp)
     sd t2, 16(sp)
-    sd a2, 24(sp)
+    sd a0, 24(sp)
     sd a3, 32(sp)
     sd ra, 40(sp)
-    or a2, a0, zero
-    la t0, global_nescputracehash
-    ld t0, 0(t0)
-    ori a3, zero, 0x100
-    dsll32 a3, a3, 0
-    ori a3, a3, 0x1B3
-    ; the fold leaf multiplies by a0: swap the prime into a0 for the duration
-    daddiu sp, sp, -16
-    sd a0, 0(sp)
-    or a0, a3, zero
-    jal nes_trace_fold
+    or t2, a0, zero                   ; the address
+    jal nes_trace_load
+    nop
+    jal nes_trace_fold_ab
     ori t1, zero, 2
-    jal nes_trace_fold
-    or t1, a2, zero
-    jal nes_trace_fold
+    jal nes_trace_fold_ab
+    or t1, t2, zero
+    jal nes_trace_fold_ab
     andi t1, a1, 0xFF
+    ; the window digest: Left, Budget, AccessPhase
     la t1, global_left
     jal nes_trace_fold
     ld t1, 0(t1)
@@ -298,14 +297,29 @@ ProcedureNaked NesCpuTraceWrite()
     la t1, global_accessphase
     jal nes_trace_fold
     ld t1, 0(t1)
+    ; the guest digest: the guest cycle, AccessPhase
+    la t2, global_cpucycles
+    ld t1, global_cpuinwindow-global_cpucycles(t2)
+    beqz t1, nes_trace_write_cycle    ; outside a window CpuCycles is the cycle
+    ld t1, 0(t2)
+    ld t1, global_nesrunstart-global_cpucycles(t2)
+    ld t2, global_budget-global_cpucycles(t2)
+    daddu t1, t1, t2
+    la t2, global_left
+    ld t2, 0(t2)
+    dsubu t1, t1, t2                  ; NesRunStart + Budget - Left
+nes_trace_write_cycle:
+    jal nes_trace_fold_b
+    nop
+    la t1, global_accessphase
+    jal nes_trace_fold_b
+    ld t1, 0(t1)
     jal nes_trace_store
     nop
-    ld a0, 0(sp)
-    daddiu sp, sp, 16
     ld t0, 0(sp)
     ld t1, 8(sp)
     ld t2, 16(sp)
-    ld a2, 24(sp)
+    ld a0, 24(sp)
     ld a3, 32(sp)
     ld ra, 40(sp)
     jr ra
