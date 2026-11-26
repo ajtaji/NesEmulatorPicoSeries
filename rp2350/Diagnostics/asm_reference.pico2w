@@ -35,7 +35,8 @@ Procedure.i VerifyRand(range.i)
   ProcedureReturn (VerifySeed>>8)%range
 EndProcedure
 
-; worker.pico's PpuSyncStatus in its plain form, before it became assembly.
+; worker.pico's PpuSyncStatus in its plain form: the routine before it became assembly, made TV-system
+; general as the assembly is (the pre-render line PpuPreLine; on PAL the horizon (5d-1-PpuDotFrac)>>4).
 Procedure PpuSyncStatusReference(stamp.i)
   Protected edge.i, line.i, spriteY.i, height.i
   If stamp<=PpuStatusDeadline And stamp>=PpuClock
@@ -45,7 +46,7 @@ Procedure PpuSyncStatusReference(stamp.i)
   PpuSync(stamp)
   PpuStatusBits=PpuStatus
   edge=341
-  If (PpuLine=241 Or PpuLine=261) And PpuDot=0
+  If (PpuLine=241 Or PpuLine=PpuPreLine) And PpuDot=0
     edge=1
   ElseIf PpuLine<240
     If PpuDot=0
@@ -74,27 +75,38 @@ Procedure PpuSyncStatusReference(stamp.i)
     EndIf
   EndIf
   If edge>PpuDot
-    PpuStatusDeadline=stamp+NesDiv(edge-PpuDot-1,3)
+    If CartPal
+      ; the most cycles that stay short of edge-PpuDot dots at 16 dots per 5 cycles
+      PpuStatusDeadline=stamp+((5*(edge-PpuDot)-1-PpuDotFrac)>>4)
+    Else
+      PpuStatusDeadline=stamp+NesDiv(edge-PpuDot-1,3)
+    EndIf
   EndIf
 EndProcedure
 Global Dim SavedCachedCount.a(256)
 ; Random PPU states, each run through the reference and the assembly from the same start: the
 ; deferral, the status bits and the next horizon must agree. stamp=PpuClock, so PpuSync moves nothing.
+; Odd passes run PAL (312 lines, the pre-render line 311, a random PpuDotFrac); NTSC is put back after.
 Procedure ComparePpuSyncStatus()
   Protected i.i, j.i, line.i, dot.i, status.i, mask.i, ctrl.i, oam0.i, count.i, index0.i, dirty.i
   Protected clock.i, deadline.i, expDeadline.i, expBits.i, expDeferred.i, sOam0.i, sIndex0.i, sCount.i, sDirty.i
   For j=0 To 255 : SavedCachedCount(j)=CachedCount(j) : Next
   sOam0=Oam(0) : sIndex0=SprIndex(0) : sCount=SprCount : sDirty=OamCacheDirty
   For i=0 To 19999
+    If i&1
+      CartPal=1 : PpuPreLine=311 : PpuLineCount=312 : PpuDotFrac=VerifyRand(5)
+    Else
+      CartPal=0 : PpuPreLine=261 : PpuLineCount=262 : PpuDotFrac=0
+    EndIf
     If (i&63)=0
       For j=0 To 255
         CachedCount(j)=VerifyRand(9)
         If VerifyRand(40)=0 : CachedCount(j)=9+VerifyRand(4) : EndIf
       Next
     EndIf
-    line=VerifyRand(262) : dot=VerifyRand(341)
+    line=VerifyRand(PpuLineCount) : dot=VerifyRand(341)
     If VerifyRand(4)=0 : dot=0 : EndIf
-    If VerifyRand(8)=0 : line=241+VerifyRand(2)*20 : EndIf
+    If VerifyRand(8)=0 : line=241+VerifyRand(2)*(PpuPreLine-241) : EndIf
     status=(VerifyRand(4)<<5)|(VerifyRand(2)<<7) : mask=VerifyRand(4)<<3 : ctrl=VerifyRand(2)<<5
     oam0=VerifyRand(256) : count=VerifyRand(3) : index0=VerifyRand(2) : dirty=0
     If VerifyRand(4)=0 : dirty=1 : EndIf
@@ -113,6 +125,7 @@ Procedure ComparePpuSyncStatus()
   For j=0 To 255 : CachedCount(j)=SavedCachedCount(j) : Next
   Oam(0)=sOam0 : SprIndex(0)=sIndex0 : SprCount=sCount : OamCacheDirty=sDirty
   PpuClock=0 : PpuStatusDeadline=0 : PpuStatusDeferred=0 : PpuLine=0 : PpuDot=0 : PpuStatus=0
+  CartPal=0 : PpuPreLine=261 : PpuLineCount=262 : PpuDotFrac=0
 EndProcedure
 
 ; ppu.pico's PpuIncY in its plain form.

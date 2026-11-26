@@ -75,8 +75,7 @@ def once(s, old, new):
 # The Pico sources' hand-written Thumb assembly cannot be carried to A64 as text. Each such routine
 # has a plain twin in rp2350/Diagnostics/asm_reference.pico2w (the routine as it was before it became
 # assembly), and that image's Compare* checks hold the assembly to it on the board. The port takes
-# the twin. The checks' inputs are NTSC (PpuSyncStatusReference keeps the NTSC line 261 and /3),
-# which is all Anvil runs: nothing on Anvil sets CartPal, so PpuPreLine stays 261.
+# the twin. Anvil runs NTSC only: nothing on Anvil sets CartPal, so PpuPreLine stays 261.
 TWINS = (ROOT/'rp2350/Diagnostics/asm_reference.pico2w').read_text()
 
 def twin(name):
