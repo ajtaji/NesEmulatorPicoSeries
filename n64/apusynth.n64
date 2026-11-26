@@ -1,7 +1,9 @@
 ; ============================================================================
 ; apusynth.n64 - the APU's SYNTHESIS, by block, from the timing's log (design note, section N.25:
-; step N6, the APU split). The CPU twin of N10's RSP synthesis: the RSP's block output is to be
-; compared with this word for word.
+; step N6, the APU split). The CPU twin of N10's RSP synthesis (rspsyn.n64rsp, design note N.52 / N.53):
+; in the builds with the RSP show the RSP renders the samples and this file runs only in the checking
+; build --syn-check, which compares every sample of every AI block with the RSP's; the builds without
+; the RSP program (--old-show and the other checking builds) still render with it.
 ;
 ; WHAT: the sound half of the old program - the oscillators (pulse x 2, triangle, noise), the
 ; envelopes, the linear counter, the sweeps, the DMC's output level, the non-linear mix and the
@@ -102,6 +104,9 @@ Procedure NesSynInit(now.i)
   PokeI(s+#NES_S_FRAC,ApuSampleFrac) : PokeI(s+#NES_S_DONE,ApuProduced)
   NesApuSampleAt=now+ApuSampleLeft
   NesApuLogHead=0 : NesApuLogTail=0 : NesApuDmcHead=0 : NesApuDmcTail=0
+  CompilerIf #NES_RSP_SYN
+    NesSynRspInit(now)                  ; the RSP's copy of the same state (rspsyn.n64)
+  CompilerEndIf
 EndProcedure
 
 CompilerIf #NES_CONSOLE_RECORD
@@ -153,6 +158,27 @@ ProcedureNaked NesSynRenderTo(n.i)
   EndASM
 EndProcedure
 
+CompilerIf #NES_RSP_SYN
+; THE RENDERS FOR ROOM with the synthesis on the RSP (design note N.52 4): the timing's log has no room, so every
+; sample at a cycle <= t is rendered by an RSP job, waited for, and the RSP's tails free the log (rspsyn.n64). In the
+; checking build the twin renders them too, first (its tails are the ones the unit's test reads; it never runs ahead of
+; the RSP, so they are the smaller).
+ProcedureNaked NesSynRenderTimeTwin(t.i)
+  ; the twin: every sample at an APU cycle <= t (a1 = t; no count limit)
+  ASM
+    move a1, a0
+    daddiu a0, zero, -1
+    j nes_syn_render
+    dsrl a0, a0, 1
+  EndASM
+EndProcedure
+Procedure NesSynRenderTime(t.i)
+  CompilerIf #NES_SYN_CHECK
+    NesSynRenderTimeTwin(t)
+  CompilerEndIf
+  NesSynRspRoom(t)
+EndProcedure
+CompilerElse
 ProcedureNaked NesSynRenderTime(t.i)
   ; render every sample at an APU cycle <= t (a1 = t; no count limit)
   ASM
@@ -172,6 +198,7 @@ ProcedureNaked NesSynRenderTime(t.i)
     dsrl a0, a0, 1
   EndASM
 EndProcedure
+CompilerEndIf
 
 ProcedureNaked NesSynRender()
   ASM

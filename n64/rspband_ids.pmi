@@ -4,4 +4,10 @@
 #NES_RSP_BAND = 129                    ; one band: the record, its OAM snapshot, the band's index
 #NES_RSP_SEG_A = 1                     ; the emitter's code segments: the band's inputs and set-up
 #NES_RSP_SEG_B = 2                     ; the three layers and the band's end
-#NES_RSP_WORDS = 4096                  ; the frame command area: doublewords (frames >= 900: at most 1,480; the title more)
+#NES_RSP_SYNJOB = 130                  ; N10: one synthesis job (rspsyn.n64rsp), on the PRIORITY ring: RspqArg 0 n (the
+                                       ; samples to have done), 1 X (the APU cycle of sample n - 1, low 32 bits), 2 / 3 the
+                                       ; main and DMC logs' heads, 4 the state block (physical)
+#NES_RSP_SEG_SYNA = 3                  ; the synthesis's pass A: the log's events into records
+#NES_RSP_SEG_SYNB = 4                  ; its pass B: the samples
+#NES_RSP_SEG_SYNC = 5                  ; its DMC pass (run between A and B): the DMC replica's level a sample
+#NES_RSP_WORDS = 4096                 ; the frame command area: doublewords (frames >= 900: at most 1,480; the title more)

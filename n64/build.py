@@ -195,7 +195,14 @@ def build(args, *, controller_trace=()):
     record_pictures = getattr(args, "record_every_picture", False)
     if record_pictures and not console_record:
         raise ValueError("--record-every-picture is a form of the console record (--console-record)")
+    # N10 (design note, N.52): the synthesis on the RSP, in every build that runs the RSP program (the RSP show);
+    # --syn-check adds the CPU twin and compares every sample of every block before it is queued
+    syn_check = getattr(args, "syn_check", False)
+    if syn_check and not (rdp_show and args.check_frame):
+        raise ValueError("the synthesis check is a runtime-MMC3 verification build with the RSP show")
     settings = {
+        "NES_RSP_SYN": int(rdp_show and audio_rate == 20000),
+        "NES_SYN_CHECK": int(syn_check),
         "NES_CONSOLE_RECORD": int(console_record),
         "NES_REC_PICTURES_ALL": int(record_pictures),
         "NES_CPU_TRACE": int(cpu_trace),
@@ -369,6 +376,9 @@ if __name__ == "__main__":
     parser.add_argument("--show-check", action="store_true",
                         help="checking build: every frame finished at its end and its shown picture hashed (with "
                              "--old-show: the old renderer's picture of the frame, the reference) (needs --check-frame)")
+    parser.add_argument("--syn-check", action="store_true",
+                        help="checking build: the APU synthesis on the RSP (rspsyn.n64rsp) and its CPU twin "
+                             "(apusynth.n64), every sample of every AI block compared (needs --check-frame)")
     parser.add_argument("--console-record", action="store_true",
                         help="the playable cart keeps a record of its run in the flash cart's memory (console_record.n64)")
     parser.add_argument("--record-every-picture", action="store_true",

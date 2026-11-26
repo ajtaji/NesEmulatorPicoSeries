@@ -391,6 +391,7 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   XIncludeFile "twin.n64"
   XIncludeFile "rspband.n64"
   XIncludeFile "show.n64"
+  XIncludeFile "rspsyn.n64"             ; N10: the synthesis on the RSP, its CPU side (#NES_RSP_SYN only)
   CompilerIf #NES_CONSOLE_RECORD
     XIncludeFile "console_record.n64"
   CompilerEndIf

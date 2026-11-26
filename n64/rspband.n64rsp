@@ -15,6 +15,9 @@
 ;    NES_RSP_BAND (129), at every band record: RspqArg 0 the record (96 B), 1 its OAM snapshot (256 B), 2 the
 ;      band's index in the frame. Index 0 starts a frame: the words go from the area's start, and the RDP's state
 ;      is taken as unknown (every sync owed, no pair resident) - as the twin does.
+;    NES_RSP_SYNJOB (130), on the PRIORITY ring: a job of the APU synthesis, the program's second module
+;      (rspsyn.n64rsp, segments 3, 5 and 4; design note N.52 / N.53). It uses only the queue's scratch and its own
+;      state in RDRAM: nothing of this module's DMEM, so a band job after it finds its globals as they were.
 ;
 ;  WHAT IS KEPT BETWEEN BANDS (this module's DMEM globals, never the queue's scratch, which belongs to the command
 ;  running): the pair cache's 32 keys, the next slot, the syncs owed (pipe, tiles, TMEM), where the frame's next
@@ -1282,12 +1285,18 @@ nbc_return:
 EndProcedure
 
 
+XIncludeFile "rspsyn.n64rsp"           ; N10: the APU synthesis, a module of this program (segments 3, 5, 4)
+
 Procedure RspqCommand(id.l)
   Select id
     Case #NES_RSP_SETUP : NesRspSetup()
     Case #NES_RSP_BAND
       If RspqSegment(#NES_RSP_SEG_A) : NesRspBandA() : EndIf
       If RspqSegment(#NES_RSP_SEG_B) : NesRspBandB() : EndIf
+    Case #NES_RSP_SYNJOB                   ; a synthesis job (the priority ring): its events, its DMC levels, its samples
+      If RspqSegment(#NES_RSP_SEG_SYNA) : NesRspSynEvents() : EndIf
+      If RspqSegment(#NES_RSP_SEG_SYNC) : NesRspSynDmc() : EndIf
+      If RspqSegment(#NES_RSP_SEG_SYNB) : NesRspSynSamples() : EndIf
   EndSelect
 EndProcedure
 

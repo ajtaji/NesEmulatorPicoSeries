@@ -34,7 +34,10 @@
 ;   run slot $1D000, the whole area $E9000 bytes. Version 5 (the same day, with the APU split): the APU's parts are
 ;   the timing in the hot unit (its calls, of them the segment path, its ticks) and the synthesis by block (its
 ;   ticks); events of 18 words (+ the synthesis, + what is left: the guest CPU, the PPU and the bus); the hash count
-;   per build; the run slot $1E000 ($3A000 with every picture hashed).
+;   per build; the run slot $1E000 ($3A000 with every picture hashed). Version 6 (N10, the synthesis on the RSP):
+;   the synthesis column (#T_SYN) is its CPU side (rspsyn.n64's job polls); the summary's words 214-218 hold the
+;   RSP's side - its jobs' clocks (DPC_CLOCK, 64 bits), jobs, renders for room, samples rendered. The layout is
+;   version 5's otherwise.
 ;
 ; THE PICTURE HASHES (version 4; every shown picture in the build #NES_REC_PICTURES_ALL, which needs no input). The owner plays freely, so the picture cannot be checked against a reference while
 ; he plays; but from the power-on until the first button the guest runs exactly as the emulator's run of the same
@@ -74,7 +77,7 @@ CompilerElse
 CompilerEndIf
 #NES_REC_MAGIC = $4E455343              ; "NESC"
 #NES_REC_RUN_MAGIC = $4E52554E          ; "NRUN"
-#NES_REC_VERSION = 5
+#NES_REC_VERSION = 6
 #NES_REC_SLOTS = 8
 #NES_REC_HASHES = $1A000                ; the picture hashes (NesRecPicture), from the slot's start
 #NES_REC_SLOT = #NES_REC_HASHES + #NES_REC_HASH_MAX * 32   ; summary 4 KB + series 64 KB + events 36 KB + pictures
@@ -133,6 +136,10 @@ CompilerEndIf
                                         ; words 192-211 (the #T_ list below)
 #R_HASHES = 212                         ; version 4: picture hashes written (NesRecPicture)
 #R_HASHSTOP = 213                       ; the guest frame at which a button was first seen (hashing stopped), 0 none yet
+#R_SYNCLK = 214                         ; version 6 (N10, the synthesis on the RSP): its jobs' RSP clocks (DPC_CLOCK, lo, hi),
+#R_SYNJOBS = 216                        ; its jobs, its renders for room (a log full), the samples it has rendered
+#R_SYNROOMS = 217
+#R_SYNDONE = 218
 ; an event's words (NesRecEvent)
 #E_FRAME = 0                            ; the guest frame
 #E_FLAGS = 1                            ; why: 1 an underrun, 2 a picture skipped, 4 work over one NES frame, 8 a drain,
@@ -305,6 +312,10 @@ Procedure NesRecFlush(frame.i, entry.i)
   NesRecW(#R_BANDS) = NesShowStat(10) : NesRecW(#R_BANDMAX) = NesShowStat(11)
   NesRecSplit(#R_SLEEP, NesRecWait)
   For k = 0 To #NES_REC_T - 1 : NesRecSplit(#R_T + 2 * k, NesRecT(k)) : Next
+  CompilerIf #NES_RSP_SYN
+    NesRecSplit(#R_SYNCLK, NesSynClocks) : NesRecW(#R_SYNJOBS) = NesSynJobs : NesRecW(#R_SYNROOMS) = NesSynRooms
+    NesRecW(#R_SYNDONE) = NesSynDone
+  CompilerEndIf
   If entry And NesRecW(#R_ENTRIES) < #NES_REC_SERIES_MAX
     a = NesRecBase + #NES_REC_SERIES + NesRecW(#R_ENTRIES) * 16
     n = NesShowStat(0) - NesRecShownSeen : If n > 255 : n = 255 : EndIf

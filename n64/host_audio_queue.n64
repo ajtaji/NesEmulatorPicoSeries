@@ -58,6 +58,24 @@ nes_host_audio_ready:
     move s1, t0
 nes_host_audio_submit:
   EndASM
+  CompilerIf #NES_RSP_SYN
+    ASM
+      ; N10 (rspsyn.n64, design note N.52 4): the block IS the RSP's words in the AI ring - queued once the RSP has
+      ; rendered it (NesSynDone >= HostPcmRead + 512), nothing copied, nothing written back. t2 = HostPcmRead here.
+      la t0, global_nessyndone
+      ld t0, 0(t0)
+      daddiu t1, t2, #HOST_AUDIO_FRAMES
+      dsubu t0, t0, t1
+      bltz t0, nes_host_audio_restore ; not rendered yet: the next poll (NesSynJobPoll hurries the job)
+      dsrl t1, t2, 9                  ; (delay slot) the block: (HostPcmRead >> 9) & 7 ...
+      andi t1, t1, 7
+      sll t0, t1, 11
+      sll t1, t1, 6
+      addu t1, t1, t0                 ; ... x 2,112 (2,048 + 64)
+      ld t0, 0(s1)                    ; the ring (HostAiBase)
+      daddu s2, t0, t1
+    EndASM
+  CompilerElse
   CompilerIf #NES_APU_SPLIT
     ASM
       ; the block's samples first (apusynth.n64, design note N.25): t2 = HostPcmRead here
@@ -80,6 +98,9 @@ nes_host_audio_submit:
     move a0, s2
     jal lpmcachewritebackdata
     ori a1, zero, #HOST_AUDIO_BYTES
+  EndASM
+  CompilerEndIf
+  ASM
     lui t0, 0xA450
     sll t1, s2, 3
     srl t1, t1, 3

@@ -14,6 +14,25 @@ Global NesApuSampleAt.i
 ; THE FAST PATH'S TEST (unit/apu.n64, design note N.26a): the APU cycles from ApuFrameClock to the
 ; frame sequencer's next event, or 0 while a $4017 reset counts down; kept by the unit only.
 Global NesApuQuiet.i
+; THE LAST SAMPLE COUNTED (design note N.52): the APU cycle of sample ApuProduced - 1, kept by NesApuCount - the X of
+; the RSP synthesis's job (rspsyn.n64), the cycle up to which its events apply.
+CompilerIf #NES_RSP_SYN
+  Global NesApuLastAt.i
+  ; N10: the synthesis on the RSP (rspsyn.n64, rspsyn.n64rsp). Declared here, before the host's audio queue and the
+  ; unit's renders for room call into it; its code comes after the show (nes.n64).
+  Global NesSynDone.i                   ; samples the RSP has rendered into the AI ring (its last job's status)
+  Global NesSynJobs.i, NesSynRooms.i, NesSynClocks.i   ; jobs seen done, renders for room, their RSP clocks (DPC_CLOCK)
+  CompilerIf #NES_SYN_CHECK
+    Global NesSynChecked.i, NesSynBlocks.i             ; the checking build: samples / blocks compared with the twin
+  CompilerEndIf
+  Declare NesSynRspInit(now.i)
+  Declare NesSynJobPoll()
+  Declare NesSynRspRoom(t.i)
+  Declare NesSynFinish()
+  CompilerIf #NES_SYN_CHECK
+    Declare NesSynCheckBlock(dst.i, first.i, count.i)
+  CompilerEndIf
+CompilerEndIf
 
 ProcedureNaked ApuAdvance(dt.i)
   ; The body is in the hot unit (n64/unit/apu.n64, inside cpu6502.n64's procedure); outside
@@ -75,6 +94,14 @@ ProcedureNaked NesApuCount()
     la t3, global_apusamplebase
     ld a6, 0(t3)
 nes_apu_count_next:
+  EndASM
+  CompilerIf #NES_RSP_SYN
+    ASM
+    la t3, global_nesapulastat
+    sd a0, 0(t3)                    ; the last sample counted: its cycle (design note N.52)
+    EndASM
+  CompilerEndIf
+  ASM
     daddiu a2, a2, 1                ; this sample counted
     daddu a3, a3, a4                ; the fraction moves
     slt t3, a3, a5

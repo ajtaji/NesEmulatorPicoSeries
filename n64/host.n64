@@ -15,7 +15,19 @@ Global HostPadPending.i, HostAudioReady.i
 Global HostPendingVideo.i, HostCoalesced.i, HostPcmRead.i, HostAiSlot.i, HostAiBase.i
 ; Leave room to align each stereo block inside a 4 KiB page. No AI transfer
 ; ends on the 8 KiB boundary affected by the AI address carry erratum.
-Global Dim HostAiMemory.a((#HOST_AUDIO_SLOTS + 1) * 4096)
+CompilerIf #NES_RSP_SYN
+  ; N10 (design note N.52 4): the AI's blocks are the RSP synthesis's output ring - 8 blocks of 512 stereo words (the
+  ; twin's 4,096-sample Pcm ring), block b at HostAiBase + b x 2,112. HostBegin places the base so that no block, and no
+  ; half block (the oracle's last transfer), ends on an 8 KiB boundary. THE RING IS NOT A VARIABLE (design note N.53):
+  ; with it below the stack the CPU trace builds ran into the stack by 7,392 bytes. It sits in the RDRAM between the
+  ; library's framebuffers (from $80200000, three of 153,600 bytes: to $80270800) and the cartridge arena
+  ; (#NES_CART_LOW in storage.n64, $80281000, written here as a number: that file comes later) - room the library's map leaves free; HostBegin checks both ends and refuses otherwise.
+  #HOST_AI_RING = $FFFFFFFF80272000
+  #HOST_AI_RING_BYTES = 8 * 2112 + 32
+  Global Dim HostAiMemory.a(8)
+CompilerElse
+  Global Dim HostAiMemory.a((#HOST_AUDIO_SLOTS + 1) * 4096)
+CompilerEndIf
 CompilerIf #VERIFY_FRAME>0
   Global HostAiQueued.i, HostAiEmpty.i, HostAiUnderruns.i, HostAiReported.i, HostAiReadyOnEmpty.i, HostLastEmptyFrame.i
 CompilerEndIf
@@ -52,12 +64,21 @@ Procedure HostQueueAudio(produced.i)
   If produced < HostPcmRead : HostPcmRead = 0 : EndIf
   If produced - HostPcmRead > 4096 : HostPcmRead = (produced - 4096 + #HOST_AUDIO_FRAMES - 1) & ~(#HOST_AUDIO_FRAMES - 1) : EndIf
   While produced - HostPcmRead >= #HOST_AUDIO_FRAMES And LpmAiFull() = 0
+    CompilerIf #NES_RSP_SYN
+      ; the RSP's words are the block (rspsyn.n64): queued once it has rendered them, nothing copied
+      If NesSynDone - HostPcmRead < #HOST_AUDIO_FRAMES : Break : EndIf
+      dst = HostAiBase + ((HostPcmRead >> 9) & 7) * 2112
+      CompilerIf #NES_SYN_CHECK
+        NesSynCheckBlock(dst, HostPcmRead, #HOST_AUDIO_FRAMES)   ; every sample against the twin's
+      CompilerEndIf
+    CompilerElse
     dst = HostAiBase + HostAiSlot * 4096
     CompilerIf #NES_APU_SPLIT
       NesSynRenderTo(HostPcmRead + #HOST_AUDIO_FRAMES)   ; the block's samples (apusynth.n64, design note N.25)
     CompilerEndIf
     HostCopyStereo(dst, @Pcm[HostPcmRead & 4095])
     LpmCacheWritebackData(dst, #HOST_AUDIO_BYTES)
+    CompilerEndIf
     LpmAiQueue(dst, #HOST_AUDIO_BYTES)
     HostPcmRead += #HOST_AUDIO_FRAMES
     HostAiSlot += 1
@@ -72,6 +93,9 @@ CompilerEndIf
 Procedure HostAudioPoll()
   CompilerIf #NES_APU_SPLIT
     NesApuCount()                       ; the samples the guest's time has produced (apusplit.n64)
+    CompilerIf #NES_RSP_SYN
+      NesSynJobPoll()                   ; the RSP renders them at the guest's pace (rspsyn.n64)
+    CompilerEndIf
   CompilerElseIf #NES_APU_BLOCKED
     NesRenderBlock()
   CompilerEndIf
@@ -92,6 +116,9 @@ Procedure HostDrainCapture()
   CompilerEndIf
   ; The guest has stopped. Submit complete blocks still in the software ring.
   HostAudioReady=1
+  CompilerIf #NES_RSP_SYN
+    NesSynFinish()                      ; every counted sample rendered by the RSP first (rspsyn.n64)
+  CompilerEndIf
   While ApuProduced-HostPcmRead>=#HOST_AUDIO_FRAMES
     HostQueueAudio(ApuProduced)
   Wend
@@ -100,18 +127,31 @@ Procedure HostDrainCapture()
     ; A remaining half descriptor starts at a 512-pair-aligned ring address.
     If ApuProduced-HostPcmRead>=256
       While LpmAiFull() : Wend
+      CompilerIf #NES_RSP_SYN
+        dst=HostAiBase+((HostPcmRead>>9)&7)*2112+(HostPcmRead&511)*4   ; the RSP's words (rendered: NesSynFinish)
+        CompilerIf #NES_SYN_CHECK
+          NesSynCheckBlock(dst,HostPcmRead,256)
+        CompilerEndIf
+      CompilerElse
       dst=HostAiBase+HostAiSlot*4096
       CompilerIf #NES_APU_SPLIT
         NesSynRenderTo(HostPcmRead+256)
       CompilerEndIf
       HostCopyStereo(dst,@Pcm[HostPcmRead&4095])
       LpmCacheWritebackData(dst,1024)
+      CompilerEndIf
       LpmAiQueue(dst,1024)
       HostPcmRead+=256
       HostAiSlot+=1
       If HostAiSlot=#HOST_AUDIO_SLOTS : HostAiSlot=0 : EndIf
       HostAiQueued+=1 : HostAiEmpty=0
     EndIf
+  CompilerEndIf
+  CompilerIf #NES_RSP_SYN
+    LpmDebugPrint("NES SYN RSP jobs " + Str(NesSynJobs) + " rooms " + Str(NesSynRooms) + " samples " + Str(NesSynDone) + " clocks " + Str(NesSynClocks))
+    CompilerIf #NES_SYN_CHECK
+      LpmDebugPrint("NES SYN CHECK blocks " + Str(NesSynBlocks) + " samples " + Str(NesSynChecked) + " differing " + Str(Bool(WorkerError = 26)))
+    CompilerEndIf
   CompilerEndIf
 EndProcedure
 CompilerEndIf
@@ -256,7 +296,25 @@ Procedure.i HostBegin()
     NesController=HostPad(0)
     NesController2=HostPad(1)
   CompilerEndIf
+  CompilerIf #NES_RSP_SYN
+    ; the ring's base: 8-byte aligned, moved on 8 while a block's end (+2,048) or a half block's (+1,024) would fall
+    ; on an 8 KiB boundary (each b excludes one base in 1,024: the first or the next two bases always do)
+    Protected b.i, ok.i
+    HostAiBase = #HOST_AI_RING
+    If ((lpm_fb_addr[lpm_dsp_n - 1] + lpm_dsp_size) & $1FFFFFFF) > (#HOST_AI_RING & $1FFFFFFF) Or #HOST_AI_RING + #HOST_AI_RING_BYTES > $FFFFFFFF80281000
+      LpmDebugPrint("NES AI RING REFUSED: the framebuffers or the cartridge arena overlap it") : ProcedureReturn 0
+    EndIf
+    Repeat
+      ok = 1
+      For b = 0 To 7
+        If ((HostAiBase + b * 2112 + 2048) & 8191) = 0 Or ((HostAiBase + b * 2112 + 1024) & 8191) = 0 : ok = 0 : EndIf
+      Next
+      If ok = 0 : HostAiBase + 8 : EndIf
+    Until ok
+    LpmCacheWritebackInvalidateData(HostAiBase, 8 * 2112)   ; the RSP writes the ring by DMA; the CPU never caches it
+  CompilerElse
   HostAiBase = ((@HostAiMemory[0] + 4095) & ~4095) + 64
+  CompilerEndIf
   HostPcmRead = ApuProduced
   HostAiSlot = 0
   LpmAiInit(#NES_AUDIO_RATE)

@@ -1,0 +1,213 @@
+; rspsyn.n64 - N10: THE APU SYNTHESIS ON THE RSP, the CPU side (design note, section N.52)
+;
+; The RSP module rspsyn.n64rsp renders the samples from the timing's logs (unit/apu.n64, unit/apu_cold.n64) and writes
+; each as the AI's stereo word into the AI ring (host.n64's ring above the framebuffers, #HOST_AI_RING: 8 blocks of 512, a block at a
+; stride of 2,112 bytes). This file sends its jobs, reads their status and frees the logs; the host queues an AI block
+; once the RSP has rendered it (host_audio_queue.n64 / host.n64). The CPU twin apusynth.n64 runs only in the checking
+; build (#NES_SYN_CHECK), where every sample of every block is compared before the block is queued.
+;
+; WHEN A JOB GOES (NesSynJobPoll, from HostAudioPoll after NesApuCount, ~16 times a guest frame): with no job
+; outstanding, when ApuProduced is #NES_SYN_BATCH samples past the RSP's done count, or an AI block waits for samples
+; the RSP has not rendered. ONE job at a time; its end is its status words (one uncached read a poll). So the synthesis
+; runs at the guest's pace, about 1.3 jobs a guest frame, and a log holds about a frame of entries (N.51: rendering
+; behind the AI let the DMC log fill and forced a 2.4-3 block catch-up in one frame).
+; A JOB: the log entries appended since the last job written back (Hit_Writeback_D: the RSP reads them by DMA), then
+; LpmRspqCmd7Pri(program, #NES_RSP_SYNJOB, n, X, main head, DMC head, the state block): n = ApuProduced (capped at
+; HostPcmRead + #NES_SYN_CAP, so the ring's blocks the AI still holds - playing and two queued, behind HostPcmRead - are
+; never written over), X = the cycle of sample n - 1 (NesApuLastAt, or counted from the RSP's own cadence when capped).
+; THE TAILS: the unit's full test reads NesApuLogTail / NesApuDmcTail; here they are the RSP's, copied at each job's
+; end (so they only lag: a log is never written over before the RSP read it). In the checking build they stay the
+; twin's (it never runs ahead of the RSP).
+; THE STATE BLOCK (layout: rspsyn.n64rsp's header) is written here once, before the guest runs, and by the RSP alone
+; afterwards; the CPU reads it only between jobs.
+CompilerIf #NES_RSP_SYN
+
+#NES_SYN_STRIDE = 2112                  ; an AI block's place in the ring: 2,048 bytes + 64 (host.n64)
+#NES_SYN_CAP = 2560                     ; samples past HostPcmRead the RSP may render (the ring's 4,096 less 3 blocks)
+#NES_SYN_BATCH = 256                    ; samples a job at least, unless a block waits
+#NES_SYN_STATUS = 256                   ; the status, from the state block's start
+#NES_SYN_TABLES = 272                   ; the tables (856 bytes)
+Global Dim NesSynRspSpace.a(272 + 856 + 16)
+Global NesSynRspK1.i                    ; the state block, KSEG1 (0: not set up)
+Global NesSynRspPhys.i                  ; its physical address
+Global NesSynSent.i, NesSynOut.i, NesSynWbMain.i, NesSynWbDmc.i
+Global NesSynClkSeen.i                  ; (NesSynJobs, NesSynRooms, NesSynClocks, NesSynDone: apusplit.n64)
+
+; Once, from NesSynInit (the twin's state set, HostBegin's ring placed): the RSP's state from the APU's power-on state
+; (as NesSynInit reads it, in 32-bit words), the fixed addresses and the cadence, the tables.
+Procedure NesSynRspInit(now.i)
+  Protected base.i, k.i, i.i
+  base = (@NesSynRspSpace(0) + 15) & ~15
+  If (@NesApuLog(0) & 7) Or (@NesApuDmcLog(0) & 7) Or (HostAiBase & 7) Or HostAiBase = 0
+    LpmDebugPrint("NES SYN REFUSED: a log or the AI ring not 8-byte aligned for the RSP's DMA") : WorkerError = 26
+    ProcedureReturn
+  EndIf
+  LpmCacheWritebackInvalidateData(base, #NES_SYN_TABLES + 856)   ; no cached line over what the RSP reads and writes
+  k = (base & $1FFFFFFF) | $A0000000
+  For i = 0 To #NES_SYN_TABLES - 4 Step 4 : PokeL(k + i, 0) : Next
+  For i = 0 To 3 : PokeL(k + i * 4, ApuTimer(i)) : Next
+  For i = 0 To 2 : PokeL(k + 16 + i * 4, ApuSeq(i)) : Next
+  PokeL(k + 28, TriDac) : PokeL(k + 32, NoiseShift)
+  PokeL(k + 36, now + DmcTimer) : PokeL(k + 40, DmcBits) : PokeL(k + 44, DmcShift) : PokeL(k + 48, DmcSilent)
+  PokeL(k + 52, DmcLevel) : PokeL(k + 56, ApuLastX) : PokeL(k + 60, ApuLastY)
+  PokeL(k + 64, now) : PokeL(k + 68, now + ApuSampleLeft) : PokeL(k + 72, ApuSampleFrac) : PokeL(k + 76, ApuProduced)
+  For i = 0 To 23 : PokeA(k + 96 + i, ApuReg(i)) : Next
+  For i = 0 To 3 : PokeL(k + 120 + i * 4, ApuLength(i)) : Next
+  For i = 0 To 2
+    PokeL(k + 136 + i * 4, ApuPeriod(i)) : PokeL(k + 148 + i * 4, EnvStart(i))
+    PokeL(k + 160 + i * 4, EnvDiv(i)) : PokeL(k + 172 + i * 4, EnvDecay(i))
+  Next
+  For i = 0 To 1 : PokeL(k + 184 + i * 4, SweepDiv(i)) : PokeL(k + 192 + i * 4, SweepReload(i)) : Next
+  PokeL(k + 92, ApuReg(16))             ; the DMC pass's own copy of $4010 (the rate in force at its edges)
+  PokeL(k + 200, ApuLinear) : PokeL(k + 204, ApuLinearReload)
+  PokeL(k + 216, @NesApuLog(0) & $1FFFFFFF) : PokeL(k + 220, @NesApuDmcLog(0) & $1FFFFFFF)
+  PokeL(k + 224, HostAiBase & $1FFFFFFF) : PokeL(k + 228, (base + #NES_SYN_TABLES) & $1FFFFFFF)
+  PokeL(k + 232, ApuFracStep) : PokeL(k + 236, ApuFracDen) : PokeL(k + 240, ApuSampleBase)
+  PokeL(k + 244, (base + #NES_SYN_STATUS) & $1FFFFFFF)
+  PokeL(k + #NES_SYN_STATUS, ApuProduced) : PokeL(k + #NES_SYN_STATUS + 4, 0)
+  For i = 0 To 30 : PokeW(k + #NES_SYN_TABLES + i * 2, PulseMix(i)) : Next
+  For i = 0 To 15
+    PokeW(k + #NES_SYN_TABLES + 64 + i * 2, NoiseTable(i)) : PokeW(k + #NES_SYN_TABLES + 96 + i * 2, DmcTable(i))
+  Next
+  For i = 0 To 202 : PokeW(k + #NES_SYN_TABLES + 128 + i * 2, TndMix(i)) : Next
+  For i = 0 To 157 : PokeW(k + #NES_SYN_TABLES + 536 + i * 2, PeekU(?NesTndTriMeanData + i * 2)) : Next
+  NesSynRspK1 = k : NesSynRspPhys = base & $1FFFFFFF
+  NesSynDone = ApuProduced : NesSynSent = 0 : NesSynOut = 0 : NesSynWbMain = 0 : NesSynWbDmc = 0
+  NesApuLastAt = now + ApuSampleLeft - ApuSampleBase   ; (read only once a sample is counted, which sets it)
+EndProcedure
+
+; A job's end seen: the RSP's done count, its tails (the logs freed), its error, its clocks.
+Procedure NesSynSeen()
+  Protected c.i
+  NesSynOut = 0
+  NesSynDone = PeekL(NesSynRspK1 + #NES_SYN_STATUS) & $FFFFFFFF
+  c = PeekL(NesSynRspK1 + 248) & $FFFFFFFF
+  If c And WorkerError = 0
+    LpmDebugPrint("NES SYN RSP STOP " + Str(c) + " at sample " + Str(NesSynDone)) : WorkerError = c
+  EndIf
+  CompilerIf #NES_SYN_CHECK = 0
+    NesApuLogTail = PeekL(NesSynRspK1 + 208) & $FFFFFFFF
+    NesApuDmcTail = PeekL(NesSynRspK1 + 80) & $FFFFFFFF
+  CompilerEndIf
+  c = PeekL(NesSynRspK1 + 88) & $FFFFFFFF                ; the jobs' DPC_CLOCK ticks, a 32-bit sum
+  NesSynClocks + ((c - NesSynClkSeen) & $FFFFFFFF) : NesSynClkSeen = c
+  NesSynJobs + 1
+EndProcedure
+
+; The log entries [from, to) of a ring (count entries of size bytes at base) written back for the RSP's DMA.
+Procedure NesSynWb(base.i, size.i, count.i, from.i, to.i)
+  Protected a.i, b.i
+  If to <= from : ProcedureReturn : EndIf
+  If to - from >= count : LpmCacheWritebackData(base, size * count) : ProcedureReturn : EndIf
+  a = from & (count - 1) : b = to & (count - 1)
+  If a < b
+    LpmCacheWritebackData(base + a * size, (b - a) * size)
+  Else
+    LpmCacheWritebackData(base + a * size, (count - a) * size)
+    If b : LpmCacheWritebackData(base, b * size) : EndIf
+  EndIf
+EndProcedure
+
+; One job: render until n samples are done; x = the cycle of sample n - 1.
+Procedure NesSynSend(n.i, x.i)
+  Protected mh.i = NesApuLogHead, dh.i = NesApuDmcHead
+  NesSynWb(@NesApuLog(0), 16, #NES_APU_LOG_ENTRIES, NesSynWbMain, mh) : NesSynWbMain = mh
+  NesSynWb(@NesApuDmcLog(0), 8, #NES_APU_DMC_ENTRIES, NesSynWbDmc, dh) : NesSynWbDmc = dh
+  LpmRspqCmd7Pri(NesShowProg, #NES_RSP_SYNJOB, n & $FFFFFFFF, x & $FFFFFFFF, mh & $FFFFFFFF, dh & $FFFFFFFF, NesSynRspPhys, 0, 0)
+  NesSynSent + 1 : NesSynOut = 1
+EndProcedure
+
+; The cycle of sample k (k > the RSP's done count, no job outstanding), stepped from the RSP's own cadence: only when
+; a job is capped below ApuProduced (rare).
+Procedure.i NesSynCycleOf(k.i)
+  Protected at.i, frac.i, d.i
+  at = PeekL(NesSynRspK1 + 68) : frac = PeekL(NesSynRspK1 + 72) & $FFFFFFFF : d = NesSynDone
+  While d < k
+    frac + ApuFracStep : at + ApuSampleBase
+    If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
+    d + 1
+  Wend
+  ProcedureReturn at
+EndProcedure
+
+; 1 when an AI block is made (ApuProduced) but not rendered: the RSP's job must not wait behind graphics.
+Procedure.i NesSynWanted()
+  ProcedureReturn Bool(HostAudioReady And ApuProduced - HostPcmRead >= #HOST_AUDIO_FRAMES And NesSynDone - HostPcmRead < #HOST_AUDIO_FRAMES)
+EndProcedure
+
+Procedure NesSynJobPollBody()
+  Protected n.i, x.i
+  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+  If NesSynOut
+    If (PeekL(NesSynRspK1 + #NES_SYN_STATUS + 4) & $FFFFFFFF) <> (NesSynSent & $FFFFFFFF)
+      If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
+      ProcedureReturn
+    EndIf
+    NesSynSeen()
+  EndIf
+  n = ApuProduced
+  If n > HostPcmRead + #NES_SYN_CAP : n = HostPcmRead + #NES_SYN_CAP : EndIf
+  If n <= NesSynDone : ProcedureReturn : EndIf
+  If n - NesSynDone < #NES_SYN_BATCH And NesSynWanted() = 0 : ProcedureReturn : EndIf
+  If n = ApuProduced : x = NesApuLastAt : Else : x = NesSynCycleOf(n - 1) : EndIf
+  NesSynSend(n, x)
+  If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
+EndProcedure
+
+Procedure NesSynJobPoll()
+  CompilerIf #NES_CONSOLE_RECORD
+    Protected t0.i = LpmCpuCount()
+    NesSynJobPollBody()
+    NesRecT(9) + ((LpmCpuCount() - t0) & $FFFFFFFF)     ; the synthesis's CPU side (console_record.n64)
+  CompilerElse
+    NesSynJobPollBody()
+  CompilerEndIf
+EndProcedure
+
+; Every sample at a cycle <= t rendered by the RSP now (a log has no room: apusynth.n64's NesSynRenderTime).
+Procedure NesSynRspRoom(t.i)
+  Protected n.i = ApuProduced, x.i = NesApuLastAt, at.i = NesApuSampleAt, frac.i = ApuSampleFrac
+  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+  If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
+  While at <= t                         ; the samples after ApuProduced up to t (NesApuCount's cadence)
+    x = at : n + 1
+    frac + ApuFracStep : at + ApuSampleBase
+    If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
+  Wend
+  If n > NesSynDone
+    NesSynSend(n, x) : LpmRspqPriSync() : NesSynSeen()
+  EndIf
+  NesSynRooms + 1
+EndProcedure
+
+; Every sample ApuProduced has counted rendered now (the oracle's end, HostDrainCapture).
+Procedure NesSynFinish()
+  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+  If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
+  If ApuProduced > NesSynDone
+    NesSynSend(ApuProduced, NesApuLastAt) : LpmRspqPriSync() : NesSynSeen()
+  EndIf
+EndProcedure
+
+CompilerIf #NES_SYN_CHECK
+; THE CHECKING BUILD: the twin renders the block (apusynth.n64, into Pcm) and every word the RSP wrote for it into the
+; AI ring (dst, KSEG0; read uncached) must be the twin's sample in both halves. The first difference stops the run
+; (WorkerError 26), the sample printed.
+Procedure NesSynCheckBlock(dst.i, first.i, count.i)
+  Protected i.i, r.i, w.i, k.i = (dst & $1FFFFFFF) | $A0000000
+  NesSynRenderTo(first + count)
+  For i = 0 To count - 1
+    w = PeekU(@Pcm[(first + i) & 4095]) & $FFFF
+    w = w | (w << 16)
+    r = PeekL(k + i * 4) & $FFFFFFFF
+    If r <> w
+      LpmDebugPrint("NES SYN DIFF sample " + Str(first + i) + " rsp $" + Hex(r) + " twin $" + Hex(w))
+      If WorkerError = 0 : WorkerError = 26 : EndIf
+      ProcedureReturn
+    EndIf
+  Next
+  NesSynChecked + count : NesSynBlocks + 1
+EndProcedure
+CompilerEndIf
+
+CompilerEndIf

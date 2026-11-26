@@ -1,0 +1,1317 @@
+; ======================================================================
+;  rspsyn.n64rsp - THE APU SYNTHESIS ON THE RSP (design note, sections N.51-N.53: the plan's step N10)
+; ======================================================================
+;  A module of the band emitter's program (rspband.n64rsp includes it; one program, never switched). Its one command,
+;  NES_RSP_SYNJOB (rspband_ids.pmi), comes on the queue's PRIORITY ring (rspsyn.n64, NesSynSend), so a synthesis job
+;  never waits behind a band job. It renders the APU's samples from the timing's logs exactly as the CPU twin
+;  n64/apusynth.n64 does - the same order of operations, the same arithmetic - and writes each sample as the AI's
+;  stereo word straight into the AI's ring of blocks (host.n64's #HOST_AI_RING). apusynth.n64 is the
+;  specification; read its header for what the samples are. This file says how the RSP gets them.
+;
+;  THE JOB: RspqArg 0 n (the samples to have done: a count), 1 X (the APU cycle of sample n - 1, low 32 bits: the
+;  job's check), 2 / 3 the main and DMC logs' heads (entry indices, low 32 bits), 4 the state block (physical). A job
+;  renders from the RSP's done count to n, at most 512 samples (the CPU sends the next job at its next poll). Two
+;  passes in two code segments, run one after the other by RspqCommand, as a band job is:
+;    PASS A, NesRspSynEvents (segment 3): EVERYTHING THAT DOES NOT READ THE OSCILLATORS, sample by sample along the
+;      sample cadence - the main log's events (the twin's syn_apply less its oscillator tick: the length counters,
+;      the quarter / half step, the sweeps, ApuWrite's sound half) and the DMC replica (its edges, the DMC log's bytes,
+;      the $4010 period and the $4011 level). An event applies before the first sample at or past its start (a step:
+;      its cycle; a write: its cycle + 1 - the twin's s4), after the DMC's edges to its cycle when it is a write. Each
+;      event leaves a RECORD: its cycle, its start and the parameters the oscillators and the mix read after it; each
+;      sample leaves its DMC level (a byte). Neither the event state nor the DMC replica ever reads the oscillators'
+;      state (their timers, steps, the noise register, the triangle's DAC: checked routine by routine in apusynth.n64),
+;      so this pass is exact without them; what an event does to the oscillators is a FLAG in its record (a pulse's
+;      step to 0 at $4003 / $4007).
+;    PASS B, NesRspSynSamples (segment 4): the same samples again - at a record's start the oscillators ticked by its
+;      cycle - tick when not 0 (the twin's flush) and the record's parameters and flags taken; then the oscillator
+;      tick by the span, the mix with the sample's DMC level, the DC filter, the stereo word.
+;  WHY TWO PASSES SPLIT THIS WAY (as built, design note N.53): the code does not fit one 1,792-byte segment, and the
+;  first split - the events in A, the DMC replica in B - left B 352 bytes over its window. The DMC replica belongs with
+;  the events: both are what the guest's log says, neither needs the oscillators.
+;  Splitting the samples into jobs at any sample changes nothing (the twin's rule: "splitting a run changes nothing").
+;
+;  WITHOUT A MULTIPLY OR A DIVIDE (the RSP's scalar unit has neither): the quotients of the oscillator tick and of the
+;  DMC's silent closed form come from a shift-and-subtract routine (nsa_div / nsb_div, one iteration a quotient bit);
+;  the DC filter's product y x 65,210 is (y << 16) - (y << 8) - (y << 6) - (y << 2) - (y << 1), exact (|y| <= 32,768:
+;  the product's magnitude stays below 2^31, so no partial sum overflows). CYCLES are the low 32 bits of the CPU's
+;  64-bit cycles, compared only as signed differences: exact while a job's span is below 2^31 cycles (20 minutes),
+;  and while the DMC replica is not left silent and unadvanced that long (every write event advances it).
+;  NO VECTOR WORK, derived not preferred (N.52 3): each channel is a serial state machine, the mix is two gathers.
+;
+;  THE STATE BLOCK in RDRAM (256 bytes, 32-bit words; rspsyn.n64 writes it at start-up, the RSP alone afterwards):
+;    0 / 4 / 8 / 12 the timers (pulse 0, pulse 1, triangle, noise), 16 / 20 / 24 the steps (pulse 0, pulse 1,
+;    triangle), 28 the triangle's DAC, 32 the noise register, 36 the DMC's next edge, 40 its bit count, 44 its shift
+;    register, 48 silent, 52 its level, 56 / 60 the DC filter's last input / output, 64 the oscillators' tick, 68 the
+;    next sample's cycle, 72 the cadence's fraction, 76 samples done, 80 the DMC log's tail, 84 the stereo word of
+;    sample done - 1, 88 DPC_CLOCK ticks the jobs took (a sum), 96-119 $4000-$4017 as applied (bytes), 120-132 the
+;    four length counters, 136-144 the three periods, 148-156 envelope start (pulse 0, 1, noise), 160-168 their
+;    dividers, 172-180 their decay levels, 184 / 188 the sweep dividers, 192 / 196 the sweep reloads, 200 the linear
+;    counter, 204 its reload, 208 the main log's tail, 212 jobs done; fixed: 216 the main log, 220 the DMC log, 224 the
+;    AI ring, 228 the tables, 244 the status (all physical), 232 / 236 / 240 the cadence (ApuFracStep, ApuFracDen,
+;    ApuSampleBase), 248 an error (0 none; 25 the DMC clocks disagree, as the twin's WorkerError 25; 27 a whole job's
+;    last sample not at X).
+;  The status (8 bytes, at 244's address; the job's last DMA, after the state's): done, jobs done. The tables (856
+;  bytes at 228's): 0 PulseMix (31), 64 NoiseTable (16), 96 DmcTable (16), 128 TndMix (203), 536 the triangle's mean
+;  TND levels (158), all 16-bit.
+;
+;  THE AI RING: sample i's word at ring + ((i >> 9) & 7) x 2,112 + (i & 511) x 4 (8 blocks of 512; the stride keeps a
+;  block's end off an 8 KB boundary, host.n64). Pass B stages 32 samples a half (two halves) and sends a half by an
+;  unwaited DMA from an EVEN sample (8-byte aligned): a job that starts at an odd sample puts sample done - 1's word
+;  (the state's +84) back into its slot first, and a half that ends on an even sample sends one word more, which the
+;  next job, starting at that odd sample, writes again. No block the CPU queues holds a sample >= done.
+;
+;  THE SCRATCH (2,560 bytes, the command's own): 0 the state | pass A: 256 its tables (PulseMix, NoiseTable,
+;  DmcTable), 384 a chunk of up to 16 main-log entries, 640 a chunk of up to 32 DMC-log entries; pass B: 256 TndMix,
+;  664 the triangle-mean table | 984 / 988 return addresses, 992 the last sample's cycle, 1000 the job's last sample
+;  (pass A's limit) | 1024 the records, 22 x 32 | 1728 the samples' DMC levels, 512 bytes | 2240 the output halves
+;  (2 x 32 x 4) | 2496 the status out, 2504 the job's DPC_CLOCK at its start, 2508 / 2556 the DMC chunk's first
+;  entry and count | 2512-2552 the caller's s0-s7, fp, gp, ra. (The assembly writes these numbers; it cannot read a
+;  # constant - change both together.)
+;
+;  A RECORD (32 bytes): 0 the event's cycle, 4 its start, 8 / 10 / 12 the periods (pulse 0, pulse 1, triangle), 14 the
+;  noise period, 16-22 the pulse pair's four levels (PulseMix(0), (v0), (v1), (v0 + v1): the twin's s3), 24 / 25 the
+;  duty bytes, 26 the ultrasonic triangle, 27 the triangle's gate (its length and linear counters both running), 28 the
+;  noise tap (1 or 6), 29 the noise volume, 30 flags (1 pulse 0's step to 0, 2 pulse 1's, 8 the end). Record 0 is the
+;  parameters before the job's first event; the last is the end (its start the cycle after the job's last sample).
+;  20 events a job at most: at the 21st the job ends before the sample that needs it.
+;
+;  REGISTERS: the caller's s0-s7, fp, gp, ra are kept (2512-2552); sp is never touched. The resident subroutines used:
+;  nbdi / nbdo (rspband.n64rsp's NesRspCommon: one DMA waited until every DMA has landed; k0 DMEM, k1 RDRAM, v0 the
+;  length - 1; CLOBBER at).
+;  CHECKED BY: the checking build --syn-check (every sample of every AI block against the twin's), the oracles' WAV byte
+;  for byte (the shipped build's AI captures these words), design note N.53's proof.
+; ======================================================================
+#RSP_SEGMENT_NesRspSynEvents = 3        ; #NES_RSP_SEG_SYNA
+#RSP_SEGMENT_NesRspSynSamples = 4       ; #NES_RSP_SEG_SYNB
+#RSP_SEGMENT_NesRspSynDmc = 5           ; #NES_RSP_SEG_SYNC
+
+; ---- PASS A (segment 3): the events and the DMC, sample by sample ----
+; Registers: s0 the record being written, s1 records written, s2 the sample's cycle, s3 the main log's tail, s4 its
+; head, s5 / s6 the first entry and the count of the main chunk in the scratch, s7 the entry, fp the sample, gp the
+; job's last sample + 1, a5 the cadence's fraction.
+Procedure NesRspSynEvents()
+  ASM
+    sw s0, global_rspq_scratch+2512(zero)
+    sw s1, global_rspq_scratch+2516(zero)
+    sw s2, global_rspq_scratch+2520(zero)
+    sw s3, global_rspq_scratch+2524(zero)
+    sw s4, global_rspq_scratch+2528(zero)
+    sw s5, global_rspq_scratch+2532(zero)
+    sw s6, global_rspq_scratch+2536(zero)
+    sw s7, global_rspq_scratch+2540(zero)
+    sw fp, global_rspq_scratch+2544(zero)
+    sw gp, global_rspq_scratch+2548(zero)
+    sw ra, global_rspq_scratch+2552(zero)
+    mfc0 t0, $12                             ; DPC_CLOCK at the job's start (pass B adds up the job's RSP time)
+    sw t0, global_rspq_scratch+2504(zero)
+    addiu k0, zero, global_rspq_scratch      ; the state in
+    lw k1, global_rspqarg+16(zero)
+    jal nbdi
+    addiu v0, zero, 255                      ; (delay slot)
+    addiu k0, zero, global_rspq_scratch+256  ; pass A's tables: PulseMix, NoiseTable, DmcTable (the tables' first 128)
+    lw k1, global_rspq_scratch+228(zero)
+    jal nbdi
+    addiu v0, zero, 127                      ; (delay slot)
+    lw s2, global_rspq_scratch+68(zero)      ; the next sample's cycle
+    lw a5, global_rspq_scratch+72(zero)      ; the cadence's fraction
+    lw fp, global_rspq_scratch+76(zero)      ; samples done
+    lw gp, global_rspqarg(zero)              ; n ...
+    addiu t0, fp, 512
+    subu t1, gp, t0
+    blez t1, nsa_lim
+    nop
+    addu gp, t0, zero                        ; ... at most 512 samples a job (the levels' room)
+nsa_lim:
+    sw gp, global_rspq_scratch+1000(zero)
+    lw s3, global_rspq_scratch+208(zero)     ; the main log's tail
+    lw s4, global_rspqarg+8(zero)            ; its head
+    addu s5, s3, zero
+    addu s6, zero, zero                      ; no main-log entry in the scratch yet
+    addiu s0, zero, global_rspq_scratch+1024
+    jal nsa_params                           ; record 0: the parameters in force before the job's first event
+    addu s1, zero, zero                      ; (delay slot)
+    sb zero, 30(s0)
+    addiu s0, s0, 32
+    addiu s1, s1, 1
+nsa_sample:
+    beq fp, gp, nsa_end                      ; the job's samples all done
+    nop
+nsa_ev:                                      ; ---- the events due before this sample ----
+    beq s3, s4, nsa_ev_done                  ; no entry left
+    subu t0, s3, s5                          ; (delay slot) the entry's place in the chunk
+    sltu t1, t0, s6
+    bne t1, zero, nsa_have                   ; in the scratch
+    sll t0, t0, 4                            ; (delay slot) x 16 bytes
+    subu t1, s4, s3                          ; a chunk from the tail: min(16, head - tail, 256 - (tail & 255))
+    sltiu t2, t1, 16
+    bne t2, zero, nsa_c1
+    nop
+    addiu t1, zero, 16
+nsa_c1:
+    andi t2, s3, 255
+    addiu t3, zero, 256
+    subu t3, t3, t2                          ; entries before the ring's end
+    slt a0, t3, t1
+    beq a0, zero, nsa_c2
+    nop
+    addu t1, t3, zero
+nsa_c2:
+    addu s5, s3, zero
+    addu s6, t1, zero
+    sll t2, t2, 4
+    lw k1, global_rspq_scratch+216(zero)     ; the main log
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+384
+    sll v0, t1, 4
+    jal nbdi
+    addiu v0, v0, -1                         ; (delay slot)
+    addu t0, zero, zero
+nsa_have:
+    addiu s7, t0, global_rspq_scratch+384    ; s7: the entry (16 bytes: +4 its cycle, +8 kind, +9 register, +10 value,
+    lw t0, 4(s7)                             ;   +12 the four length counters after it)
+    lbu t1, 8(s7)                            ; kind: 0 a write, 1 a quarter step, 2 a quarter and a half step
+    bne t1, zero, nsa_s4                     ; a step applies before a sample at its cycle ...
+    addu t2, t0, zero                        ; (delay slot)
+    addiu t2, t0, 1                          ; ... a write after it
+nsa_s4:
+    subu t3, s2, t2
+    bltz t3, nsa_ev_done                     ; not yet: this sample comes first
+    sltiu t3, s1, 21                         ; (delay slot)
+    beq t3, zero, nsa_full                   ; no room for its record and the end after it
+    nop
+    sw t0, 0(s0)                             ; the record: the event's cycle, its start
+    sw t2, 4(s0)
+    lbu t3, 12(s7)                           ; the length counters after the event, copied
+    sw t3, global_rspq_scratch+120(zero)
+    lbu t3, 13(s7)
+    sw t3, global_rspq_scratch+124(zero)
+    lbu t3, 14(s7)
+    sw t3, global_rspq_scratch+128(zero)
+    lbu t3, 15(s7)
+    sw t3, global_rspq_scratch+132(zero)
+    lbu t1, 8(s7)
+    beq t1, zero, nsa_w
+    addu v1, zero, zero                      ; (delay slot) v1: the record's flags
+    jal nsa_quarter                          ; a step: the quarter ...
+    nop
+    lbu t1, 8(s7)
+    addiu t1, t1, -2
+    bne t1, zero, nsa_rec
+    nop
+    jal nsa_sweep                            ; ... and on a half step the sweeps (the lengths are above)
+    nop
+    j nsa_rec
+    addu v1, zero, zero                      ; (delay slot)
+nsa_w:
+    lbu a0, 9(s7)                            ; a write: ApuWrite's sound half
+    jal nsa_write
+    lbu a1, 10(s7)                           ; (delay slot)
+nsa_rec:
+    jal nsa_params                           ; the parameters after the event
+    sb v1, 30(s0)                            ; (delay slot) its flags
+    addiu s0, s0, 32
+    addiu s1, s1, 1
+    j nsa_ev
+    addiu s3, s3, 1                          ; (delay slot) the entry consumed
+nsa_ev_done:                                 ; ---- the sample: the next one's cycle (NesApuCount's cadence) ----
+    lw t0, global_rspq_scratch+232(zero)
+    addu a5, a5, t0
+    lw t1, global_rspq_scratch+236(zero)
+    slt t2, a5, t1
+    lw t3, global_rspq_scratch+240(zero)
+    bne t2, zero, nsa_cad
+    addu s2, s2, t3                          ; (delay slot) the base interval ...
+    subu a5, a5, t1
+    addiu s2, s2, 1                          ; ... plus one when the fraction carries
+nsa_cad:
+    j nsa_sample
+    addiu fp, fp, 1                          ; (delay slot)
+nsa_full:
+    addu gp, fp, zero                        ; no room for the event's record: the job ends before this sample
+    sw gp, global_rspq_scratch+1000(zero)
+nsa_end:
+    sw s2, 4(s0)                             ; the end record, at the cycle after the job's last sample
+    addiu t0, zero, 8
+    sb t0, 30(s0)
+    sw s3, global_rspq_scratch+208(zero)     ; the entries consumed
+    lw s0, global_rspq_scratch+2512(zero)
+    lw s1, global_rspq_scratch+2516(zero)
+    lw s2, global_rspq_scratch+2520(zero)
+    lw s3, global_rspq_scratch+2524(zero)
+    lw s4, global_rspq_scratch+2528(zero)
+    lw s5, global_rspq_scratch+2532(zero)
+    lw s6, global_rspq_scratch+2536(zero)
+    lw s7, global_rspq_scratch+2540(zero)
+    lw fp, global_rspq_scratch+2544(zero)
+    lw gp, global_rspq_scratch+2548(zero)
+    lw ra, global_rspq_scratch+2552(zero)
+    j nsa_return
+    nop
+
+    ; ==== nsa_params: the parameters in force, into the record at s0 (+8 .. +29) - what the twin's syn_mix computes
+    ; at a run's start and nes_syn_osc reads: the periods, the noise period (NoiseTable by $400E), tap ($400E bit 7)
+    ; and volume (0 unless its length counter runs), the pulses' volumes (NesPulseBlockVolume) folded into the pair's
+    ; four PulseMix levels, the duty bytes, the triangle's gate and the ultrasonic flag. CLOBBERS t0-t3, a0, v0, t8,
+    ; t9, at. ====
+nsa_params:
+    addu t9, ra, zero
+    lw t0, global_rspq_scratch+136(zero)
+    sh t0, 8(s0)                             ; pulse 0's period
+    lw t0, global_rspq_scratch+140(zero)
+    sh t0, 10(s0)                            ; pulse 1's
+    lw t0, global_rspq_scratch+144(zero)
+    sh t0, 12(s0)                            ; the triangle's
+    lbu t1, global_rspq_scratch+110(zero)    ; $400E
+    andi t0, t1, 15
+    sll t0, t0, 1
+    lhu t0, global_rspq_scratch+320(t0)      ; NoiseTable
+    sh t0, 14(s0)
+    andi t1, t1, 128
+    beq t1, zero, nsa_p_tap
+    addiu t0, zero, 1                        ; (delay slot) tap 1 ...
+    addiu t0, zero, 6                        ; ... or 6 (the short mode)
+nsa_p_tap:
+    sb t0, 28(s0)
+    lw t0, global_rspq_scratch+132(zero)     ; the noise's length counter
+    blez t0, nsa_p_nz
+    addu v0, zero, zero                      ; (delay slot)
+    jal nsa_vol
+    addiu a0, zero, 2                        ; (delay slot)
+nsa_p_nz:
+    sb v0, 29(s0)                            ; the noise volume
+    jal nsa_pvol
+    addu a0, zero, zero                      ; (delay slot)
+    addu t8, v0, zero                        ; t8: pulse 0's volume
+    jal nsa_pvol
+    addiu a0, zero, 1                        ; (delay slot) v0: pulse 1's
+    lhu t0, global_rspq_scratch+256(zero)
+    sh t0, 16(s0)                            ; PulseMix(0)
+    sll t1, t8, 1
+    lhu t0, global_rspq_scratch+256(t1)
+    sh t0, 18(s0)                            ; PulseMix(v0)
+    sll t1, v0, 1
+    lhu t0, global_rspq_scratch+256(t1)
+    sh t0, 20(s0)                            ; PulseMix(v1)
+    addu t1, t8, v0
+    sll t1, t1, 1
+    lhu t0, global_rspq_scratch+256(t1)
+    sh t0, 22(s0)                            ; PulseMix(v0 + v1)
+    lui t2, 0xF91E
+    ori t2, t2, 0x0602                       ; the four duty patterns, a byte each
+    lbu t0, global_rspq_scratch+96(zero)     ; $4000
+    srl t0, t0, 6
+    sll t0, t0, 3
+    srlv t0, t2, t0
+    sb t0, 24(s0)                            ; pulse 0's duty byte
+    lbu t0, global_rspq_scratch+100(zero)    ; $4004
+    srl t0, t0, 6
+    sll t0, t0, 3
+    srlv t0, t2, t0
+    sb t0, 25(s0)                            ; pulse 1's
+    lw t0, global_rspq_scratch+128(zero)     ; the triangle's length counter
+    lw t1, global_rspq_scratch+200(zero)     ; its linear counter
+    sltu t0, zero, t0
+    sltu t1, zero, t1
+    and t0, t0, t1
+    sb t0, 27(s0)                            ; the gate: both running (nes_syn_osc steps the triangle only then)
+    lw t1, global_rspq_scratch+144(zero)
+    slti t1, t1, 2
+    and t1, t1, t0
+    jr t9
+    sb t1, 26(s0)                            ; (delay slot) ultrasonic: the gate and a period below 2
+
+    ; ==== nsa_pvol: pulse a0's volume for a run (NesPulseBlockVolume): 0 unless its length counter runs, its period is
+    ; 8 or more and its sweep target is below $800; then nsa_vol (a tail call). Out: v0. CLOBBERS t0-t3. ====
+nsa_pvol:
+    sll t0, a0, 2
+    lw t1, global_rspq_scratch+120(t0)       ; its length counter
+    blez t1, nsa_pv0
+    nop
+    lw t2, global_rspq_scratch+136(t0)       ; its period
+    slti t1, t2, 8
+    bne t1, zero, nsa_pv0
+    nop
+    lbu t1, global_rspq_scratch+97(t0)       ; $4001 / $4005, the sweep
+    andi t3, t1, 7
+    srlv t3, t2, t3                          ; the change
+    andi t1, t1, 8
+    beq t1, zero, nsa_pv_gate
+    addu t1, t2, t3                          ; (delay slot) the target, up
+    subu t1, t2, t3
+    sltiu t3, a0, 1
+    subu t1, t1, t3                          ; down (pulse 0: one more)
+nsa_pv_gate:
+    slti t1, t1, 2048
+    bne t1, zero, nsa_vol
+    nop
+nsa_pv0:
+    jr ra
+    addu v0, zero, zero                      ; (delay slot)
+
+    ; ==== nsa_vol: channel a0's volume (0 / 1 pulse, 2 noise; ApuVolume): its register's constant volume, or its
+    ; envelope's decay level. Out: v0. CLOBBERS t0, t1. ====
+nsa_vol:
+    sll t0, a0, 2
+    addiu t1, zero, 2
+    bne a0, t1, nsa_v_reg
+    addu t1, t0, zero                        ; (delay slot) the register: $4000 + 4 ch ...
+    addiu t1, zero, 12                       ; ... $400C for the noise
+nsa_v_reg:
+    lbu t1, global_rspq_scratch+96(t1)
+    andi v0, t1, 15
+    andi t1, t1, 16
+    bne t1, zero, nsa_v_out                  ; constant volume
+    nop
+    lw v0, global_rspq_scratch+172(t0)       ; the envelope's decay level
+nsa_v_out:
+    jr ra
+    nop
+
+    ; ==== nsa_write: ApuWrite's sound half (the twin's syn_write) on the event state: a0 the register (0-23), a1 the
+    ; value. The register is stored; $4001 / $4005 ask the sweep to reload; $4002 / $4006 / $400A set the period's low
+    ; byte, $4003 / $4007 / $400B its high bits and restart the envelope and FLAG the pulse's step to 0 (the triangle:
+    ; the linear counter's reload); $400F restarts the noise envelope; $4010 (the DMC's rate) and $4011 (its level)
+    ; are FLAGGED with the value in the record's byte 31: the DMC pass applies them at the write's cycle, after its
+    ; edges to it. Out: v1 the flags. CLOBBERS t0-t3, a2. ====
+nsa_write:
+    sb a1, global_rspq_scratch+96(a0)
+    sltiu t1, a0, 12
+    beq t1, zero, nsa_w_high
+    andi t2, a0, 3                           ; (delay slot) which register of the channel
+    srl t3, a0, 2                            ; the channel
+    sll t0, t3, 2                            ; its word offset
+    addiu t1, zero, 1
+    bne t2, t1, nsa_w_lo
+    sltiu t1, t3, 2                          ; (delay slot)
+    beq t1, zero, nsa_w_ret                  ; $4009: no sweep
+    addiu t1, zero, 1                        ; (delay slot)
+    jr ra
+    sw t1, global_rspq_scratch+192(t0)       ; (delay slot) the sweep's reload
+nsa_w_lo:
+    addiu t1, zero, 2
+    bne t2, t1, nsa_w_hi
+    nop
+    lw t1, global_rspq_scratch+136(t0)
+    andi t1, t1, 0x700
+    or t1, t1, a1
+    jr ra
+    sw t1, global_rspq_scratch+136(t0)       ; (delay slot) the period's low byte
+nsa_w_hi:
+    addiu t1, zero, 3
+    bne t2, t1, nsa_w_ret
+    nop
+    lw t1, global_rspq_scratch+136(t0)
+    andi t1, t1, 255
+    andi a2, a1, 7
+    sll a2, a2, 8
+    or t1, t1, a2
+    sw t1, global_rspq_scratch+136(t0)       ; the period's high bits
+    sltiu t1, t3, 2
+    beq t1, zero, nsa_w_lin
+    addiu t1, zero, 1                        ; (delay slot)
+    sw t1, global_rspq_scratch+148(t0)       ; the envelope restarts
+    addiu v1, zero, 1
+    jr ra
+    sllv v1, v1, t3                          ; (delay slot) FLAG 1 << channel: its step to 0
+nsa_w_lin:
+    jr ra
+    sw t1, global_rspq_scratch+204(zero)     ; (delay slot) the linear counter's reload
+nsa_w_high:
+    addiu t1, zero, 15
+    bne a0, t1, nsa_w_dmc
+    addiu t1, zero, 1                        ; (delay slot)
+    jr ra
+    sw t1, global_rspq_scratch+156(zero)     ; (delay slot) $400F: the noise envelope restarts
+nsa_w_dmc:
+    addiu t1, zero, 16
+    bne a0, t1, nsa_w_lvl
+    nop
+    sb a1, 31(s0)                            ; $4010: the DMC's rate, FLAGGED (16) for the DMC pass
+    jr ra
+    addiu v1, zero, 16                       ; (delay slot)
+nsa_w_lvl:
+    addiu t1, zero, 17
+    bne a0, t1, nsa_w_ret
+    andi t1, a1, 127                         ; (delay slot)
+    sb t1, 31(s0)                            ; $4011: the DMC level, FLAGGED (4) for the DMC pass
+    jr ra
+    addiu v1, zero, 4                        ; (delay slot)
+nsa_w_ret:
+    jr ra
+    nop
+
+    ; ==== nsa_quarter: the quarter step (the twin's syn_quarter): the envelopes of pulse 0, pulse 1 and noise (their
+    ; registers $4000 / $4004 / $400C), then the linear counter (reload from $4008 or count down; the reload flag
+    ; clears unless $4008 bit 7). CLOBBERS t0-t3, a0. ====
+nsa_quarter:
+    addu a0, zero, zero                      ; the channel
+nsa_q_next:
+    sll t0, a0, 2                            ; its word offset
+    addiu t1, zero, 8
+    bne t0, t1, nsa_q_reg
+    addu t1, t0, zero                        ; (delay slot) $4000 + 4 ch ...
+    addiu t1, zero, 12                       ; ... $400C for the noise
+nsa_q_reg:
+    lbu t1, global_rspq_scratch+96(t1)       ; t1: its register
+    lw t2, global_rspq_scratch+148(t0)       ; the start flag
+    bne t2, zero, nsa_q_start
+    andi t3, t1, 15                          ; (delay slot) the divider's period
+    lw t2, global_rspq_scratch+160(t0)       ; the divider
+    bgtz t2, nsa_q_div
+    addiu t2, t2, -1                         ; (delay slot)
+    sw t3, global_rspq_scratch+160(t0)       ; at 0: reloaded ...
+    lw t2, global_rspq_scratch+172(t0)       ; ... and the decay level moves
+    bgtz t2, nsa_q_decay
+    addiu t2, t2, -1                         ; (delay slot) down by one
+    andi t1, t1, 32
+    beq t1, zero, nsa_q_adv                  ; at 0 and not looping: it holds
+    nop
+    j nsa_q_decay
+    addiu t2, zero, 15                       ; (delay slot) looping: back to 15
+nsa_q_start:
+    sw zero, global_rspq_scratch+148(t0)
+    sw t3, global_rspq_scratch+160(t0)
+    j nsa_q_decay
+    addiu t2, zero, 15                       ; (delay slot)
+nsa_q_div:
+    j nsa_q_adv
+    sw t2, global_rspq_scratch+160(t0)       ; (delay slot) the divider counts down
+nsa_q_decay:
+    sw t2, global_rspq_scratch+172(t0)
+nsa_q_adv:
+    addiu a0, a0, 1
+    sltiu t1, a0, 3
+    bne t1, zero, nsa_q_next
+    nop
+    lw t1, global_rspq_scratch+204(zero)     ; the linear counter: its reload flag
+    lbu t2, global_rspq_scratch+104(zero)    ; $4008
+    bne t1, zero, nsa_q_lr
+    andi t1, t2, 127                         ; (delay slot) the reload value
+    lw t1, global_rspq_scratch+200(zero)
+    blez t1, nsa_q_lh
+    nop
+    addiu t1, t1, -1
+nsa_q_lr:
+    sw t1, global_rspq_scratch+200(zero)
+nsa_q_lh:
+    andi t2, t2, 128
+    bne t2, zero, nsa_q_ret
+    nop
+    sw zero, global_rspq_scratch+204(zero)   ; the reload flag clears unless $4008 bit 7
+nsa_q_ret:
+    jr ra
+    nop
+
+    ; ==== nsa_sweep: the half step's sweeps (the twin's syn_sweep): for each pulse the target = period +- period >>
+    ; shift (pulse 0's negate one more); a divider at 0 with the sweep enabled, a shift, a target below $800 and a
+    ; period of 8 or more takes it; then the divider reloads (at 0, or when asked) or counts down. CLOBBERS t0-t2,
+    ; a0-a3. ====
+nsa_sweep:
+    addu a3, zero, zero                      ; the pulse
+nsa_s_next:
+    sll t1, a3, 2
+    lw t0, global_rspq_scratch+136(t1)       ; its period
+    lbu a1, global_rspq_scratch+97(t1)       ; its sweep register
+    andi t2, a1, 7
+    srlv t2, t0, t2                          ; the change
+    andi a2, a1, 8
+    bne a2, zero, nsa_s_down
+    addu a0, t0, t2                          ; (delay slot) the target, up
+    j nsa_s_target
+    nop
+nsa_s_down:
+    subu a0, t0, t2
+    sltiu a2, a3, 1
+    subu a0, a0, a2                          ; down (pulse 0: one more)
+nsa_s_target:
+    lw t2, global_rspq_scratch+184(t1)       ; the divider
+    bne t2, zero, nsa_s_upd
+    andi a2, a1, 128                         ; (delay slot)
+    beq a2, zero, nsa_s_upd                  ; not enabled
+    andi a2, a1, 7                           ; (delay slot)
+    beq a2, zero, nsa_s_upd                  ; no shift
+    slti a2, a0, 2048                        ; (delay slot)
+    beq a2, zero, nsa_s_upd                  ; the target too high
+    slti a2, t0, 8                           ; (delay slot)
+    bne a2, zero, nsa_s_upd                  ; the period too low
+    nop
+    sw a0, global_rspq_scratch+136(t1)       ; the period takes the target
+nsa_s_upd:
+    beq t2, zero, nsa_s_rl
+    lw a2, global_rspq_scratch+192(t1)       ; (delay slot) the reload flag
+    bne a2, zero, nsa_s_rl
+    addiu t2, t2, -1                         ; (delay slot)
+    j nsa_s_adv
+    sw t2, global_rspq_scratch+184(t1)       ; (delay slot) the divider counts down
+nsa_s_rl:
+    srl a1, a1, 4
+    andi a1, a1, 7
+    sw a1, global_rspq_scratch+184(t1)       ; reloaded
+    sw zero, global_rspq_scratch+192(t1)
+nsa_s_adv:
+    addiu a3, a3, 1
+    sltiu t0, a3, 2
+    bne t0, zero, nsa_s_next
+    nop
+    jr ra
+    nop
+
+nsa_return:
+  EndASM
+EndProcedure
+
+; ---- THE DMC PASS (segment 5): the DMC replica along the cadence, a level byte a sample ----
+; The same samples as pass A (to its limit, +1000), its records walked for the $4010 / $4011 writes (flags 16 / 4, the
+; value in byte 31): at each such record's start the replica's edges to the write's cycle, then the rate or the level
+; (the twin's syn_apply: syn_dmc_to before syn_write). Other writes need no catch-up: the replica is lazy, its edges
+; depend only on the rate and the DMC log, so running them later at the same rate gives the same levels.
+; Registers: s0 the next record, s2 the sample's cycle, fp the sample, gp the job's last sample + 1, a5 the cadence's
+; fraction, a6 the replica's due cycle, a7 the next level byte.
+Procedure NesRspSynDmc()
+  ASM
+    sw s0, global_rspq_scratch+2512(zero)
+    sw s1, global_rspq_scratch+2516(zero)
+    sw s2, global_rspq_scratch+2520(zero)
+    sw s3, global_rspq_scratch+2524(zero)
+    sw s4, global_rspq_scratch+2528(zero)
+    sw s5, global_rspq_scratch+2532(zero)
+    sw s6, global_rspq_scratch+2536(zero)
+    sw s7, global_rspq_scratch+2540(zero)
+    sw fp, global_rspq_scratch+2544(zero)
+    sw gp, global_rspq_scratch+2548(zero)
+    sw ra, global_rspq_scratch+2552(zero)
+    lw s2, global_rspq_scratch+68(zero)      ; the job's first sample's cycle
+    lw a5, global_rspq_scratch+72(zero)      ; the cadence's fraction
+    lw fp, global_rspq_scratch+76(zero)      ; samples done
+    lw gp, global_rspq_scratch+1000(zero)    ; the job's last sample + 1
+    addiu a7, zero, global_rspq_scratch+1728
+    sw zero, global_rspq_scratch+2556(zero)  ; no DMC-log entry in the scratch yet
+    addiu s0, zero, global_rspq_scratch+1056 ; record 1: the job's first event
+    jal nsc_due
+    nop
+    addu a6, v0, zero
+nsc_sample:
+    beq fp, gp, nsc_end
+    nop
+nsc_ev:
+    lbu t1, 30(s0)
+    andi t0, t1, 8
+    bne t0, zero, nsc_ev_done                ; the end record: no event left
+    lw t2, 4(s0)                             ; (delay slot) its start
+    subu t3, s2, t2
+    bltz t3, nsc_ev_done                     ; not yet
+    andi t0, t1, 20                          ; (delay slot) a $4010 or $4011 write?
+    beq t0, zero, nsc_ev_next
+    nop
+    jal nsc_dmc                              ; the edges to the write's cycle first
+    lw a0, 0(s0)                             ; (delay slot)
+    lbu t1, 30(s0)
+    lbu t2, 31(s0)
+    andi t0, t1, 16
+    beq t0, zero, nsc_ev_lvl
+    nop
+    sw t2, global_rspq_scratch+92(zero)      ; $4010: the rate
+nsc_ev_lvl:
+    andi t0, t1, 4
+    beq t0, zero, nsc_ev_due
+    nop
+    sw t2, global_rspq_scratch+52(zero)      ; $4011: the level
+nsc_ev_due:
+    jal nsc_due                              ; the due cycle again
+    nop
+    addu a6, v0, zero
+nsc_ev_next:
+    j nsc_ev
+    addiu s0, s0, 32                         ; (delay slot)
+nsc_ev_done:
+    subu t0, s2, a6
+    bltz t0, nsc_level                       ; the replica not due
+    nop
+    jal nsc_dmc                              ; its edges up to and including this sample's cycle
+    addu a0, s2, zero                        ; (delay slot)
+    addu a6, v0, zero
+nsc_level:
+    lw t0, global_rspq_scratch+52(zero)
+    sb t0, 0(a7)                             ; the DMC's level at this sample
+    addiu a7, a7, 1
+    lw t0, global_rspq_scratch+232(zero)     ; the next sample's cycle (NesApuCount's cadence)
+    addu a5, a5, t0
+    lw t1, global_rspq_scratch+236(zero)
+    slt t2, a5, t1
+    lw t3, global_rspq_scratch+240(zero)
+    bne t2, zero, nsc_cad
+    addu s2, s2, t3                          ; (delay slot) the base interval ...
+    subu a5, a5, t1
+    addiu s2, s2, 1                          ; ... plus one when the fraction carries
+nsc_cad:
+    j nsc_sample
+    addiu fp, fp, 1                          ; (delay slot)
+nsc_end:
+    lw s0, global_rspq_scratch+2512(zero)
+    lw s1, global_rspq_scratch+2516(zero)
+    lw s2, global_rspq_scratch+2520(zero)
+    lw s3, global_rspq_scratch+2524(zero)
+    lw s4, global_rspq_scratch+2528(zero)
+    lw s5, global_rspq_scratch+2532(zero)
+    lw s6, global_rspq_scratch+2536(zero)
+    lw s7, global_rspq_scratch+2540(zero)
+    lw fp, global_rspq_scratch+2544(zero)
+    lw gp, global_rspq_scratch+2548(zero)
+    lw ra, global_rspq_scratch+2552(zero)
+    j nsc_return
+    nop
+
+    ; ==== nsc_due: v0 = the cycle from which the DMC replica must next run (the twin's syn_dmc_due) - its next edge
+    ; while it sounds; while silent the edge of the DMC log's next byte, or "never" (this sample + 2^30) with none in
+    ; this job's log (the job sees the log to its head; a later byte is past its last sample). CLOBBERS t0-t3, k0, k1,
+    ; v0, v1, at, a1 (nsc_dget). ====
+nsc_due:
+    lw t0, global_rspq_scratch+48(zero)      ; silent?
+    bne t0, zero, nsc_due_s
+    nop
+    jr ra
+    lw v0, global_rspq_scratch+36(zero)      ; (delay slot) sounding: the next edge
+nsc_due_s:
+    lw a1, global_rspq_scratch+80(zero)      ; the tail
+    lw t0, global_rspqarg+12(zero)           ; the head
+    bne a1, t0, nsc_dget                     ; a byte waiting: its edge (a tail call, v0)
+    nop
+    lui v0, 0x4000
+    jr ra
+    addu v0, v0, s2                          ; (delay slot) none: never in this job
+
+    ; ==== nsc_dget: DMC-log entry a1 (an index; the caller knows it is below the head): v0 its edge's cycle (32 bits:
+    ; the entry is (cycle << 8) | byte, 64 bits), v1 the byte. A chunk of up to 32 entries comes into the scratch when
+    ; the entry is not there (one DMA, waited). CLOBBERS t0-t3, k0, k1, v0, v1, at. ====
+nsc_dget:
+    lw t0, global_rspq_scratch+2508(zero)    ; the chunk's first entry
+    lw t1, global_rspq_scratch+2556(zero)    ; and its count
+    subu t2, a1, t0
+    sltu t3, t2, t1
+    bne t3, zero, nsc_dg_have
+    sll t2, t2, 3                            ; (delay slot) its place in the chunk
+    addu t3, ra, zero
+    lw t1, global_rspqarg+12(zero)
+    subu t1, t1, a1                          ; head - entry
+    sltiu t2, t1, 32
+    bne t2, zero, nsc_dg1
+    nop
+    addiu t1, zero, 32
+nsc_dg1:
+    andi t2, a1, 255
+    addiu t0, zero, 256
+    subu t0, t0, t2                          ; entries before the ring's end
+    slt v0, t0, t1
+    beq v0, zero, nsc_dg2
+    nop
+    addu t1, t0, zero
+nsc_dg2:
+    sw a1, global_rspq_scratch+2508(zero)
+    sw t1, global_rspq_scratch+2556(zero)
+    sll t2, t2, 3
+    lw k1, global_rspq_scratch+220(zero)     ; the DMC log
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+640
+    sll v0, t1, 3
+    jal nbdi
+    addiu v0, v0, -1                         ; (delay slot)
+    addu ra, t3, zero
+    addu t2, zero, zero
+nsc_dg_have:
+    lw t0, global_rspq_scratch+640(t2)       ; the entry's high word: cycle >> 24
+    lw t1, global_rspq_scratch+644(t2)       ; its low word: (cycle << 8) | byte
+    sll t0, t0, 24
+    srl v0, t1, 8
+    or v0, v0, t0
+    jr ra
+    andi v1, t1, 255                         ; (delay slot)
+
+    ; ==== nsc_dmc: the DMC's output level up to cycle a0 (inclusive), the twin's syn_dmc_to on its replica: per edge,
+    ; unless silent, bit 0 of the shift register moves the level by 2 within 0-127; the register shifts; the bit count
+    ; down; at the byte's end the DMC log's next byte if its edge is this one, else silent (an OLDER byte: error 25).
+    ; The next edge is a period later - the period of the rate in force (state +92): a $4010 write is applied only after this ran
+    ; to its cycle. While silent the edges up to min(a0, the next byte's edge - 1) are done at once (the twin's closed form).
+    ; Out: v0 = the due cycle (nsc_due, a tail call). Replica in a1 tail, a2 shift, a3 silent, a4 level, k1 bits, t8
+    ; the next edge, t9 the period. CLOBBERS t0-t3, a1-a4, k0, k1, t8, t9, v0, v1, at. ====
+nsc_dmc:
+    lw t8, global_rspq_scratch+36(zero)      ; the next edge
+    subu t0, a0, t8
+    bltz t0, nsc_due                         ; no edge up to a0: the due cycle only
+    nop
+    sw ra, global_rspq_scratch+984(zero)
+    lw t9, global_rspq_scratch+92(zero)      ; $4010 as the DMC pass has applied it
+    andi t9, t9, 15
+    sll t9, t9, 1
+    lhu t9, global_rspq_scratch+352(t9)      ; its period (DmcTable)
+    lw a1, global_rspq_scratch+80(zero)
+    lw a2, global_rspq_scratch+44(zero)
+    lw a3, global_rspq_scratch+48(zero)
+    lw a4, global_rspq_scratch+52(zero)
+    beq a3, zero, nsc_d_sound                ; sounding: edge by edge
+    nop
+    lw t0, global_rspqarg+12(zero)           ; silent: lim = a0, or the next byte's edge - 1 if that is earlier
+    beq a1, t0, nsc_d_lim0                   ; no byte waiting
+    nop
+    jal nsc_dget
+    nop
+    addiu v0, v0, -1
+    subu t0, v0, a0
+    bltz t0, nsc_d_lim                       ; E - 1 < a0: lim = E - 1
+    nop
+nsc_d_lim0:
+    addu v0, a0, zero                        ; lim = a0
+nsc_d_lim:
+    lw k1, global_rspq_scratch+40(zero)      ; the bit count
+    subu t0, v0, t8                          ; lim - next
+    bltz t0, nsc_d_skipped                   ; no edge up to lim
+    nop
+    jal nsc_div                              ; t2 = (lim - next) / period, t0 = the remainder
+    addu t1, t9, zero                        ; (delay slot)
+    addiu t2, t2, 1                          ; n, the edges up to lim
+    subu t8, v0, t0
+    addu t8, t8, t9                          ; next = lim - (lim - next) mod period + period
+    subu k1, k1, t2
+    addiu k1, k1, -1
+    andi k1, k1, 7
+    addiu k1, k1, 1                          ; bits = ((bits - 1 - n) & 7) + 1
+    sltiu t0, t2, 8
+    bne t0, zero, nsc_d_skipped
+    srlv a2, a2, t2                          ; (delay slot) the shift register by n ...
+    addu a2, zero, zero                      ; ... empty from 8 on (it holds at most 8 bits)
+nsc_d_skipped:
+    subu t0, a0, t8
+    bltz t0, nsc_d_store                     ; no edge left up to a0
+    nop
+    j nsc_d_edge
+    nop
+nsc_d_sound:
+    lw k1, global_rspq_scratch+40(zero)
+nsc_d_edge:
+    bne a3, zero, nsc_d_shift                ; silent: the level holds
+    andi t0, a2, 1                           ; (delay slot)
+    beq t0, zero, nsc_d_down
+    slti t0, a4, 126                         ; (delay slot)
+    beq t0, zero, nsc_d_shift
+    nop
+    j nsc_d_shift
+    addiu a4, a4, 2                          ; (delay slot) up by 2
+nsc_d_down:
+    slti t0, a4, 2
+    bne t0, zero, nsc_d_shift
+    nop
+    addiu a4, a4, -2                         ; down by 2
+nsc_d_shift:
+    srl a2, a2, 1
+    addiu k1, k1, -1
+    bne k1, zero, nsc_d_step
+    nop
+    addiu a3, zero, 1                        ; the byte's end: silent, unless a byte was loaded here
+    lw t0, global_rspqarg+12(zero)
+    beq a1, t0, nsc_d_b8                     ; no byte waiting
+    nop
+    jal nsc_dget                             ; v0 its edge, v1 the byte
+    nop
+    beq v0, t8, nsc_d_load
+    subu t0, v0, t8                          ; (delay slot)
+    bgez t0, nsc_d_b8                        ; a later byte: this boundary is silent
+    nop
+    addiu t0, zero, 25                       ; an older byte: the two clocks disagree - a loud stop
+    j nsc_d_b8
+    sw t0, global_rspq_scratch+248(zero)     ; (delay slot)
+nsc_d_load:
+    addu a2, v1, zero                        ; the byte enters the shift register
+    addu a3, zero, zero
+    addiu a1, a1, 1
+nsc_d_b8:
+    addiu k1, zero, 8
+nsc_d_step:
+    addu t8, t8, t9                          ; the next edge
+    subu t0, a0, t8
+    bgez t0, nsc_d_edge
+    nop
+nsc_d_store:
+    sw t8, global_rspq_scratch+36(zero)
+    sw k1, global_rspq_scratch+40(zero)
+    sw a2, global_rspq_scratch+44(zero)
+    sw a3, global_rspq_scratch+48(zero)
+    sw a4, global_rspq_scratch+52(zero)
+    sw a1, global_rspq_scratch+80(zero)
+    lw ra, global_rspq_scratch+984(zero)
+    j nsc_due                                ; v0 = the due cycle (it returns to the caller)
+    nop
+
+    ; ==== nsc_div: t2 = t0 / t1, t0 = the remainder (t0 >= 0 below 2^31, t1 >= 1): shift and subtract - the divisor is
+    ; doubled while it is not above the dividend, then halved back step by step, a quotient bit each (~20 iterations
+    ; for a silent DMC stretch of seconds). CLOBBERS t3, at, v1. (nsb_div is the same for pass B's segment.) ====
+nsc_div:
+    addu t3, t1, zero                        ; the divisor, shifted
+    addu at, zero, zero                      ; the shifts
+nsc_div_up:
+    sltu v1, t0, t3
+    bne v1, zero, nsc_div_dn                 ; above the dividend
+    addu t2, zero, zero                      ; (delay slot) the quotient from 0
+    sll t3, t3, 1
+    j nsc_div_up
+    addiu at, at, 1                          ; (delay slot)
+nsc_div_dn:
+    beq at, zero, nsc_div_ret
+    nop
+    srl t3, t3, 1
+    addiu at, at, -1
+    sltu v1, t0, t3
+    bne v1, zero, nsc_div_dn                 ; this bit 0
+    sll t2, t2, 1                            ; (delay slot)
+    subu t0, t0, t3                          ; this bit 1
+    j nsc_div_dn
+    ori t2, t2, 1                            ; (delay slot)
+nsc_div_ret:
+    jr ra
+    nop
+nsc_return:
+  EndASM
+EndProcedure
+
+; ---- PASS B (segment 4): the oscillators, the mix, the output ----
+; Registers: s0 the next sample's cycle, s1 the cadence's fraction, s2 the oscillators' tick, s3 samples done, s4 the
+; next record's start, s5 the job's last sample + 1 (pass A's), s6 the next DMC level byte, s7 the record in force,
+; fp the next record, gp the first sample of the output half not yet sent, a5 / a6 / a7 the cadence (ApuFracStep,
+; ApuFracDen, ApuSampleBase).
+Procedure NesRspSynSamples()
+  ASM
+    sw s0, global_rspq_scratch+2512(zero)
+    sw s1, global_rspq_scratch+2516(zero)
+    sw s2, global_rspq_scratch+2520(zero)
+    sw s3, global_rspq_scratch+2524(zero)
+    sw s4, global_rspq_scratch+2528(zero)
+    sw s5, global_rspq_scratch+2532(zero)
+    sw s6, global_rspq_scratch+2536(zero)
+    sw s7, global_rspq_scratch+2540(zero)
+    sw fp, global_rspq_scratch+2544(zero)
+    sw gp, global_rspq_scratch+2548(zero)
+    sw ra, global_rspq_scratch+2552(zero)
+    addiu k0, zero, global_rspq_scratch+256  ; pass B's tables: TndMix and the triangle-mean levels (728 bytes)
+    lw k1, global_rspq_scratch+228(zero)
+    addiu k1, k1, 128
+    jal nbdi
+    addiu v0, zero, 727                      ; (delay slot)
+    lw s0, global_rspq_scratch+68(zero)
+    lw s1, global_rspq_scratch+72(zero)
+    lw s2, global_rspq_scratch+64(zero)
+    lw s3, global_rspq_scratch+76(zero)
+    lw s5, global_rspq_scratch+1000(zero)    ; the job's last sample + 1 (pass A's)
+    addiu s6, zero, global_rspq_scratch+1728 ; the samples' DMC levels
+    lw a5, global_rspq_scratch+232(zero)
+    lw a6, global_rspq_scratch+236(zero)
+    lw a7, global_rspq_scratch+240(zero)
+    addiu s7, zero, global_rspq_scratch+1024 ; record 0 in force
+    addiu fp, s7, 32
+    lw s4, 4(fp)                             ; the next record's start
+    andi t0, s3, 1
+    beq t0, zero, nsb_loop
+    addu gp, s3, zero                        ; (delay slot) the output from sample done ...
+    addiu gp, s3, -1                         ; ... or from done - 1, its word back in its slot (an odd start)
+    andi t1, gp, 63
+    sll t1, t1, 2
+    lw t0, global_rspq_scratch+84(zero)
+    sw t0, global_rspq_scratch+2240(t1)
+nsb_loop:
+    beq s3, s5, nsb_done                     ; the job's samples done
+    subu t0, s0, s4                          ; (delay slot)
+    bgez t0, nsb_event                       ; the sample has reached the next record's start
+    nop
+    subu a0, s0, s2                          ; the span since the oscillators' last tick
+    jal nsb_osc
+    addu s2, s0, zero                        ; (delay slot) the tick point moves to this sample
+    ; ---- the mix (the twin's syn_mix, per sample) ----
+    lw t0, global_rspq_scratch+16(zero)
+    lbu t1, 24(s7)
+    srlv t1, t1, t0
+    andi t1, t1, 1                           ; pulse 0's output bit: its duty byte at its step
+    lw t0, global_rspq_scratch+20(zero)
+    lbu t2, 25(s7)
+    srlv t2, t2, t0
+    andi t2, t2, 1
+    sll t2, t2, 1
+    or t1, t1, t2                            ; | pulse 1's << 1
+    sll t1, t1, 1
+    addu t1, t1, s7
+    lhu v0, 16(t1)                           ; v0: the pulse pair's level (the record's four-way cache)
+    lw t0, global_rspq_scratch+32(zero)
+    andi t0, t0, 1
+    addiu t0, t0, -1                         ; all ones when the noise register's bit 0 is 0
+    lbu t1, 29(s7)
+    and t0, t0, t1                           ; the noise's level: its volume, or 0
+    sll t0, t0, 1
+    lbu t1, 0(s6)                            ; the DMC's level at this sample (pass A's)
+    addu t0, t0, t1                          ; 2 x noise + DMC
+    lbu t1, 26(s7)
+    bne t1, zero, nsb_ultra                  ; the ultrasonic triangle: its mean
+    sll t0, t0, 1                            ; (delay slot) a halfword's offset
+    lw t1, global_rspq_scratch+28(zero)      ; the triangle's DAC
+    sll t2, t1, 1
+    addu t1, t1, t2
+    sll t1, t1, 1
+    addu t0, t0, t1                          ; + 3 x DAC
+    lhu t1, global_rspq_scratch+256(t0)      ; TndMix
+    j nsb_mixed
+    addu v0, v0, t1                          ; (delay slot)
+nsb_ultra:
+    lhu t1, global_rspq_scratch+664(t0)      ; the triangle-mean table
+    addu v0, v0, t1
+nsb_mixed:
+    ; ---- the DC filter: out = (x - last x) + (last y x 65,210) / 65,536 rounded toward 0, clamped to 16 bits ----
+    lw t0, global_rspq_scratch+60(zero)      ; the last output y
+    sll t1, t0, 16
+    sll t2, t0, 8
+    subu t1, t1, t2
+    sll t2, t0, 6
+    subu t1, t1, t2
+    sll t2, t0, 2
+    subu t1, t1, t2
+    sll t2, t0, 1
+    subu t1, t1, t2                          ; y x 65,210 = y x (65,536 - 256 - 64 - 4 - 2)
+    bgez t1, nsb_dcp
+    nop
+    ori t2, zero, 65535
+    addu t1, t1, t2                          ; negative: toward 0 (the twin's mult / mflo / +65,535 / dsra)
+nsb_dcp:
+    sra t1, t1, 16
+    lw t0, global_rspq_scratch+56(zero)      ; the last input
+    subu t0, v0, t0
+    addu t0, t0, t1
+    sw v0, global_rspq_scratch+56(zero)
+    addiu t1, zero, 32767
+    slt t2, t1, t0
+    beq t2, zero, nsb_cmin
+    nop
+    addu t0, t1, zero
+nsb_cmin:
+    addiu t1, zero, -32768
+    slt t2, t0, t1
+    beq t2, zero, nsb_cout
+    nop
+    addu t0, t1, zero
+nsb_cout:
+    sw t0, global_rspq_scratch+60(zero)
+    andi t1, t0, 0xFFFF
+    sll t2, t1, 16
+    or t1, t1, t2                            ; the AI's stereo word: the sample in both halves
+    andi t2, s3, 63
+    sll t2, t2, 2
+    sw t1, global_rspq_scratch+2240(t2)      ; into its half
+    sw s0, global_rspq_scratch+992(zero)     ; the last sample's cycle (the job's check against X)
+    andi t2, s3, 31
+    addiu t3, zero, 31
+    bne t2, t3, nsb_cad
+    addiu s6, s6, 1                          ; (delay slot) the next level
+    jal nsb_flush                            ; the half is full: out
+    addu a0, s3, zero                        ; (delay slot)
+nsb_cad:
+    addu s1, s1, a5                          ; the next sample's cycle (NesApuCount's cadence)
+    slt t0, s1, a6
+    bne t0, zero, nsb_cad1
+    addu s0, s0, a7                          ; (delay slot) the base interval ...
+    subu s1, s1, a6
+    addiu s0, s0, 1                          ; ... plus one when the fraction carries
+nsb_cad1:
+    j nsb_loop
+    addiu s3, s3, 1                          ; (delay slot)
+
+    ; ---- an event: the next record ----
+nsb_event:
+    lbu t0, 30(fp)
+    andi t1, t0, 8
+    bne t1, zero, nsb_done                   ; the end (pass A ended the job before this sample)
+    lw t0, 0(fp)                             ; (delay slot)
+    subu a0, t0, s2                          ; the old flush: the cycles since the last tick ...
+    beq a0, zero, nsb_ev_in                  ; ... nothing when 0
+    nop
+    jal nsb_osc                              ; (with the parameters before the event)
+    nop
+    lw s2, 0(fp)
+nsb_ev_in:
+    addu s7, fp, zero                        ; its parameters in force
+    addiu fp, fp, 32
+    lw s4, 4(fp)
+    lbu t0, 30(s7)
+    andi t1, t0, 1
+    beq t1, zero, nsb_ev_f2
+    nop
+    sw zero, global_rspq_scratch+16(zero)    ; $4003: pulse 0's step to 0
+nsb_ev_f2:
+    andi t1, t0, 2
+    beq t1, zero, nsb_loop
+    nop
+    j nsb_loop
+    sw zero, global_rspq_scratch+20(zero)    ; (delay slot) $4007: pulse 1's
+
+    ; ---- the job's end ----
+nsb_done:
+    beq gp, s3, nsb_d_sent                   ; the open half out, if it holds a sample
+    nop
+    jal nsb_flush
+    addiu a0, s3, -1                         ; (delay slot)
+nsb_d_sent:
+    addiu t1, s3, -1                         ; sample done - 1's word, for the next job's odd start
+    andi t1, t1, 63
+    sll t1, t1, 2
+    lw t0, global_rspq_scratch+2240(t1)
+    sw t0, global_rspq_scratch+84(zero)
+    lw t0, global_rspqarg(zero)
+    bne s3, t0, nsb_d_state                  ; not the whole job (512 at most, or 20 events): no check
+    lw t0, global_rspq_scratch+992(zero)     ; (delay slot)
+    lw t1, global_rspqarg+4(zero)
+    beq t0, t1, nsb_d_state                  ; the job's last sample was at X, as the CPU counted it
+    lw t0, global_rspq_scratch+76(zero)      ; (delay slot)
+    beq t0, s3, nsb_d_state                  ; (no sample in this job: nothing to check)
+    addiu t0, zero, 27                       ; (delay slot)
+    sw t0, global_rspq_scratch+248(zero)     ; else a loud stop: the CPU's X and the RSP's cadence disagree
+nsb_d_state:
+    sw s0, global_rspq_scratch+68(zero)
+    sw s1, global_rspq_scratch+72(zero)
+    sw s2, global_rspq_scratch+64(zero)
+    sw s3, global_rspq_scratch+76(zero)
+    mfc0 t0, $12                             ; the job's RSP time: DPC_CLOCK (24 bits) since its start
+    lw t1, global_rspq_scratch+2504(zero)
+    subu t0, t0, t1
+    lui t1, 0x00FF
+    ori t1, t1, 0xFFFF
+    and t0, t0, t1
+    lw t1, global_rspq_scratch+88(zero)
+    addu t1, t1, t0
+    sw t1, global_rspq_scratch+88(zero)
+    lw t0, global_rspq_scratch+212(zero)
+    addiu t0, t0, 1
+    sw t0, global_rspq_scratch+212(zero)     ; jobs done
+    addiu k0, zero, global_rspq_scratch      ; the state out, waited (with every output half before it)
+    lw k1, global_rspqarg+16(zero)
+    jal nbdo
+    addiu v0, zero, 255                      ; (delay slot)
+    sw s3, global_rspq_scratch+2496(zero)    ; the status - done, jobs done - last
+    lw t0, global_rspq_scratch+212(zero)
+    sw t0, global_rspq_scratch+2500(zero)
+    addiu k0, zero, global_rspq_scratch+2496
+    lw k1, global_rspq_scratch+244(zero)
+    jal nbdo
+    addiu v0, zero, 7                        ; (delay slot)
+    lw s0, global_rspq_scratch+2512(zero)
+    lw s1, global_rspq_scratch+2516(zero)
+    lw s2, global_rspq_scratch+2520(zero)
+    lw s3, global_rspq_scratch+2524(zero)
+    lw s4, global_rspq_scratch+2528(zero)
+    lw s5, global_rspq_scratch+2532(zero)
+    lw s6, global_rspq_scratch+2536(zero)
+    lw s7, global_rspq_scratch+2540(zero)
+    lw fp, global_rspq_scratch+2544(zero)
+    lw gp, global_rspq_scratch+2548(zero)
+    lw ra, global_rspq_scratch+2552(zero)
+    j nsb_return
+    nop
+
+    ; ==== nsb_flush: the output half's samples gp .. a0 (inclusive) out, from an even sample (gp is even) and an even
+    ; count (one word more when a0 is even), by an unwaited DMA once every DMA before it has landed (so the half filled
+    ; next is free); then gp = a0 + 1. A half never crosses an AI block (512 is a multiple of 32). CLOBBERS t0, t1,
+    ; k0, k1, v0, at. ====
+nsb_flush:
+    mfc0 at, $4
+    andi at, at, 12                          ; DMA busy or full
+    bne at, zero, nsb_flush
+    subu t0, a0, gp                          ; (delay slot)
+    addiu t0, t0, 2
+    srl t0, t0, 1
+    sll t0, t0, 1                            ; the words, rounded up to even
+    andi k0, gp, 63
+    sll k0, k0, 2
+    addiu k0, k0, global_rspq_scratch+2240   ; DMEM: the first sample's slot
+    srl k1, gp, 9
+    andi k1, k1, 7
+    sll t1, k1, 11
+    sll k1, k1, 6
+    addu k1, k1, t1                          ; its AI block x 2,112 (2,048 + 64)
+    andi t1, gp, 511
+    sll t1, t1, 2
+    addu k1, k1, t1
+    lw t1, global_rspq_scratch+224(zero)     ; the AI ring
+    addu k1, k1, t1
+    mtc0 k0, $0                              ; SP_MEM_ADDR
+    mtc0 k1, $1                              ; SP_DRAM_ADDR
+    sll v0, t0, 2
+    addiu v0, v0, -1
+    mtc0 v0, $3                              ; SP_WR_LEN: DMEM to RDRAM, not waited
+    jr ra
+    addiu gp, a0, 1                          ; (delay slot)
+
+    ; ==== nsb_div: pass B's copy of nsa_div (each segment needs its own): t2 = t0 / t1, t0 = the remainder; 1-6
+    ; iterations for the oscillators. CLOBBERS t3, at, v1. ====
+nsb_div:
+    addu t3, t1, zero
+    addu at, zero, zero
+nsb_div_up:
+    sltu v1, t0, t3
+    bne v1, zero, nsb_div_dn
+    addu t2, zero, zero                      ; (delay slot)
+    sll t3, t3, 1
+    j nsb_div_up
+    addiu at, at, 1                          ; (delay slot)
+nsb_div_dn:
+    beq at, zero, nsb_div_ret
+    nop
+    srl t3, t3, 1
+    addiu at, at, -1
+    sltu v1, t0, t3
+    bne v1, zero, nsb_div_dn
+    sll t2, t2, 1                            ; (delay slot)
+    subu t0, t0, t3
+    j nsb_div_dn
+    ori t2, t2, 1                            ; (delay slot)
+nsb_div_ret:
+    jr ra
+    nop
+
+    ; ==== nsb_osc: one oscillator tick by a0 cycles (the twin's nes_syn_osc: the pulses' and the triangle's timers
+    ; with their quotient form, the triangle's step only while its gate is open, the noise register eight clocks at a
+    ; time when it can) on the state, with the record in force's periods. CLOBBERS a0-a4, t0-t3, t8, t9, v0, v1, at. ====
+nsb_osc:
+    sw ra, global_rspq_scratch+988(zero)
+    addu a4, zero, zero                      ; the pulse's word offset: 0, 4
+nsb_o_pulse:
+    lw a1, global_rspq_scratch+0(a4)         ; its timer
+    subu a1, a1, a0
+    bgtz a1, nsb_o_pdone                     ; no edge
+    srl t0, a4, 1                            ; (delay slot)
+    addu t0, t0, s7
+    lhu a2, 8(t0)                            ; its period
+    addiu a2, a2, 1
+    sll a2, a2, 1                            ; d = 2 (period + 1) cycles a step
+    addu a1, a1, a2
+    bgtz a1, nsb_o_pphase                    ; one step
+    addiu a3, zero, 1                        ; (delay slot)
+    subu t0, zero, a1                        ; more than one: n = -timer
+    addiu t1, zero, 2
+    bne a2, t1, nsb_o_pdiv
+    nop
+    srl a3, t0, 1                            ; a period of two: the quotient is a shift
+    addiu a3, a3, 2
+    andi a1, a1, 1
+    bne a1, zero, nsb_o_pphase
+    nop
+    j nsb_o_pphase
+    addiu a1, zero, 2                        ; (delay slot)
+nsb_o_pdiv:
+    jal nsb_div
+    addu t1, a2, zero                        ; (delay slot)
+    addiu a3, t2, 2
+    subu a1, a2, t0
+nsb_o_pphase:
+    lw t0, global_rspq_scratch+16(a4)
+    addu t0, t0, a3
+    andi t0, t0, 7
+    sw t0, global_rspq_scratch+16(a4)        ; its step
+nsb_o_pdone:
+    sw a1, global_rspq_scratch+0(a4)
+    addiu a4, a4, 4
+    sltiu t0, a4, 8
+    bne t0, zero, nsb_o_pulse
+    nop
+    lw a1, global_rspq_scratch+8(zero)       ; the triangle
+    subu a1, a1, a0
+    bgtz a1, nsb_o_tdone
+    nop
+    lhu a2, 12(s7)
+    addiu a2, a2, 1                          ; d = period + 1
+    addu a1, a1, a2
+    bgtz a1, nsb_o_tphase
+    addiu a3, zero, 1                        ; (delay slot)
+    subu t0, zero, a1
+    bne a2, a3, nsb_o_tdiv
+    nop
+    addiu a3, t0, 2                          ; a period of one: n + 2 steps
+    j nsb_o_tphase
+    addiu a1, zero, 1                        ; (delay slot)
+nsb_o_tdiv:
+    jal nsb_div
+    addu t1, a2, zero                        ; (delay slot)
+    addiu a3, t2, 2
+    subu a1, a2, t0
+nsb_o_tphase:
+    lbu t0, 27(s7)
+    beq t0, zero, nsb_o_tdone                ; the gate shut: no step
+    nop
+    lw t0, global_rspq_scratch+24(zero)
+    addu t0, t0, a3
+    andi t0, t0, 31
+    sw t0, global_rspq_scratch+24(zero)
+    srl t1, t0, 4                            ; the 32-step phase folded into the 16-level triangle
+    addiu t1, t1, -1
+    xor t0, t0, t1
+    andi t0, t0, 15
+    sw t0, global_rspq_scratch+28(zero)
+nsb_o_tdone:
+    sw a1, global_rspq_scratch+8(zero)
+    lw a1, global_rspq_scratch+12(zero)      ; the noise
+    subu a1, a1, a0
+    bgtz a1, nsb_o_ndone
+    nop
+    lhu a2, 14(s7)                           ; its period
+    lw a3, global_rspq_scratch+32(zero)      ; its register
+    lbu v0, 28(s7)                           ; its tap
+    sll t8, a2, 3                            ; eight periods
+    subu t9, t8, a2                          ; seven
+    subu t0, zero, a1
+    sltu t1, t0, t9
+    bne t1, zero, nsb_o_nshort
+    nop
+nsb_o_neight:
+    srlv t1, a3, v0                          ; across eight clocks even tap six cannot reach the new bits
+    xor t1, t1, a3
+    andi t1, t1, 255
+    sll t1, t1, 7
+    srl a3, a3, 8
+    or a3, a3, t1
+    addu a1, a1, t8
+    bgtz a1, nsb_o_nsave
+    subu t0, zero, a1                        ; (delay slot)
+    sltu t1, t0, t9
+    beq t1, zero, nsb_o_neight
+    nop
+nsb_o_nshort:
+    addiu t1, zero, 4
+    bne a2, t1, nsb_o_nclock                 ; at period four the clocks left are counted with a shift
+    subu t0, zero, a1                        ; (delay slot)
+    srl t2, t0, 2
+    sltiu t3, t2, 9
+    beq t3, zero, nsb_o_nclock
+    addiu t2, t2, 1                          ; (delay slot)
+    srlv t1, a3, v0
+    xor t1, t1, a3
+    addiu t3, zero, 1
+    sllv t3, t3, t2
+    addiu t3, t3, -1
+    and t1, t1, t3
+    srlv a3, a3, t2
+    addiu t3, zero, 15
+    subu t3, t3, t2
+    sllv t1, t1, t3
+    or a3, a3, t1
+    andi t0, t0, 3
+    j nsb_o_nsave
+    subu a1, a2, t0                          ; (delay slot)
+nsb_o_nclock:
+    srlv t1, a3, v0
+    xor t1, t1, a3
+    andi t1, t1, 1
+    sll t1, t1, 14
+    srl a3, a3, 1
+    addu a1, a1, a2
+    blez a1, nsb_o_nclock
+    or a3, a3, t1                            ; (delay slot)
+nsb_o_nsave:
+    sw a3, global_rspq_scratch+32(zero)
+nsb_o_ndone:
+    sw a1, global_rspq_scratch+12(zero)
+    lw ra, global_rspq_scratch+988(zero)
+    jr ra
+    nop
+nsb_return:
+  EndASM
+EndProcedure
