@@ -847,7 +847,7 @@ nes_ppu_data_cut:
     EndASM
   CompilerEndIf
   ASM
-    jal ppuwrite
+    jal u_ppuwrite                  ; PpuWrite(v, value), in the unit (unit/write.n64, N7)
     ld a0, global_ppuv-global_ppubus(a2)
     ld ra, 0(sp)
     daddiu sp, sp, 16

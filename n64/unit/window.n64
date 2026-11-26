@@ -60,30 +60,9 @@ nes_mmc3_wait_decoded:
     nop
     j nesmmc3ramwaitbatch
     nop
-nes_mmc3_wait_miss:
-    daddiu sp, sp, -48
-    sd ra, 32(sp)
-    sd a0, 24(sp)
-    sd a1, 16(sp)
-    sd t3, 8(sp)
-    sd t2, 0(sp)
-    jal nesramwaitrule
-    or a0, t0, zero
-    or a2, a0, zero
-    ld t2, 0(sp)
-    ld t3, 8(sp)
-    ld a1, 16(sp)
-    ld a0, 24(sp)
-    ld ra, 32(sp)
-    sw t2, 0(t3)
-    sw a2, 4(t3)
-    b nes_mmc3_wait_decoded
-    daddiu sp, sp, 48
 nes_mmc3_wait_scalar:
     j cpurun
     nop
-    ; Preserve the instruction cache placement of the following CPU code.
-    .word 0,0,0,0,0,0,0,0,0,0
   EndASM
 
 ; ---- mappercpubudget, from mmc3_budget.n64 ----

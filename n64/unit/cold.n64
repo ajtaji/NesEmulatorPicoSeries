@@ -1,0 +1,184 @@
+; unit/cold.n64 - pieces of the hot unit's files that run (almost) never, kept in the unit's COLD part
+; Part of the hot unit: included inside cpu6502.n64's procedure after its cold part begins (the shipped build) or
+; in the holder procedure in mmc3_run.n64 (the reference build), never on its own.
+; N7 (design note N.40): moved out of the hot span by MEASURED heat (rdp-n6d-replay, SMB3 0-3600: 0 cycles a
+; guest frame) to make room for the bus handlers; each block is entered by a branch and leaves by one, so its
+; place changes no path, only which I-cache set it occupies.
+
+; ---- the RAM-wait cache's miss (from unit/window.n64): decode the rule, fill the cache entry ----
+  ASM
+nes_mmc3_wait_miss:
+    daddiu sp, sp, -48
+    sd ra, 32(sp)
+    sd a0, 24(sp)
+    sd a1, 16(sp)
+    sd t3, 8(sp)
+    sd t2, 0(sp)
+    jal nesramwaitrule
+    or a0, t0, zero
+    or a2, a0, zero
+    ld t2, 0(sp)
+    ld t3, 8(sp)
+    ld a1, 16(sp)
+    ld a0, 24(sp)
+    ld ra, 32(sp)
+    sw t2, 0(t3)
+    sw a2, 4(t3)
+    b nes_mmc3_wait_decoded
+    daddiu sp, sp, 48
+  EndASM
+
+; ---- u_apuwrite: the staged ApuWrite's timing half, in assembly (N7, design note N.40 (4)) ----
+; WHAT: an APU register write $4000-$4017 (not $4014 / $4016: u_neswrite routes those elsewhere), after
+; u_nesmmc3syncapu brought the APU to the write. In: a0 the address, a1 the value (0-255). Exactly the staged
+; ApuWrite's stores that anything reads: ApuReg(r) (the DMC's rate, loop and IRQ bits, its start address and
+; length, the lengths' halt bits are read from it), the length loads, the DMC IRQ, $4015, $4017, the log
+; append (u_apulogwrite: the synthesis's only input) and WorkerIrq. WHY NOT THE REST: SweepReload, ApuPeriod,
+; EnvStart, ApuSeq, ApuLinearReload and DmcLevel are the sound half; since N6 the synthesis keeps its own copy
+; (NesSynState, filled once by NesSynInit before the guest runs, then from the log) and nothing else in this
+; configuration reads them (searched in the staged text, N.40 (4)). WHY ASSEMBLY: it replaces the compiled
+; NesWriteRegister + ApuWrite pair outside the unit (~300 cycles a write with their misses); cold, because it
+; runs ~7.5 times a frame. Clobbers what a compiled call may; keeps s0-s7, fp.
+; HOW, by register r = address - $4000:
+;   r < 12, r & 3 = 3 ($4003 / $4007 / $400B), and r = 15 ($400F, the noise, channel 3): if the channel is
+;     enabled (ApuEnable bit ch), ApuLength(ch) = LengthTable(value >> 3)
+;   r = 16 ($4010): bit 7 clear turns the DMC IRQ off
+;   r = 21 ($4015): ApuEnable = value & 31, DmcIrq = 0, the lengths of the disabled channels 0; bit 4 clear
+;     stops the sample (DmcBytes = 0); set with no sample playing starts one (DmcAddress = $C000 + ApuReg(18) x
+;     64, DmcBytes = ApuReg(19) x 16 + 1) and fetches its first byte (u_apudmcfetch, unchanged)
+;   r = 23 ($4017): ApuFive = bit 7, ApuInhibit = bit 6 (which clears the frame IRQ), the reset delay 3 + the
+;     parity of WorkerClock
+; CHECKED BY: the oracles' WAV byte for byte (the log is the synthesis's input) and checkpoints, the digests.
+  ASM
+u_apuwrite:
+    addiu a0, a0, -0x4000           ; r
+    sltiu t0, a0, 24
+    beqz t0, apuw_ret               ; not an APU register (the staged ApuWrite's own guard)
+    nop
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    la t0, global_apureg
+    addu t0, t0, a0
+    sb a1, 0(t0)                    ; ApuReg(r) = value
+    sltiu t0, a0, 12
+    beqz t0, apuw_high
+    andi t1, a0, 3
+    xori t1, t1, 3
+    bnez t1, apuw_log               ; $4000-$400B other than the length registers: the sound half only
+    srl t1, a0, 2                   ; the channel
+    b apuw_length
+    nop
+apuw_high:
+    addiu t1, zero, 15
+    bne a0, t1, apuw_not_noise
+    addiu t1, zero, 3               ; the noise is channel 3
+apuw_length:                        ; t1 = ch
+    la t0, global_apuenable
+    ld t0, 0(t0)
+    srlv t0, t0, t1
+    andi t0, t0, 1
+    beqz t0, apuw_log               ; channel disabled: the length is not loaded
+    srl t2, a1, 3
+    la t0, global_lengthtable
+    addu t0, t0, t2
+    lbu t2, 0(t0)                   ; LengthTable(value >> 3)
+    la t0, global_apulength
+    sll t1, t1, 3
+    daddu t0, t0, t1
+    b apuw_log
+    sd t2, 0(t0)                    ; ApuLength(ch)
+apuw_not_noise:
+    addiu t1, zero, 16
+    bne a0, t1, apuw_not_4010
+    andi t0, a1, 0x80
+    bnez t0, apuw_log               ; $4010 with the IRQ enabled: nothing more
+    nop
+    la t0, global_dmcirq
+    b apuw_log
+    sd zero, 0(t0)                  ; DmcIrq = 0
+apuw_not_4010:
+    addiu t1, zero, 21
+    bne a0, t1, apuw_not_4015
+    nop
+    andi t0, a1, 31
+    la t2, global_apuenable
+    sd t0, 0(t2)                    ; ApuEnable = value & 31
+    la t2, global_dmcirq
+    sd zero, 0(t2)                  ; DmcIrq = 0
+    la t2, global_apulength
+    move t1, zero
+apuw_clear:                         ; For ch = 0 To 3: a disabled channel's length is 0
+    srlv t3, a1, t1
+    andi t3, t3, 1
+    bnez t3, apuw_kept
+    sll t3, t1, 3
+    daddu t3, t2, t3
+    sd zero, 0(t3)
+apuw_kept:
+    addiu t1, t1, 1
+    sltiu t3, t1, 4
+    bnez t3, apuw_clear
+    nop
+    andi t0, a1, 16
+    la t2, global_dmcbytes
+    bnez t0, apuw_dmc_on
+    ld t1, 0(t2)
+    b apuw_log
+    sd zero, 0(t2)                  ; bit 4 clear: the sample stops
+apuw_dmc_on:
+    bnez t1, apuw_log               ; a sample already playing goes on
+    nop
+    la t0, global_apureg
+    lbu t1, 18(t0)
+    lbu t3, 19(t0)
+    sll t1, t1, 6
+    ori t0, zero, 0xC000
+    addu t1, t1, t0                 ; DmcAddress = $C000 + ApuReg(18) x 64
+    sll t3, t3, 4
+    addiu t3, t3, 1                 ; DmcBytes = ApuReg(19) x 16 + 1
+    sd t3, 0(t2)
+    la t0, global_dmcaddress
+    jal u_apudmcfetch               ; ApuDmcFetch(): the first byte
+    sd t1, 0(t0)
+    b apuw_log
+    nop
+apuw_not_4015:
+    addiu t1, zero, 23
+    bne a0, t1, apuw_log
+    srl t0, a1, 7
+    andi t0, t0, 1
+    la t2, global_apufive
+    sd t0, 0(t2)                    ; ApuFive = (value >> 7) & 1
+    srl t0, a1, 6
+    andi t0, t0, 1
+    la t2, global_apuinhibit
+    beqz t0, apuw_delay
+    sd t0, 0(t2)                    ; ApuInhibit = (value >> 6) & 1
+    la t2, global_apuframeirq
+    sd zero, 0(t2)                  ; the inhibit clears the frame IRQ
+apuw_delay:
+    la t2, global_workerclock
+    ld t0, 0(t2)
+    andi t0, t0, 1
+    addiu t0, t0, 3
+    la t2, global_apuresetdelay
+    sd t0, 0(t2)                    ; ApuResetDelay = 3 + (WorkerClock & 1)
+apuw_log:
+    ld a0, 8(sp)
+    jal u_apulogwrite               ; NesApuLogWrite(r, value) (a leaf: t0-t3, a0-a3)
+    ld a1, 16(sp)
+    la t0, global_apuframeirq
+    ld t0, 0(t0)
+    la t1, global_dmcirq
+    ld t1, 0(t1)
+    or t0, t0, t1
+    la t1, global_workerirq
+    sd t0, 0(t1)                    ; WorkerIrq = ApuFrameIrq | DmcIrq
+    ld ra, 0(sp)
+    daddiu sp, sp, 32
+apuw_ret:
+    jr ra
+    nop
+  EndASM

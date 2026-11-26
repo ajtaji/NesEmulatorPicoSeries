@@ -1702,35 +1702,6 @@ c65_op_2a_rest:
     daddiu a2, a2, -2
     b c65_nza
     addiu a1, a1, 1
-c65_op_00_rest:
-    srl t0, a1, 8
-    addu t1, s1, t2
-    sb t0, 0x100(t1)
-    addiu t2, t2, -1
-    andi t2, t2, 0xFF
-    addu t1, s1, t2
-    sb a1, 0x100(t1)
-    addiu t2, t2, -1
-    jal c65_status           ; t0 = P (t2 survives)
-    andi t2, t2, 0xFF
-    ori t0, t0, 0x10         ; B set in the pushed copy
-    sd t0, global_tmp-global_nesmmc3bias(a3)
-    addu t1, s1, t2
-    sb t0, 0x100(t1)
-    addiu t2, t2, -1
-    andi t2, t2, 0xFF
-    sd t2, global_s-global_nesmmc3bias(a3)
-    daddiu t1, zero, 1
-    sd t1, global_fi-global_nesmmc3bias(a3)
-    ld t1, 24(a3)            ; the vector at $FFFE in the top 8 KB slot
-    ori t2, zero, 0xFFFE
-    addu t1, t1, t2
-    lbu t0, 0(t1)
-    lbu v1, 1(t1)
-    sll t1, v1, 8
-    or a1, t0, t1
-    b c65_next
-    daddiu a2, a2, -7
 c65_op_06_rest:
     b c65_rmw_zp
     addiu a0, zero, 5
@@ -2176,20 +2147,6 @@ c65_m_indy:                  ; (zp),Y
     sltu t1, zero, t1
     b c65_rd_ea
     dsubu a2, a2, t1
-c65_m_indx:                  ; (zp,X)
-    lbu t1, 1(t0)
-    addu t1, t1, s6
-    andi t1, t1, 0xFF
-    addu t2, t1, s1
-    lbu t2, 0(t2)
-    addiu t1, t1, 1
-    andi t1, t1, 0xFF
-    addu t1, t1, s1
-    lbu v1, 0(t1)
-    addiu a1, a1, 2
-    sll t1, v1, 8
-    b c65_rd_ea
-    or t2, t2, t1
 
     ; --- the read of guest address t2 (16 bits) into v1 ---------------------
 c65_rd_ea:
@@ -2228,12 +2185,12 @@ c65_rd_dev:                  ; $2000-$7FFF
 c65_rd_open:
     jr ra
     andi v1, v1, 0xFF
-c65_rd_call:                 ; a device: the call-out to NesRead
+c65_rd_call:                 ; a device: the call-out to u_nesreaddev
     sd ra, global_c65link-global_nesmmc3bias(a3)
     sd t2, global_c65ea-global_nesmmc3bias(a3)
     jal c65_out
     sd t2, global_ea-global_nesmmc3bias(a3)
-    jal nesread
+    jal u_nesreaddev         ; the device read, in the unit (unit/write.n64, N7)
     or a0, t2, zero
     jal c65_in
     nop
@@ -2317,21 +2274,6 @@ c65_s_indy:
     addu t2, t2, s7
     b c65_wr_ea
     andi t2, t2, 0xFFFF
-c65_s_indx:
-    addiu v0, zero, 5
-    lbu t1, 1(t0)
-    addu t1, t1, s6
-    andi t1, t1, 0xFF
-    addu t2, t1, s1
-    lbu t2, 0(t2)
-    addiu t1, t1, 1
-    andi t1, t1, 0xFF
-    addu t1, t1, s1
-    lbu v1, 0(t1)
-    addiu a1, a1, 2
-    sll t1, v1, 8
-    b c65_wr_ea
-    or t2, t2, t1
 
     ; --- the write of a0 to guest address t2 ---------------------------------
 c65_wr_ea:
@@ -3081,11 +3023,73 @@ c65_shape_status:            ; a0 = NesPollStatusDone(), the state published and
     ld ra, global_c65link-global_nesmmc3bias(a3)
     jr ra
     nop
+
+    ; --- moved here from the hot span by measured heat (N7, design note N.40: 0 cycles a guest frame over
+    ; SMB3 0-3600 in rdp-n6d-replay); each is entered by a branch and leaves by one -----------------------
+c65_op_00_rest:
+    srl t0, a1, 8
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    sb a1, 0x100(t1)
+    addiu t2, t2, -1
+    jal c65_status           ; t0 = P (t2 survives)
+    andi t2, t2, 0xFF
+    ori t0, t0, 0x10         ; B set in the pushed copy
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    daddiu t1, zero, 1
+    sd t1, global_fi-global_nesmmc3bias(a3)
+    ld t1, 24(a3)            ; the vector at $FFFE in the top 8 KB slot
+    ori t2, zero, 0xFFFE
+    addu t1, t1, t2
+    lbu t0, 0(t1)
+    lbu v1, 1(t1)
+    sll t1, v1, 8
+    or a1, t0, t1
+    b c65_next
+    daddiu a2, a2, -7
+c65_m_indx:                  ; (zp,X)
+    lbu t1, 1(t0)
+    addu t1, t1, s6
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_rd_ea
+    or t2, t2, t1
+c65_s_indx:
+    addiu v0, zero, 5
+    lbu t1, 1(t0)
+    addu t1, t1, s6
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_wr_ea
+    or t2, t2, t1
   EndASM
   ; the PPU state machine's checking build (empty in every other build), in the cold part
   XIncludeFile "../n64/unit/ppu_cold.n64"
   XIncludeFile "../n64/unit/ppu_check.n64"
   XIncludeFile "../n64/unit/apu_cold.n64"
+  XIncludeFile "../n64/unit/cold.n64"
   ASM
 
     ; --- data (read through the D-cache only) -------------------------------------

@@ -3,6 +3,10 @@
 ; holder procedure in mmc3_run.n64 (the reference build), never on its own. Entry labels
 ; are u_<procedure>; the procedure of the same name is a one-jump stub for outside callers.
 ; Moved unchanged from the file named above each part (design note, section N, step N1).
+; N7 (design note N.40 / N.41): NesWriteRegister's paths in place in u_neswrite, u_ppuwrite, u_mappera12,
+; u_nesreaddev. QResult / QSent / QComplete, which the compiled NesWriteRegister also wrote, are
+; not written: QResult is set by WorkerCommand before NesRpc reads it, QSent is returned by NesPost to callers
+; that drop it, QComplete is read by nothing (searched in the staged text, N.40 (2)).
 
 ; ---- neswrite, from mmc3_cpu_write.n64 ----
   ASM
@@ -68,9 +72,36 @@ nes_mmc3_bus_write_stamp:
     bnez t1, nes_mmc3_bus_write_mapper
     addiu t1, a0, -0x4014
     beqz t1, nes_mmc3_bus_write_dma
+    sd a0, 8(sp)                    ; (the DMA path does not read 8(sp))
+    sltiu t1, a0, 0x4000
+    beqz t1, nes_mmc3_bus_write_apu
+    sd a1, 16(sp)
+    ; ---- a PPU register, $2000-$3FFF: the staged NesWriteRegister's PPU path, in place (N.40 (2)) ----
+    jal u_workeradvance             ; WorkerAdvance(stamp): the APU, the A12 walk and the PPU to the write
+    move a0, a2
+    ld a0, 8(sp)
+    jal u_ppuregwrite               ; PpuRegWrite(addr & 7, value) (u_ppuregwrite masks the address)
+    ld a1, 16(sp)
+    ; MapperRegNotice(addr & 7): after $2006 / $2007 the PPU's address bus shows v, so A12 may move
+    ld a0, 8(sp)
+    andi a0, a0, 6
+    xori a0, a0, 6                  ; 0: register 6 or 7
+    la t0, global_ppuv
+    bnez a0, nes_mmc3_bus_write_close
     nop
-    jal neswriteregister
+    ld a0, 0(t0)
+    ld a1, global_mapdots-global_ppuv(t0)
+    jal u_mappera12                 ; MapperA12(v & $3FFF, MapDots)
+    andi a0, a0, 0x3FFF
+    b nes_mmc3_bus_write_close
     nop
+nes_mmc3_bus_write_apu:
+    ; ---- $4000-$4013, $4015, $4017: the staged NesWriteRegister's APU path ----
+    jal u_nesmmc3syncapu            ; NesMmc3SyncApu(stamp): the APU (and a pending DMC fetch) to the write
+    move a0, a2
+    ld a0, 8(sp)
+    jal u_apuwrite                  ; ApuWrite(addr, value): its timing half (unit/cold.n64)
+    ld a1, 16(sp)
     b nes_mmc3_bus_write_close
     nop
 
@@ -191,3 +222,251 @@ nes_mmc3_bus_write_done:
     jr ra
     nop
   EndASM
+
+; ---- ppuwrite, from mmc3_ppu_bus.n64 (N7: moved unchanged but for the calls) ----
+; The PPU bus write at v: the palette (neswritepalette, outside), CHR (mapperchrwrite, outside), or a name
+; table: MapperA12 at the address, the CIRAM byte, the old renderer's row serials (NesInvalidateTileRow, only
+; where the old renderer's row reuse runs: not in the N5 show, N.40 (2)), the Nt aliases. In: a0 address,
+; a1 value. Called from u_ppuregwrite ($2007) and, through the PpuWrite stub, from outside.
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+u_ppuwrite:
+      la t0, global_nesrect           ; the console record's work split: one PPU bus write (NesRecT(8)); t0 / t1,
+      ld t1, 64(t0)                   ; set again below
+      daddiu t1, t1, 1
+      sd t1, 64(t0)
+    EndASM
+  CompilerElse
+    ASM
+u_ppuwrite:
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_bgcacheaddr
+    la t1, global_rgblastkey
+    daddiu t2, zero, -1
+    sd t2, 0(t0)
+    sd t2, 0(t1)
+    andi a0, a0, 0x3FFF
+    sltiu t0, a0, 0x3F00
+    beqz t0, nes_mmc3_ppu_palette_write
+    nop
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    la t0, global_mapdots
+    jal u_mappera12
+    ld a1, 0(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    sltiu t0, a0, 0x2000
+    beqz t0, nes_mmc3_ppu_ciram_write
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+    la t0, global_chrwritable
+    ld t0, 0(t0)
+    beqz t0, nes_mmc3_ppu_write_done
+    nop
+    j mapperchrwrite
+    nop
+nes_mmc3_ppu_ciram_write:
+    la t0, global_mapntslots
+    srl t1, a0, 10
+    andi t1, t1, 3
+    sll t1, t1, 3
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    andi t1, a0, 1023
+    sll a0, t0, 10
+    addu a0, a0, t1
+    la t2, global_mapciram
+    daddu t2, t2, a0
+    lbu t3, 0(t2)
+    beq t3, a1, nes_mmc3_ppu_write_restore
+    nop
+  EndASM
+  CompilerIf #NES_RDP_SHOW=0
+    ASM
+      sd t0, 24(sp)
+      sd t1, 32(sp)
+      sd t2, 40(sp)
+      jal nesinvalidatetilerow
+      nop
+      ld a1, 16(sp)
+      ld t0, 24(sp)
+      ld t1, 32(sp)
+      ld t2, 40(sp)
+    EndASM
+  CompilerEndIf
+  ASM
+    sb a1, 0(t2)
+    la t2, global_mapntslots
+    addiu t3, t2, 32
+    la a0, global_nt
+    daddu a0, a0, t1
+nes_mmc3_ppu_ciram_alias:
+    ld t1, 0(t2)
+    bne t1, t0, nes_mmc3_ppu_ciram_next
+    addiu t2, t2, 8
+    sb a1, 0(a0)
+nes_mmc3_ppu_ciram_next:
+    bne t2, t3, nes_mmc3_ppu_ciram_alias
+    addiu a0, a0, 1024
+nes_mmc3_ppu_write_restore:
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+nes_mmc3_ppu_write_done:
+    jr ra
+    nop
+nes_mmc3_ppu_palette_write:
+    andi t0, a0, 0x13
+    addiu t1, zero, 0x10
+    bne t0, t1, nes_mmc3_ppu_palette_store
+    andi a0, a0, 31
+    addiu a0, a0, -16
+nes_mmc3_ppu_palette_store:
+    j neswritepalette
+    andi a1, a1, 63
+  EndASM
+
+; ---- mappera12, from mmc3_ticks.n64 (N7: moved unchanged) ----
+; MMC3 A12 watch on a PPU bus access: a0 the address, a1 the dot clock. A fall records the dot; a rise after
+; at least 10 low dots clocks the IRQ counter (u_mapperclockirq, a tail jump). Clobbers t0, t1, a0.
+  ASM
+u_mappera12:
+    srl a0, a0, 12
+    la t0, global_mapa12
+    ld t1, 0(t0)
+    andi a0, a0, 1
+    beq a0, t1, mmc3_a12_done
+    nop
+    sd a0, 0(t0)
+    bnez a0, mmc3_a12_rise
+    nop
+    jr ra
+    sd a1, global_maplowsince-global_mapa12(t0)
+mmc3_a12_rise:
+    ld t1, global_maplowsince-global_mapa12(t0)
+    dsubu t1, a1, t1
+    slti t1, t1, 10
+    bnez t1, mmc3_a12_done
+    nop
+    j u_mapperclockirq
+    nop
+mmc3_a12_done:
+    jr ra
+    nop
+  EndASM
+
+; ---- the device read (N7, design note N.40 (3)): NesRead's device half, NesReadPeripheral and the staged
+; NesReadRegister in place ----
+; In: a0 the guest address, $2000-$3FFF or $4015-$4017 (the core's c65_rd_dev sends only those); out: a0 the
+; byte, also NesOpenBus. The pads ($4016 / $4017) go on to the compiled NesReadPeripheral unchanged. A register:
+; CpuNow (the stamp), the trace's read fold (checking build), then exactly the staged NesReadRegister - a $2002
+; read with the MMC3 IRQ disabled syncs only past the status horizon (NesSetStatusHorizon, compiled, then sets
+; a new one); every other register read syncs (the APU alone for $4015); the register; for $2006 / $2007 the
+; A12 notice - then CpuEndWindow (Budget -= Left, Left = 0) and NesOpenBus = the byte. WHY: it replaces five
+; compiled procedures and stubs outside the unit (NesRead, NesReadPeripheral, CpuNow, NesReadRegister,
+; CpuEndWindow, ~150 cycles a read with their misses, N.40). Clobbers what a compiled call may.
+  CompilerIf #NES_CPU_ASM           ; the assembly core's call-out only (the compiled core calls NesRead)
+  ASM
+u_nesreaddev:
+    addiu t0, a0, -0x4016
+    sltiu t0, t0, 2
+    bnez t0, nes_read_pads
+    nop
+    la t0, global_cpucycles
+    ld t1, global_cpuinwindow-global_cpucycles(t0)
+    beqz t1, nes_read_stamp
+    ld a2, 0(t0)
+    ld t1, global_nesrunstart-global_cpucycles(t0)
+    ld t2, global_budget-global_cpucycles(t0)
+    ld a2, global_left-global_cpucycles(t0)
+    daddu t1, t1, t2
+    dsubu a2, t1, a2                ; CpuNow(): CpuCycles = NesRunStart + Budget - Left
+    sd a2, 0(t0)
+nes_read_stamp:
+    ld t1, global_accessphase-global_cpucycles(t0)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    daddu a2, a2, t1                ; the stamp: CpuCycles + AccessPhase
+    sd a0, 8(sp)
+    sd a2, 16(sp)
+  EndASM
+  CompilerIf #NES_CPU_TRACE
+    ASM
+      jal nescputraceread           ; checking build: the read folded into the trace, where NesReadPeripheral did
+      nop
+      ld a0, 8(sp)
+      ld a2, 16(sp)
+    EndASM
+  CompilerEndIf
+  ASM
+    sltiu t1, a0, 0x4000
+    beqz t1, nes_read_apu
+    andi t1, a0, 7
+    addiu t2, zero, 2
+    bne t1, t2, nes_read_synced
+    nop
+    la t0, global_mapirqenable
+    ld t0, 0(t0)
+    la t1, global_nesstatushorizon
+    bnez t0, nes_read_synced
+    ld t1, 0(t1)
+    slt t0, t1, a2                  ; stamp > NesStatusHorizon: the status may have changed
+    beqz t0, nes_read_status
+    nop
+    jal u_workeradvance
+    move a0, a2
+    jal nessetstatushorizon
+    ld a0, 16(sp)
+nes_read_status:
+    jal u_ppuregread                ; PpuRegRead(2)
+    addiu a0, zero, 2
+    b nes_read_close
+    nop
+nes_read_synced:
+    jal u_workeradvance
+    move a0, a2
+    jal u_ppuregread                ; PpuRegRead(addr & 7) (u_ppuregread masks the address)
+    ld a0, 8(sp)
+    ld t0, 8(sp)
+    andi t0, t0, 6
+    xori t0, t0, 6                  ; 0: register 6 or 7, MapperRegNotice's A12 at v
+    bnez t0, nes_read_close
+    sd a0, 24(sp)
+    la t0, global_ppuv
+    ld a0, 0(t0)
+    ld a1, global_mapdots-global_ppuv(t0)
+    jal u_mappera12
+    andi a0, a0, 0x3FFF
+    b nes_read_close
+    ld a0, 24(sp)
+nes_read_apu:                       ; $4015
+    jal u_nesmmc3syncapu
+    move a0, a2
+    jal apureadstatus
+    nop
+nes_read_close:                     ; a0 = the value: CpuEndWindow, then NesOpenBus = value & 255
+    la t0, global_cpucycles
+    ld t1, global_cpuinwindow-global_cpucycles(t0)
+    beqz t1, nes_read_left
+    ld t2, global_left-global_cpucycles(t0)
+    ld t1, global_budget-global_cpucycles(t0)
+    dsubu t1, t1, t2
+    sd t1, global_budget-global_cpucycles(t0)
+nes_read_left:
+    sd zero, global_left-global_cpucycles(t0)
+    andi a0, a0, 0xFF
+    la t1, global_nesopenbus
+    sd a0, 0(t1)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+nes_read_pads:
+    j nesreadperipheral
+    nop
+  EndASM
+  CompilerEndIf

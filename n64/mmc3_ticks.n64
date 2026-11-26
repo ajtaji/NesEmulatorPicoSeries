@@ -240,28 +240,9 @@ ProcedureNaked MapperClockIrq()
 EndProcedure
 
 ProcedureNaked MapperA12(addr.i,dot.i)
+  ; The body is in the hot unit (n64/unit/write.n64, u_mappera12; design note N.40); outside callers enter it here.
   ASM
-    srl a0, a0, 12
-    la t0, global_mapa12
-    ld t1, 0(t0)
-    andi a0, a0, 1
-    beq a0, t1, mmc3_a12_done
-    nop
-    sd a0, 0(t0)
-    bnez a0, mmc3_a12_rise
-    nop
-    jr ra
-    sd a1, global_maplowsince-global_mapa12(t0)
-mmc3_a12_rise:
-    ld t1, global_maplowsince-global_mapa12(t0)
-    dsubu t1, a1, t1
-    slti t1, t1, 10
-    bnez t1, mmc3_a12_done
-    nop
-    j u_mapperclockirq
-    nop
-mmc3_a12_done:
-    jr ra
+    j u_mappera12
     nop
   EndASM
 EndProcedure
