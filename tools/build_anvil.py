@@ -50,7 +50,9 @@ def main():
       'Anvil/Graphics/Vulkan/neon_vk_chrome.pbi']
     if a.bluetooth_peer_wrapper:
         includes += ['RaspberryPi4/Lib/gpio.pi4']
-    source=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
+    # Anvil's Neon libraries do binary32 maths (Anvil/Math/float32.pbi); the program enables it.
+    source='EnableFloatingPoint\n'
+    source+=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
     source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in includes)+'\n'
     if a.bluetooth_peer_wrapper:
         # Anvil's Bluetooth stack, unchanged (2026-10-16). The BT_ON polarity

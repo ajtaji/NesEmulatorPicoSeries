@@ -1,4 +1,5 @@
 ; Touch ROM selector on exFAT partition 2; returning payload. PMF_ROOT must name an Anvil checkout.
+EnableFloatingPoint   ; Anvil's Neon libraries do binary32 maths (Anvil/Math/float32.pbi)
 #DSP_DMA_LINKED=1
 #NES_NATIVE_TIMER=1
 #NES_VERIFY_CODEC=0
