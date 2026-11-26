@@ -370,6 +370,8 @@ nes_shared_chr_write_row:
     daddu t2, t2, t1
     daddu t2, t2, t0
     sh a4, 0(t2)
+    jal neschrpairat                 ; the row's CI4 pair word too (chrpairs.n64; keeps a0-a4, t0, t2)
+    nop
     daddu a3, a3, t0
 
     la t1, global_neschrwindow

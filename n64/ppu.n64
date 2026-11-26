@@ -20,6 +20,7 @@ XIncludeFile "chrdecode.n64"
 XIncludeFile "blank.n64"
 XIncludeFile "visible.n64"
 XIncludeFile "../anvil/ppu.pmi"
+XIncludeFile "chrpairs.n64"
 XIncludeFile "sprites.n64"
 CompilerIf #NES_RETAINED_ROWS
   XIncludeFile "mappedrows.n64"

@@ -196,6 +196,7 @@ Procedure.i LoadGame()
     For i=0 To 8191 : If (i&8)=0 : PpuDecode(i) : EndIf : Next
   Next
   NesChrWindow=CartChr : Pattern=@Decoded(0)
+  NesChrPairsInit()
   CompilerIf #NES_BG_EXPANDED
     NameDescDirty=0
   CompilerEndIf

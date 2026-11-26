@@ -392,6 +392,10 @@ ProcedureNaked MapperChrWrite(addr.i,value.i)
     daddu t2, t2, a5
     daddu t2, t2, a7
     sh a6, 0(t2)
+    or a5, ra, zero                  ; (a leaf: keep ra while the pair word is written)
+    jal neschrpairat                 ; the row's CI4 pair word too (chrpairs.n64; keeps a0-a4, a6, a7, t0, t2)
+    nop
+    or ra, a5, zero
 
     la t0, global_nesmapchr
     la t1, global_nesmappattern

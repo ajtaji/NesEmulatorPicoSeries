@@ -1,0 +1,121 @@
+; THE CHR AS THE RDP LOADS IT (the RDP renderer's step 2): every decoded pattern row also kept as CI4 texels in TILE
+; PAIRS - tiles 2k and 2k + 1 side by side, 8 bytes a row (16 texels, the even texel in the high nibble), 64 bytes a
+; pair - so a LOAD_BLOCK of 64 bytes puts both tiles into TMEM as one 16 x 8 CI4 texture with a line of one 64-bit word.
+; Each 8 KB CHR bank of the decoded table (Decoded, 2 bytes a row: 8 two-bit pixels, the first in the low bits) has
+; its 16 KB of pairs at the same bank index in NesChrPairs.
+;   decoded byte index i  = bank << 13 | tile << 4 | row << 1        (tile 0-511 in the bank, row 0-7)
+;   pair byte offset   f(i) = bank << 14 | (tile >> 1) << 6 | row << 3 | (tile & 1) << 2
+;                           = ((i & ~$1F) << 1) | ((i & $E) << 2) | ((i & $10) >> 2)
+; The pairs are written UNCACHED (KSEG1): the RDP reads RDRAM, never the CPU's cache, and nothing on the CPU reads them.
+; Kept up to date at the cartridge's load (NesChrPairsInit, after the decode) and at every CHR-RAM write that stores
+; a decoded row into the physical table (MapperChrWrite in mapper_windows.n64 calls NesChrPairAt).
+Global Dim NesChrPairs.a(#CART_CHR_BANKS*16384+16)
+Global NesChrPairBase.i                 ; KSEG1 address of the 16-byte-aligned pairs
+Global NesChrPairLimit.i                ; the decoded bytes the pairs follow (0 until NesChrPairsInit: no pair written)
+Global Dim NesPairSpread.u(256)         ; 4 decoded pixels (8 bits) -> 2 CI4 bytes, the first pixel in the top nibble
+
+; NesChrPairAt - the pair word of one decoded row. WHY ASSEMBLY: it runs inside MapperChrWrite's assembly on every
+; CHR-RAM write, between registers that path still needs (a0-a4, t0, t2): a compiled call would save and reload them.
+; IN: t2 = the KSEG0 address of the decoded halfword in Decoded (any other address - an extra pattern window - is left
+; alone). CLOBBERS t1, t3, t8, t9, v0, v1; keeps every other register. HOW: i = t2 - @Decoded(0); i >= the table's
+; size: return. The halfword h holds pixels 0-3 in its low byte and 4-7 in its high byte; NesPairSpread turns each
+; byte into the two CI4 bytes of those 4 pixels, so the word is spread(h & 255) << 16 | spread(h >> 8). The word goes
+; to NesChrPairBase + f(i) (the formula above, three masks and three shifts). Every branch's delay slot is a nop.
+; CHECKED: NesChrPairsCheck (its compiled twin NesChrPairWord over every row, in the fixed-input build) and the pairs
+; dumped from the emulator against the decoded table, byte for byte.
+ProcedureNaked NesChrPairAt()
+  ASM
+    la t9, global_decoded
+    dsubu t1, t2, t9                 ; i, the decoded byte index
+    la t3, global_neschrpairlimit
+    ld t3, 0(t3)                     ; the decoded table's bytes in use
+    sltu t3, t1, t3                  ; inside the table?
+    beq t3, zero, nes_pair_at_done
+    nop
+    lhu v0, 0(t2)                    ; h, the decoded row
+    la t8, global_nespairspread
+    andi t3, v0, 255                 ; pixels 0-3
+    sll t3, t3, 1
+    daddu t3, t3, t8
+    lhu t3, 0(t3)                    ; their two CI4 bytes
+    srl v1, v0, 8                    ; pixels 4-7
+    sll v1, v1, 1
+    daddu v1, v1, t8
+    lhu v1, 0(v1)
+    sll t3, t3, 16
+    or v0, t3, v1                    ; the row's word: texels 0-7, the even one in each high nibble
+    andi t3, t1, 0xFFE0              ; f(i): (i & ~$1F) << 1 ...
+    srl t8, t1, 16
+    sll t8, t8, 16
+    or t3, t3, t8
+    sll t3, t3, 1
+    andi t8, t1, 0xE                 ; ... | (i & $E) << 2 ...
+    sll t8, t8, 2
+    or t3, t3, t8
+    andi t8, t1, 0x10                ; ... | (i & $10) >> 2
+    srl t8, t8, 2
+    or t3, t3, t8
+    la t8, global_neschrpairbase
+    lw t8, 4(t8)                     ; the pairs' KSEG1 base
+    daddu t3, t3, t8
+    sw v0, 0(t3)                     ; uncached: in RDRAM for the RDP at once
+nes_pair_at_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+; The compiled twin: the same word and the same offset, for the check.
+Procedure.i NesChrPairWord(h.i)
+  Protected w.i, x.i, px.i
+  For x = 0 To 7
+    px = (h >> (x * 2)) & 3
+    w = w | (px << (28 - x * 4))
+  Next
+  ProcedureReturn w & $FFFFFFFF
+EndProcedure
+Procedure.i NesChrPairOffset(i.i)
+  ProcedureReturn ((i & ~$1F) << 1) | ((i & $E) << 2) | ((i & $10) >> 2)
+EndProcedure
+
+ProcedureNaked NesChrPairCall(addr.i)  ; the compiled code's way in: t2 = addr, then NesChrPairAt
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal neschrpairat
+    sll t2, a0, 0                    ; the address, sign-extended as the VR4300's 32-bit addressing wants
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+
+CompilerIf #VERIFY_FRAME > 0
+Procedure NesChrPairsCheck(n.i)         ; the assembly's words against the compiled twin's, every row
+  Protected i.i, bad.i, w.i, t.i
+  For i = 0 To n - 2 Step 2
+    w = PeekL(NesChrPairBase + NesChrPairOffset(i)) & $FFFFFFFF
+    t = NesChrPairWord(PeekU(@Decoded(0) + i))
+    If w <> t : bad = bad + 1 : EndIf
+  Next
+  LpmDebugPrint("NES CHR PAIRS " + Str(n / 2) + " rows, words differing from the twin " + Str(bad) + " base $" + Hex(NesChrPairBase & $FFFFFFFF))
+EndProcedure
+CompilerEndIf
+
+Procedure NesChrPairsInit()             ; after the cartridge's decode: the spread table, then every row's pair word
+  Protected b.i, v.i, x.i, i.i, n.i
+  For b = 0 To 255
+    v = 0
+    For x = 0 To 3 : v = v | (((b >> (x * 2)) & 3) << (12 - x * 4)) : Next
+    NesPairSpread(b) = v
+  Next
+  NesChrPairBase = ((@NesChrPairs(0) + 15) & ~15) | $A0000000
+  n = CartChrBanks * 8192
+  If n > #CART_CHR_BANKS * 8192 : n = #CART_CHR_BANKS * 8192 : EndIf
+  NesChrPairLimit = n
+  For i = 0 To n - 2 Step 2 : NesChrPairCall(@Decoded(0) + i) : Next
+  CompilerIf #VERIFY_FRAME > 0
+    NesChrPairsCheck(n)
+  CompilerEndIf
+EndProcedure
+
