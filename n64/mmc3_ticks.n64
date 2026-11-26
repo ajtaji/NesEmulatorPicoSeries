@@ -1,120 +1,22 @@
 ; Clock MMC3 fetch addresses even when the renderer is batching scanlines.
 ; The worker synchronizes both clocks before changing PPU or mapper state.
 ProcedureNaked MapperPpuTicks(cycles.i)
+  ; The body is in the hot unit (n64/unit/a12.n64, inside cpu6502.n64's procedure); outside
+  ; callers enter it here.
   ASM
-    sll a1, a0, 1
-    addu a1, a1, a0
-    la a2, global_mapdots
-    ld t1, global_ppumask-global_mapdots(a2)
-    andi t1, t1, 24
-    beqz t1, mmc3_fetch_with_edges
-    ld a3, global_ppuctrl-global_mapdots(a2)
-    andi t1, a3, 16
-    bnez t1, mmc3_fetch_with_edges
-    ld t1, global_mapa12-global_mapdots(a2)
-    bnez t1, mmc3_fetch_with_edges
-    ld t1, global_nesmmc3dot-global_mapdots(a2)
-    addu t2, t1, a1
-    sltiu t3, t2, 257
-    bnez t3, mmc3_fetch_low_commit
-    sltiu t3, t1, 321
-    beqz t3, mmc3_fetch_after_sprite
-    sltiu t3, t1, 257
-    bnez t3, mmc3_fetch_full_sprite
+    j u_mapperpputicks
     nop
-    b mmc3_fetch_with_edges
-    nop
-mmc3_fetch_after_sprite:
-    ; After sprite fetch, low BG can stay low across the next line boundary.
-    ld t0, global_nesmmc3line-global_mapdots(a2)
-    addiu t1, zero, 261
-    addiu t3, zero, 341
-    bne t0, t1, mmc3_fetch_low_width
-    nop
-    ld t1, global_nesmmc3odd-global_mapdots(a2)
-    subu t3, t3, t1
-mmc3_fetch_low_width:
-    sltu t1, t2, t3
-    bnez t1, mmc3_fetch_low_commit
-    nop
-    subu t2, t2, t3
-    sltiu t1, t2, 257
-    beqz t1, mmc3_fetch_with_edges
-    addiu t0, t0, 1
-    addiu t1, zero, 262
-    bne t0, t1, mmc3_fetch_low_line
-    nop
-    ld t1, global_nesmmc3odd-global_mapdots(a2)
-    xori t1, t1, 1
-    move t0, zero
-    sd t1, global_nesmmc3odd-global_mapdots(a2)
-mmc3_fetch_low_line:
-    sd t0, global_nesmmc3line-global_mapdots(a2)
-mmc3_fetch_low_commit:
-    sd t2, global_nesmmc3dot-global_mapdots(a2)
-    ld t1, 0(a2)
-    daddu t1, t1, a1
-    jr ra
-    sd t1, 0(a2)
+  EndASM
+EndProcedure
 
-mmc3_fetch_full_sprite:
-    ; A complete 8x8 sprite phase at $1000 has one qualified rise
-    ; at most. Every later rise has only four low dots between slots.
-    andi a3, a3, 56
-    addiu t0, zero, 8
-    bne a3, t0, mmc3_fetch_with_edges
-    sltiu t0, t2, 321
-    bnez t0, mmc3_fetch_with_edges
-    ld a3, global_nesmmc3line-global_mapdots(a2)
-    sltiu t0, a3, 240
-    bnez t0, mmc3_fetch_sprite_width
-    addiu a4, zero, 341
-    addiu t0, zero, 261
-    bne a3, t0, mmc3_fetch_with_edges
-    nop
-    ld t0, global_nesmmc3odd-global_mapdots(a2)
-    subu a4, a4, t0
-mmc3_fetch_sprite_width:
-    sltu t0, t2, a4
-    bnez t0, mmc3_fetch_sprite_once
-    subu a5, t2, a4
-    sltiu t0, a5, 257
-    beqz t0, mmc3_fetch_with_edges
-    nop
-    move t2, a5
-    addiu a3, a3, 1
-    addiu t0, zero, 262
-    bne a3, t0, mmc3_fetch_sprite_line
-    nop
-    ld t0, global_nesmmc3odd-global_mapdots(a2)
-    move a3, zero
-    xori t0, t0, 1
-    sd t0, global_nesmmc3odd-global_mapdots(a2)
-mmc3_fetch_sprite_line:
-    sd a3, global_nesmmc3line-global_mapdots(a2)
-mmc3_fetch_sprite_once:
-    sd t2, global_nesmmc3dot-global_mapdots(a2)
-    ld t3, 0(a2)
-    dsubu t1, t3, t1
-    daddu t3, t3, a1
-    ld t0, global_maplowsince-global_mapdots(a2)
-    addiu a3, zero, 255
-    sd a3, global_mapspritebits-global_mapdots(a2)
-    sd t3, 0(a2)
-    daddiu t3, t1, 321
-    sd t3, global_maplowsince-global_mapdots(a2)
-    daddiu t2, t1, 261
-    dsubu t2, t2, t0
-    sltiu t2, t2, 10
-    bnez t2, mmc3_fetch_sprite_done
-    nop
-    j u_mapperclockirq
-    nop
-mmc3_fetch_sprite_done:
-    jr ra
-    nop
-
-mmc3_fetch_with_edges:
+CompilerIf #NES_A12_CHECK
+Global Dim NesA12Check.q(31)
+; The checking build only: the exact fetch-by-fetch A12 walk this file used to run, kept as
+; the reference the analytic walk (unit/a12.n64) is compared against at every call. It is
+; entered with a1 = the dots to advance and a2 = global_mapdots, as before.
+ProcedureNaked NesA12ExactHolder()
+  ASM
+mmc3_exact_walk:
     move a0, a1
     move a6, a2
     ld a1, global_nesmmc3line-global_mapdots(a6)
@@ -326,6 +228,7 @@ mmc3_fetch_done:
     nop
   EndASM
 EndProcedure
+CompilerEndIf
 
 ProcedureNaked MapperClockIrq()
   ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it

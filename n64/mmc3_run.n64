@@ -15,6 +15,7 @@ CompilerElse
 ProcedureNaked NesHotHolder()
   XIncludeFile "../n64/unit/window.n64"
   XIncludeFile "../n64/unit/advance.n64"
+  XIncludeFile "../n64/unit/a12.n64"
   XIncludeFile "../n64/unit/write.n64"
 EndProcedure
 ProcedureNaked.i NesRunMapper4(start.i)

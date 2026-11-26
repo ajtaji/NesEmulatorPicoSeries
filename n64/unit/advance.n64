@@ -149,7 +149,7 @@ mmc3_cpu_fetch_ready:
     dsubu a0, s0, t0
     blez a0, mmc3_cpu_fetch_synced
     nop
-    jal mapperpputicks
+    jal u_mapperpputicks
     nop
     sd s0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
 mmc3_cpu_fetch_synced:
@@ -195,7 +195,7 @@ mmc3_worker_fetch:
     dsubu a0, s0, t0
     blez a0, mmc3_worker_render
     nop
-    jal mapperpputicks
+    jal u_mapperpputicks
     nop
     sd s0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
 mmc3_worker_render:

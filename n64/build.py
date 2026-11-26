@@ -164,10 +164,14 @@ def build(args, *, controller_trace=()):
     if cpu_core == "asm" and not (runtime and cart.mapper == 4):
         raise ValueError("the assembly 6502 core is built for the runtime MMC3 cartridge only")
     cpu_trace = getattr(args, "cpu_trace", False)
+    a12_check = getattr(args, "a12_check", False)
+    if a12_check and not (runtime and cart.mapper == 4 and args.check_frame):
+        raise ValueError("the A12 check is a runtime-MMC3 verification build")
     if cpu_trace and not (runtime and cart.mapper == 4 and args.check_frame):
         raise ValueError("the CPU trace is a runtime-MMC3 verification build")
     settings = {
         "NES_CPU_TRACE": int(cpu_trace),
+        "NES_A12_CHECK": int(a12_check),
         "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
@@ -308,6 +312,8 @@ if __name__ == "__main__":
                         help="the 6502 core: asm (cpu6502.n64, the runtime MMC3 default) or the reference interpreter")
     parser.add_argument("--cpu-trace", action="store_true",
                         help="checking build: a per-frame digest of the state after every instruction (needs --check-frame)")
+    parser.add_argument("--a12-check", action="store_true",
+                        help="checking build: the exact and the analytic A12 walks compared at every call (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:
