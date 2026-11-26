@@ -20,8 +20,14 @@ instead of rebuilding the text list every frame. See
 ## Build
 
 An explicit checkout of [Anvil](https://github.com/ajtaji/Anvil) supplies the
-Neon Arcade, Vulkan, MMU and BCM2711 device libraries. Build against
-Anvil's main branch.
+Neon Arcade, Vulkan, MMU and BCM2711 device libraries. The build helper
+follows the file layout of Anvil's main branch, but against that branch the
+build currently stops at assembly ("stack top $3000000 is inside this
+image's BSS"): this image's variables now come to 34,036,992 bytes, most of
+them Anvil's Vulkan and Neon libraries, and this port's memory map gives its
+variables 15 MiB, from `0x02000000` to 1 MiB below the stack top at
+`0x03000000`. The last Anvil this port built against is the main branch of
+2026-10-16, whose Vulkan backend was still at its earlier paths.
 Use `PureMetalForge.exe --compile`; the build helper invokes that compiler.
 
 ```powershell
