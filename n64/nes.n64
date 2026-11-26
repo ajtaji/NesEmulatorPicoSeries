@@ -347,7 +347,11 @@ CompilerIf #NES_CONSOLE_RECORD
 CompilerEndIf
 Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
   Protected elapsed.i
-  NesDeliveredFrame=lastFrame : HostInputPoll() : HostAudioPoll()
+  NesDeliveredFrame=lastFrame : HostInputPoll()
+  CompilerIf #NES_APU_SPLIT
+    NesApuCatchUp()                     ; the APU at WorkerClock while a sample plays (apusplit.n64, N.26d)
+  CompilerEndIf
+  HostAudioPoll()
   CompilerIf #NES_CONSOLE_RECORD
     NesRecFrame(lastFrame)
   CompilerEndIf

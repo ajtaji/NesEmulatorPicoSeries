@@ -333,6 +333,87 @@ apu_log_full:
     b apu_quiet
     sd t1, 0(t0)
 
+; ---- u_apucatchup: the APU synced to WorkerClock while a sample plays (design note N.26d) ----
+; The DMC deadline (advance.n64) lets the APU lag WorkerClock while DmcBytes > 0; the old
+; program never did (every advance synced it then). The frame's wrap (NesHostGuestFrame, through
+; the stub NesApuCatchUp) reads NesMmc3ApuClock for the sample count after the run loop's stall
+; advance, so it is brought to WorkerClock first: the state the old program had there. With
+; DmcBytes = 0 the APU is left alone, as the old program left it. Once a frame; compiled ABI
+; (s0-s7, fp kept; t0-t3, a0-a7, v0, v1 clobbered).
+u_apucatchup:
+    la a1, global_nesmmc3apuclock
+    ld t0, global_dmcbytes-global_nesmmc3apuclock(a1)
+    blez t0, apu_catchup_done       ; no sample: the old program's lag, if any, stays
+    ld t1, global_workerclock-global_nesmmc3apuclock(a1)
+    ld t0, 0(a1)
+    dsubu a0, t1, t0
+    blez a0, apu_catchup_done       ; synced already
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal u_apuadvance                ; a0 = the lag
+    sd t1, 8(sp)
+    la a1, global_nesmmc3apuclock
+    ld t1, 8(sp)
+    sd t1, 0(a1)                    ; the APU at WorkerClock
+    daddiu t0, zero, -1
+    sd t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)   ; re-derived at the next advance
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+apu_catchup_done:
+    jr ra
+    nop
+
+; ---- mmc3_cpu_apu_dmc: the APU limit while a sample plays (advance.n64's mmc3_cpu_apu_limit
+; branches here: it runs once a sync, not once an advance, so it is in the cold part) ----
+    ; THE DMC DEADLINE (design note N.26c / N.26d). While a sample plays with the buffer full,
+    ; nothing the guest can see changes in the APU before the next byte fetch (its stall, its
+    ; bus read, DmcBytes, the IRQ at the last byte) or the frame IRQ: every register access
+    ; syncs by itself. So the limit is the fetch's cycle F = clock + DmcTimer + (DmcBits - 1) x
+    ; period - an advance to exactly F takes the edge (u_apuadvance: timer - dt <= 0) - or the
+    ; frame IRQ's (the rule above) if earlier. The first advance at or past it syncs, as every
+    ; advance did before, so the fetch is made by the same advance: the same window end, stall
+    ; position and IRQ time. A $4017 reset counting or an empty buffer: the stamp, as before.
+    ; Until that sync the APU lags WorkerClock; its readers allow for it (N.26d's table).
+    ; In: t1 = DmcBytes (> 0). Out: t0 = the limit, stored; t1-t3 clobbered.
+mmc3_cpu_apu_dmc:
+    ld t1, global_apuresetdelay-global_nesmmc3apuclock(a1)
+    bgtz t1, mmc3_cpu_apu_at_stamp
+    ld t1, global_dmcempty-global_nesmmc3apuclock(a1)
+    bnez t1, mmc3_cpu_apu_at_stamp
+    nop
+    la t2, global_apureg            ; $4010's rate ...
+    lbu t2, 16(t2)
+    la t3, global_dmctable
+    andi t2, t2, 15
+    sll t2, t2, 1
+    daddu t3, t3, t2
+    lhu t3, 0(t3)                   ; ... its period in CPU cycles
+    ld t2, global_dmcbits-global_nesmmc3apuclock(a1)
+    addiu t2, t2, -1
+    multu t2, t3                    ; (bits - 1) x period: at most 7 x 428
+    ld t1, global_dmctimer-global_nesmmc3apuclock(a1)
+    ld t0, 0(a1)                    ; NesMmc3ApuClock
+    daddu t0, t0, t1
+    mflo t2
+    daddu t0, t0, t2                ; t0 = F
+    ld t1, global_apuinhibit-global_nesmmc3apuclock(a1)
+    ld t2, global_apufive-global_nesmmc3apuclock(a1)
+    or t1, t1, t2
+    bnez t1, mmc3_cpu_apu_dmc_set   ; no frame IRQ can come
+    ld t1, global_apustep4-global_nesmmc3apuclock(a1)
+    ld t2, global_apuframeclock-global_nesmmc3apuclock(a1)
+    ld t3, 0(a1)
+    daddu t3, t3, t1
+    dsubu t3, t3, t2                ; the frame IRQ's cycle, as the rule above computes it
+    slt t1, t3, t0
+    beqz t1, mmc3_cpu_apu_dmc_set   ; the fetch comes first (or at the same cycle)
+    nop
+    move t0, t3                     ; the frame IRQ comes first
+mmc3_cpu_apu_dmc_set:
+    b mmc3_cpu_apu_ready
+    sd t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)
+
     .align 2
 apu_frame_steps:                    ; the frame-clock values of the steps, by address (as before)
     .word global_apustep1, global_apustep2, global_apustep3, global_apustep4, global_apustep5

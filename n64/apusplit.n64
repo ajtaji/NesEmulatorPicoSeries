@@ -40,6 +40,15 @@ ProcedureNaked NesApuLogWrite(r.i, value.i)
   EndASM
 EndProcedure
 
+ProcedureNaked NesApuCatchUp()
+  ; Called at the frame's wrap (NesHostGuestFrame): the APU brought to WorkerClock while a sample
+  ; plays (n64/unit/apu_cold.n64, the DMC deadline of design note N.26d).
+  ASM
+    j u_apucatchup
+    nop
+  EndASM
+EndProcedure
+
 ; NesApuCount: ApuProduced = the number of samples whose APU cycle is <= NesMmc3ApuClock - what
 ; the old ApuAdvance had produced by the same clock, so every reader of ApuProduced (the AI
 ; queue, the sound reserve of the frame hand-over, the checkpoint print) sees the same value.

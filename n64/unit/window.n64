@@ -238,6 +238,13 @@ u_nesmmc3maskedbudget:
     mflo t0
     ld t1, global_dmctimer-global_dmcbytes(a1)
     addu t0, t0, t1
+    ; The distance is from NesMmc3ApuClock, which may lag WorkerClock while a sample plays
+    ; (the DMC deadline, advance.n64 / design note N.26d); the old program measured it from
+    ; the APU synced at WorkerClock, so the lag comes off.
+    ld t1, global_workerclock-global_dmcbytes(a1)
+    ld t2, global_nesmmc3apuclock-global_dmcbytes(a1)
+    dsubu t1, t1, t2
+    subu t0, t0, t1
     slt t1, t0, a0
     beqz t1, mmc3_masked_raster
     nop

@@ -88,7 +88,7 @@ mmc3_cpu_render_distance:
 
 mmc3_cpu_apu_limit:
     ld t1, global_dmcbytes-global_nesmmc3apuclock(a1)
-    bgtz t1, mmc3_cpu_apu_at_stamp
+    bgtz t1, mmc3_cpu_apu_dmc       ; a sample plays: its next fetch (apu_cold.n64, design note N.26d)
     ld t1, global_apuinhibit-global_nesmmc3apuclock(a1)
     ld t2, global_apufive-global_nesmmc3apuclock(a1)
     or t1, t1, t2
