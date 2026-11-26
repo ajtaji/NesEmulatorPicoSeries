@@ -40,7 +40,25 @@ def triangle_mean_table(source: str) -> str:
     return replace(source, "\nRgbData:", "\n" + "\n".join(rows) + "\nRgbData:")
 
 
-def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) -> str:
+def stage_apu_split(source: str) -> str:
+    """The runtime MMC3 cartridge's APU split (design note N.25): the timing in the hot unit, the
+    synthesis by block from its log. ApuDmcFetch / ApuTick give way to apusplit.n64 (the stubs into
+    the unit, the log, the synthesis); ApuAdvance moves into the unit; ApuWrite logs itself at its
+    end, after its effects, instead of opening the old sound boundary at its start."""
+    begin = source.index("Procedure ApuDmcFetch()")
+    end = source.index("Procedure ApuMixSampleBase()", begin)
+    source = source[:begin] + 'XIncludeFile "../n64/apusplit.n64"\n' + source[end:]
+    scheduler = re.search(r"^Procedure ApuAdvance\(dt\.i\)\n.*?^EndProcedure$", source, re.M | re.S)
+    if not scheduler:
+        raise ValueError("N64 audio staging expected ApuAdvance")
+    source = replace(source, scheduler[0], "")
+    source = replace(source, "  WorkerIrq=ApuFrameIrq|DmcIrq\nEndProcedure\nProcedure.i ApuReadStatus()",
+                     "  NesApuLogWrite(r,value)\n  WorkerIrq=ApuFrameIrq|DmcIrq\nEndProcedure\n"
+                     "Procedure.i ApuReadStatus()")
+    return "#NES_APU_BLOCKED=0\n" + source
+
+
+def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000, split: bool = False) -> str:
     if name == "lookup_tables":
         return triangle_mean_table(source)
     if name == "bridge":
@@ -70,6 +88,8 @@ def stage_audio(name: str, source: str, mapper: int, audio_rate: int = 48000) ->
             begin = source.index("Procedure.i ApuVolume(ch.i)")
             end = source.index("Procedure ApuDmcFetch()", begin)
             source = source[:begin] + 'XIncludeFile "../n64/apuframe.n64"\n' + source[end:]
+        if split:
+            return stage_apu_split(source)
         if audio_rate == 20000 or mapper == 4:
             begin = source.index("Procedure ApuDmcFetch()")
             end = source.index("Procedure ApuMixSampleBase()", begin)

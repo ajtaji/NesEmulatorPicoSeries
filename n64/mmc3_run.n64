@@ -20,6 +20,8 @@ ProcedureNaked NesHotHolder()
   XIncludeFile "../n64/unit/ppu.n64"
   XIncludeFile "../n64/unit/ppu_cold.n64"
   XIncludeFile "../n64/unit/ppu_check.n64"
+  XIncludeFile "../n64/unit/apu.n64"
+  XIncludeFile "../n64/unit/apu_cold.n64"
 EndProcedure
 ProcedureNaked.i NesRunMapper4(start.i)
   ASM

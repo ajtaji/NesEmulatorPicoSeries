@@ -1,0 +1,87 @@
+; apusplit.n64 - the APU split's glue, runtime MMC3 cartridge (design note, section N.25: step N6)
+; Staged by stage_audio.py into the shared APU in place of ApuDmcFetch / ApuTick (and ApuAdvance
+; removed): the timing is the hot unit's (unit/apu.n64, unit/apu_cold.n64), the sound is the
+; synthesis's (apusynth.n64), and between them is the log declared here. The procedures below
+; are the names the rest of the program calls; each is one jump into the unit.
+
+; THE LOG (layout: unit/apu_cold.n64's header). Heads are written by the timing, tails by the
+; synthesis; both only grow (an index is taken modulo the entry count).
+Global NesApuLogHead.i, NesApuLogTail.i, NesApuDmcHead.i, NesApuDmcTail.i
+Global Dim NesApuLog.i(#NES_APU_LOG_ENTRIES*2)
+Global Dim NesApuDmcLog.i(#NES_APU_DMC_ENTRIES)
+; THE SAMPLE COUNT the host reads (ApuProduced): its next sample's APU cycle (NesApuCount below).
+Global NesApuSampleAt.i
+
+ProcedureNaked ApuAdvance(dt.i)
+  ; The body is in the hot unit (n64/unit/apu.n64, inside cpu6502.n64's procedure); outside
+  ; callers enter it here.
+  ASM
+    j u_apuadvance
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked ApuDmcFetch()
+  ; The body is in the hot unit's cold part (n64/unit/apu_cold.n64). ApuWrite's $4015 start.
+  ASM
+    j u_apudmcfetch
+    nop
+  EndASM
+EndProcedure
+
+ProcedureNaked NesApuLogWrite(r.i, value.i)
+  ; Called at the end of the staged ApuWrite: the write into the log (n64/unit/apu_cold.n64).
+  ASM
+    j u_apulogwrite
+    nop
+  EndASM
+EndProcedure
+
+; NesApuCount: ApuProduced = the number of samples whose APU cycle is <= NesMmc3ApuClock - what
+; the old ApuAdvance had produced by the same clock, so every reader of ApuProduced (the AI
+; queue, the sound reserve of the frame hand-over, the checkpoint print) sees the same value.
+; The cadence is the old one: after a sample, the next comes ApuSampleBase cycles later, plus
+; one when the fraction ApuSampleFrac + ApuFracStep reaches ApuFracDen (20 kHz NTSC: 89 + 43/88).
+; Called by HostAudioPoll. A leaf with the compiled ABI (t0-t3, a0-a6 clobbered).
+ProcedureNaked NesApuCount()
+  ASM
+    la t0, global_nesmmc3apuclock
+    ld t1, 0(t0)                    ; t1 = the APU's time
+    la t0, global_nesapusampleat
+    ld a0, 0(t0)                    ; a0 = the next sample's cycle
+    slt t2, t1, a0
+    bnez t2, nes_apu_count_done     ; not reached: nothing new
+    nop
+    la a1, global_apuproduced
+    ld a2, 0(a1)
+    la t2, global_apusamplefrac
+    ld a3, 0(t2)
+    la t3, global_apufracstep
+    ld a4, 0(t3)
+    la t3, global_apufracden
+    ld a5, 0(t3)
+    la t3, global_apusamplebase
+    ld a6, 0(t3)
+nes_apu_count_next:
+    daddiu a2, a2, 1                ; this sample counted
+    daddu a3, a3, a4                ; the fraction moves
+    slt t3, a3, a5
+    bnez t3, nes_apu_count_step
+    move t3, a6                     ; (delay slot) the interval: the base ...
+    dsubu a3, a3, a5
+    daddiu t3, a6, 1                ; ... plus one when the fraction carries
+nes_apu_count_step:
+    daddu a0, a0, t3                ; the next sample's cycle
+    slt t3, t1, a0
+    beqz t3, nes_apu_count_next
+    nop
+    sd a0, 0(t0)
+    sd a2, 0(a1)
+    sd a3, 0(t2)
+nes_apu_count_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+XIncludeFile "apusynth.n64"

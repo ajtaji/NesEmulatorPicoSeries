@@ -126,7 +126,7 @@ mmc3_cpu_slow:
     dsubu a0, s0, t0
     blez a0, mmc3_cpu_apu_synced
     nop
-    jal apuadvance
+    jal u_apuadvance              ; the APU timing (unit/apu.n64, design note N.25)
     nop
     sd s0, 0(s1)
 mmc3_cpu_apu_synced:
@@ -187,7 +187,7 @@ u_workeradvance:
     dsubu a0, s0, t0
     blez a0, mmc3_worker_fetch
     nop
-    jal apuadvance
+    jal u_apuadvance              ; the APU timing (unit/apu.n64, design note N.25)
     nop
     sd s0, 0(s1)
 mmc3_worker_fetch:
@@ -329,7 +329,7 @@ u_nesmmc3syncapu:
     dsubu a0, t1, t2
     blez a0, mmc3_register_apu_synced
     nop
-    jal apuadvance
+    jal u_apuadvance              ; the APU timing (unit/apu.n64, design note N.25)
     nop
     la t0, global_nesmmc3apuclock
     ld t1, 8(sp)

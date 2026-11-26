@@ -204,6 +204,8 @@ def build(args, *, controller_trace=()):
         # the CI8 rows: a whole frame (240 x 256) for the old renderer, the fallback lines' ring (240 rows) for N5
         "NES_LINE_BYTES": 240 * 256 + 255 if rdp_show else 61455,
         "NES_CPU_ASM": int(cpu_core == "asm"),
+        # N6 (design note, N.25): the runtime-MMC3 cartridge's APU timing in the hot unit, its synthesis by block
+        "NES_APU_SPLIT": int(runtime and cart.mapper == 4),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
@@ -267,7 +269,7 @@ def build(args, *, controller_trace=()):
                 code = code.replace("PeekL(@QComplete)", "PeekI(@QComplete)")
                 code = stage_input(stage_bus(code, cart.mapper))
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code), runtime and cart.mapper == 4),
-                               cart.mapper, audio_rate)
+                               cart.mapper, audio_rate, split=runtime and cart.mapper == 4)
             code = stage_sync(name, code, cart.mapper, chain_nrom, raster_deadline, runtime)
             code = stage_simple_mapper(name, code, cart.mapper)
             if name == "bridge" and runtime and cart.mapper == 4:

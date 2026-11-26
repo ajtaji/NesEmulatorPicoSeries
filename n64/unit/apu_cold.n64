@@ -1,0 +1,388 @@
+; unit/apu_cold.n64 - the APU timing's rare paths and the log (design note, section N.25)
+; In the hot unit's cold part (after c65_fetch_slow), so they never share I-cache sets with the
+; core's hottest lines on purpose (N.3). Entry labels u_<procedure>; the procedures ApuDmcFetch
+; and NesApuLogWrite (apusplit.n64) are one-jump stubs to them.
+;
+; THE LOG - the synthesis's only input from the timing, in time order (apusynth.n64 reads it):
+;   main log NesApuLog, #NES_APU_LOG_ENTRIES entries of 16 bytes, head NesApuLogHead (written
+;   here), tail NesApuLogTail (the synthesis):
+;     +0  the APU cycle of the event (dword)
+;     +8  kind: 0 a register write, 1 a quarter step, 2 a quarter and a half step
+;     +9  the register (0-23, $4000 + n)     +10 the value written
+;     +12 .. +15 the four length counters AFTER the event (the synthesis copies them: it never
+;         recomputes a counter the guest can read)
+;   DMC log NesApuDmcLog, #NES_APU_DMC_ENTRIES dwords, head NesApuDmcHead, tail NesApuDmcTail:
+;     (the cycle of the byte-boundary edge << 8) | the byte that entered the shift register.
+;     A boundary with no entry is a silent one (the buffer was empty).
+; A log with no room renders the synthesis up to the new entry's cycle - 1 first (everything
+; before the entry is decided by then); still no room is a loud stop, WorkerError 24.
+
+  ASM
+; ---- the frame sequencer's segments: the old ApuAdvance loop without its sample bound ----
+; a0 = dt > 0, NesMmc3ApuClock = the interval's start. A segment ends at dt's end, the reset's
+; end or the next step, whichever is first. Per segment: the DMC run, then the reset / the step.
+apu_frame_path:
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    move s0, a0                     ; s0 = cycles still to advance
+    la t0, global_nesmmc3apuclock
+    ld s1, 0(t0)                    ; s1 = the segment's start (an APU cycle)
+apu_seg_next:
+    move s2, s0                     ; s2 = the segment's length, at most what is left
+    la t0, global_apuframeclock
+    ld t1, global_apuresetdelay-global_apuframeclock(t0)
+    blez t1, apu_seg_step
+    slt t2, t1, s2
+    beqz t2, apu_seg_step
+    nop
+    move s2, t1                     ; bounded by the reset's end
+apu_seg_step:
+    jal apu_step_value              ; t2 = the next step's frame-clock value
+    nop
+    move s3, t2                     ; kept over the DMC run (the old loop kept it in s2)
+    ld t1, 0(t0)
+    dsubu t2, t2, t1                ; cycles to the step
+    slt t3, t2, s2
+    beqz t3, apu_seg_dmc
+    nop
+    move s2, t2                     ; bounded by the step
+apu_seg_dmc:
+    move a0, s2
+    jal u_apudmcrun                 ; the DMC over this segment (it also publishes WorkerIrq)
+    daddu a1, s1, s2                ; (delay slot) the segment's end
+    daddu s1, s1, s2                ; s1 = the segment's end: the cycle of a reset / step below
+    la t0, global_apuframeclock
+    ld t1, 0(t0)
+    daddu t1, t1, s2
+    sd t1, 0(t0)                    ; ApuFrameClock += step
+    ld t2, global_apuresetdelay-global_apuframeclock(t0)
+    blez t2, apu_seg_check
+    dsubu t2, t2, s2
+    bnez t2, apu_seg_check          ; the reset still counting (the old loop checked the step then)
+    sd t2, global_apuresetdelay-global_apuframeclock(t0)
+    ; the reset's end: frame clock and step to 0; in five-step mode a quarter and a half at once
+    sd zero, 0(t0)
+    sd zero, global_apuframestep-global_apuframeclock(t0)
+    ld t1, global_apufive-global_apuframeclock(t0)
+    beqz t1, apu_seg_done           ; (the old loop skipped the step check after a reset)
+    nop
+    jal apu_half_lengths
+    nop
+    addiu a0, zero, 2
+    b apu_seg_logged
+    nop
+apu_seg_check:
+    ld t1, 0(t0)
+    slt t2, t1, s3
+    bnez t2, apu_seg_done           ; the step not reached
+    nop
+    ; the step: a quarter; on steps 1 and 3 also a half (the length counters here, the sweep in
+    ; the synthesis); after step 3 the frame IRQ unless five-step or inhibited, and the clock
+    ; rewinds by the step's value + 1, as the old loop did
+    ld t1, global_apuframestep-global_apuframeclock(t0)
+    andi t1, t1, 1
+    beqz t1, apu_seg_quarter
+    addiu a0, zero, 1
+    jal apu_half_lengths
+    nop
+    addiu a0, zero, 2
+apu_seg_quarter:
+    la t0, global_apuframeclock
+    ld t1, global_apuframestep-global_apuframeclock(t0)
+    addiu t1, t1, 1
+    addiu t2, t1, -4
+    bnez t2, apu_seg_logged
+    sd t1, global_apuframestep-global_apuframeclock(t0)
+    ld t1, global_apufive-global_apuframeclock(t0)
+    ld t2, global_apuinhibit-global_apuframeclock(t0)
+    or t1, t1, t2
+    bnez t1, apu_seg_rewind
+    addiu t1, zero, 1
+    sd t1, global_apuframeirq-global_apuframeclock(t0)
+apu_seg_rewind:
+    ld t1, 0(t0)
+    dsubu t1, t1, s3
+    daddiu t1, t1, -1
+    sd t1, 0(t0)
+    sd zero, global_apuframestep-global_apuframeclock(t0)
+apu_seg_logged:
+    ; the log entry of the step (a0 = kind), at the segment's end, with the counters after it
+    move a1, zero
+    move a2, zero
+    jal apu_log_append
+    move a3, s1
+apu_seg_done:
+    dsubu s0, s0, s2
+    bgtz s0, apu_seg_next
+    nop
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    b apu_publish
+    daddiu sp, sp, 48
+
+; t2 = the frame-clock value of the next step (t0 = &ApuFrameClock; t3 clobbered). A leaf.
+apu_step_value:
+    la t0, global_apuframeclock
+    ld t2, global_apuframestep-global_apuframeclock(t0)
+    sltiu t3, t2, 3
+    bnez t3, apu_step_value_index
+    sll t3, t2, 2
+    ld t3, global_apufive-global_apuframeclock(t0)
+    sltu t3, zero, t3
+    sll t3, t3, 2
+    addiu t3, t3, 12
+apu_step_value_index:
+    la t2, apu_frame_steps
+    addu t2, t2, t3
+    lw t2, 0(t2)
+    jr ra
+    ld t2, 0(t2)
+
+; The half step's length counters (the first loop of the old ApuHalf, apuframe.n64; its sweep is
+; the synthesis's): a counter above 0 counts down unless its channel's halt bit is set ($4000 /
+; $4004 / $400C bit 5, $4008 bit 7). A leaf: t0-t3, a0 clobbered.
+apu_half_lengths:
+    la t0, global_apulength
+    la t1, global_apureg
+    or a0, zero, zero
+apu_len_next:
+    sll t2, a0, 2
+    addu t2, t2, t1
+    lbu t2, 0(t2)                   ; the channel's first register
+    xori t3, a0, 2
+    bnez t3, apu_len_hold
+    addiu t3, zero, 32              ; the halt bit: bit 5 ...
+    addiu t3, zero, 128             ; ... bit 7 for the triangle
+apu_len_hold:
+    and t2, t2, t3
+    bnez t2, apu_len_advance        ; halted
+    ld t3, 0(t0)
+    blez t3, apu_len_advance        ; already 0
+    daddiu t3, t3, -1
+    sd t3, 0(t0)
+apu_len_advance:
+    addiu a0, a0, 1
+    sltiu t2, a0, 4
+    bnez t2, apu_len_next
+    addiu t0, t0, 8
+    jr ra
+    nop
+
+; ---- the DMC's byte boundary (from apu_dmc_edge, unit/apu.n64): t0 = &DmcTimer, t1 the timer,
+; t2 the period, t3 = 0 (the bit count), a1 the interval's end. The old NesDmcEdge's boundary:
+; bits = 8; an empty buffer makes the output silent (the synthesis's business: nothing logged);
+; else the buffer enters the shift register (logged, with the edge's cycle), the buffer is empty
+; and the next byte is fetched.
+apu_dmc_byte:
+    ld a2, global_dmcempty-global_dmctimer(t0)
+    bnez a2, apu_dmc_next           ; empty: a silent byte
+    addiu t3, zero, 8               ; (delay slot) the bit count reloads either way
+    dsubu a2, t1, t2                ; the timer before this edge's reload (<= 0) ...
+    daddu a2, a1, a2                ; ... so the edge's APU cycle
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd t1, 8(sp)
+    sd t2, 16(sp)
+    sd a1, 24(sp)
+    sd a2, 32(sp)
+    sd zero, 40(sp)                 ; renders tried for room
+apu_dmc_log_try:
+    la a3, global_nesapudmchead
+    ld a4, 0(a3)
+    ld a5, global_nesapudmctail-global_nesapudmchead(a3)
+    dsubu a5, a4, a5
+    slti a5, a5, #NES_APU_DMC_ENTRIES
+    bnez a5, apu_dmc_log_room
+    ld a5, 40(sp)
+    bnez a5, apu_dmc_log_lost       ; a render did not make room: stop loudly
+    addiu a5, zero, 1
+    sd a5, 40(sp)
+    jal nessynrendertime            ; render everything before this edge (the compiled ABI)
+    daddiu a0, a2, -1
+    b apu_dmc_log_try
+    ld a2, 32(sp)
+apu_dmc_log_lost:
+    la a5, global_workererror
+    addiu a6, zero, 24
+    b apu_dmc_fetch
+    sd a6, 0(a5)
+apu_dmc_log_room:
+    andi a5, a4, #NES_APU_DMC_ENTRIES-1
+    sll a5, a5, 3
+    la a6, global_nesapudmclog
+    addu a5, a5, a6
+    la a6, global_dmcbuffer
+    ld a6, 0(a6)
+    dsll a7, a2, 8
+    andi a6, a6, 255
+    or a7, a7, a6
+    sd a7, 0(a5)                    ; (cycle << 8) | byte
+    daddiu a4, a4, 1
+    sd a4, 0(a3)
+apu_dmc_fetch:
+    la t0, global_dmcempty
+    addiu a2, zero, 1
+    jal u_apudmcfetch               ; the next byte, if any (it may set the DMC IRQ)
+    sd a2, 0(t0)                    ; (delay slot) the shift register took the buffer
+    ld ra, 0(sp)
+    ld t1, 8(sp)
+    ld t2, 16(sp)
+    ld a1, 24(sp)
+    daddiu sp, sp, 48
+    la t0, global_dmctimer
+    b apu_dmc_next
+    addiu t3, zero, 8
+
+; ---- u_apudmcfetch: the DMC's byte fetch, moved unchanged from apudmc.n64 (ApuDmcFetch) ----
+; If the buffer is empty and bytes remain: read the byte through the cartridge bus (WorkerRead),
+; charge the CPU 4 stall cycles, step the address ($FFFF wraps to $8000), count the byte; at the
+; last byte loop to the sample's start or raise the DMC IRQ. Called from the byte boundary above
+; and, through the stub ApuDmcFetch, from ApuWrite's $4015 start.
+u_apudmcfetch:
+    la t0, global_dmcempty
+    ld t1, 0(t0)
+    beqz t1, apu_fetch_return
+    nop
+    la t0, global_dmcbytes
+    ld t1, 0(t0)
+    blez t1, apu_fetch_return
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t0, global_dmcaddress
+    jal workerread
+    ld a0, 0(t0)
+    la t0, global_dmcbuffer
+    sd a0, 0(t0)
+    la t0, global_dmcempty
+    sd zero, 0(t0)
+    la t0, global_workerdmccycles
+    ld t1, 0(t0)
+    daddiu t1, t1, 4
+    sd t1, 0(t0)
+    la t0, global_dmcaddress
+    ld t1, 0(t0)
+    lui t2, 1
+    daddiu t1, t1, 1
+    bne t1, t2, apu_fetch_address
+    nop
+    ori t1, zero, 0x8000
+apu_fetch_address:
+    sd t1, 0(t0)
+    la t0, global_dmcbytes
+    ld t1, 0(t0)
+    daddiu t1, t1, -1
+    bnez t1, apu_fetch_done
+    sd t1, 0(t0)
+    la t1, global_apureg
+    lbu t2, 16(t1)
+    andi t3, t2, 64
+    beqz t3, apu_fetch_irq
+    andi t2, t2, 128
+    lbu t2, 19(t1)
+    lbu t1, 18(t1)
+    sll t2, t2, 4
+    sll t1, t1, 6
+    addiu t2, t2, 1
+    ori t3, zero, 0xc000
+    addu t1, t1, t3
+    sd t2, 0(t0)
+    la t0, global_dmcaddress
+    b apu_fetch_done
+    sd t1, 0(t0)
+apu_fetch_irq:
+    beqz t2, apu_fetch_done
+    nop
+    la t0, global_dmcirq
+    addiu t1, zero, 1
+    sd t1, 0(t0)
+apu_fetch_done:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+apu_fetch_return:
+    jr ra
+    nop
+
+; ---- u_apulogwrite: a register write into the log, called at the END of ApuWrite (the staged
+; shared procedure; stub NesApuLogWrite) - so the length counters logged are the ones the write
+; left. a0 = the register (0-23), a1 = the value. The cycle is NesMmc3ApuClock: the APU's time
+; when ApuWrite runs, which is where the old program put the write's sound boundary.
+u_apulogwrite:
+    move a2, a1
+    move a1, a0
+    la t0, global_nesmmc3apuclock
+    ld a3, 0(t0)
+    move a0, zero                   ; kind 0: a write; tail-call the append with ApuWrite's ra
+    ; fall through
+
+; ---- apu_log_append: one main-log entry. a0 kind, a1 register, a2 value, a3 cycle. Keeps the
+; s registers; t0-t3, a0-a7, v0, v1 clobbered (it may render the synthesis for room).
+apu_log_append:
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd zero, 40(sp)                 ; renders tried for room
+apu_log_try:
+    la t0, global_nesapuloghead
+    ld t1, 0(t0)
+    ld t2, global_nesapulogtail-global_nesapuloghead(t0)
+    dsubu t3, t1, t2
+    slti t3, t3, #NES_APU_LOG_ENTRIES
+    bnez t3, apu_log_room
+    ld t3, 40(sp)
+    bnez t3, apu_log_lost           ; a render did not make room: stop loudly
+    addiu t3, zero, 1
+    sd t3, 40(sp)
+    ld a0, 32(sp)
+    jal nessynrendertime            ; render everything before this entry's cycle
+    daddiu a0, a0, -1
+    b apu_log_try
+    nop
+apu_log_lost:
+    la t0, global_workererror
+    addiu t1, zero, 24
+    b apu_log_out
+    sd t1, 0(t0)
+apu_log_room:
+    andi t2, t1, #NES_APU_LOG_ENTRIES-1
+    sll t2, t2, 4
+    la t3, global_nesapulog
+    addu t2, t2, t3                 ; the entry
+    ld t3, 32(sp)
+    sd t3, 0(t2)                    ; +0 the cycle
+    ld t3, 8(sp)
+    sb t3, 8(t2)                    ; +8 kind
+    ld t3, 16(sp)
+    sb t3, 9(t2)                    ; +9 register
+    ld t3, 24(sp)
+    sb t3, 10(t2)                   ; +10 value
+    la t3, global_apulength
+    ld a0, 0(t3)
+    sb a0, 12(t2)                   ; +12.. the length counters (at most 254: a byte each)
+    ld a0, 8(t3)
+    sb a0, 13(t2)
+    ld a0, 16(t3)
+    sb a0, 14(t2)
+    ld a0, 24(t3)
+    sb a0, 15(t2)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)                    ; published last
+apu_log_out:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 48
+
+    .align 2
+apu_frame_steps:                    ; the frame-clock values of the steps, by address (as before)
+    .word global_apustep1, global_apustep2, global_apustep3, global_apustep4, global_apustep5
+  EndASM

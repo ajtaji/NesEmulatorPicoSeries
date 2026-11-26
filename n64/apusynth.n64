@@ -1,0 +1,1068 @@
+; ============================================================================
+; apusynth.n64 - the APU's SYNTHESIS, by block, from the timing's log (design note, section N.25:
+; step N6, the APU split). The CPU twin of N10's RSP synthesis: the RSP's block output is to be
+; compared with this word for word.
+;
+; WHAT: the sound half of the old program - the oscillators (pulse x 2, triangle, noise), the
+; envelopes, the linear counter, the sweeps, the DMC's output level, the non-linear mix and the
+; DC filter - rendered into the PCM ring Pcm (the host's AI copy reads it), on its OWN state
+; (NesSynState below), from the log the timing writes (unit/apu_cold.n64: register writes and
+; frame-sequencer steps with their cycles and the length counters after them; the bytes that
+; entered the DMC's shift register). Nothing the guest can see is computed here.
+;
+; WHEN: NesSynRenderTo(n) renders until n samples are done; HostQueueAudio calls it just before
+; it copies a 512-sample AI block, so the synthesis runs once an AI block (~0.65 a guest frame).
+; NesSynRenderTime(t) renders the samples at APU cycles <= t; the timing calls it when a log has
+; no room. A sample may be rendered only once everything before it is decided: the host asks
+; only for samples ApuProduced has counted (their cycles are <= NesMmc3ApuClock), the timing
+; only for cycles before the entry it is writing.
+;
+; HOW - the old program's order of operations, as rules on APU cycles (apuschedule.n64,
+; apublock.n64: the old ApuAdvance recorded a sample at the end of a step, then the boundary
+; of a step or a write rendered the samples so far and ticked the oscillators to now):
+;   - a frame step at cycle t applies BEFORE a sample at t; a register write at t AFTER it;
+;   - the DMC's bit edges at cycles <= t come before a sample or a write at t;
+;   - at a step or a write the oscillators are first ticked by the cycles since their last tick
+;     (the old flush; nothing when 0), then the event applies;
+;   - every sample ticks them by its span since the last tick (0 included: the old mix did);
+;   - the samples between two events are one run with that interval's parameters (the old
+;     NesRenderBlock / NesMixBlock never spanned an event; splitting a run changes nothing).
+; The per-sample arithmetic is the old routines' (oscillators.n64's NesOscillatorTick, apumix.n64's
+; NesMixBlock, apublock.n64's NesRenderBlock / NesPulseBlockVolume, apuframe.n64's ApuVolume /
+; ApuQuarter / ApuHalf's sweep, apudmc.n64's NesDmcEdge level part, ApuWrite's sound half),
+; instruction for instruction, with the state moved into NesSynState.
+; THE DMC REPLICA: this file keeps its own copy of the DMC's bit clock (the next edge's cycle,
+; the bit count, from its own $4010 copy - the same additions as the timing's) and its shift /
+; silence / level. At a byte boundary edge it takes the DMC log's next entry if that entry's
+; cycle is this edge's (the buffer was full there), else the output goes silent. An entry OLDER
+; than the edge means the two clocks disagree: a loud stop (WorkerError 25).
+;
+; CHECKED BY: the oracle's full PCM capture byte for byte against the old path's (N.25's proof).
+; ============================================================================
+
+; NesSynState, byte offsets (8-byte slots unless said; the registers are bytes)
+#NES_S_REG = 0            ; $4000-$4017 as the synthesis has applied them (24 bytes)
+#NES_S_LENGTH = 32        ; the four length counters, copied from the log
+#NES_S_PERIOD = 64        ; pulse 0, pulse 1, triangle (and an unused fourth)
+#NES_S_TIMER = 96         ; pulse 0, pulse 1, triangle, noise
+#NES_S_SEQ = 128          ; the sequencer steps (pulses 0-7, triangle 0-31)
+#NES_S_ENVSTART = 160     ; pulse 0, pulse 1, noise
+#NES_S_ENVDIV = 184
+#NES_S_ENVDECAY = 208
+#NES_S_SWEEPDIV = 232     ; pulse 0, pulse 1
+#NES_S_SWEEPRELOAD = 248
+#NES_S_LINEAR = 264
+#NES_S_LINEARRELOAD = 272
+#NES_S_NOISE = 280        ; the noise shift register
+#NES_S_TRIDAC = 288       ; the triangle's output step
+#NES_S_DMCNEXT = 296      ; the DMC's next bit edge, an APU cycle
+#NES_S_DMCBITS = 304
+#NES_S_DMCSHIFT = 312
+#NES_S_DMCSILENT = 320
+#NES_S_DMCLEVEL = 328
+#NES_S_LASTX = 336        ; the DC filter's last input and output
+#NES_S_LASTY = 344
+#NES_S_TICK = 352         ; the oscillators' last tick, an APU cycle
+#NES_S_AT = 360           ; the next sample's APU cycle
+#NES_S_FRAC = 368         ; the sample cadence's fraction
+#NES_S_DONE = 376         ; samples rendered (the Pcm index of the next)
+#NES_S_SLOTS = 48
+#NES_SYN_RUN = 128        ; samples a run holds at most (a run ends earlier at an event)
+Global Dim NesSynState.i(#NES_S_SLOTS)
+Global Dim NesSynSpans.u(#NES_SYN_RUN)
+Global Dim NesSynLevels.a(#NES_SYN_RUN)
+
+; Once, before the guest runs (now = NesMmc3ApuClock, 0 then): the synthesis starts from the APU's power-on
+; state as the timing holds it, and the host's sample count from the same cadence.
+Procedure NesSynInit(now.i)
+  Protected i.i, s.i=@NesSynState(0)
+  For i=0 To #NES_S_SLOTS-1 : NesSynState(i)=0 : Next
+  For i=0 To 23 : PokeA(s+#NES_S_REG+i,ApuReg(i)) : Next
+  For i=0 To 3
+    PokeI(s+#NES_S_LENGTH+i*8,ApuLength(i)) : PokeI(s+#NES_S_PERIOD+i*8,ApuPeriod(i))
+    PokeI(s+#NES_S_TIMER+i*8,ApuTimer(i)) : PokeI(s+#NES_S_SEQ+i*8,ApuSeq(i))
+  Next
+  For i=0 To 2
+    PokeI(s+#NES_S_ENVSTART+i*8,EnvStart(i)) : PokeI(s+#NES_S_ENVDIV+i*8,EnvDiv(i))
+    PokeI(s+#NES_S_ENVDECAY+i*8,EnvDecay(i))
+  Next
+  For i=0 To 1
+    PokeI(s+#NES_S_SWEEPDIV+i*8,SweepDiv(i)) : PokeI(s+#NES_S_SWEEPRELOAD+i*8,SweepReload(i))
+  Next
+  PokeI(s+#NES_S_LINEAR,ApuLinear) : PokeI(s+#NES_S_LINEARRELOAD,ApuLinearReload)
+  PokeI(s+#NES_S_NOISE,NoiseShift) : PokeI(s+#NES_S_TRIDAC,TriDac)
+  PokeI(s+#NES_S_DMCNEXT,now+DmcTimer) : PokeI(s+#NES_S_DMCBITS,DmcBits)
+  PokeI(s+#NES_S_DMCSHIFT,DmcShift) : PokeI(s+#NES_S_DMCSILENT,DmcSilent)
+  PokeI(s+#NES_S_DMCLEVEL,DmcLevel)
+  PokeI(s+#NES_S_LASTX,ApuLastX) : PokeI(s+#NES_S_LASTY,ApuLastY)
+  PokeI(s+#NES_S_TICK,now) : PokeI(s+#NES_S_AT,now+ApuSampleLeft)
+  PokeI(s+#NES_S_FRAC,ApuSampleFrac) : PokeI(s+#NES_S_DONE,ApuProduced)
+  NesApuSampleAt=now+ApuSampleLeft
+  NesApuLogHead=0 : NesApuLogTail=0 : NesApuDmcHead=0 : NesApuDmcTail=0
+EndProcedure
+
+ProcedureNaked NesSynRenderTo(n.i)
+  ; render until n samples are done (a0 = n; no cycle limit)
+  ASM
+    daddiu a1, zero, -1
+    j nes_syn_render
+    dsrl a1, a1, 1
+  EndASM
+EndProcedure
+
+ProcedureNaked NesSynRenderTime(t.i)
+  ; render every sample at an APU cycle <= t (a1 = t; no count limit)
+  ASM
+    move a1, a0
+    daddiu a0, zero, -1
+    j nes_syn_render
+    dsrl a0, a0, 1
+  EndASM
+EndProcedure
+
+ProcedureNaked NesSynRender()
+  ASM
+; ---- the driver. a0 = the count limit, a1 = the cycle limit (inclusive). The compiled ABI:
+; s0-s7, fp kept; everything else clobbered.
+; Registers: s0 the state, s3 the next log entry (0: none), s4 the cycle from which it applies
+; before a sample (a step: its cycle; a write: its cycle + 1), s5 / s6 the limits, s1 the run's
+; length, s7 the run's first sample index.
+nes_syn_render:
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s3, 24(sp)
+    sd s4, 32(sp)
+    sd s5, 40(sp)
+    sd s6, 48(sp)
+    sd s7, 56(sp)
+    move s5, a0
+    move s6, a1
+    la s0, global_nessynstate
+syn_outer:
+    la t0, global_nesapulogtail
+    ld t1, 0(t0)
+    ld t2, global_nesapuloghead-global_nesapulogtail(t0)
+    move s3, zero
+    daddiu s4, zero, -1
+    beq t1, t2, syn_event_ready     ; the log is empty: no event (s4 = "never")
+    dsrl s4, s4, 1
+    andi t1, t1, #NES_APU_LOG_ENTRIES-1
+    sll t1, t1, 4
+    la t2, global_nesapulog
+    addu s3, t2, t1                 ; s3 = the next entry
+    ld s4, 0(s3)                    ; its cycle
+    lbu t1, 8(s3)
+    bnez t1, syn_event_ready        ; a step applies before a sample at its cycle ...
+    nop
+    daddiu s4, s4, 1                ; ... a write after it
+syn_event_ready:
+    ld s7, #NES_S_DONE(s0)          ; the run's first sample
+    move s1, zero
+syn_run_next:
+    ld t0, #NES_S_DONE(s0)
+    slt t1, t0, s5
+    beqz t1, syn_run_end            ; the count limit
+    ld a0, #NES_S_AT(s0)            ; (delay slot) this sample's cycle
+    slt t1, s6, a0
+    bnez t1, syn_run_end            ; the cycle limit
+    slt t1, a0, s4
+    beqz t1, syn_run_end            ; the event comes first
+    nop
+    jal syn_dmc_to                  ; the DMC's edges up to and including this sample's cycle
+    nop
+    ld a0, #NES_S_AT(s0)
+    ld t0, #NES_S_TICK(s0)
+    dsubu t1, a0, t0                ; the span since the oscillators' last tick (<= 90)
+    sd a0, #NES_S_TICK(s0)
+    la t2, global_nessynspans
+    sll t3, s1, 1
+    addu t2, t2, t3
+    sh t1, 0(t2)
+    ld t1, #NES_S_DMCLEVEL(s0)      ; the DMC's level at this sample
+    la t2, global_nessynlevels
+    addu t2, t2, s1
+    sb t1, 0(t2)
+    ; the next sample's cycle (NesApuCount's cadence, apusplit.n64)
+    ld a1, #NES_S_FRAC(s0)
+    la t2, global_apufracstep
+    ld t3, 0(t2)
+    daddu a1, a1, t3
+    la t2, global_apufracden
+    ld t3, 0(t2)
+    la t2, global_apusamplebase
+    ld a2, 0(t2)
+    slt t2, a1, t3
+    bnez t2, syn_cadence
+    nop
+    dsubu a1, a1, t3
+    daddiu a2, a2, 1
+syn_cadence:
+    sd a1, #NES_S_FRAC(s0)
+    daddu a0, a0, a2
+    sd a0, #NES_S_AT(s0)
+    ld t0, #NES_S_DONE(s0)
+    daddiu t0, t0, 1
+    sd t0, #NES_S_DONE(s0)
+    daddiu s1, s1, 1
+    slti t1, s1, #NES_SYN_RUN
+    bnez t1, syn_run_next
+    nop
+syn_run_end:
+    beqz s1, syn_run_mixed
+    move a0, s1                     ; (delay slot) the run's length
+    jal syn_mix                     ; render the run (a1 = its first Pcm index)
+    move a1, s7
+syn_run_mixed:
+    ; stop at a limit; else, if the event is due before the next sample, apply it
+    ld t0, #NES_S_DONE(s0)
+    slt t1, t0, s5
+    beqz t1, syn_exit
+    ld a0, #NES_S_AT(s0)
+    slt t1, s6, a0
+    bnez t1, syn_exit
+    nop
+    beqz s3, syn_outer              ; no event: the run was only full
+    slt t1, a0, s4
+    bnez t1, syn_outer              ; not yet due: the run was only full
+    nop
+    jal syn_apply                   ; the event (s3)
+    nop
+    la t0, global_nesapulogtail
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    b syn_outer
+    sd t1, 0(t0)
+syn_exit:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s3, 24(sp)
+    ld s4, 32(sp)
+    ld s5, 40(sp)
+    ld s6, 48(sp)
+    ld s7, 56(sp)
+    jr ra
+    daddiu sp, sp, 80
+
+; ---- apply one log entry (s3; s0 the state). Called from the driver (its ra saved here).
+syn_apply:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    lbu t0, 8(s3)
+    bnez t0, syn_apply_tick         ; a step: the DMC is independent of it
+    ld a0, 0(s3)                    ; (delay slot) the event's cycle
+    jal syn_dmc_to                  ; a write: the DMC's edges <= its cycle first (a $4010 /
+    nop                             ; $4011 write must find them done, as in the old program)
+syn_apply_tick:
+    ld a0, 0(s3)
+    ld t0, #NES_S_TICK(s0)
+    dsubu a0, a0, t0                ; the old flush: the cycles since the last tick ...
+    beqz a0, syn_apply_lengths      ; ... nothing when 0
+    nop
+    jal nes_syn_osc                 ; (with this interval's lengths, periods, registers)
+    nop
+    ld t0, 0(s3)
+    sd t0, #NES_S_TICK(s0)
+syn_apply_lengths:
+    lbu t0, 12(s3)                  ; the length counters after the event
+    sd t0, #NES_S_LENGTH(s0)
+    lbu t0, 13(s3)
+    sd t0, #NES_S_LENGTH+8(s0)
+    lbu t0, 14(s3)
+    sd t0, #NES_S_LENGTH+16(s0)
+    lbu t0, 15(s3)
+    sd t0, #NES_S_LENGTH+24(s0)
+    lbu t0, 8(s3)
+    beqz t0, syn_apply_write
+    nop
+    jal syn_quarter                 ; a step: the quarter ...
+    nop
+    lbu t0, 8(s3)
+    addiu t0, t0, -2
+    bnez t0, syn_applied
+    nop
+    jal syn_sweep                   ; ... and on a half step the sweeps (the lengths are above)
+    nop
+    b syn_applied
+    nop
+syn_apply_write:
+    lbu a0, 9(s3)
+    jal syn_write
+    lbu a1, 10(s3)
+syn_applied:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+
+; ---- ApuWrite's sound half on the synthesis's state: a0 = the register (0-23), a1 = the value.
+; The register is stored; $4001 / $4005 ask the sweep to reload; $4002 / $4006 / $400A set the
+; period's low byte, $4003 / $4007 / $400B its high bits and restart the envelope and the pulse's
+; step (the triangle: the linear counter's reload); $400F restarts the noise envelope; $4011
+; sets the DMC level. (The length counters come from the log; the rest is the timing's.)
+; A leaf: t0-t3, a2, a3 clobbered.
+syn_write:
+    la t0, global_nessynstate
+    addu t1, t0, a0
+    sb a1, #NES_S_REG(t1)
+    sltiu t1, a0, 12
+    beqz t1, syn_write_high
+    andi t2, a0, 3                  ; (delay slot) which register of the channel
+    srl t3, a0, 2                   ; the channel
+    sll a2, t3, 3
+    addu a2, t0, a2                 ; a2 = the state + channel * 8
+    addiu t1, zero, 1
+    bne t2, t1, syn_write_period_low
+    sltiu t1, t3, 2
+    beqz t1, syn_write_done         ; $4009: no sweep
+    addiu t1, zero, 1
+    jr ra
+    sd t1, #NES_S_SWEEPRELOAD(a2)
+syn_write_period_low:
+    addiu t1, zero, 2
+    bne t2, t1, syn_write_period_high
+    nop
+    ld t1, #NES_S_PERIOD(a2)
+    andi t1, t1, 0x700
+    or t1, t1, a1
+    jr ra
+    sd t1, #NES_S_PERIOD(a2)
+syn_write_period_high:
+    addiu t1, zero, 3
+    bne t2, t1, syn_write_done
+    nop
+    ld t1, #NES_S_PERIOD(a2)
+    andi t1, t1, 255
+    andi a3, a1, 7
+    sll a3, a3, 8
+    or t1, t1, a3
+    sd t1, #NES_S_PERIOD(a2)
+    sltiu t1, t3, 2
+    beqz t1, syn_write_linear
+    addiu t1, zero, 1
+    sd t1, #NES_S_ENVSTART(a2)
+    jr ra
+    sd zero, #NES_S_SEQ(a2)
+syn_write_linear:
+    jr ra
+    sd t1, #NES_S_LINEARRELOAD(t0)
+syn_write_high:
+    addiu t1, zero, 15
+    bne a0, t1, syn_write_dmc
+    addiu t1, zero, 1
+    jr ra
+    sd t1, #NES_S_ENVSTART+16(t0)
+syn_write_dmc:
+    addiu t1, zero, 17
+    bne a0, t1, syn_write_done
+    andi t1, a1, 127
+    sd t1, #NES_S_DMCLEVEL(t0)
+syn_write_done:
+    jr ra
+    nop
+
+; ---- the quarter step (apuframe.n64's ApuQuarter on the synthesis's state): the envelopes of
+; pulse 0, pulse 1 and noise (their control registers $4000 / $4004 / $400C), then the linear
+; counter (reload from $4008 or count down; the reload flag clears unless $4008 bit 7). A leaf.
+syn_quarter:
+    la a7, global_nessynstate
+    daddiu t0, a7, #NES_S_ENVSTART
+    daddiu t1, a7, #NES_S_ENVDIV
+    daddiu t2, a7, #NES_S_ENVDECAY
+    daddiu t3, a7, #NES_S_REG
+    or a0, zero, zero
+syn_env_next:
+    sll a1, a0, 2
+    xori a2, a0, 2
+    bnez a2, syn_env_reg
+    nop
+    addiu a1, zero, 12
+syn_env_reg:
+    addu a1, t3, a1
+    lbu a1, 0(a1)
+    ld a2, 0(t0)
+    bnez a2, syn_env_start
+    andi a3, a1, 15
+    ld a2, 0(t1)
+    bgtz a2, syn_env_div
+    daddiu a2, a2, -1
+    sd a3, 0(t1)
+    ld a2, 0(t2)
+    bgtz a2, syn_env_decay
+    daddiu a2, a2, -1
+    andi a1, a1, 32
+    beqz a1, syn_env_advance
+    nop
+    b syn_env_decay
+    addiu a2, zero, 15
+syn_env_start:
+    sd zero, 0(t0)
+    sd a3, 0(t1)
+    b syn_env_decay
+    addiu a2, zero, 15
+syn_env_div:
+    b syn_env_advance
+    sd a2, 0(t1)
+syn_env_decay:
+    sd a2, 0(t2)
+syn_env_advance:
+    addiu a0, a0, 1
+    addiu t0, t0, 8
+    addiu t1, t1, 8
+    sltiu a1, a0, 3
+    bnez a1, syn_env_next
+    addiu t2, t2, 8
+    daddiu t0, a7, #NES_S_LINEARRELOAD
+    ld t1, 0(t0)
+    lbu t2, 8(t3)
+    daddiu t3, a7, #NES_S_LINEAR
+    bnez t1, syn_linear_reload
+    andi t1, t2, 127
+    ld t1, 0(t3)
+    blez t1, syn_linear_hold
+    nop
+    daddiu t1, t1, -1
+syn_linear_reload:
+    sd t1, 0(t3)
+syn_linear_hold:
+    andi t2, t2, 128
+    bnez t2, syn_quarter_return
+    nop
+    sd zero, 0(t0)
+syn_quarter_return:
+    jr ra
+    nop
+
+; ---- the half step's sweeps (apuframe.n64's ApuHalf second loop, ApuTarget inline): for each
+; pulse, the target = period +- period >> shift (pulse 0's negate subtracts one more); a divider
+; at 0 with the sweep enabled, a shift, a target below $800 and a period of 8 or more takes it;
+; then the divider reloads (at 0, or when asked) or counts down. A leaf: t0-t3, a0-a3 clobbered.
+syn_sweep:
+    la t3, global_nessynstate
+    or a3, zero, zero               ; the pulse
+syn_sweep_next:
+    sll t1, a3, 3
+    addu t1, t3, t1                 ; the state + pulse * 8
+    ld t0, #NES_S_PERIOD(t1)
+    sll a1, a3, 2
+    addu a1, t3, a1
+    lbu a1, #NES_S_REG+1(a1)        ; the sweep register
+    andi t2, a1, 7
+    dsrlv t2, t0, t2                ; the change
+    andi a2, a1, 8
+    bnez a2, syn_sweep_down
+    daddu a0, t0, t2                ; the target, up
+    b syn_sweep_target
+    nop
+syn_sweep_down:
+    dsubu a0, t0, t2
+    sltiu a2, a3, 1
+    dsubu a0, a0, a2                ; down (pulse 0: one more)
+syn_sweep_target:
+    ld t2, #NES_S_SWEEPDIV(t1)
+    bnez t2, syn_sweep_update
+    andi a2, a1, 128
+    beqz a2, syn_sweep_update
+    andi a2, a1, 7
+    beqz a2, syn_sweep_update
+    slti a2, a0, 2048
+    beqz a2, syn_sweep_update
+    slti a2, t0, 8
+    bnez a2, syn_sweep_update
+    nop
+    sd a0, #NES_S_PERIOD(t1)
+syn_sweep_update:
+    beqz t2, syn_sweep_reload
+    ld a2, #NES_S_SWEEPRELOAD(t1)
+    bnez a2, syn_sweep_reload
+    daddiu t2, t2, -1
+    b syn_sweep_advance
+    sd t2, #NES_S_SWEEPDIV(t1)
+syn_sweep_reload:
+    srl a1, a1, 4
+    andi a1, a1, 7
+    sd a1, #NES_S_SWEEPDIV(t1)
+    sd zero, #NES_S_SWEEPRELOAD(t1)
+syn_sweep_advance:
+    addiu a3, a3, 1
+    sltiu t0, a3, 2
+    bnez t0, syn_sweep_next
+    nop
+    jr ra
+    nop
+
+; ---- the DMC's output level up to cycle a0 (inclusive): NesDmcEdge's level half on the
+; synthesis's replica of the bit clock. Per edge: unless silent, bit 0 of the shift register
+; moves the level by 2 within 0-127; the register shifts; the bit count down; at the byte's
+; end the next byte from the DMC log if it was loaded at this very edge, else silent. Then the
+; next edge is a period later (the period of the rate in force: a $4010 write is applied only
+; between calls, after the edges before it). A leaf: t0-t3, a1-a7 clobbered; a0 kept.
+syn_dmc_to:
+    la t0, global_nessynstate
+    ld t1, #NES_S_DMCNEXT(t0)
+    slt t2, a0, t1
+    bnez t2, syn_dmc_return         ; the next edge is later
+    nop
+    lbu t2, #NES_S_REG+16(t0)
+    andi t2, t2, 15
+    sll t2, t2, 1
+    la t3, global_dmctable
+    addu t2, t3, t2
+    lhu t2, 0(t2)                   ; t2 = the period
+    ld a1, #NES_S_DMCSHIFT(t0)
+    ld a2, #NES_S_DMCSILENT(t0)
+    ld a3, #NES_S_DMCLEVEL(t0)
+    ld a4, #NES_S_DMCBITS(t0)
+syn_dmc_edge:
+    bnez a2, syn_dmc_shift          ; silent: the level holds
+    andi a5, a1, 1
+    beqz a5, syn_dmc_down
+    slti a5, a3, 126
+    beqz a5, syn_dmc_shift
+    nop
+    b syn_dmc_shift
+    daddiu a3, a3, 2
+syn_dmc_down:
+    slti a5, a3, 2
+    bnez a5, syn_dmc_shift
+    nop
+    daddiu a3, a3, -2
+syn_dmc_shift:
+    dsrl a1, a1, 1
+    daddiu a4, a4, -1
+    bnez a4, syn_dmc_step
+    nop
+    addiu a4, zero, 8               ; the byte's end
+    addiu a2, zero, 1               ; silent, unless a byte was loaded here
+    la a5, global_nesapudmctail
+    ld a6, 0(a5)
+    ld a7, global_nesapudmchead-global_nesapudmctail(a5)
+    beq a6, a7, syn_dmc_step        ; no byte waiting
+    andi a7, a6, #NES_APU_DMC_ENTRIES-1
+    sll a7, a7, 3
+    la t3, global_nesapudmclog
+    addu a7, a7, t3
+    ld a7, 0(a7)
+    dsra t3, a7, 8                  ; the byte's edge
+    beq t3, t1, syn_dmc_load
+    slt t3, t3, t1
+    beqz t3, syn_dmc_step           ; a later byte: this boundary is silent
+    nop
+    la t3, global_workererror       ; an older byte: the clocks disagree - stop loudly
+    addiu a7, zero, 25
+    b syn_dmc_step
+    sd a7, 0(t3)
+syn_dmc_load:
+    andi a1, a7, 255                ; the byte enters the shift register
+    move a2, zero
+    daddiu a6, a6, 1
+    sd a6, 0(a5)
+syn_dmc_step:
+    daddu t1, t1, t2                ; the next edge
+    slt t3, a0, t1
+    beqz t3, syn_dmc_edge
+    nop
+    sd t1, #NES_S_DMCNEXT(t0)
+    sd a1, #NES_S_DMCSHIFT(t0)
+    sd a2, #NES_S_DMCSILENT(t0)
+    sd a3, #NES_S_DMCLEVEL(t0)
+    sd a4, #NES_S_DMCBITS(t0)
+syn_dmc_return:
+    jr ra
+    nop
+
+; ---- the volume of channel a0 (0 / 1 pulse, 2 noise): its register's constant volume, or
+; the envelope (apuframe.n64's ApuVolume). Out: v0. A leaf: t0-t3 clobbered.
+syn_volume:
+    la t3, global_nessynstate
+    sll t0, a0, 2
+    addiu t1, zero, 2
+    bne a0, t1, syn_volume_reg
+    nop
+    addiu t0, zero, 12
+syn_volume_reg:
+    addu t0, t0, t3
+    lbu t0, #NES_S_REG(t0)
+    andi t2, t0, 16
+    bnez t2, syn_volume_out
+    andi v0, t0, 15
+    sll t1, a0, 3
+    addu t1, t1, t3
+    ld v0, #NES_S_ENVDECAY(t1)
+syn_volume_out:
+    jr ra
+    nop
+
+; ---- a pulse's volume for a run (apublock.n64's NesPulseBlockVolume): 0 unless its length
+; counter runs, its period is 8 or more and its sweep target is below $800. a0 = the pulse.
+; Out: v0. t0-t3 clobbered; its ra is the caller's (it tail-calls syn_volume).
+syn_pulse_volume:
+    la t3, global_nessynstate
+    sll t0, a0, 3
+    addu t1, t3, t0
+    ld t2, #NES_S_LENGTH(t1)
+    blez t2, syn_pulse_silent
+    or v0, zero, zero
+    ld t2, #NES_S_PERIOD(t1)
+    slti t1, t2, 8
+    bnez t1, syn_pulse_silent
+    sll t0, a0, 2
+    addu t1, t3, t0
+    lbu t1, #NES_S_REG+1(t1)
+    andi t0, t1, 7
+    dsrlv t0, t2, t0
+    andi t1, t1, 8
+    bnez t1, syn_pulse_down
+    daddu t1, t2, t0
+    b syn_pulse_gate
+    nop
+syn_pulse_down:
+    dsubu t1, t2, t0
+    sltiu t0, a0, 1
+    dsubu t1, t1, t0
+syn_pulse_gate:
+    slti t1, t1, 2048
+    bnez t1, syn_volume
+    nop
+syn_pulse_silent:
+    jr ra
+    or v0, zero, zero
+
+; ---- one oscillator tick by a0 cycles (oscillators.n64's NesOscillatorTick, the staged one: the
+; pulses' and the triangle's timers with their quotient form, the triangle's step only while its
+; length and linear counters run, the noise register eight clocks at a time when it can). Keeps
+; s0-s7 and fp; t0-t3, a1-a7, v1 clobbered.
+nes_syn_osc:
+    la v1, global_nessynstate
+    daddiu t0, v1, #NES_S_TIMER
+    daddiu t1, v1, #NES_S_PERIOD
+    daddiu t2, v1, #NES_S_SEQ
+    addiu a1, zero, 2
+syn_pulse_timer:
+    ld t3, 0(t0)
+    subu t3, t3, a0
+    bgtz t3, syn_pulse_done
+    ld a2, 0(t1)
+    addiu a2, a2, 1
+    sll a2, a2, 1
+    addu t3, t3, a2
+    bgtz t3, syn_pulse_phase
+    addiu a3, zero, 1
+    ; One edge has elapsed. For a period of two the quotient is a shift.
+    addiu a4, zero, 2
+    bne a2, a4, syn_pulse_div
+    subu a4, zero, t3
+    srl a4, a4, 1
+    addiu a3, a4, 2
+    andi t3, t3, 1
+    bne t3, zero, syn_pulse_phase
+    nop
+    b syn_pulse_phase
+    addiu t3, zero, 2
+syn_pulse_div:
+    divu a4, a2
+    mflo a3
+    mfhi a4
+    addiu a3, a3, 2
+    subu t3, a2, a4
+syn_pulse_phase:
+    ld a4, 0(t2)
+    addu a4, a4, a3
+    andi a4, a4, 7
+    sd a4, 0(t2)
+syn_pulse_done:
+    sd t3, 0(t0)
+    addiu t0, t0, 8
+    addiu t1, t1, 8
+    addiu t2, t2, 8
+    addiu a1, a1, -1
+    bne a1, zero, syn_pulse_timer
+    nop
+
+    ld t3, 0(t0)
+    subu t3, t3, a0
+    bgtz t3, syn_triangle_done
+    ld a2, 0(t1)
+    addiu a2, a2, 1
+    addu t3, t3, a2
+    bgtz t3, syn_triangle_phase
+    addiu a3, zero, 1
+    beq a2, a3, syn_triangle_unit
+    subu a4, zero, t3
+    divu a4, a2
+    mflo a3
+    mfhi a4
+    addiu a3, a3, 2
+    b syn_triangle_phase
+    subu t3, a2, a4
+syn_triangle_unit:
+    addiu a3, a4, 2
+    addiu t3, zero, 1
+syn_triangle_phase:
+    ld a4, #NES_S_LENGTH+16(v1)
+    beq a4, zero, syn_triangle_done
+    nop
+    ld a4, #NES_S_LINEAR(v1)
+    beq a4, zero, syn_triangle_done
+    nop
+    ld a4, 0(t2)
+    addu a4, a4, a3
+    andi a4, a4, 31
+    sd a4, 0(t2)
+    ; Fold the 32-step phase into the 16-level triangle.
+    srl a3, a4, 4
+    addiu a3, a3, -1
+    xor a4, a4, a3
+    andi a4, a4, 15
+    sd a4, #NES_S_TRIDAC(v1)
+syn_triangle_done:
+    sd t3, 0(t0)
+    ld t3, 8(t0)
+    subu t3, t3, a0
+    bgtz t3, syn_noise_done
+    nop
+    lbu t2, #NES_S_REG+14(v1)
+    andi a2, t2, 15
+    sll a2, a2, 1
+    la t1, global_noisetable
+    addu t1, t1, a2
+    lhu a2, 0(t1)
+    ld a3, #NES_S_NOISE(v1)
+    andi t2, t2, 128
+    beq t2, zero, syn_noise_batch
+    addiu t2, zero, 1
+    addiu t2, zero, 6
+syn_noise_batch:
+    ; Across eight clocks, even tap six cannot reach newly inserted bits.
+    sll a7, a2, 3
+    subu a6, a7, a2
+    subu a5, zero, t3
+    sltu a4, a5, a6
+    bnez a4, syn_noise_short
+    nop
+syn_noise_eight:
+    srlv a4, a3, t2
+    xor a4, a4, a3
+    andi a4, a4, 255
+    sll a4, a4, 7
+    srl a3, a3, 8
+    or a3, a3, a4
+    addu t3, t3, a7
+    bgtz t3, syn_noise_save
+    subu a5, zero, t3
+    sltu a4, a5, a6
+    beqz a4, syn_noise_eight
+    nop
+syn_noise_short:
+    ; At period four the remaining clocks can be counted with a shift.
+    addiu a5, zero, 4
+    bne a2, a5, syn_noise_clock
+    subu a5, zero, t3
+    srl a6, a5, 2
+    sltiu a7, a6, 9
+    beq a7, zero, syn_noise_clock
+    addiu a6, a6, 1
+    srlv a4, a3, t2
+    xor a4, a4, a3
+    addiu a7, zero, 1
+    sllv a7, a7, a6
+    addiu a7, a7, -1
+    and a4, a4, a7
+    srlv a3, a3, a6
+    addiu a7, zero, 15
+    subu a7, a7, a6
+    sllv a4, a4, a7
+    or a3, a3, a4
+    andi a5, a5, 3
+    b syn_noise_save
+    subu t3, a2, a5
+syn_noise_clock:
+    srlv a4, a3, t2
+    xor a4, a4, a3
+    andi a4, a4, 1
+    sll a4, a4, 14
+    srl a3, a3, 1
+    addu t3, t3, a2
+    blez t3, syn_noise_clock
+    or a3, a3, a4
+syn_noise_save:
+    sd a3, #NES_S_NOISE(v1)
+syn_noise_done:
+    jr ra
+    sd t3, 8(t0)
+  EndASM
+EndProcedure
+
+; ---- syn_mix: render a run of a0 samples from NesSynSpans / NesSynLevels into Pcm from index a1,
+; with the parameters of the interval (apublock.n64's NesRenderBlock, then apumix.n64's NesMixBlock,
+; the arithmetic unchanged). Per sample: tick the oscillators by its span; the pulse pair's
+; non-linear mix from a 4-way cache; the noise and DMC with the triangle (or the ultrasonic
+; triangle's mean) through the TND table; the DC filter; the 16-bit sample into the ring.
+; Keeps s0-s7 and fp (its own frame); everything else clobbered.
+; Frame: 0 ra, 8-64 s0-s7, 72 the count, 80 / 88 / 96 the verification statistics, 104 the
+; filter's last input, 112 the noise volume, 120 fp, 128 TndMix, 136 the first index.
+ProcedureNaked NesSynMix()
+  ASM
+syn_mix:
+    daddiu sp, sp, -144
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    sd fp, 120(sp)
+    sd a0, 72(sp)
+    sd a1, 136(sp)
+    ; the run's parameters (NesRenderBlock): the pulses' volumes, the noise's, the duty bytes,
+    ; the ultrasonic triangle
+    jal syn_pulse_volume
+    or a0, zero, zero
+    or s1, v0, zero
+    jal syn_pulse_volume
+    addiu a0, zero, 1
+    sll t0, v0, 8
+    la fp, global_nessynstate
+    ld t1, #NES_S_LENGTH+24(fp)
+    blez t1, syn_mix_duty
+    or s1, s1, t0
+    jal syn_volume
+    addiu a0, zero, 2
+    sll t0, v0, 16
+    or s1, s1, t0
+syn_mix_duty:
+    la fp, global_nessynstate
+    lbu t1, #NES_S_REG(fp)
+    lbu t2, #NES_S_REG+4(fp)
+    lui t3, 0xf91e
+    ori t3, t3, 0x0602
+    srl t1, t1, 6
+    srl t2, t2, 6
+    sll t1, t1, 3
+    sll t2, t2, 3
+    srlv t1, t3, t1
+    srlv t2, t3, t2
+    andi t1, t1, 255
+    andi t2, t2, 255
+    sll t2, t2, 8
+    or s4, t1, t2                   ; s4 = duty 0 | duty 1 << 8 (| ultrasonic << 16)
+    ld t0, #NES_S_PERIOD+16(fp)
+    slti t0, t0, 2
+    beqz t0, syn_mix_params
+    nop
+    ld t0, #NES_S_LENGTH+16(fp)
+    blez t0, syn_mix_params
+    nop
+    ld t0, #NES_S_LINEAR(fp)
+    blez t0, syn_mix_params
+    lui t0, 1
+    or s4, s4, t0
+syn_mix_params:
+    ; NesMixBlock from here: a3 = the volumes (pulse 0 | pulse 1 << 8 | noise << 16)
+    or a3, s1, zero
+    la s0, global_nessynspans
+    la s1, global_nessynlevels
+    ld s2, 72(sp)
+    srl t2, a3, 16
+    sd t2, 112(sp)
+    ; Cache the nonlinear pulse mix for the four combinations of the two
+    ; duty bits. The pulse amplitudes stay fixed throughout this run.
+    la t0, global_pulsemix
+    andi t1, a3, 255
+    srl t2, a3, 8
+    andi t2, t2, 255
+    sll t1, t1, 1
+    sll t2, t2, 1
+    addu t3, t1, t2
+    addu t3, t0, t3
+    lhu s3, 0(t3)
+    addu t2, t0, t2
+    lhu t2, 0(t2)
+    dsll s3, s3, 16
+    or s3, s3, t2
+    addu t1, t0, t1
+    lhu t1, 0(t1)
+    dsll s3, s3, 16
+    or s3, s3, t1
+    lhu t0, 0(t0)
+    dsll s3, s3, 16
+    or s3, s3, t0
+    la t0, global_tndmix
+    sd t0, 128(sp)
+  EndASM
+  ; Sample range and capture statistics are only used by verification.
+  CompilerIf #VERIFY_FRAME>0
+    ASM
+    la t0, global_apuminimum
+    ld t0, 0(t0)
+    sd t0, 80(sp)
+    la t0, global_apumaximum
+    ld t0, 0(t0)
+    sd t0, 88(sp)
+    sd zero, 96(sp)
+    EndASM
+  CompilerEndIf
+  ASM
+    ld t0, #NES_S_LASTX(fp)
+    sd t0, 104(sp)
+    ld s5, #NES_S_LASTY(fp)
+    la s6, global_pcm
+    ld s7, 136(sp)
+syn_mix_next:
+    lhu a0, 0(s0)
+    jal nes_syn_osc
+    daddiu s0, s0, 2
+
+    lw t0, #NES_S_SEQ+4(fp)
+    lw t1, #NES_S_SEQ+12(fp)
+    srlv t0, s4, t0
+    srlv t1, s4, t1
+    andi t0, t0, 1
+    andi t1, t1, 256
+    srl t1, t1, 7
+    or t0, t0, t1
+    sll t0, t0, 4
+    dsrlv t0, s3, t0
+    andi t0, t0, 65535
+
+    lw t1, #NES_S_NOISE+4(fp)
+    andi t1, t1, 1
+    addiu t1, t1, -1
+    ld a1, 112(sp)
+    and t1, t1, a1
+    sll t1, t1, 1
+    lbu t3, 0(s1)
+    addu t1, t1, t3
+    srl t3, s4, 16
+    bnez t3, syn_mix_triangle_mean
+    sll t1, t1, 1
+    lw t2, #NES_S_TRIDAC+4(fp)
+    sll a1, t2, 1
+    addu t2, t2, a1
+    sll t2, t2, 1
+    addu t2, t2, t1
+    ld t3, 128(sp)
+syn_mix_tnd_load:
+    addu t3, t3, t2
+    lhu t2, 0(t3)
+    addu v0, t0, t2
+
+  EndASM
+  CompilerIf #NES_AUDIO_RATE=20000
+    ASM
+    ; Q16 pole (65400/65536)^(48000/20000) rounds to 65210.
+    ori t1, zero, 65210
+    EndASM
+  CompilerElse
+    ASM
+    ori t1, zero, 65400
+    EndASM
+  CompilerEndIf
+  ASM
+    ; The signed 16-bit filter state times either pole fits signed 32 bits.
+    mult s5, t1
+    ld t0, 104(sp)
+    dsubu t0, v0, t0
+    mflo t2
+    bgez t2, syn_mix_dc_positive
+    nop
+    ori t1, zero, 65535
+    daddu t2, t2, t1
+syn_mix_dc_positive:
+    dsra t2, t2, 16
+    daddu t0, t0, t2
+    addiu t1, zero, 32767
+    slt t2, t1, t0
+    beq t2, zero, syn_mix_check_min
+    sd v0, 104(sp)
+    or t0, t1, zero
+syn_mix_check_min:
+    addiu t1, zero, -32768
+    slt t2, t0, t1
+    beq t2, zero, syn_mix_store
+    nop
+    or t0, t1, zero
+syn_mix_store:
+    daddu s5, t0, zero
+    andi t2, s7, 4095
+    sll t2, t2, 1
+    addu t2, s6, t2
+    sh t0, 0(t2)
+    daddiu s7, s7, 1
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
+    ld t2, 80(sp)
+    slt t3, t0, t2
+    beq t3, zero, syn_mix_check_max
+    nop
+    sd t0, 80(sp)
+syn_mix_check_max:
+    ld t2, 88(sp)
+    slt t3, t2, t0
+    beq t3, zero, syn_mix_check_nonzero
+    nop
+    sd t0, 88(sp)
+syn_mix_check_nonzero:
+    ld t2, 96(sp)
+    sltu t3, zero, t0
+    daddu t2, t2, t3
+    sd t2, 96(sp)
+    EndASM
+  CompilerEndIf
+  ASM
+    daddiu s2, s2, -1
+    bgtz s2, syn_mix_next
+    daddiu s1, s1, 1
+    sd s5, #NES_S_LASTY(fp)
+    ld t1, 104(sp)
+    sd t1, #NES_S_LASTX(fp)
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
+    la t0, global_apuminimum
+    ld t1, 80(sp)
+    sd t1, 0(t0)
+    la t0, global_apumaximum
+    ld t1, 88(sp)
+    sd t1, 0(t0)
+    la t0, global_apunonzero
+    ld t1, 0(t0)
+    ld t2, 96(sp)
+    daddu t1, t1, t2
+    sd t1, 0(t0)
+    la t0, global_apucapture
+    ld t1, 0(t0)
+    ld t2, 72(sp)
+    daddu t1, t1, t2
+    sltiu t2, t1, 4097
+    bnez t2, syn_mix_capture
+    nop
+    addiu t1, zero, 4096
+syn_mix_capture:
+    sd t1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    ld fp, 120(sp)
+    jr ra
+    daddiu sp, sp, 144
+syn_mix_triangle_mean:
+    la t3, NesTndTriMeanData
+    b syn_mix_tnd_load
+    or t2, t1, zero
+  EndASM
+EndProcedure

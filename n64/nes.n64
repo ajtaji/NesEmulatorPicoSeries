@@ -104,6 +104,10 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   #NES_B_OAM = 40
   #NES_B_BANKS = 48
   #NES_B_PAL = 64
+  ; THE APU SPLIT (step N6, design note N.25): the entries of the timing's two logs for the synthesis
+  ; (unit/apu_cold.n64 writes them, apusynth.n64 reads them; the layout is in apu_cold.n64's header)
+  #NES_APU_LOG_ENTRIES = 256
+  #NES_APU_DMC_ENTRIES = 256
   Global Dim NesBandSpace.a(#NES_U_BANDMAX*#NES_BAND_BYTES+16)
   Global Dim NesOamSpace.a(#NES_U_BANDMAX*256+16)
   Global NesBandBase.i, NesOamBase.i
@@ -414,6 +418,9 @@ Procedure RunGame()
     If NesShowInit()=0 : NesRecRefused(3) : ProcedureReturn : EndIf
   CompilerElse
   If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf
+  CompilerIf #NES_APU_SPLIT
+    NesSynInit(NesMmc3ApuClock)         ; the synthesis from the APU's power-on state (apusynth.n64)
+  CompilerEndIf
   CompilerIf #NES_RSP_CHECK
     NesRspInit()
   CompilerEndIf

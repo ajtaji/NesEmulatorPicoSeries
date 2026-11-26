@@ -53,6 +53,9 @@ Procedure HostQueueAudio(produced.i)
   If produced - HostPcmRead > 4096 : HostPcmRead = (produced - 4096 + #HOST_AUDIO_FRAMES - 1) & ~(#HOST_AUDIO_FRAMES - 1) : EndIf
   While produced - HostPcmRead >= #HOST_AUDIO_FRAMES And LpmAiFull() = 0
     dst = HostAiBase + HostAiSlot * 4096
+    CompilerIf #NES_APU_SPLIT
+      NesSynRenderTo(HostPcmRead + #HOST_AUDIO_FRAMES)   ; the block's samples (apusynth.n64, design note N.25)
+    CompilerEndIf
     HostCopyStereo(dst, @Pcm[HostPcmRead & 4095])
     LpmCacheWritebackData(dst, #HOST_AUDIO_BYTES)
     LpmAiQueue(dst, #HOST_AUDIO_BYTES)
@@ -67,7 +70,9 @@ EndProcedure
 CompilerEndIf
 
 Procedure HostAudioPoll()
-  CompilerIf #NES_APU_BLOCKED
+  CompilerIf #NES_APU_SPLIT
+    NesApuCount()                       ; the samples the guest's time has produced (apusplit.n64)
+  CompilerElseIf #NES_APU_BLOCKED
     NesRenderBlock()
   CompilerEndIf
   HostQueueAudio(ApuProduced)
@@ -96,6 +101,9 @@ Procedure HostDrainCapture()
     If ApuProduced-HostPcmRead>=256
       While LpmAiFull() : Wend
       dst=HostAiBase+HostAiSlot*4096
+      CompilerIf #NES_APU_SPLIT
+        NesSynRenderTo(HostPcmRead+256)
+      CompilerEndIf
       HostCopyStereo(dst,@Pcm[HostPcmRead&4095])
       LpmCacheWritebackData(dst,1024)
       LpmAiQueue(dst,1024)

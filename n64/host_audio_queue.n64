@@ -57,6 +57,16 @@ nes_host_audio_ready:
     move s0, a0
     move s1, t0
 nes_host_audio_submit:
+  EndASM
+  CompilerIf #NES_APU_SPLIT
+    ASM
+      ; the block's samples first (apusynth.n64, design note N.25): t2 = HostPcmRead here
+      jal nessynrenderto
+      daddiu a0, t2, #HOST_AUDIO_FRAMES
+      ld t2, global_hostpcmread-global_hostaibase(s1)
+    EndASM
+  CompilerEndIf
+  ASM
     ld t0, 0(s1)
     ld t1, global_hostaislot-global_hostaibase(s1)
     dsll t1, t1, 12

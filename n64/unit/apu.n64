@@ -1,0 +1,100 @@
+; unit/apu.n64 - the APU's time advance, TIMING ONLY (design note, section N.25: step N6, the APU split)
+; Part of the hot unit: included inside cpu6502.n64's procedure (the shipped build) or a holder
+; procedure in mmc3_run.n64 (the reference build), never on its own. The procedure ApuAdvance
+; (apusplit.n64) is a one-jump stub to u_apuadvance for outside callers.
+;
+; WHAT: the guest-visible half of the old ApuAdvance (apuschedule.n64 + the staged ApuTick and
+; NesDmcEdge): the frame sequencer (its steps, the length counters at the half steps, the frame
+; IRQ, the $4017 reset delay), the DMC's bit clock and byte fetch, and WorkerIrq. Nothing of the
+; sound is computed here: the steps and the bytes that enter the DMC's shift register are written
+; to the log (apu_cold.n64) and the synthesis (apusynth.n64) renders the samples from it later,
+; once an AI block. The sample clock is not here either (NesApuCount, apusplit.n64, counts the
+; samples for the host).
+;
+; HOW, and why the guest sees exactly what it saw: the old loop cut a call's interval at every
+; sample, every frame-sequencer step and the reset's end. The sample cuts had no effect on the
+; timing state: the DMC's period can change only at a $4010 write, which is never inside a call,
+; so "timer -= dt, then every edge at timer <= 0 adds the period" ends with the same timer, bit
+; count, bytes, address and IRQ however dt is cut. Only the sample cuts are dropped; the step and
+; reset cuts stay (cold path, apu_frame_path). Every call keeps its place and its dt (the deadline
+; rules in advance.n64 are untouched), so the windows, the stalls and the IRQ times are the same.
+;
+; In:  a0 = dt, APU cycles from NesMmc3ApuClock (the caller stores the new clock after the call).
+; Out: nothing. Clobbers t0-t3, a0-a7, v0, v1; keeps s0-s7 and fp (the callers keep s0 / s1 live).
+; The twin it is checked against: the old path (apuschedule.n64, the shared ApuTick), which made
+; the reference recordings; the proof is the instruction digests and the PCM byte for byte (N.25).
+
+  ASM
+u_apuadvance:
+    blez a0, apu_publish            ; nothing to advance: publish the IRQ line only, as before
+    nop
+    la t0, global_apuframeclock
+    ld t1, global_apuresetdelay-global_apuframeclock(t0)
+    bgtz t1, apu_frame_path         ; a $4017 reset is counting down: the segment path (cold)
+    ld t2, global_apuframestep-global_apuframeclock(t0)
+    ; the next step's frame-clock value: steps 0-2 ApuStep1-3; step 3 ApuStep4, or ApuStep5 in
+    ; five-step mode (the old loop's selection, word for word)
+    sltiu t3, t2, 3
+    bnez t3, apu_step_selected
+    sll t3, t2, 2                   ; (delay slot) the table offset of steps 0-2
+    ld t3, global_apufive-global_apuframeclock(t0)
+    sltu t3, zero, t3
+    sll t3, t3, 2
+    addiu t3, t3, 12                ; entry 3 (ApuStep4) or 4 (ApuStep5)
+apu_step_selected:
+    la t2, apu_frame_steps
+    addu t2, t2, t3
+    lw t2, 0(t2)                    ; the address of the selected ApuStepN
+    ld t2, 0(t2)                    ; its frame-clock value
+    ld t1, 0(t0)
+    daddu t1, t1, a0                ; the frame clock at the interval's end
+    slt t3, t1, t2
+    beqz t3, apu_frame_path         ; the step falls inside the interval or at its end: cold
+    nop
+    sd t1, 0(t0)                    ; no step: the frame clock just moves
+    la t0, global_nesmmc3apuclock
+    ld a1, 0(t0)
+    daddu a1, a1, a0                ; a1 = the interval's end as an APU cycle (the log's stamps)
+    ; fall through into the DMC run over the whole interval
+
+; ---- u_apudmcrun: the DMC bit clock over one interval, the timing half of NesDmcEdge ----
+; In: a0 = the interval's cycles, a1 = its end (APU cycle). Called from the fall-through above
+; and with jal from the segment path. Each edge: timer += period; the bit count down; at 0 a
+; byte boundary (cold: apu_dmc_byte). The output level, the shift register and the silence are
+; the synthesis's (its replica of this clock, apusynth.n64, takes the bytes from the DMC log).
+u_apudmcrun:
+    la t0, global_dmctimer
+    ld t1, 0(t0)
+    dsubu t1, t1, a0                ; the timer at the interval's end
+    blez t1, apu_dmc_edges          ; one edge or more inside the interval
+    nop
+    sd t1, 0(t0)
+apu_publish:
+    ; WorkerIrq = ApuFrameIrq | DmcIrq, as the old ApuAdvance published at its end
+    la t0, global_apuframeirq
+    ld t1, 0(t0)
+    ld t2, global_dmcirq-global_apuframeirq(t0)
+    or t1, t1, t2
+    jr ra
+    sd t1, global_workerirq-global_apuframeirq(t0)
+apu_dmc_edges:
+    ; the period of this rate ($4010's low four bits): constant over the interval (see the header)
+    lbu t2, global_apureg-global_dmctimer+16(t0)
+    andi t2, t2, 15
+    sll t2, t2, 1
+    daddiu t3, t0, global_dmctable-global_dmctimer
+    addu t2, t3, t2
+    lhu t2, 0(t2)                   ; t2 = the period in CPU cycles
+    ld t3, global_dmcbits-global_dmctimer(t0)
+apu_dmc_edge:
+    daddu t1, t1, t2                ; this edge reloads the timer (its cycle: a1 + t1 - t2)
+    daddiu t3, t3, -1               ; one bit of the byte out
+    beqz t3, apu_dmc_byte           ; the byte's last bit: the boundary (cold)
+    nop
+apu_dmc_next:
+    blez t1, apu_dmc_edge           ; another edge before the interval's end
+    nop
+    sd t3, global_dmcbits-global_dmctimer(t0)
+    b apu_publish
+    sd t1, 0(t0)
+  EndASM
