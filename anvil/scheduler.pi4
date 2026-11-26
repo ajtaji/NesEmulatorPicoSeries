@@ -63,13 +63,18 @@ Procedure.i NesPresentationLoop()
   ProcedureReturn 0
 EndProcedure
 ; Anvil lends a guarded 4 KiB secondary stack. Use our declared private
-; 1 MiB corridor for the interpreter's nested calls, then restore that stack.
+; stack (CORE1_STACK in memory_map.pi4) for the interpreter's nested calls,
+; then restore that stack. The top is read from file-scope storage, so the
+; address comes from the map, not from this block.
+Global nes_core1_stack_top.i = #NES_MAP_CORE1_STACK + #NES_MAP_CORE1_STACK_BYTES
 ProcedureNaked.i ApplicationJob()
   ASM
     ldr x9, [x0]
     cbz x9, __nes_primary_job
     mov x9, sp
-    movz x10, #$0310, lsl #16
+    adrp x10, global_nes_core1_stack_top
+    add  x10, x10, #:lo12:global_nes_core1_stack_top
+    ldr  x10, [x10]
     mov sp, x10
     stp x9, x30, [sp, #-16]!
     bl nescomputeloop

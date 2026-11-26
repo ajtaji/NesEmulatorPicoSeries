@@ -14,8 +14,8 @@ Global EmulateUs.i, EmulateCalls.i      ; Anvil's runtime counters, which GuestR
 ; windows, MMC5's sprite patterns, the extra boards' CHR RAM). tools/port_desktop.py turns each into
 ; an offset into this block.
 Global AnvilWindow.i=AllocateMemory($30000)
-; Anvil's test suites (core/tests/) build synthetic cartridges at fixed Pi addresses ($03200000 PRG,
-; $03300000 CHR): here two blocks; and the audio session flag the mapper tests check survives a reset.
+; Anvil's test suites (core/tests/) build synthetic cartridges at fixed Pi addresses (anvil/memory_map.pi4's
+; TEST_PRG and TEST_CHR): here two blocks; and the audio session flag the mapper tests check survives a reset.
 Global AnvilTestPrg.i=AllocateMemory($100000), AnvilTestChr.i=AllocateMemory($100000)
 Global AudioSessionStarted.i
 

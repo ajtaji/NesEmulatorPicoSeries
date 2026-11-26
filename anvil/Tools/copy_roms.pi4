@@ -29,10 +29,10 @@ Procedure.i CpSame(src.i,n.i)
 EndProcedure
 Procedure.i CpRun()
   Protected base.i,total.i,count.i,start.i,i.i,j.i,entry.i,off.i,n.i,c.i,len.i
-  base=$40000000
+  base=#NES_MAP_COPY_BUNDLE
   If PeekI(base)<>$314B43415053454E : ProcedureReturn 201 : EndIf
   count=PeekI(base+8) : total=PeekI(base+16) : start=PeekI(base+24)
-  If count<1 Or count>4096 Or total<32 Or total>$10000000 Or start<>32+count*272 Or start>total : ProcedureReturn 202 : EndIf
+  If count<1 Or count>4096 Or total<32 Or total>#NES_MAP_COPY_BUNDLE_BYTES Or start<>32+count*272 Or start>total : ProcedureReturn 202 : EndIf
   ; Validate the entire table before any storage writes.
   For i=0 To count-1
     entry=base+32+i*272 : len=0
@@ -75,8 +75,8 @@ Procedure.i Main()
   *cp_read=ServiceSlot(51) : *cp_close=ServiceSlot(52) : *cp_write=ServiceSlot(54)
   If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
   result=CpRun()
-  PokeI($02F00200,result) : PokeI($02F00208,CpWritten)
-  PokeI($02F00210,CpSkipped) : PokeI($02F00218,CpIndex)
-  PokeI($02F00220,CpBytes)
+  PokeI(#NES_MAP_RECORD+$200,result) : PokeI(#NES_MAP_RECORD+$208,CpWritten)
+  PokeI(#NES_MAP_RECORD+$210,CpSkipped) : PokeI(#NES_MAP_RECORD+$218,CpIndex)
+  PokeI(#NES_MAP_RECORD+$220,CpBytes)
   PlatformEnd() : ProcedureReturn result
 EndProcedure

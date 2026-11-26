@@ -77,24 +77,25 @@ EndProcedure
 Procedure RecordGame()
   Protected at.i
   ; Fixed diagnostic block inside the declared payload RAM window.
-  PokeI($02F00000,$4E455350) : PokeI($02F00008,NesHostUs()-StartUs)
-  PokeI($02F00010,CpuCycles) : PokeI($02F00018,WorkerFrames)
-  PokeI($02F00020,VideoFrames) : PokeI($02F00028,ApuSamples)
-  PokeI($02F00030,EmulateUs) : PokeI($02F00038,VideoUs)
-  PokeI($02F00040,Stopped) : PokeI($02F00048,BadOpcode)
-  PokeI($02F00050,WorkerError) : PokeI($02F00058,ExitRequested)
-  PokeI($02F00060,TouchEvents) : PokeI($02F00068,VideoError)
-  VideoDiagnostics($02F00070)
-  PokeI($02F00090,AudioLive) : PokeI($02F00098,AudioPackets)
-  PokeI($02F000A0,AudioUnderruns) : PokeI($02F000A8,AudioOverruns)
-  PokeI($02F000B0,AudioWireErrors) : PokeI($02F000B8,ParallelError)
-  AudioDiagnostics($02F000C0)
-  PokeI($02F001A0,InputSeen)
-  PokeI($02F00300,GameSessions) : PokeI($02F00308,CartMapper)
-  PokeI($02F00310,MapIrqClocks) : PokeI($02F00318,MapIrqAssertions)
-  PokeI($02F00320,MenuRequested)
+  PokeI(#NES_MAP_RECORD,$4E455350) : PokeI(#NES_MAP_RECORD+$008,NesHostUs()-StartUs)
+  PokeI(#NES_MAP_RECORD+$010,CpuCycles) : PokeI(#NES_MAP_RECORD+$018,WorkerFrames)
+  PokeI(#NES_MAP_RECORD+$020,VideoFrames) : PokeI(#NES_MAP_RECORD+$028,ApuSamples)
+  PokeI(#NES_MAP_RECORD+$030,EmulateUs) : PokeI(#NES_MAP_RECORD+$038,VideoUs)
+  PokeI(#NES_MAP_RECORD+$040,Stopped) : PokeI(#NES_MAP_RECORD+$048,BadOpcode)
+  PokeI(#NES_MAP_RECORD+$050,WorkerError) : PokeI(#NES_MAP_RECORD+$058,ExitRequested)
+  PokeI(#NES_MAP_RECORD+$060,TouchEvents) : PokeI(#NES_MAP_RECORD+$068,VideoError)
+  VideoDiagnostics(#NES_MAP_RECORD+$070)
+  VideoMemoryDiagnostics(#NES_MAP_RECORD+$1E0)
+  PokeI(#NES_MAP_RECORD+$090,AudioLive) : PokeI(#NES_MAP_RECORD+$098,AudioPackets)
+  PokeI(#NES_MAP_RECORD+$0A0,AudioUnderruns) : PokeI(#NES_MAP_RECORD+$0A8,AudioOverruns)
+  PokeI(#NES_MAP_RECORD+$0B0,AudioWireErrors) : PokeI(#NES_MAP_RECORD+$0B8,ParallelError)
+  AudioDiagnostics(#NES_MAP_RECORD+$0C0)
+  PokeI(#NES_MAP_RECORD+$1A0,InputSeen)
+  PokeI(#NES_MAP_RECORD+$300,GameSessions) : PokeI(#NES_MAP_RECORD+$308,CartMapper)
+  PokeI(#NES_MAP_RECORD+$310,MapIrqClocks) : PokeI(#NES_MAP_RECORD+$318,MapIrqAssertions)
+  PokeI(#NES_MAP_RECORD+$320,MenuRequested)
   If GameSessions<=16
-    at=$02F01000+(GameSessions-1)*128
+    at=#NES_MAP_RECORD+$1000+(GameSessions-1)*128
     PokeI(at,CartMapper) : PokeI(at+8,NesHostUs()-StartUs)
     PokeI(at+16,WorkerFrames) : PokeI(at+24,VideoFrames) : PokeI(at+32,CpuCycles)
     PokeI(at+40,ApuSamples) : PokeI(at+48,Stopped+WorkerError+VideoError+ParallelError)
@@ -112,7 +113,7 @@ Procedure.i Main()
   *svc_cores=ServiceSlot(184)
   If svc_cap(13)=0 Or svc_cap(7)=0 : ProcedureReturn 101 : EndIf
   If PlatformBegin()=0 : ProcedureReturn 103 : EndIf
-  GuestClear($02F00000,8192)
+  GuestClear(#NES_MAP_RECORD,8192)
   CompilerIf #NES_VERIFY_CODEC=1
     t=AudioCodecTests() : PlatformEnd() : ProcedureReturn t
   CompilerEndIf

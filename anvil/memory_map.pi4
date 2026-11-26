@@ -1,0 +1,130 @@
+; ======================================================================
+;  THE ANVIL NES MEMORY MAP - every fixed address of the Pi 4 port.
+;
+;  This file is the one place the port's addresses come from. The build
+;  helper (tools/anvil_map.py, used by build_anvil.py and copy_anvil_roms.py)
+;  reads the lines below, derives --load-addr, --bss-addr and --stack-addr
+;  from them, and refuses a build by name when two regions overlap, when a
+;  no-cache list disagrees with the regions, when the image outgrows its
+;  room, or when the BSS leaves less than #NES_MAP_BSS_MARGIN free.
+;
+;  Line format, read by the helper: a region is "#NES_MAP_<NAME>=$base ;
+;  region WB|NC|ANVIL <description>" followed by "#NES_MAP_<NAME>_BYTES".
+;  WB regions are Write-Back cached and walked by the DMA library; NC
+;  regions are Normal Non-Cacheable in the MMU and skipped by the DMA walk.
+;  Every value is a literal, so the file reads the same to the compiler and
+;  to the helper.
+;
+;  WHY THE MAP IS LAID OUT THIS WAY (Anvil main, BCM2711):
+;    * The loader (Anvil/Core/pmfboot.pbi) wants the image and the BSS each
+;      inside ONE payload window. The low window ends at $07EFFFFF and starts
+;      at the megabyte above the monitor image; this map assumes that is at
+;      or below $01000000 (the board refuses the image, with a message, if
+;      not). The stack top lies in Anvil's payload stack corridor.
+;    * The BSS must stay below 1 GiB: Anvil's Vulkan library DMAs from it
+;      (vkCmdUpdateBuffer data) and its mailbox buffer is a Global, which
+;      MailboxInit refuses above 1 GiB. So the high window is not used.
+;    * The BSS must be WB and walked by the DMA: a WB BSS inside a DMA
+;      no-walk range would be read stale by the DMA without any message.
+;    * The mapper work windows stay at $03500000: the desktop port and the
+;      N64 port read them from mapper_state.pi4 / mapper_extra_state.pi4
+;      (the desktop port asserts $03500000..$0352FFFF). They are defined
+;      there, not here; the helper checks they lie inside WORK below.
+;    * NC is set in 2 MiB blocks (MmuAddNc rounds outwards), so NC and WB
+;      regions never share a 2 MiB block.
+;
+;  region       base       size        cache  who else must agree
+;  IMAGE        $01000000  4 MiB room  WB     --load-addr; helper checks the image end
+;  WINDOW       $01400000  32 MiB      NC     video_neon: NeonGpuExtraMap, AnvilVkV3dWindow
+;                                             (Vulkan device memory); MMU/DMA list 1;
+;                                             V3D page table (NeonInit spans surface,
+;                                             arena and this window)
+;  VIEWS        $03400000  1 MiB       WB     selector #ROM_PRG_VIEWS
+;  WORK         $03500000  192 KiB     WB     mapper_state / mapper_extra_state (shared)
+;  TESTS        $03600000  2 MiB       WB     Tests/core, Tests/mappers fixtures (PRG, CHR);
+;                                             desktop port's AnvilTestPrg / AnvilTestChr
+;  RAW_PRG      $03800000  4 MiB       WB     selector #ROM_RAW_PRG (file reads land here)
+;  RAW_CHR      $03C00000  1 MiB       WB     selector #ROM_RAW_CHR
+;  RECORD       $03D00000  64 KiB      WB     the result record; board_run --trace,
+;                                             copy_anvil_roms.py, desktop port's strip rule
+;  CORE1_STACK  $03D10000  960 KiB     WB     scheduler ApplicationJob: core 1's
+;                                             interpreter stack, top $03E00000
+;  DMA_SCRATCH  $03E00000  4 KiB       NC     video_neon DmaSetScratch; MMU/DMA list 2
+;  MMU_TABLES   $03F00000  12 KiB      NC     platform MmuBuildTables (L1, L2, low L2)
+;  ARENA        $04000000  16 MiB      NC     video_neon NeonArena; V3D page table
+;  SURFACE      $05000000  4 MiB       NC     video_neon NeonSurface + NeonSurfaceMapSpan
+;  MENU         $05400000  4,096,000 B NC     video_neon / video_menu_neon retained menu
+;                                             (DMA source)
+;  BSS          $05800000  39 MiB      WB     --bss-addr; the compiler zeroes it
+;  STACK        $07F00000  1 MiB       WB     --stack-addr = top $08000000 (Anvil's
+;                                             payload stack corridor)
+;  Anvil bands  $08000000  ..$0FFFFFFF ANVIL  Ethernet ring, DSI framebuffer (the DMA
+;                                             target), modules, V3D console arena,
+;                                             capture, Vulkan heap, monitor BSS: NC to
+;                                             the MMU up to $0D000000, no DMA walk up to
+;                                             $10000000, as before.
+;  COPY_BUNDLE  $40000000  256 MiB     WB     copy_anvil_roms.py stages its ROM bundle in
+;                                             Anvil's high window (a separate program)
+; ======================================================================
+
+#NES_MAP_IMAGE=$01000000             ; region WB the image (load address) and its room
+#NES_MAP_IMAGE_BYTES=$00400000
+#NES_MAP_WINDOW=$01400000            ; region NC Vulkan device window
+#NES_MAP_WINDOW_BYTES=$02000000
+#NES_MAP_VIEWS=$03400000             ; region WB immutable PRG views
+#NES_MAP_VIEWS_BYTES=$00100000
+#NES_MAP_WORK=$03500000              ; region WB mapper work windows (mapper_state.pi4)
+#NES_MAP_WORK_BYTES=$00030000
+#NES_MAP_TESTS=$03600000             ; region WB verification fixtures
+#NES_MAP_TESTS_BYTES=$00200000
+#NES_MAP_TEST_PRG=$03600000
+#NES_MAP_TEST_CHR=$03700000
+#NES_MAP_RAW_PRG=$03800000           ; region WB raw PRG as read from the file
+#NES_MAP_RAW_PRG_BYTES=$00400000
+#NES_MAP_RAW_CHR=$03C00000           ; region WB raw CHR as read from the file
+#NES_MAP_RAW_CHR_BYTES=$00100000
+#NES_MAP_RECORD=$03D00000            ; region WB the result record
+#NES_MAP_RECORD_BYTES=$00010000
+#NES_MAP_CORE1_STACK=$03D10000       ; region WB core 1's interpreter stack
+#NES_MAP_CORE1_STACK_BYTES=$000F0000
+#NES_MAP_DMA_SCRATCH=$03E00000       ; region NC DMA control-block scratch
+#NES_MAP_DMA_SCRATCH_BYTES=$00001000
+#NES_MAP_MMU_TABLES=$03F00000        ; region NC this payload's MMU tables
+#NES_MAP_MMU_TABLES_BYTES=$00003000
+#NES_MAP_ARENA=$04000000             ; region NC Neon arena
+#NES_MAP_ARENA_BYTES=$01000000
+#NES_MAP_SURFACE=$05000000           ; region NC Neon surface (mapped span)
+#NES_MAP_SURFACE_BYTES=$00400000
+#NES_MAP_MENU=$05400000              ; region NC retained menu image
+#NES_MAP_MENU_BYTES=$003E8000
+#NES_MAP_BSS=$05800000               ; region WB the BSS window
+#NES_MAP_BSS_BYTES=$02700000
+#NES_MAP_STACK=$07F00000             ; region WB the primary stack, top = base + bytes
+#NES_MAP_STACK_BYTES=$00100000
+#NES_MAP_ANVIL=$08000000             ; region ANVIL the monitor's own bands
+#NES_MAP_ANVIL_BYTES=$08000000
+#NES_MAP_COPY_BUNDLE=$40000000       ; region HIGH the ROM copier's staged bundle
+#NES_MAP_COPY_BUNDLE_BYTES=$10000000
+
+; The smallest free space the BSS window must keep. A build that leaves
+; less is refused, so Anvil's next growth is announced while it still fits.
+#NES_MAP_BSS_MARGIN=$00400000
+
+; Anvil's own addresses this map relies on; the helper compares each with
+; RaspberryPi4/Board/memmap.pi4 in the Anvil checkout.
+#NES_MAP_ANVIL_FB=$08A00000          ; #MON_FB_LO, the DSI framebuffer (DMA target)
+#NES_MAP_ANVIL_PAY0_HI=$07EFFFFF     ; #PAY0_HI
+#NES_MAP_ANVIL_STACK_LO=$07F00000    ; #PAY_STACK_LO
+#NES_MAP_ANVIL_STACK_HI=$080FFFFF    ; #PAY_STACK_HI
+
+; The no-cache lists. MMU: Normal NC (platform.pi4). DMA: no cache walk
+; (video_neon.pi4). Each pair is [lo, hi). The helper checks that every NC
+; region is inside one of them and that no WB region touches one.
+#NES_MAP_NC1_LO=$01400000            ; WINDOW
+#NES_MAP_NC1_HI=$03400000
+#NES_MAP_NC2_LO=$03E00000            ; DMA_SCRATCH, MMU_TABLES, ARENA, SURFACE, MENU
+#NES_MAP_NC2_HI=$05800000
+#NES_MAP_MMU_NC3_LO=$08000000        ; Anvil's bands, as the MMU has always had them
+#NES_MAP_MMU_NC3_HI=$0D000000
+#NES_MAP_DMA_NC3_LO=$08000000        ; Anvil's bands, as the DMA list has always had them
+#NES_MAP_DMA_NC3_HI=$10000000

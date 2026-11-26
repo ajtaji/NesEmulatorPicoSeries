@@ -420,10 +420,11 @@ HAND = ['mapper_konami_namco']     # desktop/*.pbi files the core includes and d
 # Anvil's own test suites (anvil/Tests), which the Pi runs from its menu: the core tests (the boards'
 # zero-page vectors, then the PPU's packed tile fetch against its reference form) and the mapper tests
 # (synthetic PRG/CHR fixtures through every mapper). Ported to desktop/core/tests/ as they are, except
-# their fixed Pi buffers ($03200000 PRG, $03300000 CHR: host.pbi's AnvilTestPrg / AnvilTestChr) and the
-# result block they leave at $02F00000 for the Pi's monitor (the desktop reads the globals instead).
+# their fixed Pi buffers (anvil/memory_map.pi4's #NES_MAP_TEST_PRG / #NES_MAP_TEST_CHR: host.pbi's
+# AnvilTestPrg / AnvilTestChr) and the result block they leave at #NES_MAP_RECORD for the Pi's monitor
+# (the desktop reads the globals instead).
 TESTS = ['zp_vectors', 'zp', 'core', 'mapper5_bus_reference', 'mapper_extra', 'mappers']
-TEST_BUFFERS = {'$03200000': 'AnvilTestPrg', '$03300000': 'AnvilTestChr'}
+TEST_BUFFERS = {'#NES_MAP_TEST_PRG': 'AnvilTestPrg', '#NES_MAP_TEST_CHR': 'AnvilTestChr'}
 
 
 def port_tests():
@@ -431,10 +432,10 @@ def port_tests():
     out.mkdir(exist_ok=True)
     for name in TESTS:
         text = (SRC / 'Tests' / f'{name}.pi4').read_text(encoding='cp1252').replace('\r\n', '\n')
-        text = re.sub(r'^[ \t]*PokeI\(\$02F00[0-9A-F]{3},.*\n', '', text, flags=re.M)
+        text = re.sub(r'^[ \t]*PokeI\(#NES_MAP_RECORD\b.*\n', '', text, flags=re.M)
         for addr, buf in TEST_BUFFERS.items():
-            text = text.replace(addr, buf)
-        if re.search(r'\$0[23][0-9A-Fa-f]{6}\b', text):
+            text = re.sub(re.escape(addr) + r'\b', buf, text)
+        if re.search(r'\$0[23][0-9A-Fa-f]{6}\b|#NES_MAP_', text):
             raise SystemExit(f'Tests/{name}.pi4: a Pi address is left')
         text = translate(text, name).replace(f'from anvil/{name}.pi4', f'from anvil/Tests/{name}.pi4')
         for const, off in WINDOWS.items():

@@ -50,13 +50,13 @@ Procedure.i VideoMenuDraw()
   NeonVkChromePresentConsume()
   ; Retain the complete menu outside the GPU render target. The render pass
   ; clears its target, so a HUD-only redraw copies only its rotated strip.
-  If DmaSetBounds($07400000,4096000)=0 : ProcedureReturn 0 : EndIf
+  If DmaSetBounds(#NES_MAP_MENU,4096000)=0 : ProcedureReturn 0 : EndIf
   If full
-    If DmaCopy2D($07400000,3200,NgImageBase,NgImagePitch,3200,1280)=0 : VideoError=213 : EndIf
+    If DmaCopy2D(#NES_MAP_MENU,3200,NgImageBase,NgImagePitch,3200,1280)=0 : VideoError=213 : EndIf
   Else
-    If DmaCopy2D($07400000+712*4,3200,NgImageBase+712*4,NgImagePitch,36*4,1100)=0 : VideoError=213 : EndIf
+    If DmaCopy2D(#NES_MAP_MENU+712*4,3200,NgImageBase+712*4,NgImagePitch,36*4,1100)=0 : VideoError=213 : EndIf
   EndIf
-  If DmaSetBounds($08A00000,4096000)=0 : ProcedureReturn 0 : EndIf
+  If DmaSetBounds(#NES_MAP_ANVIL_FB,4096000)=0 : ProcedureReturn 0 : EndIf
   NgMenuReady=1 : MenuDrawPage=RomPage : MenuDrawStatus=RomStatus
   MenuDrawCount=RomCount : MenuDrawFps=RomMenuFps
   MenuDrawRevision=RomRevision

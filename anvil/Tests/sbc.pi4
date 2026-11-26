@@ -20,7 +20,7 @@ Procedure.i AudioCodecTests()
       SafetyPet()
     Next
   Next
-  PokeI($02F00000,$53424354) : PokeI($02F00008,checks)
-  PokeI($02F00010,failures) : PokeI($02F00018,NesHostUs()-start)
+  PokeI(#NES_MAP_RECORD,$53424354) : PokeI(#NES_MAP_RECORD+$008,checks)
+  PokeI(#NES_MAP_RECORD+$010,failures) : PokeI(#NES_MAP_RECORD+$018,NesHostUs()-start)
   ProcedureReturn failures
 EndProcedure

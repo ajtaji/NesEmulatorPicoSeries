@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import anvil_map
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,6 +25,8 @@ def main():
     p.add_argument('--out',type=Path,required=True,help='private working folder for bundle and copy records')
     a=p.parse_args(); a.anvil=a.anvil.resolve(); a.out=a.out.resolve()
     a.out.mkdir(parents=True,exist_ok=True)
+    consts,regions=anvil_map.load(); anvil_map.check(consts,regions,a.anvil)
+    bundle_at,bundle_max=consts['COPY_BUNDLE'],consts['COPY_BUNDLE_BYTES']
     files=sorted((f for f in a.directory.glob('*.nes') if f.is_file()),key=lambda f:f.name.casefold())
     if not 1<=len(files)<=4096: p.error('directory must contain 1..4096 .nes files')
     seen=set(); table=bytearray(); offset=32+272*len(files); manifest=[]
@@ -35,7 +38,7 @@ def main():
         seen.add(key); table+=name.ljust(256,b'\0')+struct.pack('<QQ',offset,n)
         manifest.append(dict(name=f.name,bytes=n,sha256=hashlib.sha256(f.read_bytes()).hexdigest()))
         offset+=n
-    if offset>0x10000000: p.error('bundle exceeds 256 MiB; copy smaller folders separately')
+    if offset>bundle_max: p.error(f'bundle exceeds {bundle_max>>20} MiB; copy smaller folders separately')
     bundle=a.out/'roms.pack'
     with bundle.open('wb') as out:
         out.write(struct.pack('<8sQQQ',b'NESPACK1',len(files),offset,32+272*len(files)));out.write(table)
@@ -45,10 +48,10 @@ def main():
             out.write(data)
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     wrapper=a.out/'copy.pi4'
-    wrapper.write_text('#NES_NATIVE_TIMER=0\nXIncludeFile "'+(a.anvil/'RaspberryPi4/Lib/mmu.pi4').as_posix()+'"\nXIncludeFile "'+(ROOT/'anvil/Tools/copy_roms.pi4').as_posix()+'"\n')
+    wrapper.write_text('XIncludeFile "'+anvil_map.MAP.as_posix()+'"\n#NES_NATIVE_TIMER=0\nXIncludeFile "'+(a.anvil/'RaspberryPi4/Lib/mmu.pi4').as_posix()+'"\nXIncludeFile "'+(ROOT/'anvil/Tools/copy_roms.pi4').as_posix()+'"\n')
     image=a.out/'copy.img'; sidecar=Path(str(image)+'.pmf');sidecar.unlink(missing_ok=True)
     env=os.environ.copy();env['PMF_ROOT']=str(a.anvil)
-    r=subprocess.run([str(a.compiler),'--compile',str(wrapper),'-t','pi4','--load-addr','0x01000000','--bss-addr','0x02000000','--stack-addr','0x03000000','--entry-returns','--wants-services','-o',str(image)],env=env,capture_output=True,text=True)
+    r=subprocess.run([str(a.compiler),'--compile',str(wrapper),'-t','pi4',*anvil_map.compiler_args(consts),'--entry-returns','--wants-services','-o',str(image)],env=env,capture_output=True,text=True)
     (a.out/'copy.build.log').write_text(r.stdout+r.stderr)
     if r.returncode or not sidecar.exists(): raise RuntimeError('copier compilation failed; see copy.build.log')
     sys.path.insert(0,str(a.anvil/'tools'))
@@ -62,7 +65,7 @@ def main():
             c.send('mkdir 2:/NES');reply=c.read_until(['pmf>'],20)
             if 'Made the directory' not in reply: raise RuntimeError(reply)
         data=bundle.read_bytes();want=hashlib.sha256(data).hexdigest()
-        line=f'net recv 5001 40000000 {len(data):X}';c.send(line)
+        line=f'net recv 5001 {bundle_at:X} {len(data):X}';c.send(line)
         listen,why=c.read_until_or_prompt(line,['for ONE connection'],15)
         if why!='needle': raise RuntimeError(listen)
         print(f'Streaming {len(files)} ROMs ({len(data)} bytes)...',flush=True)
@@ -74,7 +77,7 @@ def main():
     finally:
         c.close()
     print('Staging digest verified. Copying and comparing exFAT files...',flush=True)
-    subprocess.run([sys.executable,str(a.anvil/'tools/board_run.py'),str(sidecar),'--console-ip',a.ip,'--timeout','1200','--settle','0','--trace','2f00200:40','--no-shot','--out',str(a.out/'board')],check=True)
+    subprocess.run([sys.executable,str(a.anvil/'tools/board_run.py'),str(sidecar),'--console-ip',a.ip,'--timeout','1200','--settle','0','--trace',f'{consts["RECORD"]+0x200:x}:40','--no-shot','--out',str(a.out/'board')],check=True)
     trace=(a.out/'board/copy.img.trace.bin').read_bytes()
     result,written,skipped,index,total=struct.unpack('<5Q',trace)
     if result or written+skipped!=len(files): raise RuntimeError(f'copy incomplete at index {index}, result {result}')

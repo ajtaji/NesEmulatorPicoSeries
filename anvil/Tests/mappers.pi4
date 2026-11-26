@@ -16,7 +16,7 @@ Procedure MapSerial(addr.i,value.i,stamp.i)
 EndProcedure
 Procedure MapFixture(mapper.i)
   Protected i.i
-  CartMapper=mapper : CartPrg=$03200000 : CartChr=$03300000
+  CartMapper=mapper : CartPrg=#NES_MAP_TEST_PRG : CartChr=#NES_MAP_TEST_CHR
   MapPrgBytes=262144 : MapChrBytes=32768 : MapChrRam=0 : MapFourScreen=0
   For i=0 To 262143 : PokeA(CartPrg+i,i/8192) : Next
   For i=0 To 32767 : PokeA(CartChr+i,i/1024) : PokeA(@Decoded(i),i/1024) : Next
@@ -282,8 +282,8 @@ Procedure.i MapperTests()
   MapCheck(PpuMask,0) : MapCheck(DmcEmpty,1) : MapCheck(ApuSampleLeft,37)
   MapCheck(PpuWarmup,29658) : MapCheck(MapIrq,0) : MapCheck(AudioSessionStarted,123)
   AudioSessionStarted=session
-  PokeI($02F00400,MapperChecks) : PokeI($02F00408,MapperFailures)
-  PokeI($02F00410,MapperFirstFail) : PokeI($02F00418,MapperGot) : PokeI($02F00420,MapperExpected)
-  PokeI($02F00428,NesHostUs()-t)
+  PokeI(#NES_MAP_RECORD+$400,MapperChecks) : PokeI(#NES_MAP_RECORD+$408,MapperFailures)
+  PokeI(#NES_MAP_RECORD+$410,MapperFirstFail) : PokeI(#NES_MAP_RECORD+$418,MapperGot) : PokeI(#NES_MAP_RECORD+$420,MapperExpected)
+  PokeI(#NES_MAP_RECORD+$428,NesHostUs()-t)
   ProcedureReturn MapperFailures
 EndProcedure

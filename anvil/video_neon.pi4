@@ -10,6 +10,8 @@ Global Dim NgPixels.l(61440)
 Global Dim NgClear.l(4)
 Global NgMenuReady.i
 Global NgConvertUs.i,NgUploadUs.i,NgGpuUs.i,NgPresentUs.i
+Global NgArenaNeed.i,NgVkHigh.i
+Declare NgVkSample()
 Declare VideoUi()
 Declare VideoHudDraw()
 Declare.i VideoHudDirty()
@@ -37,10 +39,10 @@ Procedure.i NgCreateTarget()
   Define frameInfo.VkFramebufferCreateInfo
   Define mapped.i
 
-  If NeonGpuRangeMapped($05000000, $02000000) = 0
+  If NeonGpuRangeMapped(#NES_MAP_WINDOW, #NES_MAP_WINDOW_BYTES) = 0
     ProcedureReturn 200
   EndIf
-  If AnvilVkV3dWindow($05000000, $02000000) <> #VK_SUCCESS
+  If AnvilVkV3dWindow(#NES_MAP_WINDOW, #NES_MAP_WINDOW_BYTES) <> #VK_SUCCESS
     ProcedureReturn 200
   EndIf
   ici\sType = #VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
@@ -85,7 +87,7 @@ Procedure.i NgCreateTarget()
   rc = vkCreateImage(NgDevice, @imageInfo, 0, @NgImage)
   If rc <> #VK_SUCCESS : ProcedureReturn 200 : EndIf
   vkGetImageMemoryRequirements(NgDevice, NgImage, @req)
-  If req\size <= 0 Or req\size > $02000000 Or imageProps\maxResourceSize < req\size
+  If req\size <= 0 Or req\size > #NES_MAP_WINDOW_BYTES Or imageProps\maxResourceSize < req\size
     ProcedureReturn 200
   EndIf
   alloc\sType = #VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
@@ -148,18 +150,21 @@ Procedure VideoBegin()
   ScreenW=svc_w() : ScreenH=svc_h()
   If ScreenW<>1280 Or ScreenH<>800 : VideoError=201 : ProcedureReturn : EndIf
   TimerInit()
-  If NeonArena($04000000,$01000000)<>0 : VideoError=202 : ProcedureReturn : EndIf
-  If NeonSurface($07000000,800,1280,3200)<>0 : VideoError=203 : ProcedureReturn : EndIf
-  NeonSurfaceMapSpan($00400000)
+  If NeonArena(#NES_MAP_ARENA,#NES_MAP_ARENA_BYTES)<>0 : VideoError=202 : ProcedureReturn : EndIf
+  If NeonSurface(#NES_MAP_SURFACE,800,1280,3200)<>0 : VideoError=203 : ProcedureReturn : EndIf
+  NeonSurfaceMapSpan(#NES_MAP_SURFACE_BYTES)
   If NeonRenderCapacity(1280,1280)<>0 : VideoError=204 : ProcedureReturn : EndIf
-  If NeonGpuExtraMap($05000000,$02000000)<>0 : VideoError=205 : ProcedureReturn : EndIf
+  If NeonGpuExtraMap(#NES_MAP_WINDOW,#NES_MAP_WINDOW_BYTES)<>0 : VideoError=205 : ProcedureReturn : EndIf
   If NeonInit()<>0 : VideoError=206 : ProcedureReturn : EndIf
+  NgArenaNeed=Neon_ArenaNeed()
   NeonPalette() : NeonFontDefaults() : NeonFontUse(?dsp_font8x16,8,16,32,126)
   NeonFontSetup(#NEON_FONT_SMALL,2,0)
   rc=NgCreateTarget()
   If rc<>0 : VideoError=rc : ProcedureReturn : EndIf
-  DmaClearUncached() : DmaAddUncached($03000000,$10000000)
-  If DmaSetScratch($03E00000,4096)=0 Or DmaSetBounds($08A00000,800*1280*4)=0
+  NgVkSample()
+  DmaClearUncached() : DmaAddUncached(#NES_MAP_NC1_LO,#NES_MAP_NC1_HI)
+  DmaAddUncached(#NES_MAP_NC2_LO,#NES_MAP_NC2_HI) : DmaAddUncached(#NES_MAP_DMA_NC3_LO,#NES_MAP_DMA_NC3_HI)
+  If DmaSetScratch(#NES_MAP_DMA_SCRATCH,#NES_MAP_DMA_SCRATCH_BYTES)=0 Or DmaSetBounds(#NES_MAP_ANVIL_FB,800*1280*4)=0
     VideoError=211 : ProcedureReturn
   EndIf
   If DmaInit()=0 : VideoError=212 : ProcedureReturn : EndIf
@@ -171,7 +176,7 @@ Procedure.i VideoClockHz()
 EndProcedure
 Procedure NgPresent()
   Protected src.i,dst.i,n.i,line.i,previous.i,start.i
-  src=NgImageBase : dst=$08A00000 : n=800*1280*4
+  src=NgImageBase : dst=#NES_MAP_ANVIL_FB : n=800*1280*4
   ; Both private GPU target and Anvil's configured DSI front are NC.
   ; Full GPU frame has completed before publication. No LCD line streaming.
   previous=PeekL($FE400048)&$FFF : start=NesHostUs()
@@ -188,7 +193,7 @@ Procedure NgPresent()
   Until NesHostUs()-start>=20000
   CompilerIf #NES_ROM_SELECTOR=1
     If RomMenuActive
-      If DmaCopy2D(dst,3200,$07400000,3200,3200,1280)=0 : VideoError=213 : EndIf
+      If DmaCopy2D(dst,3200,#NES_MAP_MENU,3200,3200,1280)=0 : VideoError=213 : EndIf
       ProcedureReturn
     EndIf
   CompilerEndIf
@@ -215,7 +220,8 @@ Procedure.i VideoStart(top.i,bottom.i)
   Next
   NgConvertUs=NgConvertUs+NesHostUs()-t : t=NesHostUs()
   rc=NeonVkChromeImageSpriteReplaceBGRA(@NgPixels(0),256,240)
-  NgUploadUs=NgUploadUs+NesHostUs()-t : t=NesHostUs()
+  NgUploadUs=NgUploadUs+NesHostUs()-t
+  NgVkSample() : t=NesHostUs()
   If rc<>0 : VideoError=207 : ProcedureReturn 0 : EndIf
   If NeonVkChromeBegin(@NgClear(0))<>0 : VideoError=208 : ProcedureReturn 0 : EndIf
   If VideoFrames=0
@@ -227,6 +233,7 @@ Procedure.i VideoStart(top.i,bottom.i)
   If rc<>0 : VideoError=209 : ProcedureReturn 0 : EndIf
   If NeonVkChromeEnd()<>0 : VideoError=210 : ProcedureReturn 0 : EndIf
   NeonVkChromePresentConsume()
+  NgVkSample()
   NgGpuUs=NgGpuUs+NesHostUs()-t : t=NesHostUs()
   NgPresent()
   VideoHudClean()
@@ -260,4 +267,25 @@ EndProcedure
 Procedure VideoDiagnostics(address.i)
   PokeI(address,NgConvertUs) : PokeI(address+8,NgUploadUs)
   PokeI(address+16,NgGpuUs) : PokeI(address+24,NgPresentUs)
+EndProcedure
+; How much of the two GPU reservations (memory_map.pi4 ARENA and WINDOW) a run
+; really used. The Neon arena is laid out once by NeonInit (Neon_ArenaNeed).
+; The Vulkan heap is first-fit over live allocations, so its high-water mark
+; is sampled: the highest end of any live allocation, taken after each frame's
+; upload and after each frame's end (NgVkSample), read out at the end of a run.
+Procedure NgVkSample()
+  Protected s.i,e.i
+  If avkHeapReady=0 : ProcedureReturn : EndIf
+  For s=1 To #ANVIL_VK_MAX_MEMORY
+    If avkMemLive[s]<>0
+      e=avkMemOffset[s]+avkMemSize[s]
+      If e>NgVkHigh : NgVkHigh=e : EndIf
+    EndIf
+  Next
+EndProcedure
+; Four u64: arena bytes, arena used; Vulkan heap bytes, its high-water mark.
+Procedure VideoMemoryDiagnostics(address.i)
+  NgVkSample()
+  PokeI(address,#NES_MAP_ARENA_BYTES) : PokeI(address+8,NgArenaNeed)
+  PokeI(address+16,avkHeapBytes) : PokeI(address+24,NgVkHigh)
 EndProcedure

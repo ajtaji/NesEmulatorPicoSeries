@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import re
+import anvil_map
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -39,6 +40,9 @@ def main():
         p.error('choose only one verification mode')
     if a.verify_rom and (a.rom or a.no_selector or a.verify_core or a.verify_audio):
         p.error('--verify-rom requires selector mode and no other verification mode')
+    # The map is checked before anything is compiled (anvil/memory_map.pi4, tools/anvil_map.py).
+    consts,regions=anvil_map.load()
+    anvil_map.check(consts,regions,a.anvil)
     includes=['RaspberryPi4/Lib/uart.pi4','RaspberryPi4/Lib/timer.pi4',
       'RaspberryPi4/Lib/mailbox.pi4','RaspberryPi4/Lib/mmu.pi4',
       'RaspberryPi4/Lib/dma.pi4','RaspberryPi4/Lib/display.pi4',
@@ -52,6 +56,8 @@ def main():
         includes += ['RaspberryPi4/Lib/gpio.pi4']
     # Anvil's Neon libraries do binary32 maths (Anvil/Math/float32.pbi); the program enables it.
     source='EnableFloatingPoint\n'
+    # Every fixed address of the port comes first, so every module can use it.
+    source+=f'XIncludeFile "{anvil_map.MAP.as_posix()}"\n'
     source+=f'#NES_VERIFY_MAPPERS={int(a.verify_mappers)}\n#NES_BT_SESSION={int(bool(a.bluetooth_peer_wrapper))}\n#DSP_DMA_LINKED=1\n#NES_NATIVE_TIMER=1\n#NES_VERIFY_CODEC={int(a.verify_audio)}\n#NES_VERIFY_CORE={int(a.verify_core)}\n#NES_VERIFY_ROM={int(a.verify_rom)}\n#NES_ROM_SELECTOR={int(not (a.rom or a.no_selector or a.verify_core or a.verify_audio))}\n'
     source+='\n'.join(f'XIncludeFile "{(a.anvil/f).as_posix()}"' for f in includes)+'\n'
     if a.bluetooth_peer_wrapper:
@@ -145,9 +151,8 @@ EndProcedure
     wrapper=a.out.with_suffix('.pi4');wrapper.write_text(source)
     # Anvil owns its include root; the compiler still owns its intrinsics.
     env=os.environ.copy();env['PMF_ROOT']=str(a.anvil)
-    cmd=[str(a.compiler),'--compile',str(wrapper),'-t','pi4','--load-addr','0x01000000',
-      '--bss-addr','0x02000000','--stack-addr','0x03000000','--entry-returns',
-      '--wants-services','-S','-o',str(a.out)]
+    cmd=[str(a.compiler),'--compile',str(wrapper),'-t','pi4',*anvil_map.compiler_args(consts),
+      '--entry-returns','--wants-services','-S','-o',str(a.out)]
     # A failed compiler must never leave a previous loadable sidecar looking
     # like the product of this build. Only remove this explicitly named output.
     sidecar=Path(str(a.out)+'.pmf')
@@ -156,5 +161,12 @@ EndProcedure
     a.out.with_suffix('.build.log').write_text(r.stdout+'\n'+r.stderr)
     print(r.stdout);print(r.stderr,file=sys.stderr)
     if r.returncode or not Path(str(a.out)+'.pmf').exists(): raise SystemExit(r.returncode or 1)
+    try:
+        image,bss,free=anvil_map.check_built(consts,r.stdout+'\n'+r.stderr)
+    except anvil_map.MapError:
+        sidecar.unlink(missing_ok=True)
+        raise
+    print(f'memory map: image {image:,} bytes of its {consts["IMAGE_BYTES"]:,}; BSS {bss:,} bytes, '
+          f'{free:,} of the {consts["BSS_BYTES"]:,}-byte BSS window free (margin {consts["BSS_MARGIN"]:,})')
 
 if __name__=='__main__':main()

@@ -4,9 +4,9 @@ Global RomLoaded.i,RomChosen.i=-1
 CompilerIf #NES_ROM_SELECTOR=1
 #ROM_MAX_FILES=4096
 #ROM_NAME_BYTES=256
-#ROM_RAW_PRG=$03800000
-#ROM_RAW_CHR=$03C00000
-#ROM_PRG_VIEWS=$03400000
+#ROM_RAW_PRG=#NES_MAP_RAW_PRG
+#ROM_RAW_CHR=#NES_MAP_RAW_CHR
+#ROM_PRG_VIEWS=#NES_MAP_VIEWS
 Global *rom_up,*rom_open,*rom_size,*rom_read,*rom_close,*rom_dir,*rom_next
 Global Dim RomNames.a(#ROM_MAX_FILES*#ROM_NAME_BYTES)
 Global Dim RomName.a(#ROM_NAME_BYTES)
@@ -329,11 +329,11 @@ Procedure.i RomSelector()
   Wend
   RomMenuActive=0 : svc_flush() : NesController=0
   For index=0 To 15 : ContactBits(index)=0 : Next
-  PokeI($02F00000,$4D454E55) : PokeI($02F00008,NesHostUs()-RomMenuStart)
-  PokeI($02F00058,ExitRequested) : PokeI($02F00060,TouchEvents) : PokeI($02F00068,VideoError)
-  PokeI($02F001B0,RomMenuFrames) : PokeI($02F001B8,RomCount)
-  PokeI($02F001C0,RomChosen) : PokeI($02F001C8,RomLoaded)
-  PokeI($02F001D0,RomMenuFps)
+  PokeI(#NES_MAP_RECORD,$4D454E55) : PokeI(#NES_MAP_RECORD+$008,NesHostUs()-RomMenuStart)
+  PokeI(#NES_MAP_RECORD+$058,ExitRequested) : PokeI(#NES_MAP_RECORD+$060,TouchEvents) : PokeI(#NES_MAP_RECORD+$068,VideoError)
+  PokeI(#NES_MAP_RECORD+$1B0,RomMenuFrames) : PokeI(#NES_MAP_RECORD+$1B8,RomCount)
+  PokeI(#NES_MAP_RECORD+$1C0,RomChosen) : PokeI(#NES_MAP_RECORD+$1C8,RomLoaded)
+  PokeI(#NES_MAP_RECORD+$1D0,RomMenuFps)
   ProcedureReturn RomLoaded<>0 And ExitRequested=0 And VideoError=0
 EndProcedure
 CompilerEndIf

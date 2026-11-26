@@ -95,8 +95,8 @@ Procedure.i RomLoaderTests()
   RomTestGame("Contra (U).nes",2,262144,$0CE20FFF,$811C9DC5)
   RomTestGame("Castlevania (U) (PRG 0).nes",2,262144,$B6C16DBB,$811C9DC5)
   RomExtraTests()
-  PokeI($02F00280,RomChecks) : PokeI($02F00288,RomFailures)
-  PokeI($02F00290,RomFirstFail) : PokeI($02F00298,RomCount)
-  PokeI($02F002A0,NesHostUs()-t)
+  PokeI(#NES_MAP_RECORD+$280,RomChecks) : PokeI(#NES_MAP_RECORD+$288,RomFailures)
+  PokeI(#NES_MAP_RECORD+$290,RomFirstFail) : PokeI(#NES_MAP_RECORD+$298,RomCount)
+  PokeI(#NES_MAP_RECORD+$2A0,NesHostUs()-t)
   ProcedureReturn RomFailures
 EndProcedure
