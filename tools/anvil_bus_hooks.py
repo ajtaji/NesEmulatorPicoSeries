@@ -5,8 +5,19 @@ the generated renderer and CPU opcode routines are not rewritten here.
 """
 import re
 
+class Src(str):
+    """Generated text whose every replace must find its target. The adapters edit the generated
+    core by text; a Pico source change that moves a target would otherwise leave the core silently
+    unadapted (a cartridge's RAM or latch quietly lost), so a missing target stops the port."""
+    def replace(self, old, new, count=-1):
+        assert old in self, ('adapter target not in the generated core', old[:80])
+        return Src(str.replace(self, old, new, count))
+
+def read(p):
+    return Src(p.read_text())
+
 def adapt_generated_core(out):
-    p=out/'bridge.pi4';s=p.read_text()
+    p=out/'bridge.pi4';s=read(p)
     s=s.replace('    v=NesOpenBus\n  ElseIf addr=$4016',
       '    v=NesOpenBus\n    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : v=MapRam(addr&8191) : EndIf\n  ElseIf addr=$4016',1)
     s=s.replace('    If addr>=$8000 And (CartMapper=66 Or CartMapper=2)',
@@ -16,15 +27,15 @@ def adapt_generated_core(out):
     s=s.replace('Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF',
       'Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF\n  If addr>=$6000 And addr<$8000 And (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf',1)
     p.write_text(s)
-    p=out/'ppu.pi4';s=p.read_text()
+    p=out/'ppu.pi4';s=read(p)
     a=s.index('Procedure.i PpuNtAddr');b=s.index('Procedure PpuColours',a)
-    s=s[:a]+'XIncludeFile "ppu_bus_read.pi4"\n'+s[b:]
+    s=Src(s[:a]+'XIncludeFile "ppu_bus_read.pi4"\n'+s[b:])
     a=s.index('Procedure PpuWrite');b=s.index('; Packed tile fetch',a)
-    s=s[:a]+'XIncludeFile "ppu_bus_write.pi4"\n'+s[b:]
+    s=Src(s[:a]+'XIncludeFile "ppu_bus_write.pi4"\n'+s[b:])
     s=s.replace('  PpuAdvanceReference(cycles)\nEndProcedure',
       '  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf\n  PpuAdvanceReference(cycles)\nEndProcedure')
     p.write_text(s)
-    p=out/'worker.pi4';s=p.read_text()
+    p=out/'worker.pi4';s=read(p)
     s=s.replace('    ProcedureReturn PpuRegRead(addr&7)',
       '    i=PpuRegRead(addr&7) : MapperRegNotice(addr&7) : ProcedureReturn i',1)
     s=s.replace('    PpuRegWrite(addr&7,value)','    PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)')
@@ -44,6 +55,7 @@ def generate_guest_reset(out):
         source=(out/(name+'.pi4')).read_text()
         source=re.sub(r'CompilerIf #PPU_PROFILE=2.*?CompilerEndIf','',source,flags=re.S)
         for line in source.splitlines():
+            line=line.split(';')[0].rstrip()   # a trailing comment is not part of the declaration
             if line.startswith('Global Dim '):
                 m=re.fullmatch(r'Global Dim (\w+)\.(\w+)\(([^)]+)\)',line)
                 if m:
@@ -77,7 +89,7 @@ EndProcedure
 
 
 def extend_mappers(out):
-    p=out/'bridge.pi4';s=p.read_text()
+    p=out/'bridge.pi4';s=read(p)
     s=s.replace('    v=PeekA(PrgBase+addr-$8000)',      '    v=PeekA(PrgBase+addr-$8000)\n    If CartMapper=5\n      v=M5PrgRead(addr)\n      If addr=$FFFA Or addr=$FFFB : M5ScanReset() : EndIf\n      If addr<$C000 And M5PcmMode<>0\n        CpuNow() : NesRpc(0,0,0,CpuCycles) : M5PcmRead(v) : CpuEndWindow()\n      EndIf\n    EndIf',1)
     s=s.replace('  ElseIf addr=$4016\n',      '    If CartMapper=5 : v=M5PrgRead(addr) : EndIf\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    v=M5Read(addr) : CpuEndWindow()\n  ElseIf addr=$4016\n',1)
     s=s.replace('    If CartMapper=1 Or CartMapper=4\n      CpuNow()', '    If MapManaged\n      CpuNow()',1)
@@ -87,26 +99,26 @@ def extend_mappers(out):
     s=s.replace('    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf',      '    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf\n    If (CartMapper=1 Or CartMapper=4) And MapRamEnable<>0 : ProcedureReturn MapRam(addr&8191) : EndIf',1)
     s=s.replace('Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF',      'Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF\n  If CartMapper=5 And addr>=$6000 : ProcedureReturn M5PrgRead(addr) : EndIf',1)
     p.write_text(s)
-    p=out/'bridge.pi4';s=p.read_text().replace('  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()', '  ElseIf addr>=$5C00 And addr<$6000 And CartMapper=5\n    v=M5Read(addr)\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()',1);p.write_text(s)
-    p=out/'ppu.pi4';s=p.read_text().replace('Procedure PpuFetchTile()','Procedure PpuFetchTileBase()',1).replace('Procedure PpuSpritesRaw()','Procedure PpuSpritesBase()',1)
+    p=out/'bridge.pi4';s=read(p).replace('  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()', '  ElseIf addr>=$5C00 And addr<$6000 And CartMapper=5\n    v=M5Read(addr)\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow()',1);p.write_text(s)
+    p=out/'ppu.pi4';s=read(p).replace('Procedure PpuFetchTile()','Procedure PpuFetchTileBase()',1).replace('Procedure PpuSpritesRaw()','Procedure PpuSpritesBase()',1)
     s=s.replace('  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf',      '  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf\n  If CartMapper=5 : M5PpuTicks(cycles) : EndIf',1)
     p.write_text(s)
-    p=out/'apu.pi4';s=p.read_text().replace('Procedure ApuMixSample()','Procedure ApuMixSampleBase()',1)
+    p=out/'apu.pi4';s=read(p).replace('Procedure ApuMixSample()','Procedure ApuMixSampleBase()',1)
     s=s.replace('    ApuTick(step)', '    If CartMapper=5 : M5AudioAdvance(step) : EndIf\n    ApuTick(step)',1)
     p.write_text(s)
-    p=out/'worker.pi4';s=p.read_text().replace('PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)',      'PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)\n    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf')
+    p=out/'worker.pi4';s=read(p).replace('PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)',      'PpuRegWrite(addr&7,value) : MapperRegNotice(addr&7)\n    If CartMapper=5 : M5PpuNotice(addr,value) : EndIf')
     s=s.replace('  ElseIf command=3\n    OamCacheDirty=1',      '  ElseIf command=3\n    If CartMapper=5 : M5ScanReset() : EndIf\n    OamCacheDirty=1')
     p.write_text(s)
 
 
 def extend_extra_mappers(out):
-    p=out/'bridge.pi4';s=p.read_text()
+    p=out/'bridge.pi4';s=read(p)
     s=s.replace('  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    M5Write(addr,value) : CpuEndWindow()', '  ElseIf addr>=$4020 And ExtraManaged(CartMapper)\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    MapperWrite(addr,value,CpuCycles+AccessPhase) : CpuEndWindow()\n  ElseIf addr>=$5000 And CartMapper=5\n    CpuNow() : NesRpc(0,0,0,CpuCycles+AccessPhase)\n    M5Write(addr,value) : CpuEndWindow()',1)
     p.write_text(s)
 
 
 def add_extra_bus(out):
-    p=out/'bridge.pi4';s=p.read_text()
+    p=out/'bridge.pi4';s=read(p)
     s=s.replace('    v=PeekA(PrgBase+addr-$8000)', '    v=PeekA(PrgBase+addr-$8000)\n    If CartMapper=234 And addr>=$FF80\n      CpuNow() : NesRpc(0,0,0,CpuCycles)\n      ExtraReadNotice(addr,v) : CpuEndWindow()\n    EndIf',1)
     s=s.replace('    If CartMapper=5 : v=M5PrgRead(addr) : EndIf', '    If CartMapper=5 : v=M5PrgRead(addr) : EndIf\n    If ExtraManaged(CartMapper) : v=ExtraLowRead(addr,NesOpenBus) : EndIf',1)
     s=s.replace('  ElseIf addr>=$5C00', '  ElseIf addr>=$4020 And ExtraManaged(CartMapper)\n    v=ExtraLowRead(addr,NesOpenBus)\n  ElseIf addr>=$5C00',1)
@@ -114,17 +126,17 @@ def add_extra_bus(out):
     s=s.replace('    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf', '    If ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf\n    If CartMapper=5 : ProcedureReturn M5PrgRead(addr) : EndIf',1)
     s=s.replace('Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF', 'Procedure.i NesDmaRead(addr.i)\n  addr=addr&$FFFF\n  If addr>=$6000 And addr<$8000 And ExtraManaged(CartMapper) : ProcedureReturn ExtraLowRead(addr,0) : EndIf',1)
     p.write_text(s)
-    p=out/'ppu.pi4';s=p.read_text().replace('  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf', '  If ExtraA12(CartMapper) : MapperPpuTicks(cycles) : EndIf',1);p.write_text(s)
-    p=out/'worker.pi4';s=p.read_text().replace('    ApuAdvance(dt)','    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf\n    ApuAdvance(dt)',1);p.write_text(s)
-    p=out/'apu.pi4';s=p.read_text().replace('    If CartMapper=5 : M5AudioAdvance(step) : EndIf','    If CartMapper=5 : M5AudioAdvance(step) : EndIf\n    If CartMapper=69 : ExtraSoundAdvance(step) : EndIf',1);p.write_text(s)
+    p=out/'ppu.pi4';s=read(p).replace('  If CartMapper=4 : MapperPpuTicks(cycles) : EndIf', '  If ExtraA12(CartMapper) : MapperPpuTicks(cycles) : EndIf',1);p.write_text(s)
+    p=out/'worker.pi4';s=read(p).replace('    ApuAdvance(dt)','    If ExtraManaged(CartMapper) : ExtraCpuTicks(dt) : EndIf\n    ApuAdvance(dt)',1);p.write_text(s)
+    p=out/'apu.pi4';s=read(p).replace('    If CartMapper=5 : M5AudioAdvance(step) : EndIf','    If CartMapper=5 : M5AudioAdvance(step) : EndIf\n    If CartMapper=69 : ExtraSoundAdvance(step) : EndIf',1);p.write_text(s)
     # A cartridge-specific sprite fetch adapter retains pixel composition,
     # priority, flipping and evaluation. Only its CHR read has a latch side effect.
     import re
-    pp=(out/'ppu.pi4').read_text()
-    body=re.search(r'Procedure PpuSpritesReference\(\).*?EndProcedure',pp,re.S)[0]
+    pp=read(out/'ppu.pi4')
+    body=Src(re.search(r'Procedure PpuSpritesReference\(\).*?EndProcedure',pp,re.S)[0])
     body=body.replace('Procedure PpuSpritesReference()', 'Procedure ExtraLatchSprites()')
-    body=body.replace('    SprRow(i)=bank+tile*16+row*2', '    SprRow(i)=bank+tile*16+row*2\n    ExtraSpriteBits(i)=PeekU(Pattern+SprRow(i))\n    ExtraLatchRead(bank+tile*16+row+8)')
-    body=body.replace('PeekU(Pattern+SprRow(i))>>(row*2)', 'ExtraSpriteBits(i)>>(row*2)')
+    body=body.replace('    SprRow(i)=bank+tile*16+row*2', '    SprRow(i)=bank+tile*16+row*2\n    ExtraSpriteBits(i)=PeekU(Pattern+SpriteDelta+SprRow(i))\n    ExtraLatchRead(bank+tile*16+row+8)')
+    body=body.replace('PeekU(Pattern+SpriteDelta+SprRow(i))>>(row*2)', 'ExtraSpriteBits(i)>>(row*2)')
     (out/'mapper9_video.pi4').write_text('; Generated cartridge CHR-read adapter; renderer algorithm retained.\n'+body+"""
 Procedure ExtraLatchTile()
   Protected tile.i,addr.i
