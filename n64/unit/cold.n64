@@ -308,3 +308,49 @@ apuw_ret:
     jr ra
     nop
   EndASM
+
+; ---- mmc3_budget_dmc: the window bounded by the next DMC fetch (C3b, the owner's ruling, design note N.46) ----
+; WHAT: u_mappercpubudget's exit with a sample playing: the budget becomes min(budget, F - CpuCycles), F the next
+; byte fetch's cycle = NesMmc3ApuClock + DmcTimer + (DmcBits - 1) x period (the APU limit's own formula,
+; mmc3_cpu_apu_dmc); an empty buffer with bytes left fetches at once: 1. So the window ends at the first
+; instruction boundary at or after F, the catch-up there takes the fetch (an advance to exactly F takes the edge)
+; and the stall is applied at that end, 0-6 cycles after F instead of 0-134. Cold: only while a sample plays.
+; THE PLAIN TWIN:
+;   If DmcEmpty : n=1 : Else : d=DmcTimer+(DmcBits-1)*DmcTable(ApuReg(16)&15)-(CpuCycles-NesMmc3ApuClock)
+;     If d<n : n=d : EndIf : If n<1 : n=1 : EndIf : EndIf
+; In: a0 = the budget, a1 = @MapIrq. Out: a0. Clobbers t0-t3.
+  ASM
+mmc3_budget_dmc:
+    ld t0, global_dmcempty-global_mapirq(a1)
+    bnez t0, mmc3_budget_dmc_one
+    nop
+    la t2, global_apureg            ; $4010's rate ...
+    lbu t2, 16(t2)
+    la t3, global_dmctable
+    andi t2, t2, 15
+    sll t2, t2, 1
+    daddu t3, t3, t2
+    lhu t3, 0(t3)                   ; ... its period in CPU cycles
+    ld t2, global_dmcbits-global_mapirq(a1)
+    addiu t2, t2, -1
+    multu t2, t3                    ; (bits - 1) x period
+    ld t1, global_dmctimer-global_mapirq(a1)
+    ld t2, global_cpucycles-global_mapirq(a1)
+    ld t3, global_nesmmc3apuclock-global_mapirq(a1)
+    dsubu t2, t2, t3                ; the APU's lag behind the window's start
+    mflo t0
+    daddu t0, t0, t1
+    dsubu t0, t0, t2                ; d = F - CpuCycles
+    slt t1, t0, a0
+    beqz t1, mmc3_budget_dmc_min
+    nop
+    move a0, t0
+mmc3_budget_dmc_min:
+    blez a0, mmc3_budget_dmc_one
+    nop
+    jr ra
+    nop
+mmc3_budget_dmc_one:
+    jr ra
+    addiu a0, zero, 1
+  EndASM

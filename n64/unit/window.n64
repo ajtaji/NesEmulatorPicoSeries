@@ -176,7 +176,7 @@ mmc3_budget_convert:
     ; floor(dots * 171 / 512) equals floor(dots / 3) for dots < 384.
     multu a0, t0
     mflo a0
-    jr ra
+    b mmc3_budget_exit
     srl a0, a0, 9
 
 mmc3_budget_pending:
@@ -189,8 +189,17 @@ mmc3_budget_one:
     jr ra
     addiu a0, zero, 1
 mmc3_budget_full:
-    jr ra
     addiu a0, zero, 128
+mmc3_budget_exit:
+    ; C3b, the owner's ruling "exact cycle" (design note N.46): while a sample plays the window ends at its next
+    ; byte fetch, so the fetch's 4-cycle stall lands at the instruction boundary at or after the fetch's cycle F,
+    ; not at the end of the 128-cycle window holding F. The bound is computed in the cold part (unit/cold.n64).
+    ;   If DmcBytes>0 : n=Min(n, F-CpuCycles) : EndIf      ; DmcEmpty with bytes left: 1 (the fetch is due now)
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, mmc3_budget_dmc
+    nop
+    jr ra
+    nop
   EndASM
 
 ; ---- nesmmc3maskedbudget, from mmc3_budget.n64 ----
