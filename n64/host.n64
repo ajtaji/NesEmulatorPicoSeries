@@ -215,6 +215,9 @@ Procedure.i HostBegin()
     LpmDisplayFpsLimit(5000)
   CompilerEndIf
   LpmRdpInit()
+  CompilerIf #NES_RSP_CHECK
+    LpmRspqInit()                       ; the RSP band emitter's checking build (rspband.n64)
+  CompilerEndIf
   LpmInterruptsOn()
   LpmPadScan()
   CompilerIf #VERIFY_INPUT

@@ -13,6 +13,14 @@ Global Dim NesChrPairs.a(#CART_CHR_BANKS*16384+16)
 Global NesChrPairBase.i                 ; KSEG1 address of the 16-byte-aligned pairs
 Global NesChrPairLimit.i                ; the decoded bytes the pairs follow (0 until NesChrPairsInit: no pair written)
 Global Dim NesPairSpread.u(256)         ; 4 decoded pixels (8 bits) -> 2 CI4 bytes, the first pixel in the top nibble
+; THE EMPTY-ROW TABLE (the RSP band emitter's, design note N.18; the RSP checking build only until N5): one byte a
+; tile, bit r set when row r has a pixel other than 0 - the twin's empty test ("the decoded halfword is not 0") as
+; data the RSP can DMA, 64 bytes a 1 KB bank. Written UNCACHED, beside the pairs and at the same moments: every tile
+; at NesChrPairsInit (NesChrMaskInit), the written row's tile at every CHR-RAM row write (NesChrPairAt).
+CompilerIf #NES_RSP_CHECK
+  Global Dim NesChrMask.a(#CART_CHR_BANKS*512+16)
+  Global NesChrMaskBase.i               ; KSEG1 address of the 16-byte-aligned table
+CompilerEndIf
 
 ; NesChrPairAt - the pair word of one decoded row. WHY ASSEMBLY: it runs inside MapperChrWrite's assembly on every
 ; CHR-RAM write, between registers that path still needs (a0-a4, t0, t2): a compiled call would save and reload them.
@@ -59,6 +67,50 @@ ProcedureNaked NesChrPairAt()
     lw t8, 4(t8)                     ; the pairs' KSEG1 base
     daddu t3, t3, t8
     sw v0, 0(t3)                     ; uncached: in RDRAM for the RDP at once
+  EndASM
+  CompilerIf #NES_RSP_CHECK
+    ASM
+      ; the tile's empty-row byte again, from its 8 decoded rows (cached, just written): bit r = row r not 0
+      andi t3, t1, 15
+      dsubu v1, t2, t3                 ; the tile's row 0
+      lhu t9, 0(v1)
+      sltu t9, zero, t9
+      lhu t8, 2(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 1
+      or t9, t9, t8
+      lhu t8, 4(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 2
+      or t9, t9, t8
+      lhu t8, 6(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 3
+      or t9, t9, t8
+      lhu t8, 8(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 4
+      or t9, t9, t8
+      lhu t8, 10(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 5
+      or t9, t9, t8
+      lhu t8, 12(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 6
+      or t9, t9, t8
+      lhu t8, 14(v1)
+      sltu t8, zero, t8
+      sll t8, t8, 7
+      or t9, t9, t8
+      srl t3, t1, 4                    ; the tile's index
+      la t8, global_neschrmaskbase
+      lw t8, 4(t8)                     ; the table's KSEG1 base
+      daddu t3, t3, t8
+      sb t9, 0(t3)                     ; uncached, for the RSP's DMA
+    EndASM
+  CompilerEndIf
+  ASM
 nes_pair_at_done:
     jr ra
     nop
@@ -102,6 +154,21 @@ Procedure NesChrPairsCheck(n.i)         ; the assembly's words against the compi
 EndProcedure
 CompilerEndIf
 
+CompilerIf #NES_RSP_CHECK
+Procedure NesChrMaskInit()              ; every tile's empty-row byte (the table above), uncached
+  Protected i.i, r.i, m.i
+  LpmCacheWritebackInvalidateData(@NesChrMask(0), #CART_CHR_BANKS*512+16)   ; no stale line may land on it later
+  NesChrMaskBase = ((@NesChrMask(0) + 15) & ~15) | $A0000000
+  For i = 0 To #CART_CHR_BANKS*512 - 1
+    m = 0
+    For r = 0 To 7
+      If PeekU(@Decoded(0) + i*16 + r*2) : m = m | (1 << r) : EndIf
+    Next
+    PokeA(NesChrMaskBase + i, m)
+  Next
+EndProcedure
+CompilerEndIf
+
 Procedure NesChrPairsInit()             ; after the cartridge's decode: the spread table, then every row's pair word
   Protected b.i, v.i, x.i, i.i, n.i
   For b = 0 To 255
@@ -113,6 +180,9 @@ Procedure NesChrPairsInit()             ; after the cartridge's decode: the spre
   n = CartChrBanks * 8192
   If n > #CART_CHR_BANKS * 8192 : n = #CART_CHR_BANKS * 8192 : EndIf
   NesChrPairLimit = n
+  CompilerIf #NES_RSP_CHECK
+    NesChrMaskInit()                    ; before the rows' pair words: NesChrPairAt keeps it from here on
+  CompilerEndIf
   For i = 0 To n - 2 Step 2 : NesChrPairCall(@Decoded(0) + i) : Next
   CompilerIf #VERIFY_FRAME > 0
     NesChrPairsCheck(n)

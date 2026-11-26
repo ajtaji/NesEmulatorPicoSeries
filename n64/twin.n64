@@ -44,10 +44,18 @@
 ; over a higher-index front sprite's: draw order cannot give it; the design's fallback, I.3).
 CompilerIf #NES_TWIN_CHECK
 
-#NES_TWIN_WORDS = 8192
+CompilerIf #NES_RSP_CHECK                           ; room for the RSP checking build's areas (rspband.n64)
+  #NES_TWIN_WORDS = 4096
+CompilerElse
+  #NES_TWIN_WORDS = 8192
+CompilerEndIf
 Global Dim NesTwinCmd.i(#NES_TWIN_WORDS)           ; the frame's command words, (w0 << 32) | w1
 Global NesTwinN.i, NesTwinOver.i                    ; words written; words that did not fit
 #NES_TWIN_STRIP = 48                                ; the second picture's lines held at once
+CompilerIf #NES_RSP_CHECK
+  Declare NesRspFrame()
+  Global NesRspOut.i                                ; the RSP's frame command area (rspband.n64)
+CompilerEndIf
 Global Dim NesTwinPicSpace.u(320*#NES_TWIN_STRIP+32) ; the second picture, a strip of it at a time
 Global NesTwinPic.i
 Global Dim NesTwinTlutSpace.u(#NES_U_BANDMAX*128+16) ; the bands' TLUT blocks, written uncached
@@ -424,12 +432,29 @@ ProcedureNaked NesTwinBandCall()
   EndASM
 EndProcedure
 
+; Word i of the frame's words the picture is drawn from: the twin's own, or (the RSP checking build) the RSP's, read
+; uncached from its frame command area.
+Procedure.i NesTwinFrameWord(cmd.i, i.i)
+  CompilerIf #NES_RSP_CHECK
+    ProcedureReturn PeekQ(cmd + i * 8)
+  CompilerElse
+    ProcedureReturn NesTwinCmd(i)
+  CompilerEndIf
+EndProcedure
+
 ; At line 240 (unit/ppu.n64): the frame's words drawn into the second picture, then every line compared.
 Procedure NesTwinFrame()
-  Protected i.i, w.i, y.i, x.i, pal.i, row.i, old.i, new.i, q.i, f.i, k.i, split.i, ranges.i, m.i, y0.i
+  Protected i.i, w.i, y.i, x.i, pal.i, row.i, old.i, new.i, q.i, f.i, k.i, split.i, ranges.i, m.i, y0.i, cmd.i
   NesTwinBases()
   f = WorkerFrames
   If PeekI(NesUnitBase + #NES_U_BANDCOUNT) = 0 : ProcedureReturn : EndIf
+  CompilerIf #NES_RSP_CHECK
+    NesRspFrame()                                         ; the RSP's words against these, word for word
+    If NesRspHalt : ProcedureReturn : EndIf
+    cmd = NesRspOut                                       ; and the picture drawn from the RSP's words
+  CompilerElse
+    cmd = ((@NesTwinCmd(0)) & $1FFFFFFF) | $A0000000      ; (read as the array, below)
+  CompilerEndIf
   ; The picture a strip of #NES_TWIN_STRIP lines at a time (the RAM below the stack holds no whole second
   ; picture): the colour image placed so that line y0 of the frame is the strip's first, the scissor those lines
   ; (its left bound 0), every word of the frame, the library's modes back, the SYNC_FULL waited for; then those
@@ -442,11 +467,11 @@ Procedure NesTwinFrame()
     LpmRdpCmd($2D000000 | (y0 << 2), ((320 << 2) << 12) | ((y0 + #NES_TWIN_STRIP) << 2))   ; SET_SCISSOR
     i = 0
     While i < NesTwinN
-      w = NesTwinCmd(i)
+      w = NesTwinFrameWord(cmd, i)
       If ((w >> 56) & $3F) = $24
         LpmRdpRoom(16)
         LpmRdpCmd((w >> 32) & $FFFFFFFF, w & $FFFFFFFF)
-        w = NesTwinCmd(i + 1)
+        w = NesTwinFrameWord(cmd, i + 1)
         LpmRdpCmd((w >> 32) & $FFFFFFFF, w & $FFFFFFFF)
         i + 2
       Else

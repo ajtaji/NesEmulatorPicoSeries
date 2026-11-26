@@ -1,0 +1,277 @@
+; rspband.n64 - THE CPU SIDE OF THE RSP BAND EMITTER (step N4.3; design note, section N.18).
+;
+; THE WRITE-BACK AT A BAND'S CLOSE. The RSP reads RDRAM by its own DMA and never the CPU's D-cache (F-MEM-04), and
+; the name and attribute tables (Nt, 4 KB), the band record and the band's OAM snapshot are written through the
+; cache. So at every band's close, before the band's job is queued, the cold part writes back (Hit_Writeback_D,
+; op $19) every line of Nt, the record's 6 lines and the snapshot's 16 lines: 278 cache operations. A line not in
+; the cache or not dirty is left as it is; a dirty one is written to RDRAM and stays valid, so the guest's next
+; access to it still hits. Nt is written back whole rather than the band's rows: the rows a band reads follow from
+; its v walk, which the CPU does not do (the RSP does), and computing them here would cost more than the 256
+; operations (measured: section N.18).
+; IN: t2 = the record (the band cut's register, unit/ppu_cold.n64, ppu_cut_close). CLOBBERS t3, t8, t9, v1 only;
+; keeps t2 and every register the cut's callers hold.
+; #NES_WB_MEASURE (the measuring build): the Count register before and after, summed in NesWbStat: [0] all ticks,
+; [1] bands, [2] the largest, [3] the Nt part's ticks. A Count tick is 2 CPU cycles.
+CompilerIf #NES_WB_MEASURE Or #NES_RSP_CHECK
+
+CompilerIf #NES_WB_MEASURE
+  Global Dim NesWbStat.i(4)
+CompilerEndIf
+
+ProcedureNaked NesBandWriteback()
+  CompilerIf #NES_WB_MEASURE
+    ASM
+      mfc0 v1, $9                    ; Count at the start
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    la t3, global_nt
+    daddiu t8, t3, 4096              ; the end (exclusive)
+    daddiu t9, zero, -16
+    and t3, t3, t9                   ; the first line (Nt need not start on one)
+nes_bwb_nt:
+    cache 0x19, 0(t3)                ; Hit_Writeback_D: Nt, line by line
+    daddiu t3, t3, 16
+    sltu t9, t3, t8
+    bne t9, zero, nes_bwb_nt
+    nop
+  EndASM
+  CompilerIf #NES_WB_MEASURE
+    ASM
+      mfc0 t9, $9                    ; Count after Nt
+      nop
+      subu t9, t9, v1
+      la t3, global_neswbstat
+      ld t8, 24(t3)
+      daddu t8, t8, t9
+      sd t8, 24(t3)
+    EndASM
+  CompilerEndIf
+  ASM
+    cache 0x19, 0(t2)                ; the record's 96 bytes
+    cache 0x19, 16(t2)
+    cache 0x19, 32(t2)
+    cache 0x19, 48(t2)
+    cache 0x19, 64(t2)
+    cache 0x19, 80(t2)
+    ld t3, #NES_B_OAM(t2)            ; the band's OAM snapshot: NesOamBase + index x 256
+    dsll t3, t3, 8
+    la t8, global_nesoambase
+    ld t8, 0(t8)
+    daddu t3, t3, t8
+    daddiu t8, t3, 256
+nes_bwb_oam:
+    cache 0x19, 0(t3)
+    daddiu t3, t3, 16
+    bne t3, t8, nes_bwb_oam
+    nop
+  EndASM
+  CompilerIf #NES_WB_MEASURE
+    ASM
+      mfc0 t9, $9                    ; Count at the end
+      nop
+      subu t9, t9, v1                ; this band's ticks
+      la t3, global_neswbstat
+      ld t8, 0(t3)
+      daddu t8, t8, t9
+      sd t8, 0(t3)
+      ld t8, 8(t3)
+      daddiu t8, t8, 1
+      sd t8, 8(t3)
+      ld t8, 16(t3)
+      sltu v1, t8, t9
+      beq v1, zero, nes_bwb_end
+      nop
+      sd t9, 16(t3)
+nes_bwb_end:
+    EndASM
+  CompilerEndIf
+  ASM
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+CompilerIf #NES_RSP_CHECK
+; ---- THE CHECKING BUILD (--rsp-check, with the twin): the RSP program (rspband.n64rsp) on the same bands ----
+; At every band record the cut writes back the band's inputs (above) and NesRspBandCall queues the band's job; at
+; line 240 NesRspFrame waits for the queue and compares the frame's every command word and every band's TLUT block
+; with the twin's; the first difference stops the run (NesRspHalt, read at the frame's end in nes.n64) with the
+; band's record printed. The twin's second picture (NesTwinFrame) is then drawn from the RSP's words.
+XIncludeFile "rspband_ids.pmi"
+ASM
+  .rspfile "rspband.n64rsp"
+EndASM
+; WHERE: the 64 KB between the cartridge arena's end and the library's crash display (#NES_CART_LOW_END,
+; storage.n64; the library's map: "$80200000 - $803BFFFF free for your fixed buffers"): the frame command area
+; (4,096 doublewords + 16 bytes of status) at +0, the RSP's TLUT blocks (32 x 256) at +$8100, the program's copy
+; (its file + 128 bytes, at most 20 KB) at +$B000. The RAM below the stack has no room for them beside the twin.
+#NES_RSP_AREA = #NES_CART_LOW_END
+#NES_RSP_TLUT_AT = $8100
+#NES_RSP_PROG_AT = $B000
+Global NesRspProg.i, NesRspTlut.i, NesRspFirst.s          ; (NesRspOut: twin.n64)
+Global Dim NesRspStat.i(8)                          ; frames, words, TLUT blocks compared, differences, RSP clocks, bands
+
+Procedure NesRspInit()
+  Protected space.i, need.i
+  NesTwinBases()
+  If (@Nt(0) & 7) Or (@Rgb64(0) & 7) Or (NesChrMaskBase & 7)
+    LpmDebugPrint("NES RSP CHECK REFUSED: an input not 8-byte aligned for the RSP's DMA") : NesRspHalt = 1 : ProcedureReturn
+  EndIf
+  need = LpmCartFileLen(1) + 128
+  space = #NES_RSP_AREA + #NES_RSP_PROG_AT
+  If need > $10000 - #NES_RSP_PROG_AT
+    LpmDebugPrint("NES RSP CHECK REFUSED: the program's file is " + Str(need - 128) + " bytes") : NesRspHalt = 1 : ProcedureReturn
+  EndIf
+  NesRspOut = (#NES_RSP_AREA & $1FFFFFFF) | $A0000000
+  NesRspTlut = ((#NES_RSP_AREA + #NES_RSP_TLUT_AT) & $1FFFFFFF) | $A0000000
+  LpmCacheWritebackInvalidateData(#NES_RSP_AREA, #NES_RSP_PROG_AT)   ; no stale line of it may land later
+  LpmCacheWritebackData(@Rgb64(0), 1024)
+  NesRspProg = LpmRspqProgram(LpmCartFile(1), space)
+  If NesRspProg = 0
+    LpmDebugPrint("NES RSP CHECK REFUSED: LpmRspqProgram") : NesRspHalt = 1 : ProcedureReturn
+  EndIf
+  LpmRspqCmd7(NesRspProg, #NES_RSP_SETUP, @Nt(0) & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesTwinTlut & $1FFFFFFF, NesRspTlut & $1FFFFFFF, NesRspOut & $1FFFFFFF)
+  LpmRspqSync()
+  LpmDebugPrint("NES RSP PROGRAM " + Str(need - 128) + " bytes, on")
+EndProcedure
+
+Procedure NesRspBand(rec.i)
+  Protected idx.i, oam.i
+  If NesRspProg = 0 : ProcedureReturn : EndIf
+  idx = (rec - NesBandBase) / #NES_BAND_BYTES
+  oam = NesOamBase + PeekI(rec + #NES_B_OAM) * 256
+  LpmRspqCmd(NesRspProg, #NES_RSP_BAND, rec & $1FFFFFFF, oam & $1FFFFFFF, idx)
+  LpmRspqFlush()
+EndProcedure
+
+; The cold part's way in (unit/ppu_cold.n64, ppu_cut_close), after the write-back: t2 = the record. Keeps every
+; register the cut's callers may hold, as NesTwinBandCall does.
+ProcedureNaked NesRspBandCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesrspband
+    move a0, t2
+    ld t0, 136(sp)
+    mthi t0
+    ld t0, 144(sp)
+    mtlo t0
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld a4, 40(sp)
+    ld a5, 48(sp)
+    ld a6, 56(sp)
+    ld a7, 64(sp)
+    ld t0, 72(sp)
+    ld t1, 80(sp)
+    ld t2, 88(sp)
+    ld t3, 96(sp)
+    ld t8, 104(sp)
+    ld t9, 112(sp)
+    ld v0, 120(sp)
+    ld v1, 128(sp)
+    jr ra
+    daddiu sp, sp, 176
+  EndASM
+EndProcedure
+
+Procedure NesRspStop(f.i, i.i, b.i, what.s)
+  Protected k.i, s.s
+  NesRspStat(3) + 1
+  If NesRspFirst = ""
+    NesRspFirst = "frame " + Str(f) + " " + what
+    s = "NES RSP RECORD band " + Str(b)
+    If b >= 0 And b < #NES_U_BANDMAX
+      For k = 0 To 11 : s = s + " " + Hex(PeekQ(NesBandBase + b * #NES_BAND_BYTES + k * 8)) : Next
+    EndIf
+    LpmDebugPrint("NES RSP FIRST DIFFERENCE " + NesRspFirst)
+    LpmDebugPrint(s)
+  EndIf
+  NesRspHalt = 1
+EndProcedure
+
+; At line 240, before the twin's picture: every word and every TLUT block of the frame, RSP against twin.
+Procedure NesRspFrame()
+  Protected n.i, i.i, b.i, k.i, w.i, x.i, bands.i, st.i, f.i
+  If NesRspProg = 0 Or NesRspHalt : ProcedureReturn : EndIf
+  bands = PeekI(NesUnitBase + #NES_U_BANDCOUNT)
+  If bands = 0 : ProcedureReturn : EndIf
+  f = WorkerFrames
+  LpmRspqSync()
+  st = NesRspOut + #NES_RSP_WORDS * 8
+  n = PeekL(st) & $FFFFFFFF
+  If PeekL(st + 12) <> bands : NesRspStop(f, 0, bands - 1, "bands done " + Str(PeekL(st + 12)) + " of " + Str(bands)) : ProcedureReturn : EndIf
+  If n > #NES_RSP_WORDS : n = #NES_RSP_WORDS : EndIf
+  For i = 0 To n - 1
+    If i < NesTwinN
+      w = PeekQ(NesRspOut + i * 8)
+      x = NesTwinCmd(i)
+      If w <> x
+        ; the band that wrote word i: the record whose words began at or before it is not known here; the frame's
+        ; records are all printed by number - the first band whose TLUT image is named before word i
+        b = 0
+        For k = 0 To i
+          If ((NesTwinCmd(k) >> 56) & $3F) = $3D And (NesTwinCmd(k) & $FFFFFFFF) >= (NesTwinTlut & $1FFFFFFF) And (NesTwinCmd(k) & $FFFFFFFF) < (NesTwinTlut & $1FFFFFFF) + #NES_U_BANDMAX * 256 And ((NesTwinCmd(k) >> 32) & $FFF) = 127
+            b = ((NesTwinCmd(k) & $FFFFFFFF) - (NesTwinTlut & $1FFFFFFF)) / 256
+          EndIf
+        Next
+        NesRspStop(f, i, b, "word " + Str(i) + " of " + Str(NesTwinN) + ": twin $" + Hex((x >> 32) & $FFFFFFFF) + " " + Hex(x & $FFFFFFFF) + " RSP $" + Hex((w >> 32) & $FFFFFFFF) + " " + Hex(w & $FFFFFFFF))
+        ProcedureReturn
+      EndIf
+    EndIf
+  Next
+  If PeekL(st + 4) Or NesTwinOver
+    w = PeekQ(NesRspOut + NesTwinN * 8) : x = PeekQ(NesRspOut + NesTwinN * 8 + 8)
+    NesRspStop(f, 0, -1, "words that did not fit: RSP " + Str(PeekL(st + 4)) + " twin " + Str(NesTwinOver) + "; twin's words " + Str(NesTwinN) + ", the RSP's next $" + Hex((w >> 32) & $FFFFFFFF) + " " + Hex(w & $FFFFFFFF) + " $" + Hex((x >> 32) & $FFFFFFFF) + " " + Hex(x & $FFFFFFFF))
+    ProcedureReturn
+  EndIf
+  If n <> NesTwinN : NesRspStop(f, n, bands - 1, "words: twin " + Str(NesTwinN) + " RSP " + Str(n)) : ProcedureReturn : EndIf
+  For b = 0 To bands - 1
+    For k = 0 To 255 Step 8
+      If PeekQ(NesRspTlut + b * 256 + k) <> PeekQ(NesTwinTlut + b * 256 + k)
+        NesRspStop(f, 0, b, "TLUT block of band " + Str(b) + " byte " + Str(k)) : ProcedureReturn
+      EndIf
+    Next
+  Next
+  NesRspStat(0) + 1 : NesRspStat(1) + n : NesRspStat(2) + bands : NesRspStat(4) + (PeekL(st + 8) & $FFFFFFFF)
+  If (PeekL(st + 8) & $FFFFFFFF) > NesRspStat(5) : NesRspStat(5) = PeekL(st + 8) & $FFFFFFFF : EndIf
+EndProcedure
+
+Procedure NesRspReport()
+  LpmDebugPrint("NES RSP FRAMES " + Str(NesRspStat(0)) + " WORDS " + Str(NesRspStat(1)) + " TLUT BLOCKS " + Str(NesRspStat(2)) + " DIFFERENCES " + Str(NesRspStat(3)) + " RSP CLOCKS " + Str(NesRspStat(4)) + " MAX A FRAME " + Str(NesRspStat(5)))
+  LpmDebugPrint("NES RSP FIRST DIFFERENCE " + NesRspFirst)
+EndProcedure
+CompilerEndIf
+
+CompilerIf #NES_WB_MEASURE
+Procedure NesWbReport()
+  LpmDebugPrint("NES WB TICKS " + Str(NesWbStat(0)) + " BANDS " + Str(NesWbStat(1)) + " MAX " + Str(NesWbStat(2)) + " NT " + Str(NesWbStat(3)))
+EndProcedure
+CompilerEndIf
+
+CompilerEndIf

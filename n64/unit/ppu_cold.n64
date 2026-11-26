@@ -379,12 +379,18 @@ ppu_cut_close:
     sd t9, #NES_B_PAL+16(t2)
     ld t9, 24(v1)
   EndASM
-  CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK
+  CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK Or #NES_WB_MEASURE
     ASM
       sd t9, #NES_B_PAL+24(t2)
       daddiu sp, sp, -16
       sd ra, 0(sp)
     EndASM
+    CompilerIf #NES_WB_MEASURE
+      ASM
+        jal nesbandwriteback        ; Nt, the record and its OAM snapshot to RDRAM (rspband.n64)
+        nop
+      EndASM
+    CompilerEndIf
     CompilerIf #NES_PPU_CHECK
       ASM
         jal ppu_check_record        ; the record against the band's inputs (unit/ppu_check.n64)
@@ -394,6 +400,14 @@ ppu_cut_close:
     CompilerIf #NES_TWIN_CHECK
       ASM
         jal nestwinbandcall         ; the CPU twin of the emitter, t2 = the record (twin.n64)
+        nop
+      EndASM
+    CompilerEndIf
+    CompilerIf #NES_RSP_CHECK
+      ASM
+        jal nesbandwriteback        ; Nt, the record and its OAM snapshot to RDRAM (rspband.n64)
+        nop
+        jal nesrspbandcall          ; the band's job for the RSP program (rspband.n64)
         nop
       EndASM
     CompilerEndIf

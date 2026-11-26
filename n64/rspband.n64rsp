@@ -1,0 +1,1159 @@
+; ======================================================================
+;  rspband.n64rsp - THE RSP BAND EMITTER (step N4.3; design note, section N.18)
+; ======================================================================
+;  One RSP program in the queue's one-program form (rspq_program.n64rsp, put on the RSP once by LpmRspqProgram).
+;  Its one module turns a band record of the PPU state machine (unit/ppu_cold.n64, the band log of nes.n64) into
+;  the RDP command words that draw the band's NES tiles as textured rectangles - the SAME words, in the same
+;  order, as the CPU twin n64/twin.n64 (NesTwinBand), which is the specification and the checking build's
+;  reference. Read twin.n64's header for what the words are; this file says only how the RSP gets them.
+;
+;  COMMANDS (rspband_ids.pmi):
+;    NES_RSP_SETUP (128), once: RspqArg 0-6 = the physical addresses of Nt (the 4 KB name and attribute tables),
+;      NesChrMask (one byte a tile: bit r = row r has a pixel other than 0), Rgb64 (512 colours), the CI4 pairs
+;      (NesChrPairBase), the TLUT blocks the words name (32 x 256 B), the TLUT blocks this program writes, the frame
+;      command area (4,096 doublewords, then 16 bytes of status). All 8-byte aligned (the CPU checks).
+;    NES_RSP_BAND (129), at every band record: RspqArg 0 the record (96 B), 1 its OAM snapshot (256 B), 2 the
+;      band's index in the frame. Index 0 starts a frame: the words go from the area's start, and the RDP's state
+;      is taken as unknown (every sync owed, no pair resident) - as the twin does.
+;
+;  WHAT IS KEPT BETWEEN BANDS (this module's DMEM globals, never the queue's scratch, which belongs to the command
+;  running): the pair cache (32 keys, the next slot, the pins), the syncs owed (pipe, tiles, TMEM), the frame's
+;  word count. The program is never switched (one program), so they survive from band to band.
+;
+;  THE SCRATCH, as a band's job lays it out (byte offsets from rspq_scratch; the assembly writes the numbers, it
+;  cannot read a # constant - change both together):
+;      0  the record (96)              96  the OAM snapshot (256)        352  the empty-row bytes, 8 banks x 64
+;    864  the strip's name-table row (32), 896 the neighbour's (32), 928 its attribute row (8), 936 the neighbour's
+;   1024  the rectangle queue, 64 x 16; at the band's start the colour row (1024, 128) and the TLUT (1152, 256),
+;         then the sprite selection's line counts (1024 + line, 240) - each used up before the next
+;   2048  the output staging, two halves of 128    2304 the status (16)    2320 each sprite's drawn rows (64 x 2)
+;
+;  THE OUTPUT: word k of the frame at the area + 8k, each (w0, w1) as the RDP reads it. A full staging half goes
+;  out by an unwaited DMA (the other half is filled meanwhile; before a half goes out every DMA before it has
+;  landed, so the half filled next is free). At the band's end the rest, then the status: +0 the frame's words,
+;  +4 words that did not fit, +8 the RDP clock ticks (DPC_CLOCK, 24 bits) the frame's bands took on the RSP (an
+;  emulator figure: no RSP clock is known good on the console), +12 the bands done.
+;
+;  THE FIRST BUILD IS SCALAR (N.18 3): the twin's loops one for one; the vector form of a strip's 33 tiles is a
+;  later step proven by the same comparison.
+;
+;  THE CODE, in IMEM: a band's job is two procedures in two code segments of 1,792 bytes above the resident
+;  2,304 (#RSP_SEGMENT_BASE; 3,516 bytes would not fit one): NesRspBandA (segment 1: inputs, modes, backdrop,
+;  TLUT, sprite selection) and NesRspBandB (segment 2: the three layers, the band's end), run one after the other
+;  by RspqCommand (two segment loads a band). What both call is resident in NesRspCommon.
+;
+;  REGISTERS in both: s0 first line, s1 end line, s2 PPUCTRL, s3 PPUMASK, s4 fine X, s5 t, s6 / s7 the staging's
+;  write pointer and its half's end - carried from A to B in nb_bs (nb_enter / nb_leave), the caller's s0-s7 kept
+;  in nb_sv, as lpm_mixer.n64rsp keeps them; sp is never touched; ra kept in nb_ra. The subroutines' contracts:
+;    nbw     (a0, a1) one doubleword out. CLOBBERS t8, t9, at, k0, k1, v0.
+;    nbsp / nbst (t9 = 1 << tile) / nbsl  the syncs owed (SYNC_PIPE / SYNC_TILE / SYNC_LOAD), as the twin's
+;            NesTwinSync*: tail calls of nbw. CLOBBER nbw's, a0, a1.
+;    nbflush the rectangle queue out, every pin cleared. CLOBBERS nbw's, a0, a1, t3, v1.
+;    nbroom  room for one rectangle (a flush when 64 wait): v0 = its 16 bytes. CLOBBERS nbflush's.
+;    nbpair  (a0 = key) v0 = its slot, loaded when absent. CLOBBERS nbflush's.
+;    nbdesc  (a0 = 0 / 4) tiles 0-3 to that palette set. CLOBBERS nbflush's.
+;    nbdi / nbdo  (k0 DMEM, k1 RDRAM, v0 bytes - 1) a DMA in / out, waited until every DMA has landed. CLOBBER at.
+;  So a caller keeps a2-a7, t0-t2, gp and s0-s7 across every one of them.
+; ======================================================================
+#RSP_SEGMENT_BASE = 2304                ; the resident code (the kernel and NesRspCommon) needs more than 1536
+XIncludeFile "Mips/Lib/LibPureMetalN64/rspq_program.n64rsp"
+XIncludeFile "rspband_ids.pmi"
+#RSP_SEGMENT_NesRspBandA = 1            ; #NES_RSP_SEG_A
+#RSP_SEGMENT_NesRspBandB = 2            ; #NES_RSP_SEG_B
+
+Global nb_nt.l, nb_mask.l, nb_rgb.l, nb_pair.l, nb_tlut.l, nb_tlutw.l, nb_out.l
+Global Dim nb_keys.l[32]                ; the pair in each TMEM slot (-1 none)
+Global Dim nb_pins.l[32]                ; slots named by rectangles not yet written
+Global nb_next.l, nb_pinned.l, nb_rects.l, nb_pipe.l, nb_tiles.l, nb_tmem.l, nb_descs.l
+Global nb_outpos.l, nb_over.l, nb_clk.l, nb_clk0.l, nb_odram.l, nb_idx.l, nb_h.l
+Global nb_key.l, nb_xmin.l, nb_rows.l, nb_ashy.l, nb_vj0.l, nb_sat.l, nb_sx0.l, nb_sta.l, nb_sa.l, nb_slot.l
+Global nb_ra.l, nb_rabg.l, nb_raspr.l, nb_rapair.l, nb_rafl.l, nb_raroom.l, nb_radesc.l
+Global Dim nb_sv.l[8]
+Global Dim nb_bs.l[8]                   ; the band's s0-s7 from NesRspBandA to NesRspBandB
+
+Procedure NesRspSetup()
+  nb_nt = RspqArg(0) : nb_mask = RspqArg(1) : nb_rgb = RspqArg(2) : nb_pair = RspqArg(3)
+  nb_tlut = RspqArg(4) : nb_tlutw = RspqArg(5) : nb_out = RspqArg(6)
+  NesRspCommon()
+EndProcedure
+
+; A band record to its RDP command words. Documented RSP assembly (the per-band work); the twin's NesTwinBand line
+; for line, with the twin's names in the comments.
+; NesRspBandA (code segment 1) - a band's first part: its inputs in, the modes, the backdrop, the TLUT, and the
+; sprite selection (NesTwinBand up to "the three layers"). Its registers s0-s7 go to nb_bs for NesRspBandB.
+Procedure NesRspBandA()
+  ASM
+    sw ra, global_nb_ra(zero)
+    jal nb_enter                             ; the caller's s0-s7 kept
+    nop
+    mfc0 t0, $12                             ; DPC_CLOCK at the start (the RSP time, an emulator figure)
+    sw t0, global_nb_clk0(zero)
+    ; ---- the record, the snapshot, the eight banks' empty-row bytes ----
+    addiu k0, zero, global_rspq_scratch
+    lw k1, global_rspqarg(zero)
+    jal nbdi
+    addiu v0, zero, 95
+    addiu k0, zero, global_rspq_scratch+96
+    lw k1, global_rspqarg+4(zero)
+    jal nbdi
+    addiu v0, zero, 255
+    addu t0, zero, zero                      ; the bank slot, 0-7
+nb_mk:
+    lbu t1, global_rspq_scratch+48(t0)       ; its 1 KB bank number
+    sll t1, t1, 6                            ; 64 tiles a bank, a byte each
+    lw k1, global_nb_mask(zero)
+    addu k1, k1, t1
+    sll k0, t0, 6
+    addiu k0, k0, global_rspq_scratch+352
+    jal nbdi
+    addiu v0, zero, 63
+    addiu t0, t0, 1
+    sltiu t1, t0, 8
+    bne t1, zero, nb_mk
+    nop
+    ; ---- a frame's first band: the RDP's state unknown (the twin's idx = 0) ----
+    lw t0, global_rspqarg+8(zero)
+    sw t0, global_nb_idx(zero)
+    bne t0, zero, nb_nf
+    addiu t1, zero, -1                       ; (delay slot)
+    sw zero, global_nb_outpos(zero)
+    sw zero, global_nb_over(zero)
+    sw zero, global_nb_clk(zero)
+    sw zero, global_nb_next(zero)
+    sw zero, global_nb_pinned(zero)
+    sw zero, global_nb_rects(zero)
+    addiu t2, zero, 1
+    sw t2, global_nb_pipe(zero)
+    sw t2, global_nb_tmem(zero)
+    addiu t2, zero, 255
+    sw t2, global_nb_tiles(zero)
+    addiu t2, zero, 124
+nb_k0:
+    sw t1, global_nb_keys(t2)                ; no pair in any slot
+    sw zero, global_nb_pins(t2)
+    bne t2, zero, nb_k0
+    addiu t2, t2, -4                         ; (delay slot)
+nb_nf:
+    sw t1, global_nb_descs(zero)             ; tiles 0-3 unknown at every band
+    ; ---- the record's fields ----
+    lw s0, global_rspq_scratch+4(zero)       ; first
+    lw s1, global_rspq_scratch+12(zero)      ; last (exclusive)
+    lbu s2, global_rspq_scratch+31(zero)     ; ctrl
+    lbu s3, global_rspq_scratch+30(zero)     ; mask
+    lbu s4, global_rspq_scratch+29(zero)
+    andi s4, s4, 7                           ; fx
+    lw s5, global_rspq_scratch+24(zero)
+    andi s5, s5, 0x7FFF                      ; t
+    addiu s6, zero, global_rspq_scratch+2048 ; the staging's first half
+    addiu s7, zero, global_rspq_scratch+2176
+    lw t0, global_nb_outpos(zero)
+    sll t0, t0, 3
+    lw t1, global_nb_out(zero)
+    addu t1, t1, t0
+    sw t1, global_nb_odram(zero)             ; where the next half goes
+    ; the 64 colours of the band's emphasis: Rgb64 + ((mask >> 5) & 7) x 128
+    srl t0, s3, 5
+    andi t0, t0, 7
+    sll t0, t0, 7
+    lw k1, global_nb_rgb(zero)
+    addu k1, k1, t0
+    addiu k0, zero, global_rspq_scratch+1024
+    jal nbdi
+    addiu v0, zero, 127
+    ; ---- the modes, the backdrop ----
+    jal nbsp
+    nop
+    lui a0, 0x2F00
+    ori a0, a0, 0x8CF0                       ; SET_OTHER_MODES: one cycle, TLUT RGBA16, no dither ...
+    jal nbw
+    addiu a1, zero, 1                        ; ... alpha compare
+    lui a0, 0x3900
+    jal nbw
+    addiu a1, zero, 128                      ; SET_BLEND_COLOR: the compare's threshold
+    lui a0, 0x3CFF
+    ori a0, a0, 0xFFFF
+    lui a1, 0xFFFD
+    jal nbw
+    ori a1, a1, 0xF6FB                       ; SET_COMBINE: PRIM
+    lbu a0, global_rspq_scratch+64(zero)     ; palette byte 0
+    jal nbcol
+    nop
+    srl t0, v0, 11                           ; SET_PRIM_COLOR: the 5-bit fields widened to 8
+    andi t0, t0, 31
+    sll t1, t0, 3
+    srl t0, t0, 2
+    or t0, t1, t0
+    sll a1, t0, 24
+    srl t0, v0, 6
+    andi t0, t0, 31
+    sll t1, t0, 3
+    srl t0, t0, 2
+    or t0, t1, t0
+    sll t0, t0, 16
+    or a1, a1, t0
+    srl t0, v0, 1
+    andi t0, t0, 31
+    sll t1, t0, 3
+    srl t0, t0, 2
+    or t0, t1, t0
+    sll t0, t0, 8
+    or a1, a1, t0
+    ori a1, a1, 255
+    jal nbw
+    lui a0, 0x3A00
+    lui a0, 0x3648                           ; FILL_RECTANGLE x 32 .. 288, the band's lines
+    sll t0, s1, 2
+    or a0, a0, t0
+    lui a1, 0x0008
+    sll t0, s0, 2
+    jal nbw
+    or a1, a1, t0
+    addiu t0, zero, 1
+    sw t0, global_nb_pipe(zero)
+    ; ---- the TLUT: entry 16p + c, c < 4 the palette byte p x 4 + c (c = 0: byte 0, alpha 0), else 0 ----
+    addu t0, zero, zero                      ; 16p + c
+nb_tl:
+    andi t1, t0, 15                          ; c
+    sltiu t2, t1, 4
+    beq t2, zero, nb_tl0
+    addu v0, zero, zero                      ; (delay slot) 0 for c >= 4
+    srl t2, t0, 4
+    sll t2, t2, 2
+    addu t2, t2, t1                          ; p x 4 + c (the same for the sprites' 16 + (p - 4) x 4 + c)
+    bne t1, zero, nb_tl1
+    nop
+    addu t2, zero, zero                      ; c = 0: byte 0
+nb_tl1:
+    lbu a0, global_rspq_scratch+64(t2)
+    jal nbcol
+    nop
+    bne t1, zero, nb_tl0
+    nop
+    andi v0, v0, 0xFFFE                      ; alpha 0: transparent
+nb_tl0:
+    sll t2, t0, 1
+    sh v0, global_rspq_scratch+1152(t2)
+    addiu t0, t0, 1
+    sltiu t2, t0, 128
+    bne t2, zero, nb_tl
+    nop
+    lw t0, global_nb_idx(zero)
+    sll t0, t0, 8                            ; idx x 256
+    lw k1, global_nb_tlutw(zero)
+    addu k1, k1, t0
+    addiu k0, zero, global_rspq_scratch+1152
+    jal nbdo                                 ; the band's TLUT block out
+    addiu v0, zero, 255
+    jal nbsp
+    nop
+    lw a1, global_nb_tlut(zero)
+    addu a1, a1, t0
+    lui a0, 0x3D10
+    jal nbw
+    ori a0, a0, 127                          ; SET_TEXTURE_IMAGE: RGBA16, 128 entries
+    jal nbst
+    addiu t9, zero, 128                      ; (delay slot) SYNC_TILE owed for tile 7?
+    lui a0, 0x3580
+    ori a0, a0, 0x0100
+    jal nbw
+    lui a1, 0x0700                           ; SET_TILE 7: TMEM word 256
+    jal nbsl
+    nop
+    lui a0, 0x3000
+    lui a1, 0x071F
+    jal nbw
+    ori a1, a1, 0xC000                       ; LOAD_TLUT
+    lw t1, global_nb_tiles(zero)
+    ori t1, t1, 128
+    sw t1, global_nb_tiles(zero)
+    addiu t1, zero, 1
+    sw t1, global_nb_tmem(zero)
+    lui a0, 0x3CFF
+    ori a0, a0, 0xFFFF
+    lui a1, 0xFFFC
+    jal nbw
+    ori a1, a1, 0xF279                       ; SET_COMBINE: TEXEL0 (no primitive since the sync)
+    ; ---- the sprites each line shows: the first eight in OAM order (NesTwinDrawn, kept per sprite as rows) ----
+    andi t0, s3, 16
+    beq t0, zero, nba_done
+    andi t0, s2, 32                          ; (delay slot)
+    addiu t9, zero, 8
+    beq t0, zero, nb_h8
+    nop
+    addiu t9, zero, 16
+nb_h8:
+    sw t9, global_nb_h(zero)                 ; h
+    addu t0, s0, zero
+nb_cz:
+    slt t1, t0, s1
+    beq t1, zero, nb_cz9
+    nop
+    sb zero, global_rspq_scratch+1024(t0)    ; the line's count
+    j nb_cz
+    addiu t0, t0, 1                          ; (delay slot)
+nb_cz9:
+    addu t0, zero, zero                      ; sprite i x 4
+nb_si:
+    lbu t1, global_rspq_scratch+96(t0)       ; its y
+    addu t2, zero, zero                      ; r
+    addu t3, zero, zero                      ; the rows drawn
+nb_sr:
+    addu a0, t1, t2
+    addiu a0, a0, 1                          ; the line L = y + 1 + r
+    slt a1, a0, s0
+    bne a1, zero, nb_sr9                     ; before the band
+    slt a1, a0, s1                           ; (delay slot)
+    beq a1, zero, nb_sr9                     ; past it
+    nop
+    lbu a1, global_rspq_scratch+1024(a0)
+    sltiu v0, a1, 8
+    beq v0, zero, nb_sr9                     ; eight lower sprites on the line already
+    addiu a1, a1, 1                          ; (delay slot)
+    sb a1, global_rspq_scratch+1024(a0)
+    addiu v0, zero, 1
+    sllv v0, v0, t2
+    or t3, t3, v0
+nb_sr9:
+    addiu t2, t2, 1
+    bne t2, t9, nb_sr
+    nop
+    srl a0, t0, 1
+    sh t3, global_rspq_scratch+2320(a0)
+    addiu t0, t0, 4
+    sltiu a0, t0, 256
+    bne a0, zero, nb_si
+    nop
+nba_done:
+    jal nb_leave
+    nop
+    lw ra, global_nb_ra(zero)
+    j nba_return
+    nop
+
+    ; ==== nbcol: v0 = the RGBA5551 colour of palette byte a0 under the band's mask (the twin's NesTwinColour),
+    ; from the colour row in the scratch. Leaf: CLOBBERS t9, a0 ====
+nbcol:
+    andi t9, s3, 1
+    beq t9, zero, nbcol1
+    andi a0, a0, 63                          ; (delay slot)
+    andi a0, a0, 48                          ; greyscale
+nbcol1:
+    sll a0, a0, 1
+    lhu v0, global_rspq_scratch+1024(a0)
+    andi t9, v0, 31
+    sll t9, t9, 1
+    andi v0, v0, 0xFFC0
+    or v0, v0, t9
+    jr ra
+    ori v0, v0, 1                            ; (delay slot)
+
+nba_return:
+  EndASM
+EndProcedure
+
+; NesRspBandB (code segment 2) - the three layers and the band's end: the staging's rest and the status out.
+Procedure NesRspBandB()
+  ASM
+    sw ra, global_nb_ra(zero)
+    jal nb_enter                             ; s0-s7 the band's, from NesRspBandA
+    nop
+    ; ---- the three layers ----
+    andi t0, s3, 16
+    beq t0, zero, nb_ph0
+    nop
+    jal nbspr
+    addiu a0, zero, 1                        ; (delay slot) phase 0: the behind-background sprites
+nb_ph0:
+    andi t0, s3, 8
+    beq t0, zero, nb_ph1
+    nop
+    jal nbbg
+    nop
+nb_ph1:
+    andi t0, s3, 16
+    beq t0, zero, nb_ph2
+    nop
+    jal nbspr
+    addu a0, zero, zero                      ; (delay slot) phase 2: the front ones
+nb_ph2:
+    ; ---- the band's end: the staging's rest out, then the status ----
+    addiu t0, s7, -128                       ; the half's start
+    beq s6, t0, nb_e1
+    subu v0, s6, t0                          ; (delay slot) its bytes
+    addiu v0, v0, -1
+    addu k0, t0, zero
+    lw k1, global_nb_odram(zero)
+    jal nbdo
+    nop
+nb_e1:
+    mfc0 at, $4                              ; every DMA landed
+    andi at, at, 12
+    bne at, zero, nb_e1
+    nop
+    lw t0, global_nb_outpos(zero)
+    sw t0, global_rspq_scratch+2304(zero)
+    lw t0, global_nb_over(zero)
+    sw t0, global_rspq_scratch+2308(zero)
+    mfc0 t1, $12
+    lw t2, global_nb_clk0(zero)
+    subu t1, t1, t2
+    lui t2, 0x00FF
+    ori t2, t2, 0xFFFF
+    and t1, t1, t2                           ; 24 bits
+    lw t2, global_nb_clk(zero)
+    addu t2, t2, t1
+    sw t2, global_nb_clk(zero)
+    sw t2, global_rspq_scratch+2312(zero)
+    lw t0, global_nb_idx(zero)
+    addiu t0, t0, 1
+    sw t0, global_rspq_scratch+2316(zero)
+    lw k1, global_nb_out(zero)
+    ori t0, zero, 0x8000                     ; the status after the 4,096 doublewords
+    addu k1, k1, t0
+    addiu k0, zero, global_rspq_scratch+2304
+    jal nbdo
+    addiu v0, zero, 15
+    jal nb_leave
+    nop
+    lw ra, global_nb_ra(zero)
+    j nbb_return
+    nop
+
+    ; ==== THE BACKGROUND (phase 1): strips of one tile row, 33 tiles each ====
+nbbg:
+    sw ra, global_nb_rabg(zero)
+    jal nbdesc
+    addu a0, zero, zero                      ; (delay slot) tiles 0-3: the background's palettes
+    andi t0, s3, 2
+    addiu t1, zero, 8
+    beq t0, zero, nbbg_x
+    nop
+    addu t1, zero, zero
+nbbg_x:
+    sw t1, global_nb_xmin(zero)              ; xmin: 8 when the left 8 pixels are masked
+    addu a2, s0, zero                        ; L = first
+    lw a4, global_rspq_scratch+20(zero)      ; v at the first line
+nbbg_strip:
+    slt t0, a2, s1
+    beq t0, zero, nbbg_done
+    nop
+    ; L1: the strip goes on while the next line's v is this one's + $1000 (fine Y + 1, same row)
+    addu t1, a4, zero                        ; v of the strip's last line so far
+    addiu a3, a2, 1                          ; L1
+nbbg_l1:
+    jal nbstep                               ; a5 = v of line L1
+    nop
+    slt t0, a3, s1
+    beq t0, zero, nbbg_l1x
+    addiu t2, t1, 0x1000                     ; (delay slot)
+    bne a5, t2, nbbg_l1x
+    nop
+    addu t1, a5, zero
+    j nbbg_l1
+    addiu a3, a3, 1                          ; (delay slot)
+nbbg_l1x:
+    srl a7, a4, 12
+    andi a7, a7, 7                           ; fy
+    subu t0, a3, a2                          ; n
+    addiu t1, zero, 1
+    sllv t1, t1, t0
+    addiu t1, t1, -1
+    sllv t1, t1, a7
+    sw t1, global_nb_rows(zero)              ; the strip's rows of a tile: ((1 << n) - 1) << fy
+    ; the strip's name-table row and its neighbour's (bit 10), and their attribute rows
+    srl t0, a4, 10
+    andi t0, t0, 3
+    sll t0, t0, 10                           ; the name table's offset
+    srl t1, a4, 5
+    andi t1, t1, 31                          ; coarse Y
+    sll t2, t1, 5
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, t0
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+864
+    jal nbdi
+    addiu v0, zero, 31
+    xori t0, t0, 0x400
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, t0
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+896
+    jal nbdi
+    addiu v0, zero, 31
+    srl t2, t1, 2
+    sll t2, t2, 3
+    addiu t2, t2, 0x3C0                      ; $3C0 + (coarse Y >> 2) x 8
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, t0
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+936
+    jal nbdi
+    addiu v0, zero, 7
+    xori t0, t0, 0x400
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, t0
+    addu k1, k1, t2
+    addiu k0, zero, global_rspq_scratch+928
+    jal nbdi
+    addiu v0, zero, 7
+    andi t1, t1, 2
+    sll t1, t1, 1
+    sw t1, global_nb_ashy(zero)              ; the palette shift's coarse-Y part
+    andi t0, a4, 31
+    srl t1, a4, 5
+    andi t1, t1, 32
+    or t0, t0, t1
+    sw t0, global_nb_vj0(zero)               ; coarse X with the name table's bit 10 as bit 5
+    addu a6, zero, zero                      ; j
+nbbg_tile:
+    sll t0, a6, 3
+    subu t0, t0, s4                          ; x0 = 8j - fx
+    lw t1, global_nb_xmin(zero)
+    slt t2, t0, t1
+    bne t2, zero, nbbg_xs
+    nop
+    addu t1, t0, zero                        ; xs = max(x0, xmin)
+nbbg_xs:
+    addiu t2, t0, 8
+    slti v0, t2, 257
+    bne v0, zero, nbbg_xe
+    nop
+    addiu t2, zero, 256                      ; xe = min(x0 + 8, 256)
+nbbg_xe:
+    slt v0, t1, t2
+    beq v0, zero, nbbg_next                  ; nothing of the tile shows
+    subu gp, t1, t0                          ; (delay slot) xs - x0
+    lw v0, global_nb_vj0(zero)
+    addu v0, v0, a6
+    andi v0, v0, 63                          ; vj: bit 5 set in the neighbour
+    andi v1, v0, 32
+    srl v1, v1, 5
+    sll t3, v1, 5
+    andi a0, v0, 31
+    addu t3, t3, a0
+    lbu t0, global_rspq_scratch+864(t3)      ; tile
+    sll t3, v1, 3
+    srl a0, a0, 2
+    addu t3, t3, a0
+    lbu a1, global_rspq_scratch+928(t3)      ; its attribute byte
+    lw t3, global_nb_ashy(zero)
+    andi a0, v0, 2
+    or t3, t3, a0
+    srlv a1, a1, t3
+    andi a1, a1, 3                           ; pal
+    andi a0, s2, 16                          ; a = (ctrl & 16) << 8 | tile << 4: bank slot (a >> 10) & 7
+    srl a0, a0, 2
+    srl t3, t0, 6
+    or a0, a0, t3
+    sll t3, a0, 6
+    andi v1, t0, 63
+    addu t3, t3, v1
+    lbu t3, global_rspq_scratch+352(t3)      ; the tile's empty-row byte
+    lw v1, global_nb_rows(zero)
+    and t3, t3, v1
+    beq t3, zero, nbbg_next                  ; every row of it in the strip is 0: not drawn
+    nop
+    lbu t3, global_rspq_scratch+48(a0)       ; key = bank << 10 | (a & $3E0)
+    sll t3, t3, 10
+    andi v1, t0, 62
+    sll v1, v1, 4
+    or a0, t3, v1
+    andi t3, t0, 1
+    sll t3, t3, 3
+    addu gp, gp, t3                          ; s = (tile & 1) x 8 + (xs - x0)
+    sll a1, a1, 8
+    jal nbpair                               ; v0 = the slot
+    or gp, gp, a1                            ; (delay slot) gp = pal << 8 | s
+    sll t0, v0, 3
+    addu t0, t0, a7
+    sll t0, t0, 5                            ; (slot x 8 + fy) << 5
+    andi v1, gp, 255
+    sll v1, v1, 21
+    or t0, t0, v1                            ; w2
+    jal nbroom
+    nop
+    addiu v1, t2, 32                         ; w0 = TEXTURE_RECTANGLE | (xe + 32) << 14 | L1 << 2
+    sll v1, v1, 14
+    lui a0, 0x2400
+    or a0, a0, v1
+    sll v1, a3, 2
+    or a0, a0, v1
+    sw a0, 0(v0)
+    srl a0, gp, 8                            ; w1 = pal << 24 | (xs + 32) << 14 | L << 2
+    sll a0, a0, 24
+    addiu v1, t1, 32
+    sll v1, v1, 14
+    or a0, a0, v1
+    sll v1, a2, 2
+    or a0, a0, v1
+    sw a0, 4(v0)
+    sw t0, 8(v0)
+    lui a0, 0x0400
+    ori a0, a0, 0x0400                       ; w3: the steps +1, +1
+    sw a0, 12(v0)
+nbbg_next:
+    addiu a6, a6, 1
+    sltiu v0, a6, 33
+    bne v0, zero, nbbg_tile
+    nop
+    jal nbflush
+    nop
+    addu a2, a3, zero                        ; L = L1
+    j nbbg_strip
+    addu a4, a5, zero                        ; (delay slot) v = v of L1
+nbbg_done:
+    lw ra, global_nb_rabg(zero)
+    jr ra
+    nop
+
+    ; ==== nbstep: a5 = the v of the next line from t1 (the twin's walk). Leaf: CLOBBERS t8, t9 ====
+nbstep:
+    andi t8, t1, 0x7000
+    addiu t9, zero, 0x7000
+    beq t8, t9, nbstep_y
+    nop
+    j nbstep_h
+    addiu a5, t1, 0x1000                     ; (delay slot) fine Y + 1
+nbstep_y:
+    andi a5, t1, 0x0FFF
+    srl t8, a5, 5
+    andi t8, t8, 31                          ; coarse Y
+    addiu t9, zero, 29
+    bne t8, t9, nbstep_y1
+    addiu t8, t8, 1                          ; (delay slot)
+    xori a5, a5, 0x0800                      ; row 29: the other name table, row 0
+    addu t8, zero, zero
+nbstep_y1:
+    andi t8, t8, 31
+    andi a5, a5, 0x7C1F
+    sll t8, t8, 5
+    or a5, a5, t8
+nbstep_h:
+    andi a5, a5, 0x7BE0
+    andi t8, s5, 0x041F
+    jr ra
+    or a5, a5, t8                            ; (delay slot) the horizontal bits from t
+
+    ; ==== THE SPRITES (phases 0 and 2): a0 = 1 the behind-background ones, 0 the front ones; highest index first ====
+nbspr:
+    sw ra, global_nb_raspr(zero)
+    addu a6, a0, zero
+    lw a7, global_nb_h(zero)                 ; h
+    addiu a2, zero, 252                      ; sprite 63 x 4
+nbsp_i:
+    lbu t3, global_rspq_scratch+98(a2)       ; at
+    srl v1, t3, 5
+    andi v1, v1, 1
+    bne v1, a6, nbsp_next                    ; not this phase's
+    nop
+    sw t3, global_nb_sat(zero)
+    lbu t0, global_rspq_scratch+96(a2)       ; y
+    lbu t1, global_rspq_scratch+99(a2)       ; x0
+    sw t1, global_nb_sx0(zero)
+    addiu t2, t1, 8
+    slti v1, t2, 257
+    bne v1, zero, nbsp_xe
+    nop
+    addiu t2, zero, 256                      ; xe = min(x0 + 8, 256)
+nbsp_xe:
+    andi v1, s3, 4
+    bne v1, zero, nbsp_xs                    ; the left 8 pixels shown
+    slti v1, t1, 8                           ; (delay slot)
+    beq v1, zero, nbsp_xs
+    nop
+    addiu t1, zero, 8                        ; xs = 8
+nbsp_xs:
+    slt v1, t1, t2
+    beq v1, zero, nbsp_next                  ; nothing shows
+    srl v1, a2, 1                            ; (delay slot)
+    lhu a5, global_rspq_scratch+2320(v1)     ; the rows the selection drew (bit r: line y + 1 + r)
+    addu a3, zero, zero                      ; r
+nbsp_r:
+    sltu v1, a3, a7
+    beq v1, zero, nbsp_next
+    srlv v1, a5, a3                          ; (delay slot)
+    andi v1, v1, 1
+    bne v1, zero, nbsp_run
+    nop
+    j nbsp_r
+    addiu a3, a3, 1                          ; (delay slot)
+nbsp_run:
+    addiu a4, a3, 1                          ; r1: the run of drawn rows in one 8-row half
+nbsp_r1:
+    sltu v1, a4, a7
+    beq v1, zero, nbsp_r1x
+    srlv v1, a5, a4                          ; (delay slot)
+    andi v1, v1, 1
+    beq v1, zero, nbsp_r1x
+    srl v1, a4, 3                            ; (delay slot)
+    srl t3, a3, 3
+    bne v1, t3, nbsp_r1x
+    nop
+    j nbsp_r1
+    addiu a4, a4, 1                          ; (delay slot)
+nbsp_r1x:
+    lw t3, global_nb_sat(zero)
+    andi v1, t3, 128
+    beq v1, zero, nbsp_nf
+    addu gp, a3, zero                        ; (delay slot) rr = r
+    subu gp, a7, a3
+    addiu gp, gp, -1                         ; flipped: rr = h - 1 - r
+nbsp_nf:
+    lbu v1, global_rspq_scratch+97(a2)       ; tile
+    addiu t3, zero, 8
+    bne a7, t3, nbsp_16
+    nop
+    andi t3, s2, 8                           ; 8 x 8: ta = tile, a = (ctrl & 8) << 9 | ta << 4
+    sll t3, t3, 9
+    sll a0, v1, 4
+    or a0, a0, t3
+    j nbsp_ta
+    addu a1, v1, zero                        ; (delay slot)
+nbsp_16:
+    srl t3, gp, 3                            ; 8 x 16: half = rr >> 3, ta = (tile & 254) + half
+    andi a1, v1, 254
+    addu a1, a1, t3
+    andi t3, v1, 1
+    sll t3, t3, 12
+    sll a0, a1, 4
+    or a0, a0, t3                            ; a = (tile & 1) << 12 | ta << 4
+nbsp_ta:
+    sw a1, global_nb_sta(zero)
+    ; the empty test: rows lo .. hi of the tile (the run's rr & 7)
+    lw t3, global_nb_sat(zero)
+    andi t3, t3, 128
+    addu v1, a3, zero                        ; lo = r
+    beq t3, zero, nbsp_lohi
+    addiu t8, a4, -1                         ; (delay slot) hi = r1 - 1
+    subu v1, a7, a4                          ; flipped: lo = h - r1
+    subu t8, a7, a3
+    addiu t8, t8, -1                         ; hi = h - 1 - r
+nbsp_lohi:
+    andi v1, v1, 7
+    andi t8, t8, 7
+    subu t8, t8, v1
+    addiu t8, t8, 1
+    addiu t9, zero, 1
+    sllv t9, t9, t8
+    addiu t9, t9, -1
+    sllv t9, t9, v1                          ; the rows
+    srl t8, a0, 10
+    andi t8, t8, 7
+    sll v1, t8, 6
+    andi t3, a0, 0x3FF
+    srl t3, t3, 4
+    addu v1, v1, t3
+    lbu v1, global_rspq_scratch+352(v1)
+    and v1, v1, t9
+    beq v1, zero, nbsp_runx                  ; empty: not drawn
+    nop
+    sw a0, global_nb_sa(zero)
+    jal nbdesc
+    addiu a0, zero, 4                        ; (delay slot) tiles 0-3: the sprites' palettes
+    lw a0, global_nb_sa(zero)
+    srl t8, a0, 10
+    andi t8, t8, 7
+    lbu t8, global_rspq_scratch+48(t8)
+    sll t8, t8, 10
+    andi a0, a0, 0x3E0
+    jal nbpair
+    or a0, a0, t8                            ; (delay slot) key
+    sw v0, global_nb_slot(zero)
+    jal nbroom
+    nop
+    addu t3, t0, a4
+    addiu t3, t3, 1                          ; L1 = y + 1 + r1
+    addiu v1, t2, 32
+    sll v1, v1, 14
+    lui a0, 0x2400
+    or a0, a0, v1
+    sll t3, t3, 2
+    or a0, a0, t3
+    sw a0, 0(v0)                             ; w0
+    lw t3, global_nb_sat(zero)
+    andi a0, t3, 3
+    sll a0, a0, 24
+    addiu v1, t1, 32
+    sll v1, v1, 14
+    or a0, a0, v1
+    addu v1, t0, a3
+    addiu v1, v1, 1                          ; L = y + 1 + r
+    sll v1, v1, 2
+    or a0, a0, v1
+    sw a0, 4(v0)                             ; w1: palette at & 3
+    lw a0, global_nb_sx0(zero)
+    subu a0, t1, a0                          ; xs - x0
+    lw a1, global_nb_sta(zero)
+    andi a1, a1, 1
+    sll a1, a1, 3                            ; (ta & 1) x 8
+    andi v1, t3, 64
+    beq v1, zero, nbsp_nh
+    lui t9, 0x0400                           ; (delay slot) ds = +1
+    subu a0, a1, a0
+    addiu a0, a0, 7                          ; mirrored: s from the right
+    j nbsp_s
+    lui t9, 0xFC00                           ; (delay slot) ds = -1
+nbsp_nh:
+    addu a0, a1, a0
+nbsp_s:
+    sll a0, a0, 21
+    lw a1, global_nb_slot(zero)
+    sll a1, a1, 3
+    andi v1, gp, 7
+    addu a1, a1, v1
+    sll a1, a1, 5                            ; t = slot x 8 + (rr & 7)
+    or a0, a0, a1
+    sw a0, 8(v0)                             ; w2
+    andi v1, t3, 128
+    beq v1, zero, nbsp_nv
+    ori t9, t9, 0x0400                       ; (delay slot) dt = +1
+    xori t9, t9, 0x0400
+    ori t9, t9, 0xFC00                       ; flipped: dt = -1
+nbsp_nv:
+    sw t9, 12(v0)                            ; w3
+nbsp_runx:
+    j nbsp_r
+    addu a3, a4, zero                        ; (delay slot) on from r1
+nbsp_next:
+    addiu a2, a2, -4
+    bgez a2, nbsp_i
+    nop
+    jal nbflush
+    nop
+    lw ra, global_nb_raspr(zero)
+    jr ra
+    nop
+
+nbb_return:
+  EndASM
+EndProcedure
+
+; NesRspCommon (resident) - the subroutines both segments call. Never run as a procedure: NesRspSetup calls it once
+; so that the compiler keeps it, and its first instruction jumps over the subroutines.
+Procedure NesRspCommon()
+  ASM
+    j nbc_return
+    nop
+    ; ==== nb_enter / nb_leave: the caller's s0-s7 to nb_sv and the band's from nb_bs; the other way ====
+nb_enter:
+    sw s0, global_nb_sv+0(zero)
+    sw s1, global_nb_sv+4(zero)
+    sw s2, global_nb_sv+8(zero)
+    sw s3, global_nb_sv+12(zero)
+    sw s4, global_nb_sv+16(zero)
+    sw s5, global_nb_sv+20(zero)
+    sw s6, global_nb_sv+24(zero)
+    sw s7, global_nb_sv+28(zero)
+    lw s0, global_nb_bs+0(zero)
+    lw s1, global_nb_bs+4(zero)
+    lw s2, global_nb_bs+8(zero)
+    lw s3, global_nb_bs+12(zero)
+    lw s4, global_nb_bs+16(zero)
+    lw s5, global_nb_bs+20(zero)
+    lw s6, global_nb_bs+24(zero)
+    lw s7, global_nb_bs+28(zero)
+    jr ra
+    nop
+nb_leave:
+    sw s0, global_nb_bs+0(zero)
+    sw s1, global_nb_bs+4(zero)
+    sw s2, global_nb_bs+8(zero)
+    sw s3, global_nb_bs+12(zero)
+    sw s4, global_nb_bs+16(zero)
+    sw s5, global_nb_bs+20(zero)
+    sw s6, global_nb_bs+24(zero)
+    sw s7, global_nb_bs+28(zero)
+    lw s0, global_nb_sv+0(zero)
+    lw s1, global_nb_sv+4(zero)
+    lw s2, global_nb_sv+8(zero)
+    lw s3, global_nb_sv+12(zero)
+    lw s4, global_nb_sv+16(zero)
+    lw s5, global_nb_sv+20(zero)
+    lw s6, global_nb_sv+24(zero)
+    lw s7, global_nb_sv+28(zero)
+    jr ra
+    nop
+
+    ; ==== nbw: one doubleword (a0, a1) to the frame's words (the twin's NesTwinCmdW) ====
+nbw:
+    lw t8, global_nb_outpos(zero)
+    sltiu t9, t8, 4096
+    beq t9, zero, nbw_over
+    addiu t8, t8, 1                          ; (delay slot)
+    sw t8, global_nb_outpos(zero)
+    sw a0, 0(s6)
+    sw a1, 4(s6)
+    addiu s6, s6, 8
+    bne s6, s7, nbret
+    nop
+nbw_dma:
+    mfc0 at, $4                              ; the half is full: once every DMA before it has landed ...
+    andi at, at, 12
+    bne at, zero, nbw_dma
+    nop
+    addiu k0, s6, -128
+    mtc0 k0, $0                              ; SP_MEM_ADDR
+    lw k1, global_nb_odram(zero)
+    mtc0 k1, $1                              ; SP_DRAM_ADDR
+    addiu v0, zero, 127
+    mtc0 v0, $3                              ; ... SP_WR_LEN: out it goes, not waited for
+    addiu k1, k1, 128
+    sw k1, global_nb_odram(zero)
+    addiu t9, zero, global_rspq_scratch+2304
+    bne s7, t9, nbw_h2
+    nop
+    addiu s6, zero, global_rspq_scratch+2048 ; the second half went: the first again
+    jr ra
+    addiu s7, zero, global_rspq_scratch+2176 ; (delay slot)
+nbw_h2:
+    jr ra
+    addiu s7, zero, global_rspq_scratch+2304 ; (delay slot) the first went: the second (s6 is at it)
+nbw_over:
+    lw t8, global_nb_over(zero)
+    addiu t8, t8, 1
+    jr ra
+    sw t8, global_nb_over(zero)              ; (delay slot) a word that did not fit, counted
+nbret:
+    jr ra
+    nop
+
+    ; ==== the syncs owed: tail calls of nbw ====
+nbsp:
+    lw t8, global_nb_pipe(zero)
+    beq t8, zero, nbret
+    nop
+    sw zero, global_nb_pipe(zero)
+    lui a0, 0x2700
+    j nbw
+    addu a1, zero, zero                      ; (delay slot) SYNC_PIPE
+nbst:
+    lw t8, global_nb_tiles(zero)
+    and t8, t8, t9
+    beq t8, zero, nbret
+    nop
+    sw zero, global_nb_tiles(zero)
+    lui a0, 0x2800
+    j nbw
+    addu a1, zero, zero                      ; (delay slot) SYNC_TILE
+nbsl:
+    lw t8, global_nb_tmem(zero)
+    beq t8, zero, nbret
+    nop
+    sw zero, global_nb_tmem(zero)
+    lui a0, 0x2600
+    j nbw
+    addu a1, zero, zero                      ; (delay slot) SYNC_LOAD
+
+    ; ==== nbflush: the rectangles waiting for their pairs, written; their slots free again (NesTwinFlush) ====
+nbflush:
+    sw ra, global_nb_rafl(zero)
+    lw t3, global_nb_rects(zero)
+    beq t3, zero, nbfl_pins
+    sll t3, t3, 4                            ; (delay slot)
+    addiu t3, t3, global_rspq_scratch+1024   ; the queue's end
+    addiu v1, zero, global_rspq_scratch+1024
+nbfl_r:
+    lw a0, 0(v1)
+    jal nbw
+    lw a1, 4(v1)                             ; (delay slot)
+    lw a0, 8(v1)
+    jal nbw
+    lw a1, 12(v1)                            ; (delay slot)
+    lw a0, 4(v1)
+    srl a0, a0, 24
+    andi a0, a0, 7                           ; the rectangle's tile
+    addiu a1, zero, 1
+    sllv a1, a1, a0
+    lw a0, global_nb_tiles(zero)
+    or a0, a0, a1
+    sw a0, global_nb_tiles(zero)
+    addiu v1, v1, 16
+    bne v1, t3, nbfl_r
+    nop
+    addiu a0, zero, 1
+    sw a0, global_nb_pipe(zero)
+    sw a0, global_nb_tmem(zero)
+    sw zero, global_nb_rects(zero)
+nbfl_pins:
+    addiu a0, zero, 124
+nbfl_p:
+    sw zero, global_nb_pins(a0)
+    bne a0, zero, nbfl_p
+    addiu a0, a0, -4                         ; (delay slot)
+    sw zero, global_nb_pinned(zero)
+    lw ra, global_nb_rafl(zero)
+    jr ra
+    nop
+
+    ; ==== nbroom: room for one rectangle in the queue (NesTwinTexRect's flush at 64); v0 = its 16 bytes ====
+nbroom:
+    lw v0, global_nb_rects(zero)
+    sltiu v1, v0, 64
+    bne v1, zero, nbroom1
+    nop
+    sw ra, global_nb_raroom(zero)
+    jal nbflush
+    nop
+    lw ra, global_nb_raroom(zero)
+    addu v0, zero, zero
+nbroom1:
+    addiu v1, v0, 1
+    sw v1, global_nb_rects(zero)
+    sll v0, v0, 4
+    jr ra
+    addiu v0, v0, global_rspq_scratch+1024   ; (delay slot)
+
+    ; ==== nbpair: v0 = the slot holding pair a0 (NesTwinPair), loaded when absent ====
+nbpair:
+    sw ra, global_nb_rapair(zero)
+    sw a0, global_nb_key(zero)
+    addu v1, a0, zero                        ; the key
+    addu t3, zero, zero
+nbpr_s:
+    lw t8, global_nb_keys(t3)
+    beq t8, v1, nbpr_hit
+    addiu t3, t3, 4                          ; (delay slot)
+    sltiu t8, t3, 128
+    bne t8, zero, nbpr_s
+    nop
+    lw t8, global_nb_pinned(zero)            ; absent: every slot pinned? then the rectangles go first
+    addiu t9, zero, 32
+    bne t8, t9, nbpr_f
+    nop
+    jal nbflush
+    nop
+nbpr_f:
+    lw v1, global_nb_key(zero)               ; the key again (a flush uses v1)
+    lw t3, global_nb_next(zero)
+nbpr_n:
+    sll t8, t3, 2
+    lw t9, global_nb_pins(t8)
+    beq t9, zero, nbpr_free                  ; the next slot no waiting rectangle names
+    nop
+    addiu t3, t3, 1
+    j nbpr_n
+    andi t3, t3, 31                          ; (delay slot)
+nbpr_free:
+    addiu t9, t3, 1
+    andi t9, t9, 31
+    sw t9, global_nb_next(zero)              ; t3 = the slot
+    jal nbsp
+    nop
+    sll a1, v1, 1
+    lw t8, global_nb_pair(zero)
+    addu a1, a1, t8                          ; the pair: NesChrPairBase + key << 1
+    lui a0, 0x3D10
+    jal nbw
+    ori a0, a0, 3                            ; (delay slot) SET_TEXTURE_IMAGE: 16-bit units
+    jal nbst
+    addiu t9, zero, 128                      ; (delay slot)
+    sll a0, t3, 3
+    lui t8, 0x3510
+    or a0, a0, t8
+    jal nbw
+    lui a1, 0x0700                           ; (delay slot) SET_TILE 7 at the slot
+    jal nbsl
+    nop
+    lui a0, 0x3300
+    lui a1, 0x0701
+    jal nbw
+    ori a1, a1, 0xF800                       ; (delay slot) LOAD_BLOCK 32 units, a word a line
+    lw t8, global_nb_tiles(zero)
+    ori t8, t8, 128
+    sw t8, global_nb_tiles(zero)
+    addiu t8, zero, 1
+    sw t8, global_nb_tmem(zero)
+    sll t8, t3, 2
+    j nbpr_pin
+    sw v1, global_nb_keys(t8)                ; (delay slot)
+nbpr_hit:
+    addiu t3, t3, -4
+    srl t3, t3, 2
+nbpr_pin:
+    sll t8, t3, 2
+    lw t9, global_nb_pins(t8)
+    bne t9, zero, nbpr_ret
+    addiu t9, zero, 1                        ; (delay slot)
+    sw t9, global_nb_pins(t8)
+    lw t9, global_nb_pinned(zero)
+    addiu t9, t9, 1
+    sw t9, global_nb_pinned(zero)
+nbpr_ret:
+    addu v0, t3, zero
+    lw ra, global_nb_rapair(zero)
+    jr ra
+    nop
+
+    ; ==== nbdesc: tiles 0-3 to the palettes from a0 (0 the background's, 4 the sprites') (NesTwinDescriptors) ====
+nbdesc:
+    lw t8, global_nb_descs(zero)
+    beq t8, a0, nbret
+    nop
+    sw ra, global_nb_radesc(zero)
+    jal nbflush
+    sw a0, global_nb_descs(zero)             ; (delay slot)
+    addu t3, zero, zero
+nbds_t:
+    addiu t9, zero, 1
+    jal nbst
+    sllv t9, t9, t3                          ; (delay slot) 1 << t
+    lw v1, global_nb_descs(zero)
+    addu v1, v1, t3
+    sll v1, v1, 20
+    sll a1, t3, 24
+    or a1, a1, v1
+    lui a0, 0x3540
+    jal nbw
+    ori a0, a0, 0x0200                       ; (delay slot) SET_TILE t: CI4, a line of 1, TMEM 0, palette base + t
+    sll a1, t3, 24
+    lui v1, 0x0003
+    ori v1, v1, 0xC3FC
+    or a1, a1, v1
+    jal nbw
+    lui a0, 0x3200                           ; (delay slot) SET_TILE_SIZE 16 x 256
+    addiu t3, t3, 1
+    sltiu v1, t3, 4
+    bne v1, zero, nbds_t
+    nop
+    lw ra, global_nb_radesc(zero)
+    jr ra
+    nop
+
+    ; ==== nbdi / nbdo: one DMA in / out, k0 DMEM, k1 RDRAM, v0 bytes - 1; back once every DMA has landed ====
+nbdi:
+    mfc0 at, $5                              ; SP_DMA_FULL
+    bne at, zero, nbdi
+    nop
+    mtc0 k0, $0
+    mtc0 k1, $1
+    j nbdw
+    mtc0 v0, $2                              ; (delay slot) SP_RD_LEN: RDRAM to DMEM
+nbdo:
+    mfc0 at, $5
+    bne at, zero, nbdo
+    nop
+    mtc0 k0, $0
+    mtc0 k1, $1
+    mtc0 v0, $3                              ; SP_WR_LEN: DMEM to RDRAM
+nbdw:
+    mfc0 at, $4
+    andi at, at, 12                          ; DMA busy or full
+    bne at, zero, nbdw
+    nop
+    jr ra
+    nop
+nbc_return:
+  EndASM
+EndProcedure
+
+
+Procedure RspqCommand(id.l)
+  Select id
+    Case #NES_RSP_SETUP : NesRspSetup()
+    Case #NES_RSP_BAND
+      If RspqSegment(#NES_RSP_SEG_A) : NesRspBandA() : EndIf
+      If RspqSegment(#NES_RSP_SEG_B) : NesRspBandB() : EndIf
+  EndSelect
+EndProcedure
+
+LpmRspqKernel()

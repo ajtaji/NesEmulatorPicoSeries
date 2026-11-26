@@ -98,6 +98,9 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   Global Dim NesBandSpace.a(#NES_U_BANDMAX*#NES_BAND_BYTES+16)
   Global Dim NesOamSpace.a(#NES_U_BANDMAX*256+16)
   Global NesBandBase.i, NesOamBase.i
+  CompilerIf #NES_RSP_CHECK
+    Global NesRspHalt.i                 ; the RSP checking build: the first difference ends the run (rspband.n64)
+  CompilerEndIf
   CompilerIf #NES_PPU_CHECK
     Global Dim NesPpuCheck.i(16)
     Global Dim NesPpuCheckImage.i(80)  ; two band-input images of 312 bytes (unit/ppu_check.n64)
@@ -349,6 +352,9 @@ Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
       LpmDebugPrint("NES LIVE "+Str(lastFrame)+" COUNT "+Str(elapsed)+" AI STARVATIONS "+Str(HostAiStarvations)+" LAST "+Str(HostAiLastStarvation)+" PCM DROPPED "+Str(HostAudioDropped))
     EndIf
   CompilerEndIf
+  CompilerIf #NES_RSP_CHECK
+    If NesRspHalt : LpmDebugPrint("NES RSP CHECK STOPPED AT FRAME "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
+  CompilerEndIf
   CompilerIf #VERIFY_FRAME>0
     If lastFrame=#VERIFY_FRAME : HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
   CompilerEndIf
@@ -357,6 +363,7 @@ EndProcedure
 
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   XIncludeFile "twin.n64"
+  XIncludeFile "rspband.n64"
   XIncludeFile "mmc3_run.n64"
 CompilerEndIf
 
@@ -380,6 +387,9 @@ Procedure RunGame()
     EndASM
   CompilerEndIf
   If LoadGame()=0 : LpmDebugPrint("NES cartridge could not fit or load") : ProcedureReturn : EndIf
+  CompilerIf #NES_RSP_CHECK
+    NesRspInit()
+  CompilerEndIf
   CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=0
     NesRuntimeIndexNromWaits()
   CompilerElseIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
@@ -395,6 +405,12 @@ Procedure RunGame()
     CompilerEndIf
     CompilerIf #NES_TWIN_CHECK
       NesTwinReport()
+    CompilerEndIf
+    CompilerIf #NES_WB_MEASURE
+      NesWbReport()
+    CompilerEndIf
+    CompilerIf #NES_RSP_CHECK
+      NesRspReport()
     CompilerEndIf
     If i : ProcedureReturn : EndIf
   CompilerElse

@@ -167,6 +167,10 @@ def build(args, *, controller_trace=()):
     a12_check = getattr(args, "a12_check", False)
     ppu_check = getattr(args, "ppu_check", False)
     twin_check = getattr(args, "twin_check", False)
+    wb_measure = getattr(args, "wb_measure", False)
+    rsp_check = getattr(args, "rsp_check", False)
+    if (wb_measure or rsp_check) and not (runtime and cart.mapper == 4 and args.check_frame):
+        raise ValueError("the band write-back measure and the RSP check are runtime-MMC3 verification builds")
     if twin_check and not (runtime and cart.mapper == 4 and args.check_frame):
         raise ValueError("the emitter twin's check is a runtime-MMC3 verification build")
     if ppu_check and not (runtime and cart.mapper == 4 and args.check_frame):
@@ -179,7 +183,9 @@ def build(args, *, controller_trace=()):
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
         "NES_PPU_CHECK": int(ppu_check),
-        "NES_TWIN_CHECK": int(twin_check),
+        "NES_TWIN_CHECK": int(twin_check or rsp_check),
+        "NES_WB_MEASURE": int(wb_measure),
+        "NES_RSP_CHECK": int(rsp_check),
         "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
@@ -327,6 +333,12 @@ if __name__ == "__main__":
     parser.add_argument("--twin-check", action="store_true",
                         help="checking build: the RDP emitter's CPU twin draws every band into a second picture, compared "
                              "with the renderer's (needs --check-frame)")
+    parser.add_argument("--rsp-check", action="store_true",
+                        help="checking build: the RSP band emitter (rspband.n64rsp) and the twin on the same bands, every "
+                             "command word compared, the twin's picture drawn from the RSP's words (needs --check-frame)")
+    parser.add_argument("--wb-measure", action="store_true",
+                        help="measuring build: the Count register around the band cut's write-back of the name tables, "
+                             "the record and its OAM snapshot (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:
