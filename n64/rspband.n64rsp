@@ -13,8 +13,11 @@
 ;      (NesChrPairBase), the TLUT blocks the words name (32 x 256 B), the TLUT blocks this program writes, the frame
 ;      command area (4,096 doublewords, then 16 bytes of status). All 8-byte aligned (the CPU checks).
 ;    NES_RSP_BAND (129), at every band record: RspqArg 0 the record (96 B), 1 its OAM snapshot (256 B), 2 the
-;      band's index in the frame. Index 0 starts a frame: the words go from the area's start, and the RDP's state
-;      is taken as unknown (every sync owed, no pair resident) - as the twin does.
+;      band's index in the frame | its frame set << 8. Index 0 starts a frame: the words go from the area's start, and
+;      the RDP's state is taken as unknown (every sync owed, no pair resident) - as the twin does. WITH RECORD 0 IT IS
+;      THE HAND STEP (design note N.62; NesRspHand, segment 6): RspqArg 1 the set's area, 2 the set | 256 for the
+;      frame's last - the set attached, its words not yet handed handed to the RDP (RspqRdpHand), and with 256 no
+;      longer attached after. A band's end hands its words itself while its set is attached (NesRspBandE).
 ;    NES_RSP_SYNJOB (130), on the PRIORITY ring: a job of the APU synthesis, the program's second module
 ;      (rspsyn.n64rsp, segments 3, 5 and 4; design note N.52 / N.53). It uses only the queue's scratch and its own
 ;      state in RDRAM: nothing of this module's DMEM, so a band job after it finds its globals as they were.
@@ -86,12 +89,15 @@
 ;  So a caller keeps a2-a7, t0-t2, gp and s0-s7 across every one of them.
 ; ======================================================================
 #RSP_SEGMENT_BASE = 2304                ; the resident code (the kernel and NesRspCommon) needs more than 1536
+#LPM_RSPQ_RDP_HAND = 1                  ; the kernel's RspqRdpHand: the band job hands its own words (N.62)
+#RSP_SEGMENT_RspqRdpHand = 6            ; in segment 6, with its callers (NesRspBandE, NesRspHand)
 XIncludeFile "Mips/Lib/LibPureMetalN64/rspq_program.n64rsp"
 XIncludeFile "rspband_ids.pmi"
 #RSP_SEGMENT_NesRspBandA = 1            ; #NES_RSP_SEG_A
 #RSP_SEGMENT_NesRspBandB = 2            ; #NES_RSP_SEG_B
 #RSP_SEGMENT_NesRspBandS = 6            ; #NES_RSP_SEG_S (design note N.60)
 #RSP_SEGMENT_NesRspBandQ = 7            ; #NES_RSP_SEG_Q
+#RSP_SEGMENT_NesRspHand = 6             ; (the HAND step: a frame's words handed, N.62)
 #RSP_SEGMENT_NesRspBandE = 6            ; (with NesRspBandS: the band's end after segment 7)
 
 Global nb_nt.l, nb_mask.l, nb_rgb.l, nb_pair.l, nb_tlut.l, nb_tlutw.l, nb_out.l, nb_lim.l
@@ -103,6 +109,11 @@ Global nb_ra.l, nb_rabg.l, nb_raspr.l, nb_rapair.l, nb_rafl.l, nb_raroom.l, nb_r
 Global Dim nb_sv.l[8]
 Global Dim nb_bs.l[8]                   ; the band's s0-s7 from NesRspBandA to NesRspBandB
 Global Dim nb_srows.l[32]               ; each sprite's drawn rows (bit r: line y + 1 + r), a halfword a sprite
+; THE HAND-OVER (N.62): the band's frame set (0 / 1, RspqArg 2 bit 8), each set's attached flag (bit = set), its
+; words written and handed (bytes from the area's start)
+Global nb_set.l, nb_att.l
+Global Dim nb_wr.l[2]
+Global Dim nb_hnd.l[2]
 
 Procedure NesRspSetup()
   nb_nt = RspqArg(0) : nb_mask = RspqArg(1) : nb_rgb = RspqArg(2) : nb_pair = RspqArg(3)
@@ -116,6 +127,14 @@ EndProcedure
 Procedure NesRspBandA()
   ASM
     sw ra, global_nb_ra(zero)
+    lw t0, global_rspqarg(zero)              ; record 0: the HAND step (N.62), in segment 6
+    bne t0, zero, nba_band
+    addiu t0, zero, 6                        ; (delay slot)
+    sw t0, global_rspq_scratch+1012(zero)
+    addiu t0, zero, nesrsphand
+    j nba_return
+    sw t0, global_rspq_scratch+1016(zero)    ; (delay slot)
+nba_band:
     jal nb_enter                             ; the caller's s0-s7 kept
     nop
     mfc0 t0, $12                             ; DPC_CLOCK at the start (the RSP time, an emulator figure)
@@ -144,10 +163,18 @@ nb_mk:
     bne t1, zero, nb_mk
     nop
     ; ---- a frame's first band: the RDP's state unknown (the twin's idx = 0) ----
-    lw t0, global_rspqarg+8(zero)
+    lw t0, global_rspqarg+8(zero)            ; the band's index | its frame set << 8
+    srl t1, t0, 8
+    andi t1, t1, 1
+    sw t1, global_nb_set(zero)
+    andi t0, t0, 255
     sw t0, global_nb_idx(zero)
     bne t0, zero, nb_nf
     addiu t1, zero, -1                       ; (delay slot)
+    lw t2, global_nb_set(zero)               ; a frame's first band: nothing of its set written or handed (attached
+    sll t2, t2, 2                            ; it may be already: the CPU attaches a frame as early as it can)
+    sw zero, global_nb_wr(t2)
+    sw zero, global_nb_hnd(t2)
     sw zero, global_nb_over(zero)
     sw zero, global_nb_clk(zero)
     sw zero, global_nb_next(zero)
@@ -519,38 +546,10 @@ nb_ph1b:
     jal nbspr
     addu a0, zero, zero                      ; (delay slot) phase 2: the front ones
 nb_ph2:
-    ; ---- the band's end: the staging's rest out, then the status ----
-    jal nbsend
-    nop
-nb_e1:
-    mfc0 at, $4                              ; every DMA landed
-    andi at, at, 12
-    bne at, zero, nb_e1
-    nop
-    lw t0, global_nb_odram(zero)
-    lw t1, global_nb_out(zero)
-    subu t0, t0, t1
-    srl t0, t0, 3
-    sw t0, global_rspq_scratch+944(zero)     ; the frame's words
-    lw t0, global_nb_over(zero)
-    sw t0, global_rspq_scratch+948(zero)
-    mfc0 t1, $12
-    lw t2, global_nb_clk0(zero)
-    subu t1, t1, t2
-    lui t2, 0x00FF
-    ori t2, t2, 0xFFFF
-    and t1, t1, t2                           ; 24 bits
-    lw t2, global_nb_clk(zero)
-    addu t2, t2, t1
-    sw t2, global_nb_clk(zero)
-    sw t2, global_rspq_scratch+952(zero)
-    lw t0, global_nb_idx(zero)
-    addiu t0, t0, 1
-    sw t0, global_rspq_scratch+956(zero)
-    lw k1, global_nb_lim(zero)               ; the status after the 4,096 doublewords
-    addiu k0, zero, global_rspq_scratch+944
-    jal nbdo
-    addiu v0, zero, 15
+    addiu t0, zero, 6                        ; the band's end: segment 6 (NesRspBandE: the status, then the hand)
+    sw t0, global_rspq_scratch+1012(zero)
+    addiu t0, zero, nesrspbande
+    sw t0, global_rspq_scratch+1016(zero)
 nbb_out:
     jal nb_leave
     nop
@@ -1297,6 +1296,29 @@ nbe_e1:
     addiu k0, zero, global_rspq_scratch+944
     jal nbdo
     addiu v0, zero, 15
+    ; THE HAND (N.62): the set's words written so far; if its frame is attached, handed to the RDP now unless a
+    ; START is pending (then the next band's end, or the frame's HAND step, hands them)
+    lw t0, global_nb_odram(zero)
+    lw t1, global_nb_out(zero)
+    subu t0, t0, t1                          ; bytes written
+    lw t2, global_nb_set(zero)
+    sll t3, t2, 2
+    sw t0, global_nb_wr(t3)
+    lw t8, global_nb_att(zero)
+    srlv t8, t8, t2
+    andi t8, t8, 1
+    beq t8, zero, nbe_out                    ; not attached: the HAND step hands them
+    lw a0, global_nb_hnd(t3)                 ; (delay slot)
+    beq a0, t0, nbe_out                      ; nothing new
+    addu a1, t1, t0                          ; (delay slot) the end
+    jal rspqrdphand
+    addu a0, t1, a0                          ; (delay slot) the start
+    beq a0, zero, nbe_out                    ; a START pending: later
+    lw t2, global_nb_set(zero)               ; (delay slot)
+    sll t2, t2, 2
+    lw t0, global_nb_wr(t2)
+    sw t0, global_nb_hnd(t2)                 ; handed
+nbe_out:
     jal nb_leave
     nop
     lw ra, global_nb_ra(zero)
@@ -1304,6 +1326,65 @@ nbe_e1:
     nop
 
 nbe_return:
+  EndASM
+EndProcedure
+
+; NesRspHand (code segment 6, design note N.62) - THE HAND STEP: NES_RSP_BAND with record 0 (segment 1 sends it
+; here). RspqArg 1 the set's area (physical), 2 the set (bit 0) | 256 for the frame's last. The set is marked attached
+; (its frame's attach has been queued before this, behind the CPU's gate: the SYNC_FULL before it is through), every
+; word of it written and not yet handed is handed (RspqRdpHand), and with 256 the set is no longer attached after. With a START pending it tries again, reading SP signal 1 meanwhile: set,
+; it gives up its turn (rspqk_again: nothing it did is undone by running it again) and the priority ring runs first.
+Procedure NesRspHand()
+  ASM
+    sw ra, global_nb_ra(zero)
+    lw t2, global_rspqarg+8(zero)
+    andi t2, t2, 1
+    addiu t3, zero, 1
+    sllv t3, t3, t2
+    lw t8, global_nb_att(zero)
+    or t8, t8, t3
+    sw t8, global_nb_att(zero)               ; attached
+nbh_try:
+    lw t2, global_rspqarg+8(zero)
+    andi t2, t2, 1
+    sll t2, t2, 2
+    lw a0, global_nb_hnd(t2)
+    lw a1, global_nb_wr(t2)
+    beq a0, a1, nbh_done                     ; everything handed
+    lw t1, global_rspqarg+4(zero)            ; (delay slot) the area
+    addu a1, t1, a1
+    jal rspqrdphand
+    addu a0, t1, a0                          ; (delay slot)
+    bne a0, zero, nbh_handed
+    nop
+    mfc0 at, $4                              ; a START pending: SP signal 1?
+    andi at, at, 0x100
+    beq at, zero, nbh_try                    ; no: try again
+    nop
+    j rspqk_again                            ; yes: this step again after the priority ring
+    nop
+nbh_handed:
+    lw t2, global_rspqarg+8(zero)
+    andi t2, t2, 1
+    sll t2, t2, 2
+    lw t0, global_nb_wr(t2)
+    sw t0, global_nb_hnd(t2)
+nbh_done:
+    lw t2, global_rspqarg+8(zero)
+    andi t3, t2, 256
+    beq t3, zero, nbh_out                    ; not the frame's last: it stays attached
+    andi t2, t2, 1                           ; (delay slot)
+    addiu t3, zero, 1
+    sllv t3, t3, t2
+    nor t3, t3, zero
+    lw t8, global_nb_att(zero)
+    and t8, t8, t3
+    sw t8, global_nb_att(zero)               ; its frame detached: the set's next frame attaches it again
+nbh_out:
+    lw ra, global_nb_ra(zero)
+    j nbh_return
+    nop
+nbh_return:
   EndASM
 EndProcedure
 

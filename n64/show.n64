@@ -5,16 +5,21 @@
 ; name tables COPIED into a band-input slot - the guest may write them before the job runs, and a dirty cache line
 ; can reach RDRAM by any eviction - the record and its OAM snapshot written back) and the band's job queued for the
 ; RSP program rspband.n64rsp (unchanged from the checking build: one NES_RSP_SETUP naming this band's slot and this
-; frame's areas, one NES_RSP_BAND, one fence). The RDP is handed the frame's words, the fallback lines and the
-; SYNC_FULL that shows the picture once the frame's last band job is done, at the next check point (no loop): line
+; frame's areas, one NES_RSP_BAND, one fence). THE RSP HANDS THE FRAME'S WORDS TO THE RDP ITSELF (design note N.62):
+; each band job at its end once the frame is attached; the CPU only attaches a frame (its buffer, the side bands and
+; the HAND step, once the SYNC_FULL before is through - LpmRdpSyncFullDone - and a buffer is free) and detaches it (the
+; HAND step for the rest, the fallback lines, the SYNC_FULL that shows it), at its check points: a band's close, line
 ; 240 (NesShowFrameEnd), every 16 visible lines (DisplayWaitLine, host.n64), the frame's wrap (NesHostGuestFrame).
+; Nothing waits for the RDP at line 240: a frame set is reused only once the frame that used it last is drawn, looked
+; at - and slept for if need be - at the set's first write (NesShowAcquire).
 ;
 ; WHAT IS KEPT PER FRAME, IN TWO SETS (the show's frame parity, NesShowCur): the RSP's frame area (4,096 doublewords
 ; and its status), its TLUT blocks (32 x 256), its fallback lines' table. The fallback rows (CI8, 256 bytes, in LinePixels,
 ; each with a 64-byte palette) are a ring of 240 shared by the frames, a row reused once its frame is drawn. The RDP draws frame N while frame N+1 is emulated; frame N+2 takes N's set only once N is drawn
 ; (NesShowFrameEnd's guard).
-;   set 0's area: #NES_CART_LOW_END (+0 the words, +$8000 the status); both TLUT sets at +$8100; the program's copy
-;   at +$C100 (the 64 KB to the library's crash display is free in its map). Set 1's area, the four band-input
+;   set 0's area: #NES_CART_LOW_END (+0 the words, +$8000 the status); both TLUT sets at +$8100 (the 64 KB to the
+;   library's crash display is free in its map); the program's copy at $80276400 (N.62: after the AI ring, below the
+;   cartridge arena). Set 1's area, the four band-input
 ;   slots, the fallback palettes: below the stack (NesShowArea1, NesShowNtSpace, NesFbPalSpace).
 ;
 ; THE FALLBACK LINES (the lines no record draws; design note N.60 made split lines records of their own - rspband.n64,
@@ -37,7 +42,8 @@ EndASM
 
 #NES_SHOW_WORDS = 4096                  ; a frame area's doublewords (the program's limit; the status after them)
 #NES_SHOW_TLUT_AT = $8100               ; the two TLUT sets, 8 KB each, from #NES_CART_LOW_END
-#NES_SHOW_PROG_AT = $C100               ; the program's copy (its file + 128 bytes)
+#NES_SHOW_PROG = $FFFFFFFF80276400     ; the program's copy (its file + 128 bytes; N.62): after the AI ring's end
+#NES_SHOW_PROG_END = $FFFFFFFF80281000 ; ($80272000 + 16,928, host.n64) and below the cartridge arena (storage.n64)
 #NES_FB_ROWS = 240                      ; the fallback rows' ring: a frame needs at most one a line
 
 Global Dim NesShowArea1Space.a(#NES_SHOW_WORDS*8+16+16)
@@ -58,7 +64,17 @@ Global Dim NesShowFb.i(2)               ; the buffer it is drawn into, once atta
 Global Dim NesShowShown.i(2)            ; the buffer it was shown in (0: not shown)
 Global Dim NesShowTicket.i(2)           ; lpm_rdp_frames_sent after its SYNC_FULL
 Global Dim NesShowFrameNo.i(2)          ; WorkerFrames at its line 240
-Global Dim NesShowClk.i(2)              ; its RSP clocks counted (NesShowStat 12 / 13)
+Global Dim NesShowAtt.i(2)              ; attached: its buffer's attach and the RSP's HAND step queued (N.62)
+Global Dim NesShowFree.i(2)             ; the set taken by the current frame: the frame before that used it is drawn
+Global NesShowNoFbVi.i                  ; the VI count at the last look that found no buffer free
+Global NesShowFreeCur.i                 ; NesShowFree of the current set, for the unit's assembly (NesSegFirst)
+; the frame that used each set last (saved when the set is taken again), until the set's first write: its ticket, what
+; its record and check need (N.62: its set is reused only once it is drawn - waited for there, not at line 240)
+Global Dim NesShowPrevTicket.i(2)
+Global Dim NesShowPrevShown.i(2)
+Global Dim NesShowPrevFrameNo.i(2)
+Global Dim NesShowPrevFbN.i(2)
+Global Dim NesShowPrevBands.i(2)
 Global Dim NesFbCountP.i(2)
 Global Dim NesFbOverP.i(2)
 Global Dim NesFbFirstP.i(2)              ; its first row in the ring
@@ -509,10 +525,12 @@ EndProcedure
 
 ; ---- the frame's sets ----
 
-Procedure NesShowSet(p.i)               ; the current frame takes set p (its state cleared)
+Procedure NesShowSet(p.i)               ; the current frame takes set p (its state cleared; the last user's kept)
+  NesShowPrevTicket(p) = NesShowTicket(p) : NesShowPrevShown(p) = NesShowShown(p)
+  NesShowPrevFrameNo(p) = NesShowFrameNo(p) : NesShowPrevFbN(p) = NesFbCountP(p) : NesShowPrevBands(p) = NesShowBands(p)
+  NesShowFree(p) = 0 : NesShowFreeCur = 0 : NesShowAtt(p) = 0 : NesShowTicket(p) = 0
   NesShowCur = p
   NesShowDone(p) = 0 : NesShowEnded(p) = 0 : NesShowBands(p) = 0 : NesShowFb(p) = 0 : NesShowShown(p) = 0
-  NesShowClk(p) = 0
   NesFbN = 0 : NesFbOver = 0
   NesFbFirst = NesFbHead
   NesFbRowBase = NesFbRows : NesFbPalBase = NesFbPals
@@ -526,7 +544,7 @@ Procedure.i NesShowInit()
     LpmDebugPrint("NES SHOW REFUSED: an input not 8-byte aligned for the RSP's DMA") : ProcedureReturn 0
   EndIf
   need = LpmCartFileLen(1) + 128
-  If need > $10000 - #NES_SHOW_PROG_AT
+  If need > #NES_SHOW_PROG_END - #NES_SHOW_PROG
     LpmDebugPrint("NES SHOW REFUSED: the RSP program's file is " + Str(need - 128) + " bytes") : ProcedureReturn 0
   EndIf
   a1 = (@NesShowArea1Space(0) + 15) & ~15
@@ -538,15 +556,16 @@ Procedure.i NesShowInit()
   NesFbRows = (@LinePixels(0) + 255) & ~255
   NesFbPals = (@NesFbPalSpace(0) + 15) & ~15
   ; no stale cached line of what the RSP and the RDP read uncached may land on it later
-  LpmCacheWritebackInvalidateData(#NES_CART_LOW_END, #NES_SHOW_PROG_AT)
+  LpmCacheWritebackInvalidateData(#NES_CART_LOW_END, #NES_SHOW_TLUT_AT + 2 * #NES_U_BANDMAX * 256)
   LpmCacheWritebackInvalidateData(a1, #NES_SHOW_WORDS * 8 + 16)
   LpmCacheWritebackInvalidateData(@NesShowNtSpace(0), 4 * 8192 + 8192)
   LpmCacheWritebackData(@Rgb64(0), 1024)
-  space = #NES_CART_LOW_END + #NES_SHOW_PROG_AT
+  space = #NES_SHOW_PROG
   NesShowProg = LpmRspqProgram(LpmCartFile(1), space)
   If NesShowProg = 0 : LpmDebugPrint("NES SHOW REFUSED: LpmRspqProgram") : ProcedureReturn 0 : EndIf
   NesShowDone(1) = 1                    ; no frame before the first
-  NesShowSetupP = -1
+  NesShowEnded(1) = 0
+  NesShowSetupP = -1 : NesShowNoFbVi = -1
   NesSegInit(NesShowNtBase)
   NesShowSet(0)
   CompilerIf #NES_SHOW_CHECK
@@ -558,11 +577,14 @@ Procedure.i NesShowInit()
   ProcedureReturn 1
 EndProcedure
 
+Declare NesShowAcquire()
+Declare NesShowPollE(wait.i, early.i)
 ; ---- a band's close (the cold part, through NesShowBandCall) ----
 Procedure NesShowBand(rec.i)
   Protected idx.i, s.i, f.i, p.i = NesShowCur, b.i, nt.i, t0.i, t0r.i
   If NesShowProg = 0 : ProcedureReturn : EndIf
-  t0 = LpmCpuCount() : t0r = t0
+  If NesShowFreeCur = 0 : NesShowAcquire() : EndIf   ; the set's first write: its last frame drawn (N.62; timed as
+  t0 = LpmCpuCount() : t0r = t0                      ; the hand-over's)
   idx = (rec - NesBandBase) / #NES_BAND_BYTES
   f = NesShowRecFence(idx)                ; the record's job of a frame ago has read it
   If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
@@ -591,7 +613,7 @@ Procedure NesShowBand(rec.i)
   NesShowSetupP = p
   LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, nt & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
   EndIf
-  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b)
+  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b | (p << 8))
   f = LpmRspqFence()
   NesShowRecFence(idx) = f : NesShowFence(p) = f
   If s >= 0 : NesShowNtFence(s) = f : EndIf
@@ -600,6 +622,7 @@ Procedure NesShowBand(rec.i)
   CompilerIf #NES_CONSOLE_RECORD
     NesRecAdd(0, t0r)
   CompilerEndIf
+  If NesShowAtt(p) = 0 : NesShowPollE(0, 1) : EndIf    ; (N.62) attached as early as it can be (a hand-over's part)
 EndProcedure
 
 ; ---- a split line's first cut (through NesFbCatchUpCall): before the write is applied ----
@@ -715,77 +738,170 @@ Procedure NesShowFallback(p.i)
   CompilerEndIf
 EndProcedure
 
-; Frame p handed to the RDP if it can be now: 1 when it is finished (handed, or not shown and counted). wait as
-; NesShowGetFb; with 2 the RSP's last job is also waited for (LpmRspqWait sleeps), with 0 / 1 it is only asked.
-Procedure.i NesShowFinish(p.i, wait.i)
-  Protected fb.i, n.i, st.i, over.i
-  If NesShowDone(p) : ProcedureReturn 1 : EndIf
-  If NesShowEnded(p) = 0 : ProcedureReturn 0 : EndIf
-  If NesShowBands(p) And LpmRspqFenceDone(NesShowFence(p)) = 0
+; THE HAND-OVER BY THE RSP (design note N.62). The band jobs hand their own words to the RDP once their frame is
+; ATTACHED (rspband.n64rsp: the band's end, and the HAND step - NES_RSP_BAND with record 0). The CPU attaches a frame
+; - its buffer, the side bands, the HAND step - once the frame before is detached, the SYNC_FULL before is through
+; (LpmRdpSyncFullDone: the library's gate, not waited for) and a buffer is free; it DETACHES it - the HAND step for the
+; rest, the old path's lines, the SYNC_FULL that shows it - once it has ended. Nothing here waits unless told to.
+
+; Frame s attached if it can be. wait: 0 not at all; 1 a buffer slept for as HostPresent(1) did (not shown - done,
+; counted - when the sound reserve runs low); 2 until it is attached. 1 attached (or not shown), 0 not now.
+Procedure.i NesShowAttach(s.i, wait.i)
+  Protected fb.i
+  ; only the VI interrupt frees a buffer (lpm_display.n64): none was free at this VI's count - none is now
+  If wait = 0 And NesShowFb(s) = 0 And LpmDisplayFrames() = NesShowNoFbVi : ProcedureReturn 0 : EndIf
+  If LpmRdpSyncFullDone() = 0
     If wait < 2 : ProcedureReturn 0 : EndIf
-    LpmRspqWait(NesShowFence(p))
+    LpmRdpSyncFullWait()
   EndIf
-  st = NesShowArea(p) + #NES_SHOW_WORDS * 8
-  If NesShowBands(p)
-    n = PeekL(st) & $FFFFFFFF : over = PeekL(st + 4) & $FFFFFFFF
-    If NesShowClk(p) = 0                  ; the frame's RSP clocks, once (this runs at every check point until it is
-      NesShowClk(p) = 1                   ; handed: a check point with no buffer free comes back here)
-      NesShowStat(12) + (PeekL(st + 8) & $FFFFFFFF)
-      If (PeekL(st + 8) & $FFFFFFFF) > NesShowStat(13) : NesShowStat(13) = PeekL(st + 8) & $FFFFFFFF : EndIf
-    EndIf
-  EndIf
-  fb = NesShowFb(p)
-  If over Or NesFbOverP(p)
-    If fb = 0                             ; nothing handed: the frame is not shown, never half drawn
-      NesShowStat(1) + 1 : NesShowDone(p) = 1 : NesShowTicket(p) = 0
-      CompilerIf #VERIFY_FRAME > 0
-        LpmDebugPrint("NES SHOW FRAME NOT SHOWN: words over " + Str(over) + " fallback slots over " + Str(NesFbOverP(p)))
-      CompilerEndIf
-      ProcedureReturn 1
-    EndIf
-    NesShowStat(2) + 1                    ; attached by a drain already: shown as far as it goes, counted
-  EndIf
+  fb = NesShowFb(s)
   If fb = 0
     fb = NesShowGetFb(wait)
+    If fb = 0 : NesShowNoFbVi = LpmDisplayFrames() : EndIf
     If fb = 0
       If wait = 1                         ; the sound reserve is low: not shown (as HostPresent(1) coalesced)
-        HostCoalesced + 1 : NesShowStat(14) + 1 : NesShowDone(p) = 1 : NesShowTicket(p) = 0
+        HostCoalesced + 1 : NesShowStat(14) + 1 : NesShowDone(s) = 1 : NesShowTicket(s) = 0
         ProcedureReturn 1
       EndIf
       ProcedureReturn 0
     EndIf
-    LpmRdpAttach(fb)
-    CompilerIf #VERIFY_FRAME = 0
-      ; THE CONSOLE MARK (the playable cart only): the 32-pixel borders, which no NES pixel covers, green on every
-      ; picture shown - running and healthy. NesShowStopped turns the whole screen red.
-      CompilerIf #NES_CONSOLE_RECORD
-        ; with the console record: GREEN while the record is kept, YELLOW when the flash cart did not keep it
-        If NesRecKept : LpmRdpModeFill(LpmRgb16(0, 24, 0)) : Else : LpmRdpModeFill(LpmRgb16(24, 24, 0)) : EndIf
-      CompilerElse
-        LpmRdpModeFill(LpmRgb16(0, 24, 0))
-      CompilerEndIf
-      LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
-    CompilerEndIf
-    LpmRspqRdpFlush(NesShowProg)
+    NesShowFb(s) = fb
   EndIf
-  If n : LpmRspqRdpBlock(NesShowProg, NesShowArea(p), n * 8) : EndIf
-  NesShowFallback(p)
-  LpmRspqRdpDetachShow(NesShowProg, fb)
-  NesShowTicket(p) = lpm_rdp_frames_sent
-  NesShowShown(p) = fb : NesShowFb(p) = 0 : NesShowDone(p) = 1 : NesShowStat(0) + 1
+  LpmRdpForget()                          ; (the RSP's words left the RDP's modes: the library's own sent again)
+  LpmRdpAttach(fb)
+  CompilerIf #VERIFY_FRAME = 0
+    ; THE CONSOLE MARK (the playable cart only): the 32-pixel borders, which no NES pixel covers, green on every
+    ; picture shown - running and healthy. NesShowStopped turns the whole screen red.
+    CompilerIf #NES_CONSOLE_RECORD
+      ; with the console record: GREEN while the record is kept, YELLOW when the flash cart did not keep it
+      If NesRecKept : LpmRdpModeFill(LpmRgb16(0, 24, 0)) : Else : LpmRdpModeFill(LpmRgb16(24, 24, 0)) : EndIf
+    CompilerElse
+      LpmRdpModeFill(LpmRgb16(0, 24, 0))
+    CompilerEndIf
+    LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
+  CompilerEndIf
+  LpmRspqRdpFlush(NesShowProg)            ; the attach through the queue (its gate passes: decided above)
+  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(s) & $1FFFFFFF, s)   ; the HAND step: attached, words so far
+  NesShowAtt(s) = 1
   ProcedureReturn 1
 EndProcedure
 
-; A check point: the frame before the current one, if its turn has come.
-Procedure NesShowPoll(wait.i)
+; Frame s (ended, attached) detached: the rest of its words, its old-path lines, the SYNC_FULL that shows it.
+Procedure NesShowDetach(s.i)
+  Protected fb.i = NesShowFb(s)
+  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(s) & $1FFFFFFF, s | 256)   ; the HAND step: the rest, and
+  NesShowFallback(s)                                                                ; the set no longer attached
+  LpmRspqRdpDetachShow(NesShowProg, fb)
+  NesShowTicket(s) = lpm_rdp_frames_sent
+  NesShowShown(s) = fb : NesShowFb(s) = 0 : NesShowDone(s) = 1 : NesShowStat(0) + 1
+EndProcedure
+
+; A check point: the frame before attached (wait as NesShowAttach) and detached; then, with early = 1 (a band's close,
+; line 240), the current frame attached early if it can be (never waited for) - not at the 16-line check points, where
+; a buffer is rarely free and the attempt would cost more than it gains.
+Procedure NesShowAdvance(wait.i, early.i)
+  Protected q.i = NesShowCur ! 1, p.i = NesShowCur
+  If NesShowDone(q) And (early = 0 Or NesShowAtt(p) Or NesShowDone(p)) : ProcedureReturn : EndIf   ; (most: nothing)
+  If wait = 0 And lpm_rdp_frames_done < lpm_rdp_sf_handed : ProcedureReturn : EndIf  ; the gate shut: nothing yet
+  If NesShowDone(q) = 0
+    If NesShowAtt(q) = 0
+      If NesShowAttach(q, wait) = 0 : ProcedureReturn : EndIf
+    EndIf
+    If NesShowDone(q) = 0 : NesShowDetach(q) : EndIf
+  EndIf
+  If early And NesShowAtt(p) = 0 And NesShowDone(p) = 0 : NesShowAttach(p, 0) : EndIf
+EndProcedure
+
+Procedure NesShowPollE(wait.i, early.i)
   CompilerIf #NES_CONSOLE_RECORD
     Protected tr.i = LpmCpuCount(), w0.i = NesRecWait, s0.i = NesRecT(9)
-    If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+    If NesShowProg : NesShowAdvance(wait, early) : EndIf
     NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)   ; the sleep for a buffer is the record's
     ; own column, the sound's synthesis (an AI block rendered while waiting) its own part
   CompilerElse
-    If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+    If NesShowProg : NesShowAdvance(wait, early) : EndIf
   CompilerEndIf
+EndProcedure
+Procedure NesShowPoll(wait.i)             ; a 16-line check point (host.n64), the frame's wrap (nes.n64)
+  NesShowPollE(wait, 0)
+EndProcedure
+
+; Sleep (not spin) until the RDP has finished picture ticket t: the DP, VI and AI interrupts wake it, the sound is fed
+; meanwhile. (The console record counts it as slept, as the sleep for a buffer.)
+Procedure NesShowSleepDrawn(t.i)
+  Protected seen.i
+  If LpmRdpFramesDone() >= t : ProcedureReturn : EndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecWaitFrom = LpmCpuCount() : NesRecWaitSyn = NesRecT(9)
+  CompilerEndIf
+  seen = LpmIrqSeen(#LPM_WAKE_DP | #LPM_WAKE_VI | #LPM_WAKE_AI)
+  While LpmRdpFramesDone() < t
+    seen = LpmIrqSleep(#LPM_WAKE_DP | #LPM_WAKE_VI | #LPM_WAKE_AI, seen, #LPM_WAIT_TICK, 0, 0)
+    HostQueueAudio(ApuProduced)
+  Wend
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecWait + ((LpmCpuCount() - NesRecWaitFrom) & $FFFFFFFF) - (NesRecT(9) - NesRecWaitSyn)
+  CompilerEndIf
+EndProcedure
+
+Declare NesShowCheckPrev(p.i)
+; THE SET TAKEN AT ITS FIRST WRITE (N.62; the frame's first band close, or its first split line's segment pool): the
+; frame that used it last must be drawn - in practice long since (its drawing ends a few ms after line 240, the first
+; write comes a band later). Its status read once now (its RSP clocks, words that did not fit), its picture checked.
+Procedure NesShowAcquire()
+  Protected p.i = NesShowCur, st.i, tr.i, w0.i, s0.i
+  If NesShowFreeCur : ProcedureReturn : EndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
+  CompilerEndIf
+  If NesShowPrevTicket(p) And LpmRdpFramesDone() < NesShowPrevTicket(p)
+    NesShowStat(3) + 1
+    NesShowSleepDrawn(NesShowPrevTicket(p))
+  EndIf
+  If NesShowPrevBands(p)
+    st = NesShowArea(p) + #NES_SHOW_WORDS * 8
+    NesShowStat(12) + (PeekL(st + 8) & $FFFFFFFF)
+    If (PeekL(st + 8) & $FFFFFFFF) > NesShowStat(13) : NesShowStat(13) = PeekL(st + 8) & $FFFFFFFF : EndIf
+    If PeekL(st + 4) : NesShowStat(2) + 1 : EndIf   ; words that did not fit: shown as far as they went, counted
+  EndIf
+  NesShowCheckPrev(p)
+  NesShowPrevBands(p) = 0
+  NesShowFree(p) = 1 : NesShowFreeCur = 1
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)
+  CompilerEndIf
+EndProcedure
+
+; The unit's way in (NesSegFirst, a split line's first cut): every register kept.
+ProcedureNaked NesShowAcquireCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesshowacquire
+    nop
+    j nes_show_restore
+    nop
+  EndASM
 EndProcedure
 
 CompilerIf #NES_SHOW_CHECK
@@ -818,27 +934,39 @@ nes_show_hash_px:
   EndASM
 EndProcedure
 
-; Frame p's shown picture hashed (its SYNC_FULL done; the buffer is on screen or waiting for its field, so no frame
-; draws into it yet) and printed as "NES PIC frame hash fallback-lines" - or NOT SHOWN.
-Procedure NesShowCheck(p.i)
-  Protected fb.i = NesShowShown(p)
-  If NesShowEnded(p) = 0 : ProcedureReturn : EndIf   ; (no frame before the first)
+; The picture of set p's last frame hashed (drawn: NesShowAcquire, or the run's end; its buffer is on screen or
+; waiting for its field, or free - no frame draws into it before the next frame is attached) and printed as "NES PIC
+; frame hash fallback-lines" - or NOT SHOWN.
+Procedure NesShowCheckPrev(p.i)
+  Protected fb.i = NesShowPrevShown(p)
+  If NesShowPrevFrameNo(p) = 0 And fb = 0 : ProcedureReturn : EndIf   ; (no frame before the first)
   If fb
     fb = (fb & $1FFFFFFF) | $80000000
     LpmCacheInvalidateData(fb, #HOST_WIDTH * #HOST_HEIGHT * 2)
     NesShowHash = $351B5058
     NesShowHashFb(fb)
-    LpmDebugPrint("NES PIC " + Str(NesShowFrameNo(p)) + " " + Hex(NesShowHash) + " " + Str(NesFbCountP(p)))
+    LpmDebugPrint("NES PIC " + Str(NesShowPrevFrameNo(p)) + " " + Hex(NesShowHash) + " " + Str(NesShowPrevFbN(p)))
   Else
-    LpmDebugPrint("NES PIC " + Str(NesShowFrameNo(p)) + " NOT SHOWN " + Str(NesFbCountP(p)))
+    LpmDebugPrint("NES PIC " + Str(NesShowPrevFrameNo(p)) + " NOT SHOWN " + Str(NesShowPrevFbN(p)))
   EndIf
-  NesShowShown(p) = 0
+  NesShowPrevShown(p) = 0 : NesShowPrevFrameNo(p) = 0
+EndProcedure
+CompilerEndIf
+
+CompilerIf #NES_SHOW_CHECK = 0
+Procedure NesShowCheckPrev(p.i)
+  CompilerIf #NES_CONSOLE_RECORD
+    ; the record's picture hashes (console_record.n64), while no button has been seen: the set's last frame, drawn
+    ; (NesRecPicture takes its own ticks out of the hand-over's)
+    NesRecPicture(NesShowPrevFrameNo(p), NesShowPrevShown(p), NesShowPrevFbN(p))
+  CompilerEndIf
+  NesShowPrevShown(p) = 0
 EndProcedure
 CompilerEndIf
 
 ; ---- line 240, after the frame's last close (unit/ppu.n64) ----
 Procedure NesShowFrameEnd()
-  Protected p.i = NesShowCur, q.i = NesShowCur ! 1, fb.i, tr.i, w0.i
+  Protected p.i = NesShowCur, q.i = NesShowCur ! 1, tr.i, w0.i
   CompilerIf #NES_CONSOLE_RECORD
     Protected s0.i                      ; the record: the synthesis's ticks at the start
     tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
@@ -848,10 +976,12 @@ Procedure NesShowFrameEnd()
   NesShowStat(5) + NesFbN
   If NesFbN > NesShowStat(6) : NesShowStat(6) = NesFbN : EndIf
   NesShowStat(8) + PeekI(NesUnitBase + #NES_U_BANDLOST)
-  ; the next frame takes q's set: the frame before this one handed and drawn first (in practice long since)
-  NesShowFinish(q, 2)
-  While LpmRdpFramesDone() < NesShowTicket(q) : Wend
   NesShowFrameNo(p) = WorkerFrames
+  ; the frame before must be DETACHED before its set's state is taken by the next frame (a buffer slept for if none
+  ; was free yet: the pacing); this frame attached and detached at once if it can be. NOTHING waits for the RDP here:
+  ; the next frame waits, if at all, at its set's first write (NesShowAcquire).
+  NesShowAdvance(2, 1)
+  If NesShowAtt(p) And NesShowDone(p) = 0 : NesShowDetach(p) : EndIf
   CompilerIf #NES_SHOW_CHECK
     If WorkerFrames = 300                 ; one frame's bands by line and inputs, for the record
       Protected k.i, s.s = "NES SHOW BANDS 300"
@@ -860,20 +990,24 @@ Procedure NesShowFrameEnd()
       Next
       LpmDebugPrint(s + " LOST " + Str(PeekI(NesUnitBase + #NES_U_BANDLOST)))
     EndIf
-    NesShowCheck(q)                       ; the frame before: drawn by now, through the hand-over as it runs
   CompilerEndIf
   CompilerIf #VERIFY_FRAME > 0
-    If WorkerFrames + 1 = #VERIFY_FRAME   ; a screenshot checkpoint shows its frame
-      NesShowFinish(p, 2)
+    If WorkerFrames + 1 = #VERIFY_FRAME   ; a screenshot checkpoint shows its frame: both frames finished, drawn,
+      If NesShowDone(p) = 0               ; checked in order
+        If NesShowAtt(p) = 0 : NesShowAttach(p, 2) : EndIf
+        If NesShowDone(p) = 0 : NesShowDetach(p) : EndIf
+      EndIf
+      NesShowSleepDrawn(NesShowTicket(p))
       CompilerIf #NES_SHOW_CHECK
-        LpmRdpFinish() : NesShowCheck(p)
+        LpmRdpFinish()
+        NesShowPrevShown(q) = NesShowShown(q) : NesShowPrevFrameNo(q) = NesShowFrameNo(q) : NesShowPrevFbN(q) = NesFbCountP(q)
+        If NesShowEnded(q) : NesShowCheckPrev(q) : EndIf
+        NesShowShown(q) = 0
+        NesShowPrevShown(p) = NesShowShown(p) : NesShowPrevFrameNo(p) = NesShowFrameNo(p) : NesShowPrevFbN(p) = NesFbCountP(p)
+        NesShowCheckPrev(p)
+        NesShowShown(p) = 0
       CompilerEndIf
     EndIf
-  CompilerEndIf
-  CompilerIf #NES_CONSOLE_RECORD
-    ; the frame before is drawn (its SYNC_FULL done above) and its buffer is on screen or waiting for its field, so
-    ; nothing draws into it yet: its picture hashed into the record while no button has been seen (console_record.n64)
-    NesRecPicture(NesShowFrameNo(q), NesShowShown(q), NesFbCountP(q))
   CompilerEndIf
   NesShowSet(q)
   NesFbGuard = NesFbCountP(p)             ; this frame's rows, until it is drawn (NesFbSlot, NesFbWait)
@@ -882,10 +1016,11 @@ Procedure NesShowFrameEnd()
   CompilerEndIf
 EndProcedure
 
-; The ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL waited for.
+; The ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL slept for.
 Procedure NesFbWait()
-  NesShowFinish(NesShowCur ! 1, 2)
-  While LpmRdpFramesDone() < NesShowTicket(NesShowCur ! 1) : Wend
+  Protected q.i = NesShowCur ! 1
+  NesShowAdvance(2, 0)
+  NesShowSleepDrawn(NesShowTicket(q))
   NesFbGuard = 0 : NesShowStat(3) + 1
 EndProcedure
 
@@ -894,23 +1029,22 @@ EndProcedure
 ; shown); the current frame's next band then starts the RSP's state again (index 0: every sync owed, no pair taken as
 ; resident - a pair in TMEM would be the old one), its words from the area's start, which the RDP has read.
 Procedure NesShowDrain()
-  Protected p.i = NesShowCur, n.i, fb.i, tr.i, w0.i
+  Protected p.i = NesShowCur, tr.i, w0.i
   CompilerIf #NES_CONSOLE_RECORD
     Protected s0.i                      ; the record: the synthesis's ticks at the start
     tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
   CompilerEndIf
   LpmRspqSync()
-  NesShowFinish(p ! 1, 2)
+  NesShowAdvance(2, 0)                    ; the frame before attached and detached
   If NesShowBands(p)
-    fb = NesShowFb(p)
-    If fb = 0
-      fb = NesShowGetFb(2)
-      LpmRdpAttach(fb) : LpmRspqRdpFlush(NesShowProg)
-      NesShowFb(p) = fb
+    If NesShowAtt(p) = 0                  ; this frame's words so far handed (its attach, then the HAND step that
+      NesShowAttach(p, 2)                 ; ends its attachment: the next band restarts the RSP's state)
+      LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
+    Else
+      LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
     EndIf
-    n = PeekL(NesShowArea(p) + #NES_SHOW_WORDS * 8) & $FFFFFFFF
-    If n : LpmRspqRdpBlock(NesShowProg, NesShowArea(p), n * 8) : EndIf
-    NesShowBands(p) = 0
+    LpmRspqSync()
+    NesShowBands(p) = 0 : NesShowAtt(p) = 0  ; the next band restarts the RSP's state; attached again (the same buffer)
   EndIf
   LpmRdpFinish()
   NesShowBusy = 0 : NesShowStat(4) + 1
@@ -924,7 +1058,7 @@ Procedure NesShowStopped()
   Protected fb.i
   If NesShowProg = 0 : ProcedureReturn : EndIf
   LpmRspqSync()
-  NesShowFinish(NesShowCur ! 1, 2)
+  NesShowAdvance(2, 0)
   LpmRdpFinish()
   fb = NesShowGetFb(2)
   LpmRdpAttach(fb)

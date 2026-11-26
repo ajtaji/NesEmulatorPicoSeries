@@ -453,6 +453,19 @@ ProcedureNaked NesSegFirst()
     sd t2, 56(sp)
     sd t3, 64(sp)
     move a3, v0
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      la t0, global_nesshowfreecur   ; the frame's set taken before its segment pool is written (show.n64, N.62)
+      ld t0, 0(t0)
+      bnez t0, nes_seg_first_free
+      nop
+      jal nesshowacquirecall         ; (every register kept)
+      nop
+nes_seg_first_free:
+    EndASM
+  CompilerEndIf
+  ASM
     ld t0, #NES_U_BANDCOUNT(a3)
     sltiu t0, t0, 31                 ; (#NES_U_BANDMAX - 1) the band closing now may take a record, the line takes the next
     beqz t0, nes_seg_first_rec

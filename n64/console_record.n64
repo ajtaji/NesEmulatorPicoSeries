@@ -16,7 +16,8 @@
 ; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable); the
 ; record is kept only if its header reads back, and the side bands say so (show.n64: green kept, yellow not).
 ;   +$0000   the header, 16 words: "NESC", the ROM's CRC (the cartridge's word at $10), the version, the power-ons
-;            seen, the run slot this power-on writes, #NES_REC_HASH_MAX, #NES_REC_HASH_EVERY (version 5)
+;            seen, the run slot this power-on writes, #NES_REC_HASH_MAX, #NES_REC_HASH_EVERY (version 5), the VI's
+;            control word (word 7: its bits 8-9 the output filter, 2 resample, 3 the nearest pixel)
 ;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x #NES_REC_SLOT ($1E000; all pictures: $3A000):
 ;            +0      the summary, #NES_REC_WORDS words (the #R_ list below); "NRUN" in word 0 once it is valid
 ;            +$1000  the series: one entry of 4 words for every 60 guest frames (about a second), up to 4,096
@@ -267,6 +268,8 @@ Procedure NesRecOpen()
   EndIf
   LpmDebugIoWrite(#NES_REC + 20, #NES_REC_HASH_MAX)       ; version 5: the picture hashes' room and period, which
   LpmDebugIoWrite(#NES_REC + 24, #NES_REC_HASH_EVERY)     ; size the run slots (the decoder reads them here)
+  LpmDebugIoWrite(#NES_REC + 28, PeekL($A4400000))         ; the VI's control word as this power-on set it (its bits
+  ; 8-9 the output filter: 2 resample, 3 replicate - the nearest pixel), so the record says which filter ran
   boots = LpmDebugIoRead(#NES_REC + 12) + 1
   slot = (boots - 1) % #NES_REC_SLOTS
   LpmDebugIoWrite(#NES_REC + 12, boots)
@@ -534,7 +537,7 @@ Procedure NesRecPicture(frame.i, fb.i, fbl.i)
   LpmDebugIoWrite(a + 20, fbl)
   NesRecW(#R_HASHES) = n + 1
   NesRecT(3) - ((LpmCpuCount() - t0) & $FFFFFFFF)   ; the hash is the record's own, not the hand-over's (it runs
-EndProcedure                                       ; inside NesShowFrameEnd, which is timed as the hand-over)
+EndProcedure                                       ; inside NesShowAcquire, which is timed as the hand-over)
 
 ; The emulator stopped (RunGame's NES STOP): its reason, and the whole summary out now.
 Procedure NesRecStop()
