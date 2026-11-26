@@ -76,6 +76,89 @@ nes_mmc3_bus_write_stamp:
     sltiu t1, a0, 0x4000
     beqz t1, nes_mmc3_bus_write_apu
     sd a1, 16(sp)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; ---- THE $2007 BURST (design note N.43) ----
+      ; WHAT: a $2007 name-table write while nothing the guest can observe or be interrupted by can change before
+      ; the next synced access is applied at once, WITHOUT the sync (u_workeradvance) and WITHOUT ending the CPU
+      ; window; the next access that syncs brings the APU, the A12 walk and the PPU to its own time.
+      ; WHY: in a world entry a game uploads 2,000-3,000 name-table bytes with rendering off; the sync and the
+      ; window's end and re-entry were ~17 of the ~20 us each write cost (N.41), and those frames are where the
+      ; console's sound broke. HOW IT STAYS EXACT: condition C, below, item by item. Under C (1) no interrupt
+      ; source can change state and no DMC stall exists, so where the window ends is invisible to the guest (a
+      ; window end stalls, polls interrupts and hands frames to the host; the first two are void, the third is
+      ; host-only); (2) the deferred PPU / APU advance over [WorkerClock, the write] reads neither v nor the name
+      ; tables with rendering off, so the write and the advance commute; (3) the write's own A12 is low before and
+      ; after it with MapA12 low, so u_mappera12 and the notice are no-ops. The guest digest (cputrace.n64, N.42)
+      ; proves it; the window digest, which folds where windows end, differs by design.
+      ; C: in a CPU window; register 7; PPUMASK & $18 = 0 (rendering off); PPUCTRL & $80 = 0 (NMI off);
+      ; WorkerNmi = NesSeenNmi (no NMI pending: it is taken at a window end); MapIrq = 0, WorkerIrq = 0 (no IRQ
+      ; asserted); DmcBytes = 0 (no fetch, stall or DMC IRQ); MapA12 = 0; ApuInhibit | ApuFive <> 0 (no frame IRQ
+      ; can be raised); v & $3000 = $2000 (a name table: A12 low) and (v + increment) & $1000 = 0 (A12 still low
+      ; after it). Anything else takes the synced path below. In: a0 the address, a1 the value, t0 =
+      ; @CpuCycles, the frame (ra, a0, a1) on the stack. Clobbers t1-t3, t8 before the decision.
+      ; THE PLAIN TWIN (what the assembly computes):
+      ;   If CpuInWindow And WorkerNmi=NesSeenNmi And addr&7=7 And MapIrq=0 And WorkerIrq=0 And DmcBytes=0 And
+      ;      MapA12=0 And PpuMask&$18=0 And PpuCtrl&$80=0 And (ApuInhibit Or ApuFive) And PpuV&$3000=$2000 And
+      ;      (PpuV+inc)&$1000=0                          ; inc = 32 when PpuCtrl&4, else 1
+      ;     PpuRegWrite(7,value) : ProcedureReturn      ; no WorkerAdvance, no MapperRegNotice, no CpuEndWindow
+      ;   EndIf
+      ld t1, global_cpuinwindow-global_cpucycles(t0)
+      ld t2, global_workernmi-global_cpucycles(t0)
+      ld t3, global_nesseennmi-global_cpucycles(t0)
+      beqz t1, nes_mmc3_ppu_synced    ; outside a CPU window
+      xor t2, t2, t3
+      bnez t2, nes_mmc3_ppu_synced    ; an NMI edge not yet taken
+      andi t1, a0, 7
+      xori t1, t1, 7
+      bnez t1, nes_mmc3_ppu_synced    ; not $2007
+      nop
+      la t3, global_mapirq
+      ld t1, 0(t3)                    ; MapIrq
+      ld t2, global_workerirq-global_mapirq(t3)
+      or t1, t1, t2
+      ld t2, global_dmcbytes-global_mapirq(t3)
+      or t1, t1, t2
+      ld t2, global_mapa12-global_mapirq(t3)
+      or t1, t1, t2
+      ld t2, global_ppumask-global_mapirq(t3)
+      andi t2, t2, 24
+      or t1, t1, t2
+      ld t2, global_ppuctrl-global_mapirq(t3)
+      andi t8, t2, 128
+      or t1, t1, t8
+      bnez t1, nes_mmc3_ppu_synced    ; an IRQ, a sample, A12 high, rendering or NMI on
+      andi t2, t2, 4                  ; PPUCTRL bit 2: the increment is 32
+      la t3, global_nesmmc3apuclock
+      ld t1, global_apuinhibit-global_nesmmc3apuclock(t3)
+      ld t8, global_apufive-global_nesmmc3apuclock(t3)
+      or t1, t1, t8
+      beqz t1, nes_mmc3_ppu_synced    ; the four-step sequence can raise the frame IRQ
+      nop
+      la t3, global_ppuv
+      ld t8, 0(t3)                    ; v
+      andi t1, t8, 0x3000
+      xori t1, t1, 0x2000
+      bnez t1, nes_mmc3_ppu_synced    ; not a name table ($0000-$1FFF CHR, $3000-$3FFF palette / mirror)
+      sll t1, t2, 3                   ; 32 or 0
+      srl t2, t2, 2                   ; 1 or 0
+      subu t1, t1, t2
+      addiu t1, t1, 1                 ; the increment: 32 or 1
+      addu t1, t8, t1
+      andi t1, t1, 0x1000
+      bnez t1, nes_mmc3_ppu_synced    ; the increment takes v to $3000: A12 would rise
+      nop
+      jal u_ppuregwrite               ; PpuRegWrite(7, value): PpuBus, u_ppucut (returns: rendering off), u_ppuwrite, v
+      ld a1, 16(sp)
+      ld ra, 0(sp)                    ; no sync, no notice (a no-op under C), no close
+      jr ra
+      daddiu sp, sp, 32
+nes_mmc3_ppu_synced:
+      ld a0, 8(sp)
+    EndASM
+  CompilerEndIf
+  ASM
     ; ---- a PPU register, $2000-$3FFF: the staged NesWriteRegister's PPU path, in place (N.40 (2)) ----
     jal u_workeradvance             ; WorkerAdvance(stamp): the APU, the A12 walk and the PPU to the write
     move a0, a2
