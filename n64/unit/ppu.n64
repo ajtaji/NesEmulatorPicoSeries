@@ -46,6 +46,9 @@
 ;   the frame's last band. A cut at dot 0 ends the band before that line; at dots 1-255 the line is
 ;   split (a bit in U_SPLIT, the fallback lines of step N5) and the band ends before it; at dot 256
 ;   or later the line is complete and is the band's last.
+;   In the shipped N5 path (#NES_RDP_SHOW) a band whose rendering is off (PPUMASK bits 3-4 clear) shows only the
+;   backdrop, so only a PPUMASK change and a palette write cut it (u_ppucut_always); the other inputs change
+;   unseen and its record holds them as at the close (design note N.27, fix 1).
 ;   OAM is cut differently, from the renderer's own rule: a line's sprites are evaluated and drawn
 ;   from OAM at the line's dot 0, so a write to OAM ($2004, or an OAM DMA, whose copy is the shared
 ;   worker's) changes the picture from the NEXT line on, never in the middle of one. Every such
@@ -254,8 +257,19 @@ ppu_adv_draw_call:
       ld t1, #NES_U_LIVE(s6)        ; N5: the renderer draws only a fallback line (into its slot), never
       beqz t1, ppu_draw_none        ; reusing a retained row (a slot holds another line every frame)
       sd t0, #NES_U_DRAWST(s6)      ; the status before the draw
-      jal nesrenderto               ; spans ceil8(dot) .. a0
-      nop
+    EndASM
+    CompilerIf #NES_CONSOLE_RECORD
+      ASM
+        jal nesrecrenderto          ; the same call, timed for the console record (show.n64)
+        nop
+      EndASM
+    CompilerElse
+      ASM
+        jal nesrenderto             ; spans ceil8(dot) .. a0
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
 ppu_draw_none:
     EndASM
   CompilerElse
@@ -320,8 +334,19 @@ ppu_adv_publish:
       ld t0, #NES_U_LIVE(s6)        ; N5: only a fallback line is published (its slot's row and palette)
       beqz t0, ppu_adv_published
       nop
-      jal nesfbpublish
-      nop
+    EndASM
+    CompilerIf #NES_CONSOLE_RECORD
+      ASM
+        jal nesrecfbpublish         ; the same call, timed for the console record (show.n64)
+        nop
+      EndASM
+    CompilerElse
+      ASM
+        jal nesfbpublish
+        nop
+      EndASM
+    CompilerEndIf
+    ASM
 ppu_adv_published:
     EndASM
   CompilerElse
@@ -526,6 +551,30 @@ ppu_add6:                           ; leaf: v0 = v0 + a0 coarse-X increments (a0
 ; ---- the band cut ----
   ASM
 u_ppucut:                           ; leaf: close the open band BEFORE a picture input changes
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; RENDERING OFF (design note N.27, fix 1). With PPUMASK bits 3-4 clear every line of the open band is the
+      ; backdrop: palette byte 0 under the mask's emphasis / greyscale, whatever PPUCTRL, t, fine X, v, the name
+      ; tables, CHR and the mirroring hold (the old renderer writes index 0 on such a line; the RSP program draws
+      ; only the backdrop for a band with bits 3-4 clear - its background and sprite layers test them). So a change
+      ; of any of those is not seen and needs no cut: it returns here. PpuMask is the open band's own (a PPUMASK
+      ; change cuts first, through u_ppucut_always), and the two inputs such a band DOES show cut through
+      ; u_ppucut_always: a PPUMASK change ($2001) and a $2007 write to the palette. Without this, a game uploading
+      ; a screen with rendering off cut a band at every write after a whole line (each with its 4 KB name-table
+      ; copy and RSP job) and split every line a write landed in (each a fallback line the old renderer drew):
+      ; ~7.5 ms of a ~34 ms frame, measured (N.27). Only the shipped N5 path: the checking builds that compare the
+      ; records with the renderer line by line (--ppu-check, --twin-check, --rsp-check) keep the old rule.
+      ; Uses t8 only (u_ppucut's clobbers).
+      la t8, global_ppumask
+      ld t8, 0(t8)
+      andi t8, t8, 24
+      beqz t8, ppu_cut_done         ; rendering off: not seen, no cut
+      nop
+u_ppucut_always:                    ; the cut whatever the mask (PPUMASK changes, palette writes)
+    EndASM
+  CompilerEndIf
+  ASM
     la v0, global_nesunitbase       ; clobbers t2 t3 t8 t9 v0 v1 only (callers keep a0-a7, t0, t1)
     ld v0, 0(v0)                    ; NesUnitData
     la t2, global_ppuline
@@ -680,7 +729,17 @@ nes_ppu_write_mask:
     ld t0, global_ppumask-global_ppubus(a2)
     beq t0, a1, nes_ppu_mask_store
     move a3, ra
-    jal u_ppucut                    ; PPUMASK changes: the band ends first
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      jal u_ppucut_always           ; PPUMASK changes: the band ends first, rendering off or not (N.27, fix 1)
+    EndASM
+  CompilerElse
+    ASM
+      jal u_ppucut                  ; PPUMASK changes: the band ends first
+    EndASM
+  CompilerEndIf
+  ASM
     nop
     move ra, a3
 nes_ppu_mask_store:
@@ -759,8 +818,35 @@ nes_ppu_latch_write:
 nes_ppu_write_data:
     daddiu sp, sp, -16
     sd ra, 0(sp)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; A palette write ($3F00-$3FFF: v's bits 8-13 all set) changes the backdrop a rendering-off band shows, so it
+      ; cuts whatever the mask (u_ppucut_always); a name-table or CHR-RAM write is not seen while rendering is off
+      ; (u_ppucut decides by the mask). N.27, fix 1. t0 is free here (u_ppucut keeps it; ppuwrite's a0 is loaded
+      ; again below).
+      ld t0, global_ppuv-global_ppubus(a2)
+      andi t0, t0, 0x3F00
+      xori t0, t0, 0x3F00           ; 0: v addresses the palette
+      bnez t0, nes_ppu_data_masked
+      nop
+      jal u_ppucut_always           ; the palette: the band ends first
+      nop
+      b nes_ppu_data_cut
+      nop
+nes_ppu_data_masked:
+    EndASM
+  CompilerEndIf
+  ASM
     jal u_ppucut                    ; a name table, the palette, CHR-RAM or v changes
     nop
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+nes_ppu_data_cut:
+    EndASM
+  CompilerEndIf
+  ASM
     jal ppuwrite
     ld a0, global_ppuv-global_ppubus(a2)
     ld ra, 0(sp)

@@ -16,6 +16,16 @@ ProcedureNaked ApuDmcFetch()
     ld a0, 0(t0)
     la t0, global_dmcbuffer
     sd a0, 0(t0)
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      la t0, global_nesrect           ; the console record's work split: one DMC byte fetched (NesRecT(7))
+      ld t1, 56(t0)
+      daddiu t1, t1, 1
+      sd t1, 56(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     la t0, global_dmcempty
     sd zero, 0(t0)
     la t0, global_workerdmccycles

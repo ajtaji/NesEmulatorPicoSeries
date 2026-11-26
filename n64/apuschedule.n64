@@ -1,5 +1,15 @@
 ; Advance guest APU time to the same ordered deadlines as the shared core.
 ProcedureNaked ApuAdvance(dt.i)
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      ; The console record's work split (console_record.n64, show.n64's NesRecT): one call more (NesRecT(5)).
+      ; t0 / t1 only, before the code below first sets them.
+      la t0, global_nesrect
+      ld t1, 40(t0)
+      daddiu t1, t1, 1
+      sd t1, 40(t0)
+    EndASM
+  CompilerEndIf
   ASM
     blez a0, nes_apu_publish
     nop
@@ -51,6 +61,14 @@ nes_apu_full:
     sd s5, 48(sp)
     sd s6, 56(sp)
     sd s7, 64(sp)
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      mfc0 t0, $9                    ; the record: Count at the full path's start, in the frame's free slot
+      sd t0, 72(sp)
+    EndASM
+  CompilerEndIf
+  ASM
     daddu s0, a0, zero
     la s3, global_apusampleleft
     la s4, global_apuframeclock
@@ -198,6 +216,26 @@ nes_apu_save_fraction:
 nes_apu_continue:
     bgtz s0, nes_apu_next
     nop
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      ; the record: the full path's ticks into NesRecT(4) (zero-extended 32-bit Count difference), one more
+      ; full-path call into NesRecT(6); t0-t2 only (set again below before use)
+      mfc0 t1, $9
+      ld t0, 72(sp)
+      subu t1, t1, t0
+      dsll32 t1, t1, 0
+      dsrl32 t1, t1, 0
+      la t0, global_nesrect
+      ld t2, 32(t0)
+      daddu t2, t2, t1
+      sd t2, 32(t0)
+      ld t2, 48(t0)
+      daddiu t2, t2, 1
+      sd t2, 48(t0)
+    EndASM
+  CompilerEndIf
+  ASM
     ld ra, 0(sp)
     ld s0, 8(sp)
     ld s1, 16(sp)

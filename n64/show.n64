@@ -72,6 +72,15 @@ CompilerIf #NES_SHOW_CHECK
   Global NesShowHash.i
   Global Dim NesShowChr.i(3)            ; a CHR-RAM row write's pair word and empty-row byte: start, ticks, writes
 CompilerEndIf
+CompilerIf #NES_CONSOLE_RECORD
+  ; THE CONSOLE RECORD'S WORK SPLIT (console_record.n64, version 3): Count ticks and counts since the power-on, each
+  ; part where it runs - 0 band closes (NesShowBand), 1 fallback lines (NesFbCatchUp and the unit's timed calls
+  ; below), 2 the fallback list (NesShowFallback), 3 the hand-over (NesShowPoll, NesShowFrameEnd, NesShowDrain), 4
+  ; ApuAdvance's full path, 5 / 6 ApuAdvance calls / full-path calls, 7 DMC bytes fetched, 8 PPU bus writes. Read by
+  ; NesRecFrame once a frame (the differences are the frame's parts).
+  Global Dim NesRecT.i(10)
+  Declare NesRecPicture(frame.i, fb.i, fbl.i)   ; the record's picture hashes (console_record.n64)
+CompilerEndIf
 
 ; ---- the unit's assembly ways in (cold paths) ----
 
@@ -187,6 +196,69 @@ ProcedureNaked NesFbPublish()
     cache 0x19, 48(t3)
   EndASM
 EndProcedure
+
+CompilerIf #NES_CONSOLE_RECORD
+; THE CONSOLE RECORD'S TIMED CALLS (console_record.n64, the work split's part 1). In the record build only, the unit
+; calls these instead of the three renderer routines it runs on a fallback line - the line's spans (NesRenderTo, at
+; ppu_adv_draw), its publish (NesFbPublish, ppu_adv_publish) and its sprite row (NesMmc3DrawSprites, ppu_live_on):
+; the same jal, another target, so the unit's size and layout do not change. Each one: the return address and Count
+; at entry kept in a 16-byte frame, the routine called with every argument register as the unit set it (only t0 and
+; the stack are touched before the call), then Count again and the difference (the 32-bit Count's wrap taken by the
+; zero-extension: a call never lasts 2^32 ticks) added to NesRecT(1). After the call only t0-t2 are used: each routine
+; clobbers at least those itself (NesFbPublish: a0, t0-t3; the others are compiled-convention callers), so the unit
+; sees no register it did not already lose.
+ProcedureNaked NesRecRenderTo()          ; a0 = the end dot, as NesRenderTo
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    mfc0 t0, $9                      ; Count at entry
+    sd t0, 8(sp)
+    jal nesrenderto
+    nop
+    j nes_rec_fb_tail
+    nop
+  EndASM
+EndProcedure
+ProcedureNaked NesRecFbPublish()         ; as NesFbPublish
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    mfc0 t0, $9
+    sd t0, 8(sp)
+    jal nesfbpublish
+    nop
+    j nes_rec_fb_tail
+    nop
+  EndASM
+EndProcedure
+ProcedureNaked NesRecDrawSprites()       ; a0 = line, a1 = count, a2 = PPUMASK, as NesMmc3DrawSprites
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    mfc0 t0, $9
+    sd t0, 8(sp)
+    jal nesmmc3drawsprites
+    nop
+nes_rec_fb_tail:                     ; the three wrappers' common end: the call's ticks into NesRecT(1)
+    mfc0 t1, $9                      ; Count after the call
+    ld t0, 8(sp)
+    subu t1, t1, t0                  ; ticks (low 32 bits) ...
+    dsll32 t1, t1, 0
+    dsrl32 t1, t1, 0                 ; ... zero-extended
+    la t0, global_nesrect
+    ld t2, 8(t0)                     ; NesRecT(1), the fallback lines' ticks
+    daddu t2, t2, t1
+    sd t2, 8(t0)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+; A part's ticks since t0 (a LpmCpuCount reading) into NesRecT(k), from compiled code.
+Procedure NesRecAdd(k.i, t0.i)
+  NesRecT(k) + ((LpmCpuCount() - t0) & $FFFFFFFF)
+EndProcedure
+CompilerEndIf
 
 ; NesShowCopyNt(dst) - the 4 KB name and attribute image Nt into a band-input slot (dst, KSEG0, 16-byte aligned, on
 ; the same D-cache sets as Nt: NesShowInit). A line at a time: its 16 bytes read (cached hits), the slot's line
@@ -444,17 +516,25 @@ EndProcedure
 
 ; ---- a band's close (the cold part, through NesShowBandCall) ----
 Procedure NesShowBand(rec.i)
-  Protected idx.i, s.i, f.i, p.i = NesShowCur, b.i, nt.i, t0.i
+  Protected idx.i, s.i, f.i, p.i = NesShowCur, b.i, nt.i, t0.i, t0r.i
   If NesShowProg = 0 : ProcedureReturn : EndIf
-  t0 = LpmCpuCount()
+  t0 = LpmCpuCount() : t0r = t0
   idx = (rec - NesBandBase) / #NES_BAND_BYTES
   f = NesShowRecFence(idx)                ; the record's job of a frame ago has read it
   If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
-  s = NesShowNtNext : NesShowNtNext = (s + 1) & 3
-  f = NesShowNtFence(s)                   ; the slot's last job has read it
-  If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
-  nt = NesShowNtBase + s * 8192
-  NesShowCopyNt(nt)
+  ; THE BACKGROUND OFF (design note N.27, fix 2): the RSP program reads a band's name-table slot only in its
+  ; background layer (nbbg, run only with PPUMASK bit 3 set), so a band whose background is off - every band of a
+  ; frame drawn with rendering off - needs no copy: no slot is taken (its fence does not move) and the job names
+  ; slot 0's address, which it does not read. The copy was ~14,000 of a band close's ~16,000 ticks.
+  If (PeekI(rec + #NES_B_STATE) >> 8) & 8
+    s = NesShowNtNext : NesShowNtNext = (s + 1) & 3
+    f = NesShowNtFence(s)                 ; the slot's last job has read it
+    If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
+    nt = NesShowNtBase + s * 8192
+    NesShowCopyNt(nt)
+  Else
+    s = -1 : nt = NesShowNtBase
+  EndIf
   NesShowRecWriteback(rec)
   t0 = (LpmCpuCount() - t0) & $FFFFFFFF
   NesShowStat(9) + t0 : NesShowStat(10) + 1
@@ -463,9 +543,13 @@ Procedure NesShowBand(rec.i)
   LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, nt & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
   LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b)
   f = LpmRspqFence()
-  NesShowRecFence(idx) = f : NesShowNtFence(s) = f : NesShowFence(p) = f
+  NesShowRecFence(idx) = f : NesShowFence(p) = f
+  If s >= 0 : NesShowNtFence(s) = f : EndIf
   NesShowBands(p) = b + 1 : NesShowBusy = 1
   LpmRspqFlush()
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(0, t0r)
+  CompilerEndIf
 EndProcedure
 
 ; ---- a split line's first cut (through NesFbCatchUpCall): before the write is applied ----
@@ -475,7 +559,10 @@ EndProcedure
 ; began (OamCacheDirty: such a write changes the sprites from the next line on) is set aside for the band's snapshot,
 ; which is OAM as at this line's start. PpuDot, PpuV and PpuStatus (the renderer writes v and bit 6) are put back.
 Procedure NesFbCatchUp()
-  Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty
+  Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty, tr.i
+  CompilerIf #NES_CONSOLE_RECORD
+    tr = LpmCpuCount()
+  CompilerEndIf
   NesFbSlot()
   If PeekI(NesUnitBase + #NES_U_LIVE) = 0 : ProcedureReturn : EndIf
   NesShowStat(7) + 1
@@ -492,6 +579,9 @@ Procedure NesFbCatchUp()
   EndIf
   NesRenderTo(dot)
   PpuDot = dot : PpuV = v : PpuStatus = st
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(1, tr)
+  CompilerEndIf
 EndProcedure
 
 ; ---- the hand-over ----
@@ -524,23 +614,54 @@ Procedure.i NesShowGetFb(wait.i)
   ForEver
 EndProcedure
 
+; 1 when two fallback rows' palettes (64 bytes each, 16-byte aligned) are the same.
+Procedure.i NesFbPalSame(a.i, b.i)
+  Protected k.i
+  For k = 0 To 56 Step 8
+    If PeekQ(a + k) <> PeekQ(b + k) : ProcedureReturn 0 : EndIf
+  Next
+  ProcedureReturn 1
+EndProcedure
+
 ; The frame's fallback lines, after its last band: the syncs the RSP's words owe, the library's own mode words as it
-; believes them (it did not see the RSP's), its combiner, colours and TMEM forgotten; then the old blit's calls,
-; one line a slot, in copy mode (the TLUT entry of each CI8 index written into the picture as it is).
+; believes them (it did not see the RSP's), its combiner, colours and TMEM forgotten; then the old blit's calls in
+; copy mode (the TLUT entry of each CI8 index written into the picture as it is) - A RUN OF LINES AT A TIME (design
+; note N.27, fix 3): lines y, y + 1, ... in consecutive ring rows (no wrap between them) whose palettes are the same,
+; at most 8 (8 rows x 256 bytes of CI8 = the 2 KB of TMEM a colour-indexed texture may take beside its palette), are
+; one palette load, one 256 x k texture load and one k-line rectangle: the same texels through the same TLUT into
+; the same pixels as k single lines. A single line costs ~3,900 Count ticks in the library's three calls (measured,
+; N.27: the texture load is a TMEM miss every time - a new row - with its fit search and eviction); a run pays it once.
 Procedure NesShowFallback(p.i)
-  Protected i.i, y.i, r.i, n.i = NesFbCountP(p)
+  Protected i.i, y.i, r.i, k.i, n.i = NesFbCountP(p), tr.i, run.i
   If n = 0 : ProcedureReturn : EndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    tr = LpmCpuCount()
+  CompilerEndIf
   LpmRdpCmd($27000000, 0) : LpmRdpCmd($28000000, 0) : LpmRdpCmd($26000000, 0)
   If lpm_rdp_cycle <> -1 : LpmRdpCmd($2F000000 | lpm_rdp_om_hi, lpm_rdp_om_lo) : EndIf
   LpmRdpForget() : LpmRdpTmemReset()
   LpmRdpModeCopy(0)
-  For i = 0 To n - 1
+  i = 0
+  While i < n
     y = NesFbLine(p * #NES_FB_ROWS + i)
     r = (NesFbFirstP(p) + i) % #NES_FB_ROWS
+    k = 1 : run = 1
+    While run
+      run = 0
+      If k < 8 And i + k < n And r + k < #NES_FB_ROWS
+        If NesFbLine(p * #NES_FB_ROWS + i + k) = y + k
+          If NesFbPalSame(NesFbPals + r * 64, NesFbPals + (r + k) * 64) : k + 1 : run = 1 : EndIf
+        EndIf
+      EndIf
+    Wend
     LpmRdpLoadPalette(NesFbPals + r * 64, 0, 32)
-    LpmRdpLoadTexture(NesFbRows + r * 256, 256, 1, #LPM_TEX_CI8)
-    LpmRdpTextureRect(32, y, 288, y + 1, 0, 0, 1024, 1024)
-  Next
+    LpmRdpLoadTexture(NesFbRows + r * 256, 256, k, #LPM_TEX_CI8)
+    LpmRdpTextureRect(32, y, 288, y + k, 0, 0, 1024, 1024)
+    i + k
+  Wend
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(2, tr)
+  CompilerEndIf
 EndProcedure
 
 ; Frame p handed to the RDP if it can be now: 1 when it is finished (handed, or not shown and counted). wait as
@@ -603,7 +724,13 @@ EndProcedure
 
 ; A check point: the frame before the current one, if its turn has come.
 Procedure NesShowPoll(wait.i)
-  If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    Protected tr.i = LpmCpuCount(), w0.i = NesRecWait
+    If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)   ; the sleep for a buffer is the record's own column
+  CompilerElse
+    If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+  CompilerEndIf
 EndProcedure
 
 CompilerIf #NES_SHOW_CHECK
@@ -656,7 +783,10 @@ CompilerEndIf
 
 ; ---- line 240, after the frame's last close (unit/ppu.n64) ----
 Procedure NesShowFrameEnd()
-  Protected p.i = NesShowCur, q.i = NesShowCur ! 1, fb.i
+  Protected p.i = NesShowCur, q.i = NesShowCur ! 1, fb.i, tr.i, w0.i
+  CompilerIf #NES_CONSOLE_RECORD
+    tr = LpmCpuCount() : w0 = NesRecWait
+  CompilerEndIf
   NesFbCountP(p) = NesFbN : NesFbOverP(p) = NesFbOver : NesFbFirstP(p) = NesFbFirst : NesShowEnded(p) = 1
   NesFbHead = (NesFbFirst + NesFbN) % #NES_FB_ROWS
   NesShowStat(5) + NesFbN
@@ -684,8 +814,16 @@ Procedure NesShowFrameEnd()
       CompilerEndIf
     EndIf
   CompilerEndIf
+  CompilerIf #NES_CONSOLE_RECORD
+    ; the frame before is drawn (its SYNC_FULL done above) and its buffer is on screen or waiting for its field, so
+    ; nothing draws into it yet: its picture hashed into the record while no button has been seen (console_record.n64)
+    NesRecPicture(NesShowFrameNo(q), NesShowShown(q), NesFbCountP(q))
+  CompilerEndIf
   NesShowSet(q)
   NesFbGuard = NesFbCountP(p)             ; this frame's rows, until it is drawn (NesFbSlot, NesFbWait)
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)
+  CompilerEndIf
 EndProcedure
 
 ; The ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL waited for.
@@ -700,7 +838,10 @@ EndProcedure
 ; shown); the current frame's next band then starts the RSP's state again (index 0: every sync owed, no pair taken as
 ; resident - a pair in TMEM would be the old one), its words from the area's start, which the RDP has read.
 Procedure NesShowDrain()
-  Protected p.i = NesShowCur, n.i, fb.i
+  Protected p.i = NesShowCur, n.i, fb.i, tr.i, w0.i
+  CompilerIf #NES_CONSOLE_RECORD
+    tr = LpmCpuCount() : w0 = NesRecWait
+  CompilerEndIf
   LpmRspqSync()
   NesShowFinish(p ! 1, 2)
   If NesShowBands(p)
@@ -716,6 +857,9 @@ Procedure NesShowDrain()
   EndIf
   LpmRdpFinish()
   NesShowBusy = 0 : NesShowStat(4) + 1
+  CompilerIf #NES_CONSOLE_RECORD
+    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0)
+  CompilerEndIf
 EndProcedure
 
 ; The emulator has stopped (RunGame's NES STOP): every job run, then one picture, the whole screen red, shown.

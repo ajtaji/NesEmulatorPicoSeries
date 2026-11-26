@@ -10,20 +10,40 @@
 ; and why the emulator stopped, if it did.
 ;
 ; WHERE: the flash cart's SDRAM (a SummerCart64), which the coordinator dumps over USB after the run, the console
-; off: SDRAM 0x01600000 - 0x016A8FFF (KSEG1 $B1600000), used by no other cart of the project. The cart asks the SC64
+; off: SDRAM 0x01600000 - 0x016E8FFF (KSEG1 $B1600000; 0xE9000 bytes), used by no other cart of the project. The cart asks the SC64
 ; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable); the
 ; record is kept only if its header reads back, and the side bands say so (show.n64: green kept, yellow not).
 ;   +$0000   the header, 16 words: "NESC", the ROM's CRC (the cartridge's word at $10), the version, the power-ons
 ;            seen, the run slot this power-on writes
-;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x $15000:
+;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x $19000:
 ;            +0      the summary, #NES_REC_WORDS words (the #R_ list below); "NRUN" in word 0 once it is valid
 ;            +$1000  the series: one entry of 4 words for every 60 guest frames (about a second), up to 4,096
 ;                    (68 minutes): shown | not shown << 8 | underruns << 16 | frames with a button held << 24;
 ;                    the worst period; the worst work; the RSP's clocks in those 60 frames
-;            +$11000 the events (NesRecEvent): 512 entries of 8 words - the first 256 kept, then a ring of the
+;            +$11000 the events (NesRecEvent): 512 entries of 16 words - the first 256 kept, then a ring of the
 ;                    latest 256 - one for every guest frame with a sound underrun, a picture skipped, a drain, or
 ;                    work over one NES frame (779,970 ticks); the #E_ list below says what each holds
-;   rdp-tools\console_record.py decodes it.
+;            +$19000 the picture hashes (NesRecPicture): 512 entries of 8 words - frame, the hash of NES columns
+;                    0-239 (lo, hi), the hash of columns 240-255 (lo, hi), the frame's fallback lines, 0, 0
+;   The record's tools decode it (console_record.py beside the cart). Version 3 (2026-11-26): the events grew from
+;   8 words to 16 - the frame's work split into its parts (#E_TBAND on) - the summary keeps the same split summed
+;   over the run (#R_T); the run slot grew from $15000 to $19000. Version 4 (the same day): the picture hashes; the
+;   run slot $1D000, the whole area $E9000 bytes.
+;
+; THE PICTURE HASHES (version 4). The owner plays freely, so the picture cannot be checked against a reference while
+; he plays; but from the power-on until the first button the guest runs exactly as the emulator's run of the same
+; cart with no input does (the title and its demo), so every shown frame whose number is a multiple of
+; #NES_REC_HASH_EVERY in that stretch is hashed - the NES picture's 256 x 240 pixels as the console's RDP drew them,
+; read back from the buffer after its SYNC_FULL, in two parts: columns 0-239 and the rightmost 16 (240-255) - and the
+; decoder compares them with the emulator's: the first frame that differs, and on which side. Hashing stops for good
+; at the first button seen. A hash costs ~3-4 ms (the buffer's 7,680 lines invalidated and read), one frame in four,
+; only before the game is touched.
+;
+; THE WORK SPLIT (version 3): Count ticks spent, per frame, in each part of the emulator that is not the guest's own
+; instructions - accumulated where each part runs (NesRecT, show.n64; the unit calls timed copies of the three
+; renderer routines it calls on a fallback line, and apuschedule.n64 / apudmc.n64 / mmc3_ppu_bus.n64 count in their
+; own code), all only in this build. What is left of the frame's work is the guest CPU, the PPU state machine and the
+; bus. Each timed part includes the cache misses it takes itself, not those it leaves the code after it to take.
 ;
 ; HOW IT STAYS OUT OF THE GAME'S WAY: everything is counted in RAM once a guest frame (NesRecFrame, called from
 ; NesHostGuestFrame - compiled code at the frame's wrap, outside the hot unit); once every 60 guest frames the summary
@@ -36,15 +56,19 @@
 #NES_REC = $B1600000                    ; KSEG1: cartridge $11600000 = SDRAM 0x01600000
 #NES_REC_MAGIC = $4E455343              ; "NESC"
 #NES_REC_RUN_MAGIC = $4E52554E          ; "NRUN"
-#NES_REC_VERSION = 2
+#NES_REC_VERSION = 4
 #NES_REC_SLOTS = 8
-#NES_REC_SLOT = $15000                  ; a run slot: summary 4 KB + series 64 KB + events 16 KB
+#NES_REC_SLOT = $1D000                  ; a run slot: summary 4 KB + series 64 KB + events 32 KB + pictures 16 KB
+#NES_REC_HASHES = $19000                ; the picture hashes (NesRecPicture), from the slot's start
+#NES_REC_HASH_MAX = 512                 ; entries of 32 bytes
+#NES_REC_HASH_EVERY = 4                 ; a shown frame whose number is a multiple of this is hashed
 #NES_REC_EVENTS = $11000                ; the events, from the slot's start
-#NES_REC_EVENT_MAX = 512                ; entries of 32 bytes: 0-255 the first, 256-511 a ring of the latest
+#NES_REC_EVENT_MAX = 512                ; entries of 64 bytes: 0-255 the first, 256-511 a ring of the latest
+#NES_REC_EVENT_WORDS = 16
 #NES_REC_SLOW = 779970                  ; one NES frame in Count ticks (46.875 MHz / 60.0988 Hz): work over it is an event
 #NES_REC_SERIES = $1000                 ; the series, from the slot's start
 #NES_REC_SERIES_MAX = 4096              ; entries of 16 bytes
-#NES_REC_WORDS = 192
+#NES_REC_WORDS = 224
 #NES_REC_WINDOW = 60                    ; guest frames an entry
 #NES_REC_MS = 46875                     ; Count ticks a millisecond
 ; the summary's words
@@ -89,6 +113,10 @@
 #R_EVENTS = 51                          ; events seen (written: the first 256 and the latest 256)
 #R_PHIST = 64                           ; the period's histogram: words 64-127, 1 ms each, the last 63 ms and over
 #R_WHIST = 128                          ; the work's histogram: words 128-191
+#R_T = 192                              ; version 3: NesRecT(0 .. #NES_REC_T - 1) over the run, each 64 bits (lo, hi):
+                                        ; words 192-209 (the #T_ list below)
+#R_HASHES = 210                         ; version 4: picture hashes written (NesRecPicture)
+#R_HASHSTOP = 211                       ; the guest frame at which a button was first seen (hashing stopped), 0 none yet
 ; an event's words (NesRecEvent)
 #E_FRAME = 0                            ; the guest frame
 #E_FLAGS = 1                            ; why: 1 an underrun, 2 a picture skipped, 4 work over one NES frame, 8 a drain,
@@ -101,6 +129,29 @@
                                         ; | PPUCTRL << 24 (each against the frame before)
 #E_NT = 6                               ; name-table 64-byte blocks changed (of 64) | bands << 8 | drains << 16 | waits << 24
 #E_MORE = 7                             ; fallback lines (12 bits) | tenths of a second since the first frame << 12
+; version 3, the frame's work split (Count ticks; the #T_ list: what each part is and where it is counted)
+#E_TBAND = 8                            ; band closes
+#E_TFB = 9                              ; fallback lines drawn by the old renderer (the catch-up, the line's spans, its
+                                        ; sprite row, its publish)
+#E_TLIST = 10                           ; the fallback lines' list to the RDP (inside #E_TSHOW)
+#E_TSHOW = 11                           ; the hand-over: the check points' polls, line 240's frame end, drains (their
+                                        ; waits for the RSP, the RDP or a buffer included; the sleep for a buffer not)
+#E_TAPU = 12                            ; ApuAdvance's full path (the APU timing and the synthesis it calls)
+#E_NAPU = 13                            ; ApuAdvance calls (16 bits) | of them its full path << 16
+#E_NBUS = 14                            ; DMC bytes fetched (16 bits) | PPU bus writes ($2007) << 16
+#E_NSPLIT = 15                          ; of the fallback lines: split lines (16 bits) | the others (priority-quirk
+                                        ; candidates, lines of a band not recorded) << 16
+; NesRecT: the parts, accumulated since the power-on (declared in show.n64, written by the timed code)
+#T_BAND = 0
+#T_FB = 1
+#T_LIST = 2
+#T_SHOW = 3
+#T_APU = 4
+#T_NAPU = 5                             ; counts from here
+#T_NAPUFULL = 6
+#T_NDMC = 7
+#T_N2007 = 8
+#NES_REC_T = 9
 ; THE SC64'S OWN REGISTERS (the hardware carts' RsScCmd / RsScEnable)
 #NES_SC_ST = $BFFF0000
 #NES_SC_D0 = $BFFF0004
@@ -120,7 +171,10 @@ Global Dim NesRecChrLast.i(8)
 Global Dim NesRecPrgLast.i(4)
 Global Dim NesRecPalLast.a(32)
 Global Dim NesRecNtSig.i(64)
-Global Dim NesRecE.i(8)                 ; the event being written (NesRecEventCheck, NesRecEvent)
+Global Dim NesRecE.i(#NES_REC_EVENT_WORDS)   ; the event being written (NesRecEventCheck, NesRecEvent)
+Global Dim NesRecTLast.i(#NES_REC_T)    ; NesRecT at the frame before's wrap (the frame's parts are the differences)
+Global Dim NesRecTD.i(#NES_REC_T)       ; this frame's parts
+Global NesRecSplitSeen.i
 Global Dim NesRecDpcLast.i(4)
 Global Dim NesRecDpcSum.i(4)
 Global Dim NesRecW.i(#NES_REC_WORDS)    ; the summary as counted
@@ -227,6 +281,7 @@ Procedure NesRecFlush(frame.i, entry.i)
   NesRecW(#R_FBMOST) = NesShowStat(6) : NesRecW(#R_SPLIT) = NesShowStat(7) : NesRecW(#R_LOST) = NesShowStat(8)
   NesRecW(#R_BANDS) = NesShowStat(10) : NesRecW(#R_BANDMAX) = NesShowStat(11)
   NesRecSplit(#R_SLEEP, NesRecWait)
+  For k = 0 To #NES_REC_T - 1 : NesRecSplit(#R_T + 2 * k, NesRecT(k)) : Next
   If entry And NesRecW(#R_ENTRIES) < #NES_REC_SERIES_MAX
     a = NesRecBase + #NES_REC_SERIES + NesRecW(#R_ENTRIES) * 16
     n = NesShowStat(0) - NesRecShownSeen : If n > 255 : n = 255 : EndIf
@@ -279,19 +334,27 @@ Procedure.i NesRecChanges()
   ProcedureReturn nchr | (nprg << 8) | (npal << 16) | (blocks << 24)
 EndProcedure
 
-; One event out (8 words, PI writes): entries 0-255 are the run's first events, 256-511 a ring of the latest.
+; One event out (16 words, PI writes): entries 0-255 are the run's first events, 256-511 a ring of the latest.
 Procedure NesRecEvent()          ; the event in NesRecE
   Protected n.i = NesRecW(#R_EVENTS), slot.i, a.i, k.i
   If n < 256 : slot = n : Else : slot = 256 + ((n - 256) & 255) : EndIf
-  a = NesRecBase + #NES_REC_EVENTS + slot * 32
-  For k = 0 To 7 : LpmDebugIoWrite(a + k * 4, NesRecE(k) & $FFFFFFFF) : Next
+  a = NesRecBase + #NES_REC_EVENTS + slot * #NES_REC_EVENT_WORDS * 4
+  For k = 0 To #NES_REC_EVENT_WORDS - 1 : LpmDebugIoWrite(a + k * 4, NesRecE(k) & $FFFFFFFF) : Next
   NesRecW(#R_EVENTS) + 1
 EndProcedure
 
 ; Every frame: an event when the frame had a sound underrun, a picture skipped, a drain or a wait, or its work
 ; exceeded one NES frame - with what the frame did (NesRecChanges) and the sound buffer at this moment.
+Procedure.i NesRecSat16(v.i)            ; a count into 16 bits (65,535 and over: 65,535)
+  If v < 0 : ProcedureReturn 0 : EndIf
+  If v > $FFFF : ProcedureReturn $FFFF : EndIf
+  ProcedureReturn v
+EndProcedure
+
 Procedure NesRecEventCheck(frame.i, d.i, w.i)
-  Protected ch.i, starve.i, skip.i, bands.i, fb.i, drains.i, waits.i, why.i, q.i, ai.i
+  Protected ch.i, starve.i, skip.i, bands.i, fb.i, drains.i, waits.i, why.i, q.i, ai.i, k.i, split.i
+  For k = 0 To #NES_REC_T - 1 : NesRecTD(k) = NesRecT(k) - NesRecTLast(k) : NesRecTLast(k) = NesRecT(k) : Next
+  split = NesShowStat(7) - NesRecSplitSeen : NesRecSplitSeen = NesShowStat(7)
   ch = NesRecChanges()
   starve = HostAiStarvations - NesRecStarveFrame : NesRecStarveFrame = HostAiStarvations
   skip = NesShowStat(1) + NesShowStat(14) - NesRecSkipSeen : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14)
@@ -315,6 +378,11 @@ Procedure NesRecEventCheck(frame.i, d.i, w.i)
   NesRecE(#E_NT) = ((ch >> 24) & 255) | ((bands & 255) << 8) | ((drains & 255) << 16) | ((waits & 255) << 24)
   q = NesRecPSum / 4687500 : If fb > 4095 : fb = 4095 : EndIf
   NesRecE(#E_MORE) = fb | ((q & $FFFFF) << 12)
+  NesRecE(#E_TBAND) = NesRecTD(#T_BAND) : NesRecE(#E_TFB) = NesRecTD(#T_FB) : NesRecE(#E_TLIST) = NesRecTD(#T_LIST)
+  NesRecE(#E_TSHOW) = NesRecTD(#T_SHOW) : NesRecE(#E_TAPU) = NesRecTD(#T_APU)
+  NesRecE(#E_NAPU) = NesRecSat16(NesRecTD(#T_NAPU)) | (NesRecSat16(NesRecTD(#T_NAPUFULL)) << 16)
+  NesRecE(#E_NBUS) = NesRecSat16(NesRecTD(#T_NDMC)) | (NesRecSat16(NesRecTD(#T_N2007)) << 16)
+  NesRecE(#E_NSPLIT) = NesRecSat16(split) | (NesRecSat16(fb - split) << 16)
   NesRecEvent()
 EndProcedure
 
@@ -331,6 +399,8 @@ Procedure NesRecFrame(frame.i)
     NesRecChanges()                                      ; the baselines of "what changed in a frame"
     NesRecBandsSeen = NesShowStat(10) : NesRecFbSeen = NesShowStat(5) : NesRecDrainSeen = NesShowStat(4)
     NesRecWaitSeen = NesShowStat(3) : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14) : NesRecStarveFrame = HostAiStarvations
+    For k = 0 To #NES_REC_T - 1 : NesRecTLast(k) = NesRecT(k) : Next
+    NesRecSplitSeen = NesShowStat(7)
   Else
     d = (now - NesRecLast) & $FFFFFFFF
     w = d - (NesRecWait - NesRecLastWait)
@@ -357,6 +427,76 @@ Procedure NesRecFrame(frame.i)
   NesRecW(#R_PADS) = (NesController & 255) | ((NesController2 & 255) << 8)
   If frame % #NES_REC_WINDOW = 0 : NesRecFlush(frame, 1) : EndIf
 EndProcedure
+
+; NesRecHashFb(fb) - the NES picture in a shown buffer (KSEG0, invalidated; 320 x 240 RGBA16, the NES at x 32-287)
+; hashed in two parts, a doubleword (4 pixels) at a time, rotate-xor-add as the video digest and the show check
+; (NesShowHashFb): per row, NES columns 0-239 (60 doublewords) into NesRecHashA, then columns 240-255 (4) into
+; NesRecHashB. IN: a0 the buffer. CLOBBERS a0-a2, t0-t3, v0, v1.
+Global NesRecHashA.i, NesRecHashB.i
+ProcedureNaked NesRecHashFb(fb.i)
+  ASM
+    sll a0, a0, 0                    ; the address, sign-extended
+    la t0, global_nesrechasha
+    ld t3, 0(t0)                     ; t3 = hash A (columns 0-239)
+    la t0, global_nesrechashb
+    ld v1, 0(t0)                     ; v1 = hash B (columns 240-255)
+    daddiu a0, a0, 64                ; x 32: NES column 0
+    addiu a2, zero, 240              ; rows
+nes_rec_hash_row:
+    daddiu a1, a0, 480               ; the end of columns 0-239 (240 pixels x 2 bytes)
+nes_rec_hash_a:
+    ld t1, 0(a0)
+    daddiu a0, a0, 8
+    xor t3, t3, t1
+    dsll t2, t3, 7
+    dsrl32 t3, t3, 25
+    or t3, t3, t2                    ; rotate left 7
+    bne a0, a1, nes_rec_hash_a
+    daddu t3, t3, t1                 ; (delay slot) + the doubleword
+    daddiu a1, a0, 32                ; columns 240-255 (16 pixels)
+nes_rec_hash_b:
+    ld t1, 0(a0)
+    daddiu a0, a0, 8
+    xor v1, v1, t1
+    dsll t2, v1, 7
+    dsrl32 v1, v1, 25
+    or v1, v1, t2
+    bne a0, a1, nes_rec_hash_b
+    daddu v1, v1, t1
+    daddiu a0, a0, 128               ; the next row's x 32 (a row is 640 bytes)
+    addiu a2, a2, -1
+    bnez a2, nes_rec_hash_row
+    nop
+    la t0, global_nesrechasha
+    sd t3, 0(t0)
+    la t0, global_nesrechashb
+    jr ra
+    sd v1, 0(t0)
+  EndASM
+EndProcedure
+
+; A frame's picture is drawn and shown (show.n64, NesShowFrameEnd: its SYNC_FULL waited, its buffer not yet given to
+; another frame): hashed into the record while no button has been seen, one frame in #NES_REC_HASH_EVERY.
+Procedure NesRecPicture(frame.i, fb.i, fbl.i)
+  Protected n.i, a.i
+  If NesRecOn = 0 Or NesRecW(#R_HASHSTOP) : ProcedureReturn : EndIf
+  If (NesController | NesController2) <> 0 : NesRecW(#R_HASHSTOP) = frame : ProcedureReturn : EndIf
+  If fb = 0 Or frame % #NES_REC_HASH_EVERY : ProcedureReturn : EndIf
+  n = NesRecW(#R_HASHES)
+  If n >= #NES_REC_HASH_MAX : ProcedureReturn : EndIf
+  Protected t0.i = LpmCpuCount()
+  fb = (fb & $1FFFFFFF) | $80000000
+  LpmCacheInvalidateData(fb, #HOST_WIDTH * #HOST_HEIGHT * 2)
+  NesRecHashA = $351B5058 : NesRecHashB = $351B5058
+  NesRecHashFb(fb)
+  a = NesRecBase + #NES_REC_HASHES + n * 32
+  LpmDebugIoWrite(a, frame)
+  LpmDebugIoWrite(a + 4, NesRecHashA & $FFFFFFFF) : LpmDebugIoWrite(a + 8, (NesRecHashA >> 32) & $FFFFFFFF)
+  LpmDebugIoWrite(a + 12, NesRecHashB & $FFFFFFFF) : LpmDebugIoWrite(a + 16, (NesRecHashB >> 32) & $FFFFFFFF)
+  LpmDebugIoWrite(a + 20, fbl)
+  NesRecW(#R_HASHES) = n + 1
+  NesRecT(3) - ((LpmCpuCount() - t0) & $FFFFFFFF)   ; the hash is the record's own, not the hand-over's (it runs
+EndProcedure                                       ; inside NesShowFrameEnd, which is timed as the hand-over)
 
 ; The emulator stopped (RunGame's NES STOP): its reason, and the whole summary out now.
 Procedure NesRecStop()

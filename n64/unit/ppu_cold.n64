@@ -289,8 +289,19 @@ ppu_live_on:
       ld t0, #NES_U_LIVE(s6)
       beqz t0, ppu_adv_draw
       nop
-      jal nesmmc3drawsprites        ; the old renderer's sprite row of the line (a0 line, a1 count, a2 mask)
-      move a0, s1
+    EndASM
+    CompilerIf #NES_CONSOLE_RECORD
+      ASM
+        jal nesrecdrawsprites       ; the same call, timed for the console record (show.n64)
+        move a0, s1
+      EndASM
+    CompilerElse
+      ASM
+        jal nesmmc3drawsprites      ; the old renderer's sprite row of the line (a0 line, a1 count, a2 mask)
+        move a0, s1
+      EndASM
+    CompilerEndIf
+    ASM
       b ppu_adv_draw
       nop
     EndASM

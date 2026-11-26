@@ -52,6 +52,14 @@ nes_mmc3_ppu_palette_index:
 EndProcedure
 
 ProcedureNaked PpuWrite(addr.i,value.i)
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      la t0, global_nesrect           ; the console record's work split: one PPU bus write (NesRecT(8)); t0 / t1,
+      ld t1, 64(t0)                   ; set again below
+      daddiu t1, t1, 1
+      sd t1, 64(t0)
+    EndASM
+  CompilerEndIf
   ASM
     la t0, global_bgcacheaddr
     la t1, global_rgblastkey
