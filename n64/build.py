@@ -17,7 +17,7 @@ from save_profile import save_copy_source, save_profile, stage_save
 from save_header import patch_save_header
 from rom_catalog import prg_views
 from port_desktop import CONTROLLER_PATCHES
-from stage_cpu import stage_cpu
+from stage_cpu import stage_cpu, stage_cpu_asm, trace_reference
 from stage_bus import stage_bus, stage_runtime_mmc3_bus
 from stage_simple_mapper import stage_simple_mapper
 from stage_audio import stage_audio, stage_oscillators
@@ -74,6 +74,27 @@ def replay_source(controller_trace):
     return "\n".join(lines) + "\n"
 
 
+def trace_bus_reads(code):
+    """Checking build: fold every PPU / APU register read into the CPU trace."""
+    old = "  ElseIf addr<$4000 Or addr=$4015\n    CpuNow()\n"
+    proc = "Procedure.i NesReadPeripheral(addr.i)\n"
+    if code.count(old) != 1 or code.count(proc) != 1:
+        raise ValueError("peripheral read path changed")
+    code = code.replace(old, old + "    NesCpuTraceRead(addr)\n")
+    return code.replace(proc, "Declare NesCpuTraceRead(addr.i)\n" + proc)
+
+
+def trace_bus_writes(code):
+    """Checking build: fold every timed device write and work-RAM write into the CPU trace."""
+    call = ("    daddiu sp, sp, -16\n    sd ra, 0(sp)\n    jal nescputracewrite\n    nop\n"
+            "    ld ra, 0(sp)\n    daddiu sp, sp, 16\n")
+    for label in ("nes_mmc3_bus_write_timed:\n", "nes_mmc3_bus_write_workram:\n"):
+        if code.count(label) != 1:
+            raise ValueError(f"bus write label {label.strip()} changed")
+        code = code.replace(label, label + call)
+    return code
+
+
 def build(args, *, controller_trace=()):
     controller_trace = tuple(controller_trace)
     telemetry = getattr(args, "telemetry", False)
@@ -118,7 +139,17 @@ def build(args, *, controller_trace=()):
     runtime_waits = runtime and cart.mapper in (0, 1, 4)
     mmc1_rows = cart.mapper == 1 and (getattr(args, "runtime_chr_ram", False) if runtime
                                      else not cart.chr and chr_size == 8192)
+    # The runtime-MMC3 cartridge runs the assembly 6502 core (cpu6502.n64).
+    # "reference" builds the compiled interpreter instead, for the checking
+    # build that compares the two; the other configurations still use it.
+    cpu_core = getattr(args, "cpu_core", None) or ("asm" if runtime and cart.mapper == 4 else "reference")
+    if cpu_core == "asm" and not (runtime and cart.mapper == 4):
+        raise ValueError("the assembly 6502 core is built for the runtime MMC3 cartridge only")
+    cpu_trace = getattr(args, "cpu_trace", False)
+    if cpu_trace and not (runtime and cart.mapper == 4 and args.check_frame):
+        raise ValueError("the CPU trace is a runtime-MMC3 verification build")
     settings = {
+        "NES_CPU_TRACE": int(cpu_trace),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
@@ -157,8 +188,12 @@ def build(args, *, controller_trace=()):
             code = stage_expansion(name, code)
             if name == "lookup_tables":
                 code = code.split("CartridgeData:", 1)[0] + "EndDataSection\n"
+            elif name == "cpu2a03" and cpu_core == "asm":
+                code = stage_cpu_asm(code)
             elif name == "cpu2a03":
                 code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k, runtime)
+                if cpu_trace:
+                    code = trace_reference(code)
                 if runtime and cart.mapper == 1:
                     serial = "nes_native_mapper_serial:\n"
                     if code.count(serial) != 1:
@@ -188,6 +223,8 @@ def build(args, *, controller_trace=()):
             code = code.replace("ExtraA12(CartMapper)", "NesA12Board")
             if save_bytes and not (runtime and cart.mapper == 4 and name == "mappers"):
                 code = stage_save(name, code, save)
+            if cpu_trace and name == "bridge":
+                code = trace_bus_reads(code)
             (guest / (name + ".pmi")).write_text(guest_names(code).replace('.pi4"', '.pmi"'), encoding="utf-8")
         expansion = expansion_source(cart.mapper)
         if save_bytes:
@@ -202,6 +239,9 @@ def build(args, *, controller_trace=()):
             mmc1.write_text(stage_save("mmc1", mmc1.read_text(), save), encoding="utf-8")
             (app / "save_backing.pmi").write_text(save_copy_source(save), encoding="utf-8")
             (app / "save_restore.pmi").write_text(save.restore + "\n", encoding="utf-8")
+        if cpu_trace:
+            write = app / "mmc3_cpu_write.n64"
+            write.write_text(trace_bus_writes(write.read_text(encoding="utf-8")), encoding="utf-8")
         oscillator = app / "oscillators.n64"
         oscillator.write_text(stage_oscillators(oscillator.read_text(encoding="utf-8"), cart.mapper), encoding="utf-8")
         if controller_trace:
@@ -243,6 +283,10 @@ if __name__ == "__main__":
                         help="persist NES battery RAM in cartridge SRAM (default on for playable builds, off for verification)")
     parser.add_argument("--telemetry", action="store_true", help="report live gameplay timing and AI starvation")
     parser.add_argument("--check-frame", type=int, default=0, help="stop on a guest frame for capture (0 keeps playing)")
+    parser.add_argument("--cpu-core", choices=("asm", "reference"), default=None,
+                        help="the 6502 core: asm (cpu6502.n64, the runtime MMC3 default) or the reference interpreter")
+    parser.add_argument("--cpu-trace", action="store_true",
+                        help="checking build: a per-frame digest of the state after every instruction (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:

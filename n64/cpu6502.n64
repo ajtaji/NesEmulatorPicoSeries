@@ -1,0 +1,2238 @@
+; ============================================================================
+; cpu6502.n64 - the NES 2A03 (6502) CPU core, VR4300 assembly, for the runtime
+; MMC3 cartridge configuration.
+;
+; WHAT IT IS
+;   CpuRun(n) runs whole guest instructions for a window of n CPU cycles and
+;   returns the cycles it ran, exactly as the compiled interpreter it replaces
+;   (anvil/cpu2a03.pi4 as staged by stage_cpu.py, stage_poll.py and
+;   stage_thread.py: the compiled handlers plus their string-spliced fast
+;   paths). It is ONE core: every documented opcode, every addressing mode,
+;   the bus slow paths, the poll / idle batching shapes, the IRQ-unmask end of
+;   window and the illegal-opcode stop are all here. Device code (the PPU, APU,
+;   mapper and controller registers) is reached through NesRead / NesWrite and
+;   the scheduler's own procedures, never re-implemented.
+;
+; WHY ASSEMBLY (measured, diagnosis note section L)
+;   The procedure it replaces was 45,688 bytes: 27,984 compiled (the complete
+;   interpreter, kept because the fast paths fell back to it), 14,120 of
+;   spliced assembly and 3,584 of tables inside the code. In the slow section
+;   a guest instruction cost ~33 VR4300 instructions and ~68 cycles in it,
+;   most of them I-cache misses over that spread-out code and ~180 cycles of
+;   window entry / exit. This core keeps the guest state in registers, shares
+;   one block of straight-line code per addressing mode, and is a few KB.
+;   (Measured size and cycles: the note, section L, after the proof.)
+;
+; HOW
+;   Dispatch: the guest PC is checked against a cached FETCH REGION (s2 guest
+;   base, s3 host bias, s4 extent = how far an opcode may sit so that its two
+;   operand bytes are inside too). Inside it the opcode byte is loaded from
+;   host memory, its handler address read from c65_table (1 KB) and jumped
+;   to: one indexed jump. Outside it the region is rebuilt (c65_rebase) or
+;   the instruction's bytes are copied one by one into a small buffer
+;   (c65_fetch_slow) and the handler reads its operands from there.
+;   Handlers: a handler sets the access phase, calls the shared block of its
+;   addressing mode with jal (the block ends in jr ra, or tail-branches into
+;   the shared read / write routine that returns with the same ra), does its
+;   operation and branches to c65_next, charging its cycles in the delay slot.
+;   Memory: internal RAM and the stack ($0000-$1FFF), PRG ROM through the MMC3
+;   bank-bias table, enabled work RAM and the open-bus ranges are handled
+;   inline. Every other address is a CALL-OUT: the guest state is published
+;   to the globals the device code reads (c65_publish), the device procedure
+;   is called with the compiled calling convention (Help/VR4300.txt: a0-a7
+;   in, a0 out, s0-s7 kept), and the state is reloaded (c65_reload), because
+;   a device may end the window (CpuEndWindow: Left and Budget) and a write may
+;   switch a PRG bank (so a write call-out also drops the fetch region).
+;
+; REGISTERS during a window (the convention the device code already met at
+; the old core's flush):
+;   a1 PC         a2 Left (cycles still to run)   a3 global_nesmmc3bias
+;   a4 A  a5 X  a6 Y   a7 FZ   t8 FN   t9 FC        t3 NesInstructions
+;   v0 AccessPhase   v1 open bus (the last byte on the guest data bus)
+;   s0 c65_table   s1 global_m (RAM)   s2 s3 s4 the fetch region
+;   t0 the host address of the opcode byte (operands at 1(t0) and 2(t0))
+;   t1 t2 a0 scratch; t2 holds an effective address between a mode block and
+;   the read / write routine.  ra: the link to a mode block.
+;   FV, FD, FI, S stay in their globals (as in the old core's fast paths).
+;
+; FLAGS are lazy, as in the old core: N is bit 7 of FN, Z is "FZ & 255 = 0",
+; C is bit 8 of FC, V is bit 7 of FV. Status bytes are built only by PHP, BRK
+; and the interrupt entry.
+;
+; WHAT IT REPRODUCES, and deliberately so (the old core's behaviour is the
+; specification; see the note for the findings):
+;   - the access phase each opcode publishes and its moves around RMW
+;     accesses (read at phase-2, the two writes at phase-1 and phase);
+;   - DEC abs ($CE) charging 3 cycles with phase 2, as the generated
+;     interpreter does (a defect of the reference, kept until fixed there);
+;   - the read-modify-write double write (unchanged value, then the result);
+;   - the page-cross cycle of indexed reads charged BEFORE the read, so a
+;     device sees the same time stamp;
+;   - the BNE -6 / BEQ -7 / BEQ -4 polling shapes, which read their pattern
+;     from PrgBias+PC (the linear PRG, not the banked view), and the JMP-to-
+;     self idle batching;
+;   - the $2002 poll batching after LDA abs / BIT abs when the read ended
+;     the window.
+; WHAT IT DOES NOT DO: execute code fetched from device space or disabled
+; work RAM. The old core would read such bytes through the bus; no supported
+; game does it. Here it stops the CPU loudly: Stopped = 1 and BadOpcode =
+; $10000 | the address.
+;
+; CHECKED BY: the instruction-by-instruction digest (cputrace.n64, the trace
+; build) against the reference core over the SMB3 and Mega Man 4 oracle
+; routes; then the 61 checkpoints, final picture, full PCM and video digest
+; of the shipped build (the note, section L).
+; ============================================================================
+
+ProcedureNaked.i CpuRun(n.i)
+  ASM
+    ; --- window entry: If n <= 0 Or Stopped : ProcedureReturn 0 ------------
+    blez a0, c65_zero
+    nop
+    la t0, global_pc
+    ld t1, global_stopped-global_pc(t0)
+    bnez t1, c65_zero
+    ; If NesStall : CpuCycles = CpuCycles + NesStall : NesStall = 0
+    ld t1, global_nesstall-global_pc(t0)
+    ld t2, global_cpucycles-global_pc(t0)
+    daddu t2, t2, t1
+    sd t2, global_cpucycles-global_pc(t0)
+    sd zero, global_nesstall-global_pc(t0)
+    ; NesRunStart = CpuCycles : CpuInWindow = 1 : Budget = n : Left = n
+    la t0, global_cpucycles
+    sd t2, global_nesrunstart-global_cpucycles(t0)
+    daddiu t1, zero, 1
+    sd t1, global_cpuinwindow-global_cpucycles(t0)
+    sd a0, global_budget-global_cpucycles(t0)
+    sd a0, global_left-global_cpucycles(t0)
+    ; frame: 0-32 s0-s4, 40 the caller's ra, 48 a link saved over a call-out,
+    ; 56 an effective address, 64 a value, 72 a count, 80 the fetch buffer
+    daddiu sp, sp, -96
+    sd s0, 0(sp)
+    sd s1, 8(sp)
+    sd s2, 16(sp)
+    sd s3, 24(sp)
+    sd s4, 32(sp)
+    sd ra, 40(sp)
+    la s0, c65_table
+    la s1, global_m
+    jal c65_reload           ; the guest state from its globals (a2 = Left = n)
+    or s4, zero, zero        ; no fetch region yet: the first fetch builds it
+    b c65_rebase
+    nop
+c65_zero:
+    jr ra
+    or a0, zero, zero
+
+    ; --- the end of every instruction --------------------------------------
+c65_next:
+  EndASM
+  CompilerIf #NES_CPU_TRACE
+    ASM
+      jal nescputracestep    ; checking build only: fold the state into the digest
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    blez a2, c65_end         ; the window is spent
+    subu t1, a1, s2          ; PC inside the fetch region, with its operands?
+    sltu t1, t1, s4
+    beqz t1, c65_rebase
+    addu t0, a1, s3          ; host address of the opcode
+    lbu a0, 0(t0)
+c65_dispatch:
+    sll t1, a0, 2            ; the handler from the 256-entry table
+    addu t1, t1, s0
+    lw t1, 0(t1)
+    or v1, a0, zero          ; the opcode is now on the data bus
+    jr t1
+    daddiu t3, t3, 1         ; NesInstructions + 1
+
+    ; --- the hottest handlers first (SMB3's slow section, note L.2) ---------
+c65_op_f0:  ; $F0 BEQ rel cycles 2
+    andi t1, a7, 0xFF
+    bnez t1, c65_br_not
+    nop
+    jal c65_br_taken
+    nop
+    addiu t0, zero, -7
+    beq t2, t0, c65_beq_shape7
+    addiu t0, zero, -4
+    beq t2, t0, c65_beq_shape4
+    nop
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_d0:  ; $D0 BNE rel cycles 2
+    andi t1, a7, 0xFF
+    beqz t1, c65_br_not
+    nop
+    jal c65_br_taken
+    nop
+    addiu t0, zero, -6
+    beq t2, t0, c65_bne_shape
+    nop
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_85:  ; $85 STA zpg cycles 3
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t1, t2, s1
+    sb a4, 0(t1)
+    or v1, a4, zero
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_a5:  ; $A5 LDA zpg cycles 3
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t1, t2, s1
+    lbu a4, 0(t1)
+    daddiu a2, a2, -3
+    or v1, a4, zero
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_op_ad:  ; $AD LDA abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    or a4, v1, zero
+    or a7, v1, zero
+    or t8, v1, zero
+    beqz a2, c65_poll        ; Left = 0 only when the read was a device read that ended the window
+    or a0, v1, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_8d:  ; $8D STA abs cycles 4 phase 3
+    or a0, a4, zero
+    jal c65_s_abs
+    addiu v0, zero, 3
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_bd:  ; $BD LDA abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_lda
+    daddiu a2, a2, -4
+c65_op_20:  ; $20 JSR abs cycles 6 phase 5
+    lbu t1, 1(t0)            ; target low byte
+    lbu v1, 2(t0)            ; target high byte (last on the bus)
+    addiu a0, a1, 2          ; the pushed address: the high operand byte's
+    andi a0, a0, 0xFFFF
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addu t0, s1, t2
+    srl a1, a0, 8
+    sb a1, 0x100(t0)         ; push PCH
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    addu t0, s1, t2
+    sb a0, 0x100(t0)         ; push PCL
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    sll a1, v1, 8
+    or a1, a1, t1
+    addiu v0, zero, 5
+    b c65_next
+    daddiu a2, a2, -6
+c65_op_4a:  ; $4A LSR acc cycles 2
+    sll t9, a4, 8            ; C = bit 0
+    srl a4, a4, 1
+    addiu a1, a1, 1
+    or a7, a4, zero
+    or t8, a4, zero
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_60:  ; $60 RTS imp cycles 6
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    lbu a0, 0x100(t1)        ; pull PCL
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    lbu t1, 0x100(t1)        ; pull PCH
+    sd t2, global_s-global_nesmmc3bias(a3)
+    sll t1, t1, 8
+    or a1, a0, t1
+    addiu a1, a1, 1
+    andi a1, a1, 0xFFFF
+    b c65_next
+    daddiu a2, a2, -6
+c65_op_10:  ; $10 BPL rel cycles 2
+    andi t1, t8, 0x80
+    bnez t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_c9:  ; $C9 CMP imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_cmp
+    daddiu a2, a2, -2
+c65_op_a9:  ; $A9 LDA imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_lda
+    daddiu a2, a2, -2
+c65_op_b9:  ; $B9 LDA aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_lda
+    daddiu a2, a2, -4
+c65_op_99:  ; $99 STA aby cycles 5 phase 4
+    or a0, a4, zero
+    jal c65_s_absy
+    addiu v0, zero, 4
+    b c65_next
+    daddiu a2, a2, -5
+c65_op_29:  ; $29 AND imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_and
+    daddiu a2, a2, -2
+c65_op_18:  ; $18 CLC imp cycles 2
+    or t9, zero, zero
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_ca:  ; $CA DEX imp cycles 2
+    addiu a5, a5, -1
+    andi a5, a5, 0xFF
+    daddiu a2, a2, -2
+    b c65_nzx
+    addiu a1, a1, 1
+c65_op_90:  ; $90 BCC rel cycles 2
+    andi t1, t9, 0x100
+    bnez t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_9d:  ; $9D STA abx cycles 5 phase 4
+    or a0, a4, zero
+    jal c65_s_absx
+    addiu v0, zero, 4
+    b c65_next
+    daddiu a2, a2, -5
+c65_op_b5:  ; $B5 LDA zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_lda
+    daddiu a2, a2, -4
+c65_op_0a:  ; $0A ASL acc cycles 2
+    sll t9, a4, 1
+    andi a4, t9, 0xFF
+    addiu a1, a1, 1
+    or a7, a4, zero
+    or t8, a4, zero
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_a8:  ; $A8 TAY imp cycles 2
+    or a6, a4, zero
+    daddiu a2, a2, -2
+    b c65_nzy
+    addiu a1, a1, 1
+c65_op_c8:  ; $C8 INY imp cycles 2
+    addiu a6, a6, 1
+    andi a6, a6, 0xFF
+    daddiu a2, a2, -2
+    b c65_nzy
+    addiu a1, a1, 1
+c65_op_88:  ; $88 DEY imp cycles 2
+    addiu a6, a6, -1
+    andi a6, a6, 0xFF
+    daddiu a2, a2, -2
+    b c65_nzy
+    addiu a1, a1, 1
+c65_op_e8:  ; $E8 INX imp cycles 2
+    addiu a5, a5, 1
+    andi a5, a5, 0xFF
+    daddiu a2, a2, -2
+    b c65_nzx
+    addiu a1, a1, 1
+c65_op_b0:  ; $B0 BCS rel cycles 2
+    andi t1, t9, 0x100
+    beqz t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_68:  ; $68 PLA imp cycles 4
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    lbu a4, 0x100(t1)
+    addiu a1, a1, 1
+    daddiu a2, a2, -4
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_op_ac:  ; $AC LDY abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_ldy
+    daddiu a2, a2, -4
+c65_op_b1:  ; $B1 LDA iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_lda
+    daddiu a2, a2, -5
+c65_op_69:  ; $69 ADC imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_adc
+    daddiu a2, a2, -2
+c65_op_38:  ; $38 SEC imp cycles 2
+    ori t9, zero, 0x100
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_26:  ; $26 ROL zpg cycles 5
+    jal c65_m_zp
+    nop
+    srl t2, t9, 8
+    andi t2, t2, 1
+    sll t9, v1, 1
+    or t9, t9, t2
+    b c65_rmw_zp
+    addiu a0, zero, 5
+c65_op_48:  ; $48 PHA imp cycles 3
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    sb a4, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_4c:  ; $4C JMP abs cycles 3 phase 2
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu v0, zero, 2
+    sll t2, v1, 8
+    or t2, t2, t1            ; Ea
+    beq t2, a1, c65_jmp_self ; a jump to itself: the idle batching
+    nop
+    or a1, t2, zero
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_86:  ; $86 STX zpg cycles 3
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t1, t2, s1
+    sb a5, 0(t1)
+    or v1, a5, zero
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_e0:  ; $E0 CPX imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_cpx
+    daddiu a2, a2, -2
+c65_op_a0:  ; $A0 LDY imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_ldy
+    daddiu a2, a2, -2
+c65_op_a2:  ; $A2 LDX imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_ldx
+    daddiu a2, a2, -2
+c65_op_79:  ; $79 ADC aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_adc
+    daddiu a2, a2, -4
+c65_op_95:  ; $95 STA zpx cycles 4
+    jal c65_s_zpx
+    nop
+    sb a4, 0(t1)
+    or v1, a4, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_98:  ; $98 TYA imp cycles 2
+    or a4, a6, zero
+    daddiu a2, a2, -2
+    b c65_nza
+    addiu a1, a1, 1
+c65_op_d9:  ; $D9 CMP aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_cmp
+    daddiu a2, a2, -4
+c65_op_65:  ; $65 ADC zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_adc
+    daddiu a2, a2, -3
+c65_op_0d:  ; $0D ORA abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_ora
+    daddiu a2, a2, -4
+c65_op_30:  ; $30 BMI rel cycles 2
+    andi t1, t8, 0x80
+    beqz t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_8a:  ; $8A TXA imp cycles 2
+    or a4, a5, zero
+    daddiu a2, a2, -2
+    b c65_nza
+    addiu a1, a1, 1
+c65_op_fd:  ; $FD SBC abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_sbc
+    daddiu a2, a2, -4
+c65_op_2a:  ; $2A ROL acc cycles 2
+    srl t1, t9, 8
+    andi t1, t1, 1
+    sll t9, a4, 1
+    or t9, t9, t1
+    andi a4, t9, 0xFF
+    daddiu a2, a2, -2
+    b c65_nza
+    addiu a1, a1, 1
+c65_op_7d:  ; $7D ADC abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_adc
+    daddiu a2, a2, -4
+c65_op_aa:  ; $AA TAX imp cycles 2
+    or a5, a4, zero
+    daddiu a2, a2, -2
+    b c65_nzx
+    addiu a1, a1, 1
+c65_op_a6:  ; $A6 LDX zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_ldx
+    daddiu a2, a2, -3
+c65_op_a4:  ; $A4 LDY zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_ldy
+    daddiu a2, a2, -3
+c65_op_84:  ; $84 STY zpg cycles 3
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t1, t2, s1
+    sb a6, 0(t1)
+    or v1, a6, zero
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_c5:  ; $C5 CMP zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_cmp
+    daddiu a2, a2, -3
+c65_op_e6:  ; $E6 INC zpg cycles 5
+    jal c65_m_zp
+    nop
+    addiu t2, v1, 1
+    b c65_incdec_zp
+    addiu a0, zero, 5
+c65_op_c6:  ; $C6 DEC zpg cycles 5
+    jal c65_m_zp
+    nop
+    addiu t2, v1, -1
+    b c65_incdec_zp
+    addiu a0, zero, 5
+c65_op_ae:  ; $AE LDX abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_ldx
+    daddiu a2, a2, -4
+c65_op_be:  ; $BE LDX aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_ldx
+    daddiu a2, a2, -4
+c65_op_bc:  ; $BC LDY abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_ldy
+    daddiu a2, a2, -4
+c65_op_b4:  ; $B4 LDY zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_ldy
+    daddiu a2, a2, -4
+c65_op_b6:  ; $B6 LDX zpy cycles 4
+    jal c65_m_zpy
+    nop
+    b c65_ldx
+    daddiu a2, a2, -4
+c65_op_8e:  ; $8E STX abs cycles 4 phase 3
+    or a0, a5, zero
+    jal c65_s_abs
+    addiu v0, zero, 3
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_8c:  ; $8C STY abs cycles 4 phase 3
+    or a0, a6, zero
+    jal c65_s_abs
+    addiu v0, zero, 3
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_91:  ; $91 STA iny cycles 6 phase 5
+    or a0, a4, zero
+    jal c65_s_indy
+    addiu v0, zero, 5
+    b c65_next
+    daddiu a2, a2, -6
+c65_op_2c:  ; $2C BIT abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    or t8, v1, zero          ; N = bit 7
+    sll t1, v1, 1            ; V = bit 6
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    and a7, a4, v1           ; Z from A AND value
+    beqz a2, c65_poll
+    or a0, v1, zero
+    b c65_next
+    daddiu a2, a2, -4
+
+    ; --- shared tails: the operation on v1, cycles already charged ----------
+c65_lda:
+    or a4, v1, zero
+c65_nza:                     ; N and Z from A
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_ldx:
+    or a5, v1, zero
+c65_nzx:
+    or a7, a5, zero
+    b c65_next
+    or t8, a5, zero
+c65_ldy:
+    or a6, v1, zero
+c65_nzy:
+    or a7, a6, zero
+    b c65_next
+    or t8, a6, zero
+c65_ora:
+    or a4, a4, v1
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_and:
+    and a4, a4, v1
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_eor:
+    xor a4, a4, v1
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_cmp:                     ; Res = A - value: N, Z from Res, C = NOT borrow
+    subu a7, a4, v1
+    or t8, a7, zero
+    b c65_next
+    nor t9, a7, zero
+c65_cpx:
+    subu a7, a5, v1
+    or t8, a7, zero
+    b c65_next
+    nor t9, a7, zero
+c65_cpy:
+    subu a7, a6, v1
+    or t8, a7, zero
+    b c65_next
+    nor t9, a7, zero
+c65_adc:                     ; Res = A + value + C; V = ~(A^value) & (A^Res)
+    srl t1, t9, 8
+    andi t1, t1, 1
+    addu t0, a4, v1
+    addu t0, t0, t1
+    xor t1, a4, v1
+    nor t1, t1, zero
+    xor t2, a4, t0
+    and t1, t1, t2
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    or t9, t0, zero          ; C = bit 8 of the sum
+    andi a4, t0, 0xFF
+    or a7, a4, zero
+    b c65_next
+    or t8, a4, zero
+c65_sbc:                     ; Res = A - value - !C; V = (A^value) & (A^Res); C = ~Res
+    srl t1, t9, 8
+    andi t1, t1, 1
+    xori t1, t1, 1
+    subu t0, a4, v1
+    subu t0, t0, t1
+    xor t1, a4, v1
+    xor t2, a4, t0
+    and t1, t1, t2
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    nor t9, t0, zero
+    or a7, t0, zero          ; N and Z from the unmasked Res, as the reference
+    or t8, t0, zero
+    b c65_next
+    andi a4, t0, 0xFF
+c65_rmw_zp:                  ; t9 = shifted value (C in bit 8), t1 = host address, a0 = cycles
+    andi t2, t9, 0xFF
+c65_store_zp:                ; t2 = result byte
+    sb t2, 0(t1)             ; the unchanged-value write is invisible in RAM
+    or v1, t2, zero
+    or a7, t2, zero
+    or t8, t2, zero
+    b c65_next
+    dsubu a2, a2, a0
+c65_incdec_zp:               ; t2 = value +/- 1, t1 = host address, a0 = cycles
+    b c65_store_zp
+    andi t2, t2, 0xFF
+
+    ; --- branches ------------------------------------------------------------
+c65_br_not:                  ; not taken: no operand read (as the reference)
+    addiu a1, a1, 2
+    b c65_next
+    daddiu a2, a2, -2
+c65_br_take:
+    jal c65_br_taken
+    nop
+    b c65_next
+    daddiu a2, a2, -2
+c65_br_taken:                ; leaf: t2 = offset, t1 = Base, a1 = new PC; the
+    lb t2, 1(t0)             ; page-cross and taken cycles are charged here
+    addiu t1, a1, 2
+    andi t1, t1, 0xFFFF      ; Base: the next instruction's address
+    andi v1, t2, 0xFF        ; the offset byte was the last on the bus
+    addu a1, t1, t2
+    andi a1, a1, 0xFFFF
+    xor t0, a1, t1
+    srl t0, t0, 8
+    sltu t0, zero, t0
+    dsubu a2, a2, t0         ; + 1 when the target is on another page
+    jr ra
+    daddiu a2, a2, -1        ; + 1 taken
+
+    ; --- addressing modes: read (v1 = value; t2 = effective address) --------
+c65_m_zp:                    ; t1 = host address of the zero-page byte
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t1, t2, s1
+    jr ra
+    lbu v1, 0(t1)
+c65_m_zpx:
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, a5
+    andi t2, t2, 0xFF
+    addu t1, t2, s1
+    jr ra
+    lbu v1, 0(t1)
+c65_m_zpy:
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, a6
+    andi t2, t2, 0xFF
+    addu t1, t2, s1
+    jr ra
+    lbu v1, 0(t1)
+c65_m_abs:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)            ; the high operand byte is on the bus
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    b c65_rd_ea
+    or t2, t2, t1
+c65_m_absx:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    or t1, t2, t1            ; Base
+    addu t2, t1, a5
+    andi t2, t2, 0xFFFF
+    xor t1, t1, t2
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    b c65_rd_ea
+    dsubu a2, a2, t1         ; the page cross is charged before the read
+c65_m_absy:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    or t1, t2, t1
+    addu t2, t1, a6
+    andi t2, t2, 0xFFFF
+    xor t1, t1, t2
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    b c65_rd_ea
+    dsubu a2, a2, t1
+c65_m_indy:                  ; (zp),Y
+    lbu t1, 1(t0)
+    addu t2, t1, s1
+    lbu t2, 0(t2)            ; pointer low byte
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)            ; pointer high byte, on the bus
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    or t1, t1, t2            ; Base
+    addu t2, t1, a6
+    andi t2, t2, 0xFFFF
+    xor t1, t1, t2
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    b c65_rd_ea
+    dsubu a2, a2, t1
+c65_m_indx:                  ; (zp,X)
+    lbu t1, 1(t0)
+    addu t1, t1, a5
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_rd_ea
+    or t2, t2, t1
+
+    ; --- the read of guest address t2 (16 bits) into v1 ---------------------
+c65_rd_ea:
+    andi t1, t2, 0x8000
+    bnez t1, c65_rd_prg
+    sltiu t1, t2, 0x2000
+    beqz t1, c65_rd_dev
+    andi t1, t2, 0x7FF
+    addu t1, t1, s1          ; internal RAM, mirrored every 2 KB
+    jr ra
+    lbu v1, 0(t1)
+c65_rd_prg:                  ; PRG ROM: the MMC3 bias of its 8 KB slot
+    andi t1, t2, 0x6000
+    srl t1, t1, 10
+    addu t1, t1, a3
+    ld t1, 0(t1)
+    addu t1, t1, t2
+    jr ra
+    lbu v1, 0(t1)
+c65_rd_dev:                  ; $2000-$7FFF
+    sltiu t1, t2, 0x4000
+    bnez t1, c65_rd_call     ; PPU registers
+    addiu t1, t2, -0x4015
+    sltiu t1, t1, 3
+    bnez t1, c65_rd_call     ; $4015-$4017
+    sltiu t1, t2, 0x6000
+    bnez t1, c65_rd_open     ; nothing answers: open bus
+    nop
+    ld t1, global_mapramenable-global_nesmmc3bias(a3)
+    beqz t1, c65_rd_open
+    andi t1, t2, 0x1FFF
+    la t0, global_mapram     ; enabled work RAM
+    addu t0, t0, t1
+    jr ra
+    lbu v1, 0(t0)
+c65_rd_open:
+    jr ra
+    andi v1, v1, 0xFF
+c65_rd_call:                 ; a device: the call-out to NesRead
+    sd ra, 48(sp)
+    sd t2, 56(sp)
+    jal c65_publish
+    sd t2, global_ea-global_nesmmc3bias(a3)
+    jal nesread
+    or a0, t2, zero
+    jal c65_reload
+    nop
+    ld t2, 56(sp)
+    ld ra, 48(sp)
+    jr ra
+    or v1, a0, zero          ; the value (NesRead left it on the bus too)
+
+    ; --- addressing modes: effective address only (RMW and stores) ----------
+c65_s_zpx:                   ; t1 = host address
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, a5
+    andi t2, t2, 0xFF
+    jr ra
+    addu t1, t2, s1
+c65_s_zpy:
+    lbu t2, 1(t0)
+    addiu a1, a1, 2
+    addu t2, t2, a6
+    andi t2, t2, 0xFF
+    jr ra
+    addu t1, t2, s1
+c65_e_abs:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    jr ra
+    or t2, t2, t1
+c65_e_absx:                  ; no page-cross cycle for RMW
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    or t2, t2, t1
+    addu t2, t2, a5
+    jr ra
+    andi t2, t2, 0xFFFF
+    ; stores: a0 = the value; tail into the write routine
+c65_s_abs:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    b c65_wr_ea
+    or t2, t2, t1
+c65_s_absx:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    or t2, t2, t1
+    addu t2, t2, a5
+    b c65_wr_ea
+    andi t2, t2, 0xFFFF
+c65_s_absy:
+    lbu t1, 1(t0)
+    lbu v1, 2(t0)
+    addiu a1, a1, 3
+    sll t2, v1, 8
+    or t2, t2, t1
+    addu t2, t2, a6
+    b c65_wr_ea
+    andi t2, t2, 0xFFFF
+c65_s_indy:
+    lbu t1, 1(t0)
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    or t2, t2, t1
+    addu t2, t2, a6
+    b c65_wr_ea
+    andi t2, t2, 0xFFFF
+c65_s_indx:
+    lbu t1, 1(t0)
+    addu t1, t1, a5
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_wr_ea
+    or t2, t2, t1
+
+    ; --- the write of a0 to guest address t2 ---------------------------------
+c65_wr_ea:
+    sltiu t1, t2, 0x2000
+    beqz t1, c65_wr_call
+    andi t1, t2, 0x7FF
+    addu t1, t1, s1          ; internal RAM
+    sb a0, 0(t1)
+    jr ra
+    or v1, a0, zero          ; the written byte is on the bus
+c65_wr_call:                 ; everything else: the call-out to NesWrite
+    sd ra, 48(sp)
+    sd t2, 56(sp)
+    sd a0, 64(sp)
+    jal c65_publish
+    sd t2, global_ea-global_nesmmc3bias(a3)
+    or a0, t2, zero
+    jal neswrite
+    ld a1, 64(sp)
+    jal c65_reload
+    or s4, zero, zero        ; a mapper write may move PRG: rebuild the fetch region
+    ld t2, 56(sp)
+    ld a0, 64(sp)
+    ld ra, 48(sp)
+    jr ra
+    nop
+
+    ; --- publish and reload the guest state around a call-out ---------------
+c65_publish:                 ; leaf; the globals the device code reads
+    andi a1, a1, 0xFFFF
+    sd a1, global_pc-global_nesmmc3bias(a3)
+    sd v1, global_nesopenbus-global_nesmmc3bias(a3)
+    sd a2, global_left-global_nesmmc3bias(a3)
+    sd a4, global_a-global_nesmmc3bias(a3)
+    sd a5, global_x-global_nesmmc3bias(a3)
+    sd a6, global_y-global_nesmmc3bias(a3)
+    sd a7, global_fz-global_nesmmc3bias(a3)
+    sd t8, global_fn-global_nesmmc3bias(a3)
+    sd t9, global_fc-global_nesmmc3bias(a3)
+    sd t3, global_nesinstructions-global_nesmmc3bias(a3)
+    jr ra
+    sd v0, global_accessphase-global_nesmmc3bias(a3)
+c65_reload:                  ; leaf; a0 and t2 are left alone
+    la a3, global_nesmmc3bias
+    ld a1, global_pc-global_nesmmc3bias(a3)
+    ld v1, global_nesopenbus-global_nesmmc3bias(a3)
+    ld a2, global_left-global_nesmmc3bias(a3)
+    ld a4, global_a-global_nesmmc3bias(a3)
+    ld a5, global_x-global_nesmmc3bias(a3)
+    ld a6, global_y-global_nesmmc3bias(a3)
+    ld a7, global_fz-global_nesmmc3bias(a3)
+    ld t8, global_fn-global_nesmmc3bias(a3)
+    ld t9, global_fc-global_nesmmc3bias(a3)
+    ld t3, global_nesinstructions-global_nesmmc3bias(a3)
+    jr ra
+    ld v0, global_accessphase-global_nesmmc3bias(a3)
+
+    ; --- the end of the window -------------------------------------------------
+c65_end:
+  EndASM
+  CompilerIf #NES_CPU_TRACE
+    ASM
+      jal nescputracestep    ; a window can end without passing c65_next
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    jal c65_publish
+    nop
+    ; CpuCycles = NesRunStart + Budget - Left : CpuInWindow = 0
+    la t0, global_cpucycles
+    ld t1, global_nesrunstart-global_cpucycles(t0)
+    ld t2, global_budget-global_cpucycles(t0)
+    daddu t2, t1, t2
+    dsubu t2, t2, a2
+    sd t2, 0(t0)
+    sd zero, global_cpuinwindow-global_cpucycles(t0)
+    dsubu a0, t2, t1         ; ProcedureReturn CpuCycles - NesRunStart
+    ld s0, 0(sp)
+    ld s1, 8(sp)
+    ld s2, 16(sp)
+    ld s3, 24(sp)
+    ld s4, 32(sp)
+    ld ra, 40(sp)
+    jr ra
+    daddiu sp, sp, 96
+
+    ; --- the fetch region and the slow fetch ----------------------------------
+c65_rebase:                  ; a1 = PC
+    andi a1, a1, 0xFFFF
+    andi t1, a1, 0x8000
+    bnez t1, c65_rebase_prg
+    sltiu t1, a1, 0x2000
+    bnez t1, c65_rebase_ram
+    sltiu t1, a1, 0x6000
+    bnez t1, c65_fetch_slow
+    nop
+    ld t1, global_mapramenable-global_nesmmc3bias(a3)
+    beqz t1, c65_fetch_slow
+    ori s2, zero, 0x6000     ; enabled work RAM: one 8 KB region
+    la t1, global_mapram
+    subu s3, t1, s2
+    b c65_refetch
+    ori s4, zero, 0x1FFD
+c65_rebase_ram:              ; one 2 KB mirror of internal RAM
+    andi s2, a1, 0xF800
+    subu s3, s1, s2
+    b c65_refetch
+    ori s4, zero, 0x7FD
+c65_rebase_prg:              ; one 8 KB PRG slot through its MMC3 bias
+    andi s2, a1, 0xE000
+    andi t1, a1, 0x6000
+    srl t1, t1, 10
+    addu t1, t1, a3
+    ld s3, 0(t1)
+    ori s4, zero, 0x1FFD
+c65_refetch:
+    subu t1, a1, s2
+    sltu t1, t1, s4
+    beqz t1, c65_fetch_slow  ; the instruction runs over the region's end
+    addu t0, a1, s3
+    b c65_dispatch
+    lbu a0, 0(t0)
+c65_fetch_slow:              ; copy the instruction's bytes into the buffer
+    jal c65_peek
+    or t2, a1, zero
+    sb t1, 80(sp)
+    or a0, t1, zero
+    la t0, c65_lengths
+    addu t0, t0, a0
+    lbu t0, 0(t0)
+    sd t0, 72(sp)
+    sltiu t1, t0, 2
+    bnez t1, c65_fetch_buffered
+    addiu t2, a1, 1
+    jal c65_peek
+    andi t2, t2, 0xFFFF
+    sb t1, 81(sp)
+    ld t0, 72(sp)
+    sltiu t1, t0, 3
+    bnez t1, c65_fetch_buffered
+    addiu t2, a1, 2
+    jal c65_peek
+    andi t2, t2, 0xFFFF
+    sb t1, 82(sp)
+c65_fetch_buffered:
+    lbu a0, 80(sp)
+    b c65_dispatch
+    daddiu t0, sp, 80
+c65_peek:                    ; leaf: t1 = the byte at guest address t2 (no side effect)
+    andi t1, t2, 0x8000
+    bnez t1, c65_peek_prg
+    sltiu t1, t2, 0x2000
+    bnez t1, c65_peek_ram
+    sltiu t1, t2, 0x6000
+    bnez t1, c65_bad_fetch
+    nop
+    ld t1, global_mapramenable-global_nesmmc3bias(a3)
+    beqz t1, c65_bad_fetch
+    andi t1, t2, 0x1FFF
+    la t0, global_mapram
+    addu t0, t0, t1
+    jr ra
+    lbu t1, 0(t0)
+c65_peek_ram:
+    andi t1, t2, 0x7FF
+    addu t1, t1, s1
+    jr ra
+    lbu t1, 0(t1)
+c65_peek_prg:
+    andi t1, t2, 0x6000
+    srl t1, t1, 10
+    addu t1, t1, a3
+    ld t1, 0(t1)
+    addu t1, t1, t2
+    jr ra
+    lbu t1, 0(t1)
+c65_bad_fetch:               ; code fetched from device space: stop loudly
+    lui t1, 1
+    or t1, t1, t2
+    sd t1, global_badopcode-global_nesmmc3bias(a3)
+    daddiu t1, zero, 1
+    sd t1, global_stopped-global_nesmmc3bias(a3)
+    b c65_end
+    nop
+
+    ; --- the rest of the opcodes ------------------------------------------------
+c65_op_00:  ; $00 BRK imp cycles 7
+    addiu a1, a1, 2          ; the pushed address skips the padding byte
+    andi a1, a1, 0xFFFF
+    ld t2, global_s-global_nesmmc3bias(a3)
+    srl t0, a1, 8
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    sb a1, 0x100(t1)
+    addiu t2, t2, -1
+    jal c65_status           ; t0 = P (t2 survives)
+    andi t2, t2, 0xFF
+    ori t0, t0, 0x10         ; B set in the pushed copy
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    daddiu t1, zero, 1
+    sd t1, global_fi-global_nesmmc3bias(a3)
+    ld t1, 24(a3)            ; the vector at $FFFE in the top 8 KB slot
+    ori t2, zero, 0xFFFE
+    addu t1, t1, t2
+    lbu t0, 0(t1)
+    lbu v1, 1(t1)
+    sll t1, v1, 8
+    or a1, t0, t1
+    b c65_next
+    daddiu a2, a2, -7
+c65_op_01:  ; $01 ORA inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_ora
+    daddiu a2, a2, -6
+c65_op_05:  ; $05 ORA zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_ora
+    daddiu a2, a2, -3
+c65_op_06:  ; $06 ASL zpg cycles 5
+    jal c65_m_zp
+    nop
+    sll t9, v1, 1
+    b c65_rmw_zp
+    addiu a0, zero, 5
+c65_op_08:  ; $08 PHP imp cycles 3
+    jal c65_status
+    nop
+    ori t0, t0, 0x10
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_09:  ; $09 ORA imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_ora
+    daddiu a2, a2, -2
+c65_op_0e:  ; $0E ASL abs cycles 6 phase 5
+    jal c65_e_abs
+    addiu v0, zero, 3        ; the read at phase - 2
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 1
+    b c65_rmw_write
+    addiu t0, zero, 6
+c65_op_11:  ; $11 ORA iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_ora
+    daddiu a2, a2, -5
+c65_op_15:  ; $15 ORA zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_ora
+    daddiu a2, a2, -4
+c65_op_16:  ; $16 ASL zpx cycles 6
+    jal c65_m_zpx
+    nop
+    sll t9, v1, 1
+    b c65_rmw_zp
+    addiu a0, zero, 6
+c65_op_19:  ; $19 ORA aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_ora
+    daddiu a2, a2, -4
+c65_op_1d:  ; $1D ORA abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_ora
+    daddiu a2, a2, -4
+c65_op_1e:  ; $1E ASL abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 1
+    b c65_rmw_write
+    addiu t0, zero, 7
+c65_op_21:  ; $21 AND inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_and
+    daddiu a2, a2, -6
+c65_op_24:  ; $24 BIT zpg cycles 3
+    jal c65_m_zp
+    nop
+    or t8, v1, zero
+    sll t1, v1, 1
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    and a7, a4, v1
+    b c65_next
+    daddiu a2, a2, -3
+c65_op_25:  ; $25 AND zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_and
+    daddiu a2, a2, -3
+c65_op_28:  ; $28 PLP imp cycles 4
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    lbu t0, 0x100(t1)
+    jal c65_setstatus
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_irq_check
+    addiu a0, zero, 4
+c65_op_2d:  ; $2D AND abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_and
+    daddiu a2, a2, -4
+c65_op_2e:  ; $2E ROL abs cycles 6 phase 5
+    jal c65_e_abs
+    addiu v0, zero, 3
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    srl t1, t9, 8
+    andi t1, t1, 1
+    sll t9, v1, 1
+    or t9, t9, t1
+    b c65_rmw_write
+    addiu t0, zero, 6
+c65_op_31:  ; $31 AND iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_and
+    daddiu a2, a2, -5
+c65_op_35:  ; $35 AND zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_and
+    daddiu a2, a2, -4
+c65_op_36:  ; $36 ROL zpx cycles 6
+    jal c65_m_zpx
+    nop
+    srl t2, t9, 8
+    andi t2, t2, 1
+    sll t9, v1, 1
+    or t9, t9, t2
+    b c65_rmw_zp
+    addiu a0, zero, 6
+c65_op_39:  ; $39 AND aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_and
+    daddiu a2, a2, -4
+c65_op_3d:  ; $3D AND abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_and
+    daddiu a2, a2, -4
+c65_op_3e:  ; $3E ROL abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    srl t1, t9, 8
+    andi t1, t1, 1
+    sll t9, v1, 1
+    or t9, t9, t1
+    b c65_rmw_write
+    addiu t0, zero, 7
+c65_op_40:  ; $40 RTI imp cycles 6
+    ld t2, global_s-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    lbu t0, 0x100(t1)        ; P
+    jal c65_setstatus        ; (t2 survives)
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    lbu a1, 0x100(t1)        ; PCL
+    sd a1, global_lo-global_nesmmc3bias(a3)
+    addiu t2, t2, 1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    lbu t0, 0x100(t1)        ; PCH
+    sd t0, global_hi-global_nesmmc3bias(a3)
+    sd t2, global_s-global_nesmmc3bias(a3)
+    sll t0, t0, 8
+    or a1, a1, t0
+    b c65_irq_check
+    addiu a0, zero, 6
+c65_op_41:  ; $41 EOR inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_eor
+    daddiu a2, a2, -6
+c65_op_45:  ; $45 EOR zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_eor
+    daddiu a2, a2, -3
+c65_op_46:  ; $46 LSR zpg cycles 5
+    jal c65_m_zp
+    nop
+    sll t9, v1, 8
+    srl t2, v1, 1
+    b c65_store_zp
+    addiu a0, zero, 5
+c65_op_49:  ; $49 EOR imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_eor
+    daddiu a2, a2, -2
+c65_op_4d:  ; $4D EOR abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_eor
+    daddiu a2, a2, -4
+c65_op_4e:  ; $4E LSR abs cycles 6 phase 5
+    jal c65_e_abs
+    addiu v0, zero, 3
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 8
+    srl a7, v1, 1
+    b c65_rmw_write_res
+    addiu t0, zero, 6
+c65_op_50:  ; $50 BVC rel cycles 2
+    ld t1, global_fv-global_nesmmc3bias(a3)
+    andi t1, t1, 0x80
+    bnez t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_51:  ; $51 EOR iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_eor
+    daddiu a2, a2, -5
+c65_op_55:  ; $55 EOR zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_eor
+    daddiu a2, a2, -4
+c65_op_56:  ; $56 LSR zpx cycles 6
+    jal c65_m_zpx
+    nop
+    sll t9, v1, 8
+    srl t2, v1, 1
+    b c65_store_zp
+    addiu a0, zero, 6
+c65_op_58:  ; $58 CLI imp cycles 2
+    sd zero, global_fi-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_irq_check
+    addiu a0, zero, 2
+c65_op_59:  ; $59 EOR aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_eor
+    daddiu a2, a2, -4
+c65_op_5d:  ; $5D EOR abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_eor
+    daddiu a2, a2, -4
+c65_op_5e:  ; $5E LSR abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    sll t9, v1, 8
+    srl a7, v1, 1
+    b c65_rmw_write_res
+    addiu t0, zero, 7
+c65_op_61:  ; $61 ADC inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_adc
+    daddiu a2, a2, -6
+c65_op_66:  ; $66 ROR zpg cycles 5
+    jal c65_m_zp
+    nop
+    srl t2, t9, 1
+    andi t2, t2, 0x80
+    srl t0, v1, 1
+    or t2, t2, t0
+    sll t9, v1, 8
+    b c65_store_zp
+    addiu a0, zero, 5
+c65_op_6a:  ; $6A ROR acc cycles 2
+    srl t0, t9, 1
+    andi t0, t0, 0x80
+    sll t9, a4, 8
+    srl a4, a4, 1
+    or a4, a4, t0
+    daddiu a2, a2, -2
+    b c65_nza
+    addiu a1, a1, 1
+c65_op_6c:  ; $6C JMP ind cycles 5 phase 4
+    jal c65_e_abs
+    addiu v0, zero, 4
+    jal c65_rd_ea            ; the target's low byte
+    nop
+    sd v1, 72(sp)
+    andi t0, t2, 0xFF00      ; the high byte wraps inside the pointer's page
+    addiu t1, t2, 1
+    andi t1, t1, 0xFF
+    jal c65_rd_ea
+    or t2, t0, t1
+    ld t0, 72(sp)
+    sll t1, v1, 8
+    or a1, t0, t1
+    b c65_next
+    daddiu a2, a2, -5
+c65_op_6d:  ; $6D ADC abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_adc
+    daddiu a2, a2, -4
+c65_op_6e:  ; $6E ROR abs cycles 6 phase 5
+    jal c65_e_abs
+    addiu v0, zero, 3
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    srl a7, t9, 1
+    andi a7, a7, 0x80
+    srl t1, v1, 1
+    or a7, a7, t1
+    sll t9, v1, 8
+    b c65_rmw_write_res
+    addiu t0, zero, 6
+c65_op_70:  ; $70 BVS rel cycles 2
+    ld t1, global_fv-global_nesmmc3bias(a3)
+    andi t1, t1, 0x80
+    beqz t1, c65_br_not
+    nop
+    b c65_br_take
+    nop
+c65_op_71:  ; $71 ADC iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_adc
+    daddiu a2, a2, -5
+c65_op_75:  ; $75 ADC zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_adc
+    daddiu a2, a2, -4
+c65_op_76:  ; $76 ROR zpx cycles 6
+    jal c65_m_zpx
+    nop
+    srl t2, t9, 1
+    andi t2, t2, 0x80
+    srl t0, v1, 1
+    or t2, t2, t0
+    sll t9, v1, 8
+    b c65_store_zp
+    addiu a0, zero, 6
+c65_op_78:  ; $78 SEI imp cycles 2
+    daddiu t1, zero, 1
+    sd t1, global_fi-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_7e:  ; $7E ROR abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    srl a7, t9, 1
+    andi a7, a7, 0x80
+    srl t1, v1, 1
+    or a7, a7, t1
+    sll t9, v1, 8
+    b c65_rmw_write_res
+    addiu t0, zero, 7
+c65_op_81:  ; $81 STA inx cycles 6 phase 5
+    or a0, a4, zero
+    jal c65_s_indx
+    addiu v0, zero, 5
+    b c65_next
+    daddiu a2, a2, -6
+c65_op_94:  ; $94 STY zpx cycles 4
+    jal c65_s_zpx
+    nop
+    sb a6, 0(t1)
+    or v1, a6, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_96:  ; $96 STX zpy cycles 4
+    jal c65_s_zpy
+    nop
+    sb a5, 0(t1)
+    or v1, a5, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_9a:  ; $9A TXS imp cycles 2
+    sd a5, global_s-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_a1:  ; $A1 LDA inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_lda
+    daddiu a2, a2, -6
+c65_op_b8:  ; $B8 CLV imp cycles 2
+    sd zero, global_fv-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_ba:  ; $BA TSX imp cycles 2
+    ld a5, global_s-global_nesmmc3bias(a3)
+    daddiu a2, a2, -2
+    b c65_nzx
+    addiu a1, a1, 1
+c65_op_c0:  ; $C0 CPY imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_cpy
+    daddiu a2, a2, -2
+c65_op_c1:  ; $C1 CMP inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_cmp
+    daddiu a2, a2, -6
+c65_op_c4:  ; $C4 CPY zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_cpy
+    daddiu a2, a2, -3
+c65_op_cc:  ; $CC CPY abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_cpy
+    daddiu a2, a2, -4
+c65_op_cd:  ; $CD CMP abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_cmp
+    daddiu a2, a2, -4
+c65_op_ce:  ; $CE DEC abs cycles 3 phase 2
+    jal c65_e_abs
+    or v0, zero, zero        ; phase 2 - 2: the reference's own figures
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    addiu a7, v1, -1
+    andi a7, a7, 0xFF
+    b c65_rmw_write_res
+    addiu t0, zero, 3
+c65_op_d1:  ; $D1 CMP iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_cmp
+    daddiu a2, a2, -5
+c65_op_d5:  ; $D5 CMP zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_cmp
+    daddiu a2, a2, -4
+c65_op_d6:  ; $D6 DEC zpx cycles 6
+    jal c65_m_zpx
+    nop
+    addiu t2, v1, -1
+    b c65_incdec_zp
+    addiu a0, zero, 6
+c65_op_d8:  ; $D8 CLD imp cycles 2
+    sd zero, global_fd-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_dd:  ; $DD CMP abx cycles 4 phase 3
+    jal c65_m_absx
+    addiu v0, zero, 3
+    b c65_cmp
+    daddiu a2, a2, -4
+c65_op_de:  ; $DE DEC abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    addiu a7, v1, -1
+    andi a7, a7, 0xFF
+    b c65_rmw_write_res
+    addiu t0, zero, 7
+c65_op_e1:  ; $E1 SBC inx cycles 6 phase 5
+    jal c65_m_indx
+    addiu v0, zero, 5
+    b c65_sbc
+    daddiu a2, a2, -6
+c65_op_e4:  ; $E4 CPX zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_cpx
+    daddiu a2, a2, -3
+c65_op_e5:  ; $E5 SBC zpg cycles 3
+    jal c65_m_zp
+    nop
+    b c65_sbc
+    daddiu a2, a2, -3
+c65_op_e9:  ; $E9 SBC imm cycles 2
+    lbu v1, 1(t0)
+    addiu a1, a1, 2
+    b c65_sbc
+    daddiu a2, a2, -2
+c65_op_ea:  ; $EA NOP imp cycles 2
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_ec:  ; $EC CPX abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_cpx
+    daddiu a2, a2, -4
+c65_op_ed:  ; $ED SBC abs cycles 4 phase 3
+    jal c65_m_abs
+    addiu v0, zero, 3
+    b c65_sbc
+    daddiu a2, a2, -4
+c65_op_ee:  ; $EE INC abs cycles 6 phase 5
+    jal c65_e_abs
+    addiu v0, zero, 3
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    addiu a7, v1, 1
+    andi a7, a7, 0xFF
+    b c65_rmw_write_res
+    addiu t0, zero, 6
+c65_op_f1:  ; $F1 SBC iny cycles 5 phase 4
+    jal c65_m_indy
+    addiu v0, zero, 4
+    b c65_sbc
+    daddiu a2, a2, -5
+c65_op_f5:  ; $F5 SBC zpx cycles 4
+    jal c65_m_zpx
+    nop
+    b c65_sbc
+    daddiu a2, a2, -4
+c65_op_f6:  ; $F6 INC zpx cycles 6
+    jal c65_m_zpx
+    nop
+    addiu t2, v1, 1
+    b c65_incdec_zp
+    addiu a0, zero, 6
+c65_op_f8:  ; $F8 SED imp cycles 2
+    daddiu t1, zero, 1
+    sd t1, global_fd-global_nesmmc3bias(a3)
+    addiu a1, a1, 1
+    b c65_next
+    daddiu a2, a2, -2
+c65_op_f9:  ; $F9 SBC aby cycles 4 phase 3
+    jal c65_m_absy
+    addiu v0, zero, 3
+    b c65_sbc
+    daddiu a2, a2, -4
+c65_op_fe:  ; $FE INC abx cycles 7 phase 6
+    jal c65_e_absx
+    addiu v0, zero, 4
+    jal c65_rd_ea
+    nop
+    addiu v0, v0, 2
+    addiu a7, v1, 1
+    andi a7, a7, 0xFF
+    b c65_rmw_write_res
+    addiu t0, zero, 7
+
+    ; --- read-modify-write of a device-reachable address -----------------------
+c65_rmw_write:               ; t9 = shifted value (C in bit 8), v1 = the value read,
+    andi a7, t9, 0xFF        ; t2 = ea, v0 = phase, t0 = cycles
+c65_rmw_write_res:           ; a7 here = the result byte (Z from it)
+    or t8, a7, zero          ; N and Z from the result, before the writes
+    sd t0, 72(sp)
+    addiu v0, v0, -1
+    jal c65_wr_ea            ; the unchanged value first, at phase - 1
+    or a0, v1, zero
+    addiu v0, v0, 1
+    jal c65_wr_ea            ; then the result, at phase
+    or a0, a7, zero
+    ld t0, 72(sp)
+    b c65_next
+    dsubu a2, a2, t0
+
+    ; --- status byte ------------------------------------------------------------
+c65_status:                  ; leaf: t0 = NV1BDIZC with B clear (t1 scratch)
+    andi t0, t8, 0x80
+    ld t1, global_fv-global_nesmmc3bias(a3)
+    andi t1, t1, 0x80
+    srl t1, t1, 1
+    or t0, t0, t1
+    ld t1, global_fd-global_nesmmc3bias(a3)
+    sll t1, t1, 3
+    or t0, t0, t1
+    ld t1, global_fi-global_nesmmc3bias(a3)
+    sll t1, t1, 2
+    or t0, t0, t1
+    srl t1, t9, 8
+    andi t1, t1, 1
+    or t0, t0, t1
+    andi t1, a7, 0xFF
+    sltiu t1, t1, 1
+    sll t1, t1, 1
+    or t0, t0, t1
+    jr ra
+    ori t0, t0, 0x20
+c65_setstatus:               ; leaf: the flags from P in t0 (t1 scratch)
+    or t8, t0, zero
+    sll t1, t0, 1
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    andi t9, t0, 1
+    sll t9, t9, 8
+    andi a7, t0, 2
+    xori a7, a7, 2
+    srl t1, t0, 3
+    andi t1, t1, 1
+    sd t1, global_fd-global_nesmmc3bias(a3)
+    srl t1, t0, 2
+    andi t1, t1, 1
+    jr ra
+    sd t1, global_fi-global_nesmmc3bias(a3)
+c65_irq_check:               ; after PLP / RTI / CLI: a pending mapper IRQ with I clear
+    ld t1, global_fi-global_nesmmc3bias(a3)   ; ends the window (CpuEndWindow); a0 = cycles
+    bnez t1, c65_irq_none
+    nop
+    ld t1, global_mapirq-global_nesmmc3bias(a3)
+    beqz t1, c65_irq_none
+    nop
+    ld t1, global_budget-global_nesmmc3bias(a3)
+    dsubu t1, t1, a2
+    sd t1, global_budget-global_nesmmc3bias(a3)
+    or a2, zero, zero
+c65_irq_none:
+    b c65_next
+    dsubu a2, a2, a0
+
+c65_illegal:                 ; an undocumented opcode stops the CPU
+    daddiu t3, t3, -1        ; it does not count as executed
+    jal c65_rd_ea            ; BadOpcode = NesRead(PC)
+    or t2, a1, zero
+    sd v1, global_badopcode-global_nesmmc3bias(a3)
+    daddiu t1, zero, 1
+    sd t1, global_stopped-global_nesmmc3bias(a3)
+    b c65_end
+    nop
+  EndASM
+  ; -------------------------------------------------------------------------
+  ; The batching shapes (cold). Each is the reference's PureMetal condition,
+  ; evaluated on the live registers; the call-outs are the same procedures.
+  ; -------------------------------------------------------------------------
+  ASM
+c65_poll:                    ; LDA / BIT abs whose device read ended the window
+    addiu t1, a1, -0x7FFF    ; If Left=0 And PC>=$8003 And NesStatusHorizon>CpuCycles+8
+    addiu t1, t1, -4
+    bltz t1, c65_poll_done
+    nop
+    la t0, global_cpucycles
+    ld t0, 0(t0)
+    la t1, global_nesstatushorizon
+    ld t1, 0(t1)
+    daddiu t0, t0, 8
+    slt t0, t0, t1
+    beqz t0, c65_poll_done
+    nop
+    jal c65_publish
+    nop
+    jal nescurrentpoll       ; NesLoopRule = NesCurrentPoll(acc in a0)
+    nop
+    jal c65_reload
+    nop
+    la t1, global_neslooprule
+    sd a0, 0(t1)
+c65_poll_rule:
+    beqz a0, c65_poll_done
+    andi t0, a0, 0xFF        ; NesLoopCost = rule & 255
+    la t1, global_nesloopcost
+    sd t0, 0(t1)
+    la t1, global_nesstatushorizon
+    ld t1, 0(t1)
+    la t2, global_cpucycles
+    ld t2, 0(t2)
+    dsubu t1, t1, t2
+    daddiu t1, t1, -4
+    ddiv t1, t0        ; NesIdleExtra = (NesStatusHorizon-CpuCycles-4)/NesLoopCost
+    mflo t1
+    nop
+    nop
+    la t2, global_nesidleextra
+    sd t1, 0(t2)
+    blez t1, c65_poll_done
+    nop
+    dmult t1, t0
+    mflo t2
+    dsubu a2, a2, t2         ; Left = Left - NesIdleExtra*NesLoopCost
+    srl t2, a0, 8
+    andi t2, t2, 0xFF
+    dmult t1, t2
+    mflo t2
+    daddu t3, t3, t2         ; NesInstructions + NesIdleExtra*((rule>>8)&255)
+    lui t1, 0x200
+    and t1, a0, t1
+    beqz t1, c65_poll_done
+    srl t1, a0, 16           ; If rule&$2000000 : FC = ~(((rule>>16)&511)-256)
+    andi t1, t1, 511
+    addiu t1, t1, -256
+    nor t9, t1, zero
+c65_poll_done:
+    b c65_next
+    daddiu a2, a2, -4
+
+c65_jmp_self:                ; JMP to itself; t2 = a1 = Ea
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_jmp_go
+    slti t1, a2, 4
+    bnez t1, c65_jmp_go      ; Left > 3
+    nop
+    la t0, global_nesstall
+    ld t0, 0(t0)
+    bnez t0, c65_jmp_go      ; NesStall = 0
+    sltiu t1, t2, 0x1FFE
+    bnez t1, c65_jmp_idle    ; Ea < $1FFE Or Ea >= $8000
+    andi t1, t2, 0x8000
+    beqz t1, c65_jmp_go
+    nop
+c65_jmp_idle:
+    daddiu t0, a2, -1
+    daddiu t1, zero, 3
+    ddiv t0, t1        ; NesIdleExtra = NesDiv(Left-1, 3)
+    mflo t0
+    la t1, global_nesidleextra
+    sd t0, 0(t1)
+    dsll t1, t0, 1
+    daddu t1, t1, t0
+    dsubu a2, a2, t1         ; Left - NesIdleExtra*3
+    daddu t3, t3, t0         ; NesInstructions + NesIdleExtra
+    la t1, global_nesidlebatched
+    ld a0, 0(t1)
+    daddu a0, a0, t0
+    sd a0, 0(t1)
+c65_jmp_go:
+    or a1, t2, zero
+    b c65_next
+    daddiu a2, a2, -3
+
+c65_bne_shape:               ; BNE -6: the LDA $2002 / INX / BNE wait (t1 = Base)
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_shape_done
+    nop
+    blez a5, c65_shape_done  ; X > 0
+    slti t0, a2, 13
+    bnez t0, c65_shape_done  ; Left > 12
+    andi t0, a1, 0x8000
+    beqz t0, c65_shape_done  ; PC >= $8000
+    ori t0, zero, 0xFFFB
+    sltu t0, a1, t0
+    beqz t0, c65_shape_done  ; PC <= $FFFA
+    nop
+    jal c65_shape_now        ; t0 = now, true when now < PpuStatusDeadline
+    sd t1, 72(sp)
+    beqz a0, c65_shape_done
+    nop
+    jal c65_shape_ptr        ; t0 = NesPollPtr = PrgBias + PC
+    nop
+    lbu t2, 0(t0)
+    xori t2, t2, 0xAD
+    bnez t2, c65_shape_done
+    lbu t2, 1(t0)
+    xori t2, t2, 0x02
+    bnez t2, c65_shape_done
+    lbu t2, 2(t0)
+    xori t2, t2, 0x20
+    bnez t2, c65_shape_done
+    lbu t2, 3(t0)
+    xori t2, t2, 0xE8
+    bnez t2, c65_shape_done
+    lbu t2, 4(t0)
+    xori t2, t2, 0xD0
+    bnez t2, c65_shape_done
+    lbu t2, 5(t0)
+    xori t2, t2, 0xFA
+    bnez t2, c65_shape_done
+    addiu a0, zero, 9
+    jal c65_shape_count      ; t0 = NesPollCount (clamped to the deadline), t1 = cycles
+    nop
+    addiu a0, zero, 255      ; If NesPollCount > 255-X : NesPollCount = 255-X
+    subu a0, a0, a5
+    slt t2, a0, t0
+    beqz t2, c65_bne_count
+    nop
+    or t0, a0, zero
+c65_bne_count:
+    la t2, global_nespollcount
+    sd t0, 0(t2)
+    blez t0, c65_shape_done
+    addiu a0, zero, 3
+    jal c65_shape_charge     ; Left, NesInstructions, NesIdleBatched (a0 = per poll)
+    nop
+    jal c65_shape_status     ; A = NesPollStatusDone()
+    nop
+    or a4, a0, zero
+    la t0, global_nespollcount
+    ld t0, 0(t0)
+    daddu a5, a5, t0         ; X = X + NesPollCount : FN = X : FZ = X
+    or t8, a5, zero
+    or a7, a5, zero
+    b c65_shape_done
+    addiu v1, zero, 0xFA     ; NesOpenBus = $FA
+
+c65_beq_shape7:              ; BEQ -7: the LDA $2002 / AND #$40 / BEQ wait
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_shape_done
+    nop
+    bnez a4, c65_shape_done  ; A = 0
+    nop
+    la t0, global_ppustatusbits
+    ld t0, 0(t0)
+    andi t0, t0, 0x40
+    bnez t0, c65_shape_done  ; (PpuStatusBits & $40) = 0
+    slti t0, a2, 13
+    bnez t0, c65_shape_done  ; Left > 12
+    andi t0, a1, 0x8000
+    beqz t0, c65_shape_done
+    ori t0, zero, 0xFFFA
+    sltu t0, a1, t0
+    beqz t0, c65_shape_done  ; PC <= $FFF9
+    nop
+    jal c65_shape_now
+    sd t1, 72(sp)
+    beqz a0, c65_shape_done
+    nop
+    jal c65_shape_ptr
+    nop
+    lbu t2, 0(t0)
+    xori t2, t2, 0xAD
+    bnez t2, c65_shape_done
+    lbu t2, 1(t0)
+    xori t2, t2, 0x02
+    bnez t2, c65_shape_done
+    lbu t2, 2(t0)
+    xori t2, t2, 0x20
+    bnez t2, c65_shape_done
+    lbu t2, 3(t0)
+    xori t2, t2, 0x29
+    bnez t2, c65_shape_done
+    lbu t2, 4(t0)
+    xori t2, t2, 0x40
+    bnez t2, c65_shape_done
+    lbu t2, 5(t0)
+    xori t2, t2, 0xF0
+    bnez t2, c65_shape_done
+    lbu t2, 6(t0)
+    xori t2, t2, 0xF9
+    bnez t2, c65_shape_done
+    addiu a0, zero, 9
+    jal c65_shape_count
+    nop
+    la t2, global_nespollcount
+    sd t0, 0(t2)
+    blez t0, c65_shape_done
+    addiu a0, zero, 3
+    jal c65_shape_charge
+    nop
+    jal c65_shape_status     ; NesPollStatusDone(), its value dropped
+    nop
+    or t8, zero, zero        ; FN = 0 : FZ = 0
+    or a7, zero, zero
+    b c65_shape_done
+    addiu v1, zero, 0xF9
+
+c65_beq_shape4:              ; BEQ -4: the LDA zp / BEQ wait on a RAM byte
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_shape_done
+    nop
+    bnez a4, c65_shape_done  ; A = 0
+    slti t0, a2, 10
+    bnez t0, c65_shape_done  ; Left > 9
+    andi t0, a1, 0x8000
+    beqz t0, c65_shape_done
+    ori t0, zero, 0xFFFD
+    sltu t0, a1, t0
+    beqz t0, c65_shape_done  ; PC <= $FFFC
+    nop
+    sd t1, 72(sp)
+    jal c65_shape_ptr
+    nop
+    lbu t2, 0(t0)
+    xori t2, t2, 0xA5
+    bnez t2, c65_shape_done
+    lbu t2, 2(t0)
+    xori t2, t2, 0xF0
+    bnez t2, c65_shape_done
+    lbu t2, 3(t0)
+    xori t2, t2, 0xFC
+    bnez t2, c65_shape_done
+    lbu t2, 1(t0)
+    addu t2, t2, s1
+    lbu t2, 0(t2)
+    bnez t2, c65_shape_done  ; M(PeekA(NesPollPtr+1)) = 0
+    nop
+    ld t1, 72(sp)            ; NesPollCycles = 6, 7 across a page
+    xor t1, t1, a1
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    addiu t1, t1, 6
+    la t0, global_nespollcycles
+    sd t1, 0(t0)
+    daddiu t0, a2, -3        ; NesPollCount = NesDiv(Left-3, NesPollCycles)
+    ddiv t0, t1
+    mflo t0
+    la t2, global_nespollcount
+    sd t0, 0(t2)
+    addiu a0, zero, 2        ; applied even when the count is 0, as the reference
+    jal c65_shape_charge
+    nop
+    or t8, zero, zero
+    or a7, zero, zero
+    addiu v1, zero, 0xFC
+c65_shape_done:
+    b c65_next
+    daddiu a2, a2, -2
+
+c65_shape_now:               ; leaf: t0 = NesRunStart+Budget-Left; a0 = (t0 < PpuStatusDeadline)
+    la t0, global_nesrunstart
+    ld t0, 0(t0)
+    ld t2, global_budget-global_nesmmc3bias(a3)
+    daddu t0, t0, t2
+    dsubu t0, t0, a2
+    sd t0, 64(sp)
+    la t2, global_ppustatusdeadline
+    ld t2, 0(t2)
+    jr ra
+    slt a0, t0, t2
+c65_shape_ptr:               ; leaf: t0 = NesPollPtr = PrgBias + PC (stored)
+    la t0, global_prgbias
+    ld t0, 0(t0)
+    daddu t0, t0, a1
+    la t2, global_nespollptr
+    jr ra
+    sd t0, 0(t2)
+c65_shape_count:             ; leaf: a0 = 9; t1 = NesPollCycles (+1 across a page);
+    ld t1, 72(sp)            ; t0 = min(NesDiv(Left-3, c), NesDiv(Deadline-now+4, c))
+    xor t1, t1, a1
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    addu t1, t1, a0
+    la t0, global_nespollcycles
+    sd t1, 0(t0)
+    daddiu t0, a2, -3
+    ddiv t0, t1
+    mflo t0
+    la t2, global_ppustatusdeadline
+    ld t2, 0(t2)
+    ld a0, 64(sp)
+    dsubu t2, t2, a0
+    daddiu t2, t2, 4
+    ddiv t2, t1
+    mflo t2
+    sd t2, global_tmp-global_nesmmc3bias(a3)
+    slt a0, t2, t0
+    beqz a0, c65_shape_count_done
+    nop
+    or t0, t2, zero
+c65_shape_count_done:
+    jr ra
+    nop
+c65_shape_charge:            ; leaf: t0 = count, t1 = cycles a poll, a0 = instructions a poll
+    dmult t0, t1
+    mflo t2
+    dsubu a2, a2, t2         ; CpuTick(NesPollCount*NesPollCycles)
+    nop
+    dmult t0, a0
+    mflo t2
+    daddu t3, t3, t2         ; NesInstructions + count*a0
+    la t1, global_nesidlebatched
+    ld a0, 0(t1)
+    daddu a0, a0, t2
+    jr ra
+    sd a0, 0(t1)
+c65_shape_status:            ; a0 = NesPollStatusDone(), the state published and reloaded
+    sd ra, 48(sp)
+    or t2, a1, zero          ; Ea = PC, as the reference's taken branch left it
+    jal c65_publish
+    sd t2, global_ea-global_nesmmc3bias(a3)
+    jal nespollstatusdone
+    nop
+    jal c65_reload
+    nop
+    ld ra, 48(sp)
+    jr ra
+    nop
+
+    ; --- data (read through the D-cache only) -------------------------------------
+    .align 2
+c65_lengths:                 ; bytes an instruction occupies, by opcode (the slow fetch)
+    .word 0x01020101, 0x01020201, 0x01020101, 0x01030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+    .word 0x03020101, 0x02020201, 0x01020101, 0x03030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+    .word 0x01020101, 0x01020201, 0x01020101, 0x03030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+    .word 0x01020101, 0x01020201, 0x01020101, 0x03030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+    .word 0x01020101, 0x02020201, 0x01010101, 0x03030301, 0x02020101, 0x02020201, 0x01030101, 0x01030101
+    .word 0x02020201, 0x02020201, 0x01020101, 0x03030301, 0x02020101, 0x02020201, 0x01030101, 0x03030301
+    .word 0x02020101, 0x02020201, 0x01020101, 0x03030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+    .word 0x02020101, 0x02020201, 0x01020101, 0x03030301, 0x02020101, 0x01020201, 0x01030101, 0x01030301
+c65_table:                   ; the handler of every opcode
+    .word c65_op_00, c65_op_01, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_05, c65_op_06, c65_illegal
+    .word c65_op_08, c65_op_09, c65_op_0a, c65_illegal
+    .word c65_illegal, c65_op_0d, c65_op_0e, c65_illegal
+    .word c65_op_10, c65_op_11, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_15, c65_op_16, c65_illegal
+    .word c65_op_18, c65_op_19, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_1d, c65_op_1e, c65_illegal
+    .word c65_op_20, c65_op_21, c65_illegal, c65_illegal
+    .word c65_op_24, c65_op_25, c65_op_26, c65_illegal
+    .word c65_op_28, c65_op_29, c65_op_2a, c65_illegal
+    .word c65_op_2c, c65_op_2d, c65_op_2e, c65_illegal
+    .word c65_op_30, c65_op_31, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_35, c65_op_36, c65_illegal
+    .word c65_op_38, c65_op_39, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_3d, c65_op_3e, c65_illegal
+    .word c65_op_40, c65_op_41, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_45, c65_op_46, c65_illegal
+    .word c65_op_48, c65_op_49, c65_op_4a, c65_illegal
+    .word c65_op_4c, c65_op_4d, c65_op_4e, c65_illegal
+    .word c65_op_50, c65_op_51, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_55, c65_op_56, c65_illegal
+    .word c65_op_58, c65_op_59, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_5d, c65_op_5e, c65_illegal
+    .word c65_op_60, c65_op_61, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_65, c65_op_66, c65_illegal
+    .word c65_op_68, c65_op_69, c65_op_6a, c65_illegal
+    .word c65_op_6c, c65_op_6d, c65_op_6e, c65_illegal
+    .word c65_op_70, c65_op_71, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_75, c65_op_76, c65_illegal
+    .word c65_op_78, c65_op_79, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_7d, c65_op_7e, c65_illegal
+    .word c65_illegal, c65_op_81, c65_illegal, c65_illegal
+    .word c65_op_84, c65_op_85, c65_op_86, c65_illegal
+    .word c65_op_88, c65_illegal, c65_op_8a, c65_illegal
+    .word c65_op_8c, c65_op_8d, c65_op_8e, c65_illegal
+    .word c65_op_90, c65_op_91, c65_illegal, c65_illegal
+    .word c65_op_94, c65_op_95, c65_op_96, c65_illegal
+    .word c65_op_98, c65_op_99, c65_op_9a, c65_illegal
+    .word c65_illegal, c65_op_9d, c65_illegal, c65_illegal
+    .word c65_op_a0, c65_op_a1, c65_op_a2, c65_illegal
+    .word c65_op_a4, c65_op_a5, c65_op_a6, c65_illegal
+    .word c65_op_a8, c65_op_a9, c65_op_aa, c65_illegal
+    .word c65_op_ac, c65_op_ad, c65_op_ae, c65_illegal
+    .word c65_op_b0, c65_op_b1, c65_illegal, c65_illegal
+    .word c65_op_b4, c65_op_b5, c65_op_b6, c65_illegal
+    .word c65_op_b8, c65_op_b9, c65_op_ba, c65_illegal
+    .word c65_op_bc, c65_op_bd, c65_op_be, c65_illegal
+    .word c65_op_c0, c65_op_c1, c65_illegal, c65_illegal
+    .word c65_op_c4, c65_op_c5, c65_op_c6, c65_illegal
+    .word c65_op_c8, c65_op_c9, c65_op_ca, c65_illegal
+    .word c65_op_cc, c65_op_cd, c65_op_ce, c65_illegal
+    .word c65_op_d0, c65_op_d1, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_d5, c65_op_d6, c65_illegal
+    .word c65_op_d8, c65_op_d9, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_dd, c65_op_de, c65_illegal
+    .word c65_op_e0, c65_op_e1, c65_illegal, c65_illegal
+    .word c65_op_e4, c65_op_e5, c65_op_e6, c65_illegal
+    .word c65_op_e8, c65_op_e9, c65_op_ea, c65_illegal
+    .word c65_op_ec, c65_op_ed, c65_op_ee, c65_illegal
+    .word c65_op_f0, c65_op_f1, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_f5, c65_op_f6, c65_illegal
+    .word c65_op_f8, c65_op_f9, c65_illegal, c65_illegal
+    .word c65_illegal, c65_op_fd, c65_op_fe, c65_illegal
+  EndASM
+EndProcedure

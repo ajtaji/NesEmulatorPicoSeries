@@ -119,6 +119,9 @@ XIncludeFile "../anvil/mapper69_audio.pmi"
 XIncludeFile "../anvil/mapper9_video.pmi"
 XIncludeFile "../anvil/mapper_adapters.pmi"
 XIncludeFile "../anvil/worker.pmi"
+CompilerIf #NES_CPU_TRACE
+  XIncludeFile "cputrace.n64"
+CompilerEndIf
 XIncludeFile "../anvil/mapper_konami_namco.pmi"
 XIncludeFile "../anvil/lookup_tables.pmi"
 XIncludeFile "region.pmi"

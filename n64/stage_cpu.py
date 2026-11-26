@@ -49,6 +49,44 @@ def cache_window_registers(source: str) -> str:
     return head + signature + declarations + body
 
 
+def stage_cpu_asm(source: str) -> str:
+    """The runtime-MMC3 build: CpuRun is the assembly core in cpu6502.n64.
+
+    The compiled interpreter's CpuRun (every opcode handler) leaves the build;
+    its globals, the status procedures and the MMC3 interrupt entry stay.
+    """
+    signature = "Procedure.i CpuRun(n.i)\n"
+    head, found, body = source.partition(signature)
+    end = "\nEndProcedure"
+    if not found or body.count(end) != 1:
+        raise ValueError("2A03 CpuRun is no longer the last procedure of the shared core")
+    tail = body[body.index(end) + len(end):]
+    source = head + 'XIncludeFile "../n64/cpu6502.n64"\n' + tail
+    source = source.replace("Global Dim Dispatch.Label(256)\n", "")
+    source, count = re.subn(r"^Procedure\.i CpuInterrupt\(vector\.i\)\n.*?^EndProcedure",
+                            'XIncludeFile "../n64/mmc3_cpu_interrupt.n64"', source, flags=re.M | re.S)
+    if count != 1:
+        raise ValueError("2A03 interrupt entry changed")
+    return "Declare CpuEndWindow()\nDeclare.i NesMmc3IrqPending()\n" + source
+
+
+def trace_reference(source: str) -> str:
+    """The checking build of the reference core: fold the state after every instruction.
+
+    The calls preserve every register of the threaded span and add no state.
+    """
+    for label in ("nes_thread_check:\n", "nes_thread_end:\n"):
+        if source.count(label) != 1:
+            raise ValueError(f"reference core label {label.strip()} changed")
+        source = source.replace(label, label + "    jal nescputracestep\n    nop\n")
+    count = "  NesInstructions = NesInstructions + 1\n"
+    macro = "Macro CpuNextOp(c)\n  CpuTick(c)\n" + count
+    if source.count(macro) != 1:
+        raise ValueError("reference CpuNextOp changed")
+    source = source.replace(macro, macro + "  NesCpuTraceGlobals()\n")
+    return "Declare NesCpuTraceGlobals()\n" + source
+
+
 def stage_cpu(source: str, mapper: int, program: bytes = b"", has_waits: bool = False, chain_nrom: bool = False, mmc1_20k: bool = False, runtime: bool = False) -> str:
     # Keep the opcode bodies and the set of legal opcodes in the guest core.
     # Forge has no .Label or computed Goto lowering on VR4300.
