@@ -37,6 +37,18 @@ ppu_band_oam:
     ; gets index #NES_U_BANDMAX and its close counts it lost). In: s6 = NesUnitData. Out:
     ; U_BANDOAM. Clobbers t0-t3, t8, t9, v0, v1. OAM is 8-byte aligned (NesUnitPlace refuses
     ; a build where it is not).
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; N5: a band that will not be recorded (32 records used, or - below - no snapshot free) is drawn line by line
+      ; by the old renderer (U_LIVEBAND: every line of it a fallback line); the close clears it.
+      ld t0, #NES_U_BANDCOUNT(s6)
+      sltiu t0, t0, #NES_U_BANDMAX
+      xori t0, t0, 1
+      sd t0, #NES_U_LIVEBAND(s6)
+    EndASM
+  CompilerEndIf
+  ASM
     ld t0, #NES_U_OAMSNAPS(s6)
     la t1, global_nesoambase
     ld t1, 0(t1)                    ; t1 = the snapshots
@@ -76,6 +88,14 @@ ppu_oam_copy:
     sd t0, #NES_U_OAMSNAPS(s6)
 ppu_oam_none:
     addiu t3, zero, #NES_U_BANDMAX
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      addiu t0, zero, 1
+      sd t0, #NES_U_LIVEBAND(s6)    ; N5: no snapshot: the band is drawn by the old renderer
+    EndASM
+  CompilerEndIf
+  ASM
     jr ra
     sd t3, #NES_U_BANDOAM(s6)
 
@@ -195,6 +215,87 @@ ppu_s0_store:
     sd t0, #NES_U_S0X(s6)
     b ppu_line_sprites
     nop
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+ppu_live_empty:
+      ; N5: a line with no sprite in a band that cannot be recorded - a fallback slot, the sprite row cleared.
+      jal nesfbslot                 ; U_LIVE and NesLineRow (or no slot free: none) - clobbers t0-t3, v0
+      nop
+      ld t0, #NES_U_LIVE(s6)
+      beqz t0, ppu_adv_draw
+      nop
+      jal ppuclearsprites
+      nop
+      b ppu_adv_draw
+      nop
+ppu_live_sprites:
+      ; N5: a line with sprites (a1 their count 1-8, a2 PPUMASK, s1 the line; a1 / a2 kept for the draw). A
+      ; fallback line when its band cannot be recorded, or when the priority quirk can show: a behind-background
+      ; sprite i and a front sprite j > i in the roster (CachedSprite: OAM indices in OAM order) whose 8-pixel x
+      ; ranges overlap. (The twin's test is per pixel; this one is a superset of it, from the roster alone - the
+      ; old renderer's pixels are right on any line, so a line taken needlessly costs time, never a pixel.) Uses
+      ; t0-t3, t8, t9, v0, v1.
+      ld t0, #NES_U_LIVEBAND(s6)
+      bnez t0, ppu_live_on
+      sltiu t0, a1, 2
+      bnez t0, ppu_adv_draw         ; one sprite: no pair
+      andi t0, a2, 16
+      beqz t0, ppu_adv_draw         ; sprites hidden: none drawn
+      sll t0, s1, 3
+      la t1, global_cachedsprite
+      daddu t1, t1, t0              ; t1 = sprite i's roster slot
+      daddu t2, t1, a1              ; t2 = the roster's end
+      la t3, global_oam
+ppu_quirk_i:
+      lbu t0, 0(t1)
+      sll t0, t0, 2
+      daddu t0, t0, t3              ; sprite i's OAM entry
+      lbu t8, 2(t0)
+      andi t8, t8, 32
+      beqz t8, ppu_quirk_inext      ; i in front of the background: it cannot hide a front sprite wrongly
+      nop
+      lbu t8, 3(t0)                 ; t8 = X of i
+      daddiu v0, t1, 1              ; v0 = sprite j's roster slot, j > i
+ppu_quirk_j:
+      beq v0, t2, ppu_quirk_inext
+      nop
+      lbu t9, 0(v0)
+      sll t9, t9, 2
+      daddu t9, t9, t3              ; sprite j's OAM entry
+      lbu v1, 2(t9)
+      andi v1, v1, 32
+      bnez v1, ppu_quirk_jnext      ; j behind as well
+      nop
+      lbu v1, 3(t9)                 ; X of j
+      subu v1, v1, t8
+      addiu v1, v1, 7
+      sltiu v1, v1, 15              ; -8 < X j - X i < 8: the ranges overlap
+      bnez v1, ppu_live_on
+      nop
+ppu_quirk_jnext:
+      b ppu_quirk_j
+      daddiu v0, v0, 1
+ppu_quirk_inext:
+      daddiu t1, t1, 1
+      daddiu t0, t2, -1
+      bne t1, t0, ppu_quirk_i       ; i = 0 .. count - 2
+      nop
+      b ppu_adv_draw
+      nop
+ppu_live_on:
+      jal nesfbslot                 ; a fallback slot (or none free: the frame is not shown, show.n64)
+      nop
+      ld t0, #NES_U_LIVE(s6)
+      beqz t0, ppu_adv_draw
+      nop
+      jal nesmmc3drawsprites        ; the old renderer's sprite row of the line (a0 line, a1 count, a2 mask)
+      move a0, s1
+      b ppu_adv_draw
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
 ppu_hit_first:
     srl a3, t8, 3
     sll a3, a3, 3                   ; a3 = the first span holding sprite 0
@@ -303,6 +404,24 @@ ppu_cut_split:
     sllv v1, v1, t2
     or t9, t9, v1
     sb t9, #NES_U_SPLIT(t8)         ; U_SPLIT bit (line): a fallback line
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ; N5: the line's first cut. Before the write is applied (the band's inputs still in force) the old renderer
+      ; draws the line's sprite row and its spans [0, dot) into a fallback slot (show.n64, NesFbCatchUp); the
+      ; line's later draws go on into that slot. Every register is kept (v0, t3 included).
+      ld t8, #NES_U_LIVE(v0)
+      bnez t8, ppu_cut_close        ; a fallback line already
+      nop
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal nesfbcatchupcall
+      nop
+      ld ra, 0(sp)
+      daddiu sp, sp, 16
+    EndASM
+  CompilerEndIf
+  ASM
 ppu_cut_close:
     ; The open band ends before line t3: its record (the band log, nes.n64). Every input is read
     ; at the close, BEFORE the change that cut it is applied, so it is the value the band's lines
@@ -312,6 +431,13 @@ ppu_cut_close:
     beqz t8, ppu_cut_done
     ld t9, #NES_U_BANDFIRST(v0)
     sd zero, #NES_U_BANDOPEN(v0)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      sd zero, #NES_U_LIVEBAND(v0)  ; N5: the band ends; the next one decides again at its open
+    EndASM
+  CompilerEndIf
+  ASM
     sltu t8, t9, t3
     beqz t8, ppu_cut_done           ; no complete line in it: no record
     ld t8, #NES_U_BANDOAM(v0)
@@ -379,12 +505,18 @@ ppu_cut_close:
     sd t9, #NES_B_PAL+16(t2)
     ld t9, 24(v1)
   EndASM
-  CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK Or #NES_WB_MEASURE
+  CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK Or #NES_WB_MEASURE Or #NES_RDP_SHOW
     ASM
       sd t9, #NES_B_PAL+24(t2)
       daddiu sp, sp, -16
       sd ra, 0(sp)
     EndASM
+    CompilerIf #NES_RDP_SHOW
+      ASM
+        jal nesshowbandcall         ; N5: the band's inputs copied / written back, its RSP job queued (show.n64)
+        nop
+      EndASM
+    CompilerEndIf
     CompilerIf #NES_WB_MEASURE
       ASM
         jal nesbandwriteback        ; Nt, the record and its OAM snapshot to RDRAM (rspband.n64)

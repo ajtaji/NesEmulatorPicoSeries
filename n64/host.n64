@@ -154,6 +154,7 @@ Procedure HostInputPoll()
   CompilerEndIf
 EndProcedure
 
+CompilerIf #NES_RDP_SHOW=0
 Procedure HostPresent(waitMode.i)
   Protected seen.i, fb.i
   If HostPendingVideo=0 : ProcedureReturn : EndIf
@@ -173,27 +174,47 @@ Procedure HostPresent(waitMode.i)
     HostQueueAudio(ApuProduced)
   ForEver
 EndProcedure
+CompilerEndIf
 
+CompilerIf #NES_RDP_SHOW
+  Declare NesShowPoll(wait.i)
+CompilerEndIf
+CompilerIf #NES_SHOW_CHECK And #NES_RDP_SHOW=0
+  Declare NesShowHashRef()
+CompilerEndIf
 Procedure DisplayWaitLine(line.i)
   CompilerIf #VERIFY_INPUT=0
     ; Start the transfer before the guest's usual vblank strobe.
     If line=224 : HostRequestPads() : EndIf
   CompilerEndIf
   HostAudioPoll()
-  If line=0
-    HostPresent(1)
-    ; The previous RDP transfer must release the indexed pixels before reuse.
-    While LpmRdpFramesDone()<NesIndexTicket : Wend
-  EndIf
+  CompilerIf #NES_RDP_SHOW
+    ; A check point of the show's hand-over (show.n64). At line 0 the frame before is handed with a buffer waited
+    ; for, as HostPresent(1) did (unless the sound reserve runs low: then it is not shown, HostCoalesced).
+    ; The checking build never leaves a frame unshown for the sound (it runs slower than the console: #NES_SHOW_CHECK).
+    If line=0 : NesShowPoll(1+#NES_SHOW_CHECK) : Else : NesShowPoll(0) : EndIf
+  CompilerElse
+    If line=0
+      HostPresent(1)
+      ; The previous RDP transfer must release the indexed pixels before reuse.
+      While LpmRdpFramesDone()<NesIndexTicket : Wend
+    EndIf
+  CompilerEndIf
 EndProcedure
 
 Procedure DisplayFrame()
   HostAudioPoll()
-  HostPendingVideo=1
-  CompilerIf #VERIFY_FRAME>0
+  CompilerIf #NES_RDP_SHOW
+    ; The frame's picture is handed at line 240, after its last band (show.n64, NesShowFrameEnd).
+  CompilerElseIf #VERIFY_FRAME>0
+    CompilerIf #NES_SHOW_CHECK
+      NesShowHashRef()                  ; the reference: the old renderer's picture of this frame (show.n64)
+    CompilerEndIf
+    HostPendingVideo=1
     ; A screenshot checkpoint must present its requested guest frame.
     If WorkerFrames+1=#VERIFY_FRAME : HostPresent(2) : Else : HostPresent(0) : EndIf
   CompilerElse
+    HostPendingVideo=1
     HostPresent(0)
   CompilerEndIf
   CompilerIf #VERIFY_INPUT
@@ -215,8 +236,8 @@ Procedure.i HostBegin()
     LpmDisplayFpsLimit(5000)
   CompilerEndIf
   LpmRdpInit()
-  CompilerIf #NES_RSP_CHECK
-    LpmRspqInit()                       ; the RSP band emitter's checking build (rspband.n64)
+  CompilerIf #NES_RSP_CHECK Or #NES_RDP_SHOW
+    LpmRspqInit()                       ; the RSP band emitter (rspband.n64rsp; show.n64, rspband.n64)
   CompilerEndIf
   LpmInterruptsOn()
   LpmPadScan()

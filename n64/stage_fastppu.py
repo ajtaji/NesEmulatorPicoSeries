@@ -299,7 +299,8 @@ CompilerElse
                             "    If (previous!value)&$E1 : PpuColours() : EndIf")
     # Sprite priority is resolved before that row's indexed pixels go to RDP.
     # Leave room to use a whole cache-line-aligned 256-byte row.
-    source = source.replace("LinePixels.a(256)", "LinePixels.a(61455)")
+    # (#NES_LINE_BYTES, game.pmi: 61,455 for a whole frame; the N5 build keeps only its fallback lines' slots.)
+    source = source.replace("LinePixels.a(256)", "LinePixels.a(#NES_LINE_BYTES)")
     # The shared lookup is RGB565; VI and the texture palette use RGBA5551.
     source = replace_procedure(source, "PpuRgbLineRaw", "")
     source = replace_procedure(source, "PpuColours", "Declare PpuColours()")

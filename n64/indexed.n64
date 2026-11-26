@@ -1,3 +1,17 @@
+CompilerIf #NES_RDP_SHOW
+; N5 (design note N.22): the RSP band emitter's picture is shown (show.n64); the old renderer draws only the
+; fallback lines, into their slots, and show.n64's NesFbPublish publishes them. No frame-sized CI8 image, no blit.
+XIncludeFile "ppu_palette.n64"
+CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  Global NesReusedIndexRow.i            ; (NesReuseLine's, mappedrows.n64; that routine is not called in N5)
+CompilerEndIf
+ProcedureNaked PpuRgbLineRaw()          ; (declared by ppu.n64; nothing calls it in N5)
+  ASM
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerElse
 ; The guest PPU writes one indexed frame in CPU cache. Keep the effective
 ; RGBA5551 palette at each scanline where it changes. The RDP expands CI8
 ; strips into the VI back buffer after the last visible scanline.
@@ -151,3 +165,4 @@ Procedure NesIndexedShow(fb.i)
   If NesDisplayBlock : LpmRdpBlockRun(NesDisplayBlock) : Else : NesIndexCommands() : EndIf
   LpmRdpDetachShow(fb) : NesIndexTicket=lpm_rdp_frames_sent
 EndProcedure
+CompilerEndIf

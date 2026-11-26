@@ -13,11 +13,11 @@ Global Dim NesChrPairs.a(#CART_CHR_BANKS*16384+16)
 Global NesChrPairBase.i                 ; KSEG1 address of the 16-byte-aligned pairs
 Global NesChrPairLimit.i                ; the decoded bytes the pairs follow (0 until NesChrPairsInit: no pair written)
 Global Dim NesPairSpread.u(256)         ; 4 decoded pixels (8 bits) -> 2 CI4 bytes, the first pixel in the top nibble
-; THE EMPTY-ROW TABLE (the RSP band emitter's, design note N.18; the RSP checking build only until N5): one byte a
+; THE EMPTY-ROW TABLE (the RSP band emitter's, design note N.18; the RSP checking build and, from N5, the shipped build): one byte a
 ; tile, bit r set when row r has a pixel other than 0 - the twin's empty test ("the decoded halfword is not 0") as
 ; data the RSP can DMA, 64 bytes a 1 KB bank. Written UNCACHED, beside the pairs and at the same moments: every tile
 ; at NesChrPairsInit (NesChrMaskInit), the written row's tile at every CHR-RAM row write (NesChrPairAt).
-CompilerIf #NES_RSP_CHECK
+CompilerIf #NES_RSP_CHECK Or #NES_RDP_SHOW
   Global Dim NesChrMask.a(#CART_CHR_BANKS*512+16)
   Global NesChrMaskBase.i               ; KSEG1 address of the 16-byte-aligned table
 CompilerEndIf
@@ -32,6 +32,31 @@ CompilerEndIf
 ; CHECKED: NesChrPairsCheck (its compiled twin NesChrPairWord over every row, in the fixed-input build) and the pairs
 ; dumped from the emulator against the decoded table, byte for byte.
 ProcedureNaked NesChrPairAt()
+  CompilerIf #NES_RDP_SHOW
+    ; N5 (show.n64, design note N.22): band jobs queued or words handed that the RDP has not drawn name the pairs
+    ; and the empty-row bytes about to change - the show is drained first (every register kept).
+    ASM
+      la t9, global_nesshowbusy
+      ld t9, 0(t9)
+      beq t9, zero, nes_pair_at_free
+      nop
+      daddiu sp, sp, -16
+      sd ra, 0(sp)
+      jal nesshowdraincall
+      nop
+      ld ra, 0(sp)
+      daddiu sp, sp, 16
+nes_pair_at_free:
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_SHOW_CHECK And #NES_RDP_SHOW
+    ASM
+      mfc0 t9, $9                      ; Count at the row write's start (the measure: show.n64, NesShowChr)
+      nop
+      la t3, global_nesshowchr
+      sd t9, 0(t3)
+    EndASM
+  CompilerEndIf
   ASM
     la t9, global_decoded
     dsubu t1, t2, t9                 ; i, the decoded byte index
@@ -68,7 +93,7 @@ ProcedureNaked NesChrPairAt()
     daddu t3, t3, t8
     sw v0, 0(t3)                     ; uncached: in RDRAM for the RDP at once
   EndASM
-  CompilerIf #NES_RSP_CHECK
+  CompilerIf #NES_RSP_CHECK Or #NES_RDP_SHOW
     ASM
       ; the tile's empty-row byte again, from its 8 decoded rows (cached, just written): bit r = row r not 0
       andi t3, t1, 15
@@ -108,6 +133,21 @@ ProcedureNaked NesChrPairAt()
       lw t8, 4(t8)                     ; the table's KSEG1 base
       daddu t3, t3, t8
       sb t9, 0(t3)                     ; uncached, for the RSP's DMA
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_SHOW_CHECK And #NES_RDP_SHOW
+    ASM
+      mfc0 t9, $9                      ; Count at the end: the row write's pair word and empty-row byte
+      nop
+      la t3, global_nesshowchr
+      ld t8, 0(t3)
+      subu t9, t9, t8
+      ld t8, 8(t3)
+      daddu t8, t8, t9
+      sd t8, 8(t3)                     ; [1] ticks summed
+      ld t8, 16(t3)
+      daddiu t8, t8, 1
+      sd t8, 16(t3)                    ; [2] row writes
     EndASM
   CompilerEndIf
   ASM
@@ -154,7 +194,7 @@ Procedure NesChrPairsCheck(n.i)         ; the assembly's words against the compi
 EndProcedure
 CompilerEndIf
 
-CompilerIf #NES_RSP_CHECK
+CompilerIf #NES_RSP_CHECK Or #NES_RDP_SHOW
 Procedure NesChrMaskInit()              ; every tile's empty-row byte (the table above), uncached
   Protected i.i, r.i, m.i
   LpmCacheWritebackInvalidateData(@NesChrMask(0), #CART_CHR_BANKS*512+16)   ; no stale line may land on it later
@@ -180,7 +220,7 @@ Procedure NesChrPairsInit()             ; after the cartridge's decode: the spre
   n = CartChrBanks * 8192
   If n > #CART_CHR_BANKS * 8192 : n = #CART_CHR_BANKS * 8192 : EndIf
   NesChrPairLimit = n
-  CompilerIf #NES_RSP_CHECK
+  CompilerIf #NES_RSP_CHECK Or #NES_RDP_SHOW
     NesChrMaskInit()                    ; before the rows' pair words: NesChrPairAt keeps it from here on
   CompilerEndIf
   For i = 0 To n - 2 Step 2 : NesChrPairCall(@Decoded(0) + i) : Next

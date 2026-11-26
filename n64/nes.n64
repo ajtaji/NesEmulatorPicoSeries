@@ -69,11 +69,20 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   #NES_U_BANDOAM = 96
   #NES_U_OAMSNAPS = 104
   #NES_U_BANDMAX = 32
+  ; N5 (show.n64, design note N.22): U_LINEV v at the line's dot 0; U_LIVE the fallback slot the line is drawn into
+  ; by the old renderer (0: not a fallback line); U_LIVEBAND 1 while the open band cannot be recorded.
+  #NES_U_LINEV = 112
+  #NES_U_LIVE = 120
+  #NES_U_LIVEBAND = 128
   ; NesUnitData is not a declared array: its #NES_UNIT_BYTES are a window into NesUnitSpace, chosen
   ; at load (NesUnitPlace) so that its D-cache sets (8 KB, 16-byte lines, 512 sets) are clear of
   ; guest RAM's and of the host stack's working top. Where the compiler places arrays is not the
   ; program's to choose; which bytes of these 8 KB it uses is. NesUnitBase holds the address.
-  #NES_UNIT_BYTES = 112
+  CompilerIf #NES_RDP_SHOW
+    #NES_UNIT_BYTES = 144
+  CompilerElse
+    #NES_UNIT_BYTES = 112
+  CompilerEndIf
   Global Dim NesUnitSpace.a(8192+#NES_UNIT_BYTES+16)
   Global Dim NesUnitSets.a(512)
   Global NesUnitBase.i
@@ -355,6 +364,9 @@ Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
   CompilerIf #NES_RSP_CHECK
     If NesRspHalt : LpmDebugPrint("NES RSP CHECK STOPPED AT FRAME "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
   CompilerEndIf
+  CompilerIf #NES_RDP_SHOW
+    NesShowPoll(0)                      ; a check point of the show's hand-over (show.n64)
+  CompilerEndIf
   CompilerIf #VERIFY_FRAME>0
     If lastFrame=#VERIFY_FRAME : HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
   CompilerEndIf
@@ -364,6 +376,7 @@ EndProcedure
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   XIncludeFile "twin.n64"
   XIncludeFile "rspband.n64"
+  XIncludeFile "show.n64"
   XIncludeFile "mmc3_run.n64"
 CompilerEndIf
 
@@ -390,6 +403,9 @@ Procedure RunGame()
   CompilerIf #NES_RSP_CHECK
     NesRspInit()
   CompilerEndIf
+  CompilerIf #NES_RDP_SHOW
+    If NesShowInit()=0 : ProcedureReturn : EndIf
+  CompilerEndIf
   CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=0
     NesRuntimeIndexNromWaits()
   CompilerElseIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
@@ -411,6 +427,9 @@ Procedure RunGame()
     CompilerEndIf
     CompilerIf #NES_RSP_CHECK
       NesRspReport()
+    CompilerEndIf
+    CompilerIf #NES_RDP_SHOW And #VERIFY_FRAME>0
+      NesShowReport()
     CompilerEndIf
     If i : ProcedureReturn : EndIf
   CompilerElse
@@ -453,6 +472,9 @@ Procedure RunGame()
     Wend
   CompilerEndIf
   LpmDebugPrint("NES STOP "+Str(BadOpcode)+" PC "+Str(PC)+" WORKER "+Str(WorkerError))
+  CompilerIf #NES_RDP_SHOW And #VERIFY_FRAME=0
+    NesShowStopped()                    ; the console mark: the whole screen red (show.n64)
+  CompilerEndIf
 EndProcedure
 RunGame()
 Repeat : ForEver

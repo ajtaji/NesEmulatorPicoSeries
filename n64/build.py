@@ -179,6 +179,14 @@ def build(args, *, controller_trace=()):
         raise ValueError("the A12 check is a runtime-MMC3 verification build")
     if cpu_trace and not (runtime and cart.mapper == 4 and args.check_frame):
         raise ValueError("the CPU trace is a runtime-MMC3 verification build")
+    # N5 (design note, N.22): the runtime-MMC3 cartridge shows the RSP band emitter's picture. The old per-pixel
+    # renderer and its CI8 blit stay for the builds that compare against them, and as --old-show (the reference).
+    old_show = getattr(args, "old_show", False)
+    show_check = getattr(args, "show_check", False)
+    rdp_show = (runtime and cart.mapper == 4 and not old_show
+                and not (twin_check or rsp_check or ppu_check or wb_measure))
+    if show_check and not (runtime and cart.mapper == 4 and args.check_frame) or old_show and not (runtime and cart.mapper == 4):
+        raise ValueError("the show check and the old show are runtime-MMC3 builds (the check a verification build)")
     settings = {
         "NES_CPU_TRACE": int(cpu_trace),
         "NES_A12_CHECK": int(a12_check),
@@ -186,6 +194,10 @@ def build(args, *, controller_trace=()):
         "NES_TWIN_CHECK": int(twin_check or rsp_check),
         "NES_WB_MEASURE": int(wb_measure),
         "NES_RSP_CHECK": int(rsp_check),
+        "NES_RDP_SHOW": int(rdp_show),
+        "NES_SHOW_CHECK": int(show_check),
+        # the CI8 rows: a whole frame (240 x 256) for the old renderer, the fallback lines' ring (240 rows) for N5
+        "NES_LINE_BYTES": 240 * 256 + 255 if rdp_show else 61455,
         "NES_CPU_ASM": int(cpu_core == "asm"),
         "NES_HW_TELEMETRY": int(telemetry),
         "NES_RUNTIME_ROM": int(runtime),
@@ -339,6 +351,12 @@ if __name__ == "__main__":
     parser.add_argument("--wb-measure", action="store_true",
                         help="measuring build: the Count register around the band cut's write-back of the name tables, "
                              "the record and its OAM snapshot (needs --check-frame)")
+    parser.add_argument("--old-show", action="store_true",
+                        help="the runtime-MMC3 cartridge with the old per-pixel renderer and its CI8 blit shown (the "
+                             "reference of the show check) instead of the RSP band emitter's picture")
+    parser.add_argument("--show-check", action="store_true",
+                        help="checking build: every frame finished at its end and its shown picture hashed (with "
+                             "--old-show: the old renderer's picture of the frame, the reference) (needs --check-frame)")
     try:
         args = parser.parse_args()
         if args.check_frame < 0:

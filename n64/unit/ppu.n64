@@ -168,8 +168,20 @@ ppu_line_cached:
     sd a1, 0(t0)
     bnez a1, ppu_line_count
     sd zero, #NES_U_S0ROW(s6)       ; no sprite-0 pixels unless found below
-    jal ppuclearsprites             ; an empty line: the renderer clears its sprite row
-    nop
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ld t0, #NES_U_LIVEBAND(s6)    ; N5: an empty line is drawn by the renderer only in a band that cannot
+      bnez t0, ppu_live_empty       ; be recorded (cold part: a fallback slot, the sprite row cleared)
+      nop
+    EndASM
+  CompilerElse
+    ASM
+      jal ppuclearsprites           ; an empty line: the renderer clears its sprite row
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
     b ppu_adv_draw
     nop
 ppu_line_count:
@@ -207,9 +219,18 @@ ppu_line_roster:
     b ppu_s0_row                    ; sprite 0's row (cold part)
     nop
 ppu_line_sprites:
-    jal nesmmc3drawsprites          ; the renderer draws the line's sprites (a1 count, a2 mask)
-    move a0, s1
   EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      b ppu_live_sprites            ; N5: is it a fallback line? (cold part: the band, the priority quirk; only
+      nop                           ; a fallback line's sprite row is drawn)
+    EndASM
+  CompilerElse
+    ASM
+      jal nesmmc3drawsprites        ; the renderer draws the line's sprites (a1 count, a2 mask)
+      move a0, s1
+    EndASM
+  CompilerEndIf
   CompilerIf #NES_PPU_CHECK
     ASM
       jal ppu_check_s0row
@@ -227,8 +248,23 @@ ppu_adv_draw_call:
     move s5, a0
     ld s7, global_ppuv-global_ppuline(s4)       ; v: the tile of the next span to consume
     ld t0, global_ppustatus-global_ppuline(s4)
-    jal nesreuseline                ; the renderer draws spans ceil8(dot) .. a0
-    sd t0, #NES_U_DRAWST(s6)        ; the status before the draw
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ld t1, #NES_U_LIVE(s6)        ; N5: the renderer draws only a fallback line (into its slot), never
+      beqz t1, ppu_draw_none        ; reusing a retained row (a slot holds another line every frame)
+      sd t0, #NES_U_DRAWST(s6)      ; the status before the draw
+      jal nesrenderto               ; spans ceil8(dot) .. a0
+      nop
+ppu_draw_none:
+    EndASM
+  CompilerElse
+    ASM
+      jal nesreuseline              ; the renderer draws spans ceil8(dot) .. a0
+      sd t0, #NES_U_DRAWST(s6)      ; the status before the draw
+    EndASM
+  CompilerEndIf
+  ASM
     addiu t0, s2, 7
     srl t0, t0, 3
     addiu t1, s5, 7
@@ -278,8 +314,23 @@ ppu_draw_store:
     jal u_ppuincy                   ; dot 256: the next fine / coarse Y
     nop
 ppu_adv_publish:
-    jal ppurgblineraw               ; the renderer publishes the line
-    nop
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      ld t0, #NES_U_LIVE(s6)        ; N5: only a fallback line is published (its slot's row and palette)
+      beqz t0, ppu_adv_published
+      nop
+      jal nesfbpublish
+      nop
+ppu_adv_published:
+    EndASM
+  CompilerElse
+    ASM
+      jal ppurgblineraw             ; the renderer publishes the line
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
     addiu t0, zero, 239
     bne s1, t0, ppu_adv_hblank
     nop
@@ -412,6 +463,12 @@ ppu_adv_next_line:
       nop
     EndASM
   CompilerEndIf
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      jal nesshowframeend           ; N5: the frame's hand-over begins (show.n64)
+      nop
+    EndASM
+  CompilerEndIf
   ASM
 ppu_adv_line_count:
     ld t0, global_ppulinecount-global_ppuline(s4)
@@ -504,15 +561,31 @@ u_ppubeginline:
     ld a0, 8(sp)
     daddiu sp, sp, 16
 ppu_begin_row:
-    la t0, global_linepixels        ; the renderer's row for this line
-    addiu t0, t0, 15
-    srl t0, t0, 4
-    sll t0, t0, 4
-    sll a0, a0, 8
-    addu t0, t0, a0
-    la t1, global_neslinerow
-    jr ra
-    sd t0, 0(t1)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      la t0, global_ppuv            ; N5: v at the line's dot 0 (a split line's first spans are drawn from it
+      ld t1, 0(t0)                  ; at the cut), and no fallback slot yet
+      la t0, global_nesunitbase
+      ld t0, 0(t0)
+      sd t1, #NES_U_LINEV(t0)
+      jr ra
+      sd zero, #NES_U_LIVE(t0)
+    EndASM
+  CompilerElse
+    ASM
+      la t0, global_linepixels      ; the renderer's row for this line
+      addiu t0, t0, 15
+      srl t0, t0, 4
+      sll t0, t0, 4
+      sll a0, a0, 8
+      addu t0, t0, a0
+      la t1, global_neslinerow
+      jr ra
+      sd t0, 0(t1)
+    EndASM
+  CompilerEndIf
+  ASM
 
 u_ppuincy:
     la t0, global_ppuv

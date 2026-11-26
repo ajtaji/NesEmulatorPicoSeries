@@ -1,0 +1,802 @@
+; show.n64 - N5: THE RSP BAND EMITTER'S PICTURE IS THE SHOWN ONE (design note, section N.22).
+;
+; The PPU state machine (unit/ppu.n64) cuts the picture into bands and writes a record for each at its close
+; (unit/ppu_cold.n64, ppu_cut_close). Here, at every close: the band's inputs are made safe for the RSP's DMA (the
+; name tables COPIED into a band-input slot - the guest may write them before the job runs, and a dirty cache line
+; can reach RDRAM by any eviction - the record and its OAM snapshot written back) and the band's job queued for the
+; RSP program rspband.n64rsp (unchanged from the checking build: one NES_RSP_SETUP naming this band's slot and this
+; frame's areas, one NES_RSP_BAND, one fence). The RDP is handed the frame's words, the fallback lines and the
+; SYNC_FULL that shows the picture once the frame's last band job is done, at the next check point (no loop): line
+; 240 (NesShowFrameEnd), every 16 visible lines (DisplayWaitLine, host.n64), the frame's wrap (NesHostGuestFrame).
+;
+; WHAT IS KEPT PER FRAME, IN TWO SETS (the show's frame parity, NesShowCur): the RSP's frame area (4,096 doublewords
+; and its status), its TLUT blocks (32 x 256), its fallback lines' table. The fallback rows (CI8, 256 bytes, in LinePixels,
+; each with a 64-byte palette) are a ring of 240 shared by the frames, a row reused once its frame is drawn. The RDP draws frame N while frame N+1 is emulated; frame N+2 takes N's set only once N is drawn
+; (NesShowFrameEnd's guard).
+;   set 0's area: #NES_CART_LOW_END (+0 the words, +$8000 the status); both TLUT sets at +$8100; the program's copy
+;   at +$C100 (the 64 KB to the library's crash display is free in its map). Set 1's area, the four band-input
+;   slots, the fallback palettes: below the stack (NesShowArea1, NesShowNtSpace, NesFbPalSpace).
+;
+; THE FALLBACK LINES (the lines the bands cannot draw): split lines (a cut at dots 1-255: NesFbCatchUp), the lines
+; of a band that cannot be recorded, and the lines where the sprite-priority quirk can show (both decided at the
+; line's start, ppu_live_sprites / ppu_live_empty in the cold part). The old renderer's own assembly draws each into
+; a slot (NesFbSlot), NesFbPublish writes the row and the line's palette back at its dot 256, and the frame's list
+; (NesShowFallback) copies the slots into the picture after the last band, as the old blit drew each line.
+;
+; THE CHECKING BUILD (#NES_SHOW_CHECK, --show-check): every frame is finished at its end, the RDP waited for, and
+; the shown picture's 256 x 240 pixels hashed (NesShowHashFb), printed "NES PIC frame hash fallback-lines". With
+; --old-show the same hash is taken of the old renderer's picture (NesShowHashRef: the CI8 rows and the per-line
+; palettes, the pixel the old blit writes) at line 239: the reference.
+XIncludeFile "rspband_ids.pmi"
+
+CompilerIf #NES_RDP_SHOW
+ASM
+  .rspfile "rspband.n64rsp"
+EndASM
+
+#NES_SHOW_WORDS = 4096                  ; a frame area's doublewords (the program's limit; the status after them)
+#NES_SHOW_TLUT_AT = $8100               ; the two TLUT sets, 8 KB each, from #NES_CART_LOW_END
+#NES_SHOW_PROG_AT = $C100               ; the program's copy (its file + 128 bytes)
+#NES_FB_ROWS = 240                      ; the fallback rows' ring: a frame needs at most one a line
+
+Global Dim NesShowArea1Space.a(#NES_SHOW_WORDS*8+16+16)
+Global Dim NesShowNtSpace.a(4*8192+8192)  ; four 4 KB slots, each on Nt's D-cache sets (8 KB apart)
+Global Dim NesFbPalSpace.u(#NES_FB_ROWS*32+8)  ; a row's palette, 64 bytes
+Global Dim NesFbLine.i(2*#NES_FB_ROWS)   ; each set's fallback lines, in order
+Global Dim NesShowOamKeep.a(256+8)
+
+Global NesShowProg.i, NesShowCur.i, NesShowBusy.i, NesShowNtBase.i, NesShowNtNext.i
+Global Dim NesShowArea.i(2)             ; KSEG1: the frame areas
+Global Dim NesShowTlut.i(2)             ; KSEG1: the TLUT sets
+Global Dim NesShowBands.i(2)            ; band jobs queued (the RSP's band index of the next)
+Global Dim NesShowFence.i(2)            ; the fence after the last of them
+Global Dim NesShowEnded.i(2)            ; the frame's line 240 has passed
+Global Dim NesShowDone.i(2)             ; handed (or not shown, counted)
+Global Dim NesShowFb.i(2)               ; the buffer it is drawn into, once attached
+Global Dim NesShowShown.i(2)            ; the buffer it was shown in (0: not shown)
+Global Dim NesShowTicket.i(2)           ; lpm_rdp_frames_sent after its SYNC_FULL
+Global Dim NesShowFrameNo.i(2)          ; WorkerFrames at its line 240
+Global Dim NesFbCountP.i(2)
+Global Dim NesFbOverP.i(2)
+Global Dim NesFbFirstP.i(2)              ; its first row in the ring
+Global Dim NesShowNtFence.i(4)          ; the band-input slots' last jobs
+Global Dim NesShowRecFence.i(#NES_U_BANDMAX)   ; each record's last job
+; the current frame's fallback slots, as the unit's assembly reads them (NesFbSlot, NesFbPublish)
+Global NesFbFirst.i, NesFbGuard.i, NesFbHead.i
+Global NesFbN.i, NesFbOver.i, NesFbRowBase.i, NesFbPalBase.i, NesFbLineBase.i, NesFbRows.i, NesFbPals.i
+; statistics (NesShowReport): [0] frames shown [1] not shown (words or slots over) [2] shown over (after a drain)
+; [3] waits for a record or slot [4] drains [5] fallback lines [6] most in a frame [7] split lines [8] lost bands
+; [9] band-close ticks (Count) [10] bands [11] most ticks a band [12] RSP clocks [13] most a frame [14] coalesced
+Global Dim NesShowStat.i(16)
+CompilerIf #NES_SHOW_CHECK
+  Global NesShowHash.i
+  Global Dim NesShowChr.i(3)            ; a CHR-RAM row write's pair word and empty-row byte: start, ticks, writes
+CompilerEndIf
+
+; ---- the unit's assembly ways in (cold paths) ----
+
+; NesFbSlot - the current line becomes a fallback line: the next row of the ring (#NES_FB_ROWS rows of 256 bytes,
+; LinePixels, each with a 64-byte palette). IN: nothing (PpuLine, NesUnitBase). OUT: U_LIVE = the row (KSEG0,
+; 256-aligned) and NesLineRow = it (the old renderer draws there), the line in the set's line table, NesFbN + 1.
+; The frame's rows follow the frame before's in the ring (NesFbFirst); that frame's rows are free once the RDP has
+; drawn it. NesFbGuard = its row count while that is not known: when this frame's next row would reach them, the
+; frame before is finished and waited for first (NesFbWaitCall - in practice never: a frame needs 240 - its
+; predecessor's rows for that). So no fallback line is ever left undrawn. CLOBBERS t0-t3, v0 only.
+ProcedureNaked NesFbSlot()
+  ASM
+    la t0, global_nesfbn
+    ld t1, 0(t0)                     ; n, this frame's rows so far
+    la t2, global_nesfbguard
+    ld t2, 0(t2)
+    beqz t2, nes_fb_slot_free
+    addiu t3, zero, #NES_FB_ROWS
+    subu t3, t3, t2
+    sltu t3, t1, t3
+    bnez t3, nes_fb_slot_free        ; n < rows - the frame before's: row n is free
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal nesfbwaitcall                ; the frame before drawn (every register kept), then NesFbGuard = 0
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la t0, global_nesfbn
+    ld t1, 0(t0)
+nes_fb_slot_free:
+    daddiu t2, t1, 1
+    sd t2, 0(t0)                     ; NesFbN + 1
+    la t0, global_nesfblinebase
+    ld t0, 0(t0)
+    dsll t2, t1, 3
+    daddu t0, t0, t2
+    la t3, global_ppuline
+    ld t3, 0(t3)
+    sd t3, 0(t0)                     ; the row's line
+    la t0, global_nesfbfirst
+    ld t0, 0(t0)
+    daddu t1, t1, t0                 ; the ring's row: (first + n) mod #NES_FB_ROWS
+    sltiu t2, t1, #NES_FB_ROWS
+    bnez t2, nes_fb_slot_row
+    nop
+    daddiu t1, t1, -#NES_FB_ROWS
+nes_fb_slot_row:
+    la t0, global_nesfbrowbase
+    ld t0, 0(t0)
+    dsll t2, t1, 8
+    daddu t0, t0, t2                 ; the row
+    la t3, global_neslinerow
+    sd t0, 0(t3)
+    la t3, global_nesunitbase
+    ld t3, 0(t3)
+    jr ra
+    sd t0, #NES_U_LIVE(t3)
+  EndASM
+EndProcedure
+; NesFbPublish - a fallback line's dot 256 (unit/ppu.n64, ppu_adv_publish): its slot's row (256 bytes, drawn
+; through the cache) written back, and RgbPal - the palette the old blit used for the line, captured by the old
+; publish at this same moment - copied into the slot's palette (64 bytes) and written back. CLOBBERS a0, t0-t3.
+ProcedureNaked NesFbPublish()
+  ASM
+    la t0, global_nesunitbase
+    ld t0, 0(t0)
+    ld a0, #NES_U_LIVE(t0)           ; the row
+    cache 0x19, 0(a0)                ; Hit_Writeback_D, its 16 lines
+    cache 0x19, 16(a0)
+    cache 0x19, 32(a0)
+    cache 0x19, 48(a0)
+    cache 0x19, 64(a0)
+    cache 0x19, 80(a0)
+    cache 0x19, 96(a0)
+    cache 0x19, 112(a0)
+    cache 0x19, 128(a0)
+    cache 0x19, 144(a0)
+    cache 0x19, 160(a0)
+    cache 0x19, 176(a0)
+    cache 0x19, 192(a0)
+    cache 0x19, 208(a0)
+    cache 0x19, 224(a0)
+    cache 0x19, 240(a0)
+    la t1, global_nesfbrowbase
+    ld t1, 0(t1)
+    dsubu t2, a0, t1
+    dsrl t2, t2, 2                   ; slot x 64
+    la t3, global_nesfbpalbase
+    ld t3, 0(t3)
+    daddu t3, t3, t2                 ; the slot's palette (16-byte aligned)
+    la t0, global_rgbpal
+    ld t1, 0(t0)
+    ld t2, 8(t0)
+    sd t1, 0(t3)
+    sd t2, 8(t3)
+    ld t1, 16(t0)
+    ld t2, 24(t0)
+    sd t1, 16(t3)
+    sd t2, 24(t3)
+    ld t1, 32(t0)
+    ld t2, 40(t0)
+    sd t1, 32(t3)
+    sd t2, 40(t3)
+    ld t1, 48(t0)
+    ld t2, 56(t0)
+    sd t1, 48(t3)
+    sd t2, 56(t3)
+    cache 0x19, 0(t3)
+    cache 0x19, 16(t3)
+    cache 0x19, 32(t3)
+    jr ra
+    cache 0x19, 48(t3)
+  EndASM
+EndProcedure
+
+; NesShowCopyNt(dst) - the 4 KB name and attribute image Nt into a band-input slot (dst, KSEG0, 16-byte aligned, on
+; the same D-cache sets as Nt: NesShowInit). A line at a time: its 16 bytes read (cached hits), the slot's line
+; created in the cache without a fill, written, and written back and invalidated - one block write to RDRAM a line
+; where uncached stores make two bus writes and stall on each (measured: 13,247 Count ticks a band with uncached
+; stores). The line created takes the set of the Nt line just read (a dirty one is written back first), so the copy
+; displaces only Nt - which the guest reaches through $2007 alone - never guest RAM or the stack. The slot is in
+; RDRAM and not in the cache when the loop ends. CLOBBERS a0, t0-t3.
+ProcedureNaked NesShowCopyNt(dst.i)
+  ASM
+    sll a0, a0, 0                    ; the address, sign-extended as the VR4300's 32-bit addressing wants
+    la t0, global_nt
+    daddiu t1, t0, 4096
+nes_show_nt_copy:
+    ld t2, 0(t0)                     ; 16 bytes of Nt (cached: a hit)
+    ld t3, 8(t0)
+    daddiu t0, t0, 16
+    cache 0x0D, 0(a0)                ; Create_Dirty_Exclusive_D: the slot's line, not read from RDRAM
+    sd t2, 0(a0)
+    sd t3, 8(a0)
+    cache 0x15, 0(a0)                ; Hit_Writeback_Invalidate_D: to RDRAM in one block write, out of the cache
+    bne t0, t1, nes_show_nt_copy
+    daddiu a0, a0, 16
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+; NesShowRecWriteback(rec) - the band record's 96 bytes and its OAM snapshot's 256 to RDRAM (Hit_Writeback_D: a
+; dirty line written, every line stays valid) - as rspband.n64's NesBandWriteback without the name tables.
+; CLOBBERS t0, t1.
+ProcedureNaked NesShowRecWriteback(rec.i)
+  ASM
+    sll a0, a0, 0
+    cache 0x19, 0(a0)
+    cache 0x19, 16(a0)
+    cache 0x19, 32(a0)
+    cache 0x19, 48(a0)
+    cache 0x19, 64(a0)
+    cache 0x19, 80(a0)
+    ld t0, #NES_B_OAM(a0)            ; the snapshot: NesOamBase + index x 256
+    dsll t0, t0, 8
+    la t1, global_nesoambase
+    ld t1, 0(t1)
+    daddu t0, t0, t1
+    daddiu t1, t0, 256
+nes_show_rec_oam:
+    cache 0x19, 0(t0)
+    daddiu t0, t0, 16
+    bne t0, t1, nes_show_rec_oam
+    nop
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+; The cold part's ways into compiled code: each keeps every register its caller may hold (a0-a7, t0-t3, t8, t9, v0,
+; v1, hi / lo), as rspband.n64's NesRspBandCall does. NesShowBandCall: t2 = the record (ppu_cut_close).
+ProcedureNaked NesShowBandCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesshowband
+    move a0, t2
+    j nes_show_restore
+    nop
+  EndASM
+EndProcedure
+
+; NesFbCatchUpCall: a split line's first cut (ppu_cut_split).
+ProcedureNaked NesFbCatchUpCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesfbcatchup
+    nop
+    j nes_show_restore
+    nop
+  EndASM
+EndProcedure
+
+; NesFbWaitCall: the fallback rows' ring has reached the frame before's rows (NesFbSlot).
+ProcedureNaked NesFbWaitCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesfbwait
+    nop
+    j nes_show_restore
+    nop
+  EndASM
+EndProcedure
+
+; NesShowDrainCall: a CHR-RAM row write while the show is busy (chrpairs.n64, NesChrPairAt). Then the common tail
+; that puts every register back.
+ProcedureNaked NesShowDrainCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nesshowdrain
+    nop
+nes_show_restore:
+    ld t0, 136(sp)
+    mthi t0
+    ld t0, 144(sp)
+    mtlo t0
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld a4, 40(sp)
+    ld a5, 48(sp)
+    ld a6, 56(sp)
+    ld a7, 64(sp)
+    ld t0, 72(sp)
+    ld t1, 80(sp)
+    ld t2, 88(sp)
+    ld t3, 96(sp)
+    ld t8, 104(sp)
+    ld t9, 112(sp)
+    ld v0, 120(sp)
+    ld v1, 128(sp)
+    jr ra
+    daddiu sp, sp, 176
+  EndASM
+EndProcedure
+
+; ---- the frame's sets ----
+
+Procedure NesShowSet(p.i)               ; the current frame takes set p (its state cleared)
+  NesShowCur = p
+  NesShowDone(p) = 0 : NesShowEnded(p) = 0 : NesShowBands(p) = 0 : NesShowFb(p) = 0 : NesShowShown(p) = 0
+  NesFbN = 0 : NesFbOver = 0
+  NesFbFirst = NesFbHead
+  NesFbRowBase = NesFbRows : NesFbPalBase = NesFbPals
+  NesFbLineBase = @NesFbLine(p * #NES_FB_ROWS)
+EndProcedure
+
+Procedure.i NesShowInit()
+  Protected need.i, space.i, a1.i
+  If (@Nt(0) & 7) Or (@Rgb64(0) & 7) Or (NesChrMaskBase & 7)
+    LpmDebugPrint("NES SHOW REFUSED: an input not 8-byte aligned for the RSP's DMA") : ProcedureReturn 0
+  EndIf
+  need = LpmCartFileLen(1) + 128
+  If need > $10000 - #NES_SHOW_PROG_AT
+    LpmDebugPrint("NES SHOW REFUSED: the RSP program's file is " + Str(need - 128) + " bytes") : ProcedureReturn 0
+  EndIf
+  a1 = (@NesShowArea1Space(0) + 15) & ~15
+  NesShowArea(0) = (#NES_CART_LOW_END & $1FFFFFFF) | $A0000000
+  NesShowArea(1) = (a1 & $1FFFFFFF) | $A0000000
+  NesShowTlut(0) = ((#NES_CART_LOW_END + #NES_SHOW_TLUT_AT) & $1FFFFFFF) | $A0000000
+  NesShowTlut(1) = NesShowTlut(0) + #NES_U_BANDMAX * 256
+  NesShowNtBase = @NesShowNtSpace(0) + (((@Nt(0) & ~15) - @NesShowNtSpace(0)) & 8191)   ; KSEG0, Nt's sets
+  NesFbRows = (@LinePixels(0) + 255) & ~255
+  NesFbPals = (@NesFbPalSpace(0) + 15) & ~15
+  ; no stale cached line of what the RSP and the RDP read uncached may land on it later
+  LpmCacheWritebackInvalidateData(#NES_CART_LOW_END, #NES_SHOW_PROG_AT)
+  LpmCacheWritebackInvalidateData(a1, #NES_SHOW_WORDS * 8 + 16)
+  LpmCacheWritebackInvalidateData(@NesShowNtSpace(0), 4 * 8192 + 8192)
+  LpmCacheWritebackData(@Rgb64(0), 1024)
+  space = #NES_CART_LOW_END + #NES_SHOW_PROG_AT
+  NesShowProg = LpmRspqProgram(LpmCartFile(1), space)
+  If NesShowProg = 0 : LpmDebugPrint("NES SHOW REFUSED: LpmRspqProgram") : ProcedureReturn 0 : EndIf
+  NesShowDone(1) = 1                    ; no frame before the first
+  NesShowSet(0)
+  CompilerIf #NES_SHOW_CHECK
+    NesShowChr(1) = 0 : NesShowChr(2) = 0 ; (the load's own row writes are not the guest's)
+  CompilerEndIf
+  CompilerIf #VERIFY_FRAME > 0
+    LpmDebugPrint("NES SHOW: the RSP program " + Str(need - 128) + " bytes; set 1's area $" + Hex(a1 & $FFFFFFFF))
+  CompilerEndIf
+  ProcedureReturn 1
+EndProcedure
+
+; ---- a band's close (the cold part, through NesShowBandCall) ----
+Procedure NesShowBand(rec.i)
+  Protected idx.i, s.i, f.i, p.i = NesShowCur, b.i, nt.i, t0.i
+  If NesShowProg = 0 : ProcedureReturn : EndIf
+  t0 = LpmCpuCount()
+  idx = (rec - NesBandBase) / #NES_BAND_BYTES
+  f = NesShowRecFence(idx)                ; the record's job of a frame ago has read it
+  If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
+  s = NesShowNtNext : NesShowNtNext = (s + 1) & 3
+  f = NesShowNtFence(s)                   ; the slot's last job has read it
+  If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
+  nt = NesShowNtBase + s * 8192
+  NesShowCopyNt(nt)
+  NesShowRecWriteback(rec)
+  t0 = (LpmCpuCount() - t0) & $FFFFFFFF
+  NesShowStat(9) + t0 : NesShowStat(10) + 1
+  If t0 > NesShowStat(11) : NesShowStat(11) = t0 : EndIf
+  b = NesShowBands(p)
+  LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, nt & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
+  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b)
+  f = LpmRspqFence()
+  NesShowRecFence(idx) = f : NesShowNtFence(s) = f : NesShowFence(p) = f
+  NesShowBands(p) = b + 1 : NesShowBusy = 1
+  LpmRspqFlush()
+EndProcedure
+
+; ---- a split line's first cut (through NesFbCatchUpCall): before the write is applied ----
+; The old renderer, at the line's dot 0, drew the line's sprite row and then its spans as they were consumed; the
+; inputs are unchanged since (every change cuts first, and this is the line's first cut), so the same calls now, with
+; PpuDot and PpuV as at dot 0, draw the same pixels: the sprite row, then spans [0, dot). OAM written since the line
+; began (OamCacheDirty: such a write changes the sprites from the next line on) is set aside for the band's snapshot,
+; which is OAM as at this line's start. PpuDot, PpuV and PpuStatus (the renderer writes v and bit 6) are put back.
+Procedure NesFbCatchUp()
+  Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty
+  NesFbSlot()
+  If PeekI(NesUnitBase + #NES_U_LIVE) = 0 : ProcedureReturn : EndIf
+  NesShowStat(7) + 1
+  If dirty
+    snap = NesOamBase + PeekI(NesUnitBase + #NES_U_BANDOAM) * 256
+    For i = 0 To 255 Step 8
+      PokeQ(@NesShowOamKeep(0) + i, PeekQ(@Oam(0) + i)) : PokeQ(@Oam(0) + i, PeekQ(snap + i))
+    Next
+  EndIf
+  PpuDot = 0 : PpuV = PeekI(NesUnitBase + #NES_U_LINEV)
+  If n : NesMmc3DrawSprites(PpuLine, n, PpuMask) : Else : PpuClearSprites() : EndIf
+  If dirty
+    For i = 0 To 255 Step 8 : PokeQ(@Oam(0) + i, PeekQ(@NesShowOamKeep(0) + i)) : Next
+  EndIf
+  NesRenderTo(dot)
+  PpuDot = dot : PpuV = v : PpuStatus = st
+EndProcedure
+
+; ---- the hand-over ----
+
+; A buffer to draw into: wait 0 only if one is free now; 1 as HostPresent(1) did - sleep on the VI / AI interrupts
+; until one frees, unless the sound reserve runs low (then 0: the frame is not shown); 2 until one frees.
+Procedure.i NesShowGetFb(wait.i)
+  Protected fb.i, seen.i
+  fb = LpmDisplayTryGet()
+  If fb Or wait = 0 : ProcedureReturn fb : EndIf
+  seen = LpmIrqSeen(#LPM_WAKE_VI | #LPM_WAKE_AI)
+  Repeat
+    fb = LpmDisplayTryGet()
+    If fb : ProcedureReturn fb : EndIf
+    If wait = 1 And HostAudioReady And ApuProduced - HostPcmRead < #HOST_AUDIO_RESERVE : ProcedureReturn 0 : EndIf
+    seen = LpmIrqSleep(#LPM_WAKE_VI | #LPM_WAKE_AI, seen, #LPM_WAIT_TICK, 0, 0)
+    HostQueueAudio(ApuProduced)
+  ForEver
+EndProcedure
+
+; The frame's fallback lines, after its last band: the syncs the RSP's words owe, the library's own mode words as it
+; believes them (it did not see the RSP's), its combiner, colours and TMEM forgotten; then the old blit's calls,
+; one line a slot, in copy mode (the TLUT entry of each CI8 index written into the picture as it is).
+Procedure NesShowFallback(p.i)
+  Protected i.i, y.i, r.i, n.i = NesFbCountP(p)
+  If n = 0 : ProcedureReturn : EndIf
+  LpmRdpCmd($27000000, 0) : LpmRdpCmd($28000000, 0) : LpmRdpCmd($26000000, 0)
+  If lpm_rdp_cycle <> -1 : LpmRdpCmd($2F000000 | lpm_rdp_om_hi, lpm_rdp_om_lo) : EndIf
+  LpmRdpForget() : LpmRdpTmemReset()
+  LpmRdpModeCopy(0)
+  For i = 0 To n - 1
+    y = NesFbLine(p * #NES_FB_ROWS + i)
+    r = (NesFbFirstP(p) + i) % #NES_FB_ROWS
+    LpmRdpLoadPalette(NesFbPals + r * 64, 0, 32)
+    LpmRdpLoadTexture(NesFbRows + r * 256, 256, 1, #LPM_TEX_CI8)
+    LpmRdpTextureRect(32, y, 288, y + 1, 0, 0, 1024, 1024)
+  Next
+EndProcedure
+
+; Frame p handed to the RDP if it can be now: 1 when it is finished (handed, or not shown and counted). wait as
+; NesShowGetFb; with 2 the RSP's last job is also waited for (LpmRspqWait sleeps), with 0 / 1 it is only asked.
+Procedure.i NesShowFinish(p.i, wait.i)
+  Protected fb.i, n.i, st.i, over.i
+  If NesShowDone(p) : ProcedureReturn 1 : EndIf
+  If NesShowEnded(p) = 0 : ProcedureReturn 0 : EndIf
+  If NesShowBands(p) And LpmRspqFenceDone(NesShowFence(p)) = 0
+    If wait < 2 : ProcedureReturn 0 : EndIf
+    LpmRspqWait(NesShowFence(p))
+  EndIf
+  st = NesShowArea(p) + #NES_SHOW_WORDS * 8
+  If NesShowBands(p)
+    n = PeekL(st) & $FFFFFFFF : over = PeekL(st + 4) & $FFFFFFFF
+    NesShowStat(12) + (PeekL(st + 8) & $FFFFFFFF)
+    If (PeekL(st + 8) & $FFFFFFFF) > NesShowStat(13) : NesShowStat(13) = PeekL(st + 8) & $FFFFFFFF : EndIf
+  EndIf
+  fb = NesShowFb(p)
+  If over Or NesFbOverP(p)
+    If fb = 0                             ; nothing handed: the frame is not shown, never half drawn
+      NesShowStat(1) + 1 : NesShowDone(p) = 1 : NesShowTicket(p) = 0
+      CompilerIf #VERIFY_FRAME > 0
+        LpmDebugPrint("NES SHOW FRAME NOT SHOWN: words over " + Str(over) + " fallback slots over " + Str(NesFbOverP(p)))
+      CompilerEndIf
+      ProcedureReturn 1
+    EndIf
+    NesShowStat(2) + 1                    ; attached by a drain already: shown as far as it goes, counted
+  EndIf
+  If fb = 0
+    fb = NesShowGetFb(wait)
+    If fb = 0
+      If wait = 1                         ; the sound reserve is low: not shown (as HostPresent(1) coalesced)
+        HostCoalesced + 1 : NesShowStat(14) + 1 : NesShowDone(p) = 1 : NesShowTicket(p) = 0
+        ProcedureReturn 1
+      EndIf
+      ProcedureReturn 0
+    EndIf
+    LpmRdpAttach(fb)
+    CompilerIf #VERIFY_FRAME = 0
+      ; THE CONSOLE MARK (the playable cart only): the 32-pixel borders, which no NES pixel covers, green on every
+      ; picture shown - running and healthy. NesShowStopped turns the whole screen red.
+      LpmRdpModeFill(LpmRgb16(0, 24, 0)) : LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
+    CompilerEndIf
+    LpmRspqRdpFlush(NesShowProg)
+  EndIf
+  If n : LpmRspqRdpBlock(NesShowProg, NesShowArea(p), n * 8) : EndIf
+  NesShowFallback(p)
+  LpmRspqRdpDetachShow(NesShowProg, fb)
+  NesShowTicket(p) = lpm_rdp_frames_sent
+  NesShowShown(p) = fb : NesShowFb(p) = 0 : NesShowDone(p) = 1 : NesShowStat(0) + 1
+  ProcedureReturn 1
+EndProcedure
+
+; A check point: the frame before the current one, if its turn has come.
+Procedure NesShowPoll(wait.i)
+  If NesShowProg : NesShowFinish(NesShowCur ! 1, wait) : EndIf
+EndProcedure
+
+CompilerIf #NES_SHOW_CHECK
+; The shown picture's hash (KSEG0 address a0, invalidated): rows 0-239, x 32-287, a doubleword (4 pixels) at a time,
+; rotate-xor-add as the video digest. CLOBBERS a0-a2, t0-t3.
+ProcedureNaked NesShowHashFb(fb.i)
+  ASM
+    sll a0, a0, 0
+    la t0, global_nesshowhash
+    ld t3, 0(t0)
+    daddiu a0, a0, 64                ; x 32
+    addiu a2, zero, 240
+nes_show_hash_row:
+    daddiu a1, a0, 512
+nes_show_hash_px:
+    ld t1, 0(a0)
+    daddiu a0, a0, 8
+    xor t3, t3, t1
+    dsll t2, t3, 7
+    dsrl32 t3, t3, 25
+    or t3, t3, t2
+    bne a0, a1, nes_show_hash_px
+    daddu t3, t3, t1
+    daddiu a0, a0, 128               ; the next row's x 32 (a row is 640 bytes)
+    addiu a2, a2, -1
+    bnez a2, nes_show_hash_row
+    nop
+    jr ra
+    sd t3, 0(t0)
+  EndASM
+EndProcedure
+
+; Frame p's shown picture hashed (its SYNC_FULL done; the buffer is on screen or waiting for its field, so no frame
+; draws into it yet) and printed as "NES PIC frame hash fallback-lines" - or NOT SHOWN.
+Procedure NesShowCheck(p.i)
+  Protected fb.i = NesShowShown(p)
+  If NesShowEnded(p) = 0 : ProcedureReturn : EndIf   ; (no frame before the first)
+  If fb
+    fb = (fb & $1FFFFFFF) | $80000000
+    LpmCacheInvalidateData(fb, #HOST_WIDTH * #HOST_HEIGHT * 2)
+    NesShowHash = $351B5058
+    NesShowHashFb(fb)
+    LpmDebugPrint("NES PIC " + Str(NesShowFrameNo(p)) + " " + Hex(NesShowHash) + " " + Str(NesFbCountP(p)))
+  Else
+    LpmDebugPrint("NES PIC " + Str(NesShowFrameNo(p)) + " NOT SHOWN " + Str(NesFbCountP(p)))
+  EndIf
+  NesShowShown(p) = 0
+EndProcedure
+CompilerEndIf
+
+; ---- line 240, after the frame's last close (unit/ppu.n64) ----
+Procedure NesShowFrameEnd()
+  Protected p.i = NesShowCur, q.i = NesShowCur ! 1, fb.i
+  NesFbCountP(p) = NesFbN : NesFbOverP(p) = NesFbOver : NesFbFirstP(p) = NesFbFirst : NesShowEnded(p) = 1
+  NesFbHead = (NesFbFirst + NesFbN) % #NES_FB_ROWS
+  NesShowStat(5) + NesFbN
+  If NesFbN > NesShowStat(6) : NesShowStat(6) = NesFbN : EndIf
+  NesShowStat(8) + PeekI(NesUnitBase + #NES_U_BANDLOST)
+  ; the next frame takes q's set: the frame before this one handed and drawn first (in practice long since)
+  NesShowFinish(q, 2)
+  While LpmRdpFramesDone() < NesShowTicket(q) : Wend
+  NesShowFrameNo(p) = WorkerFrames
+  CompilerIf #NES_SHOW_CHECK
+    If WorkerFrames = 300                 ; one frame's bands by line and inputs, for the record
+      Protected k.i, s.s = "NES SHOW BANDS 300"
+      For k = 0 To PeekI(NesUnitBase + #NES_U_BANDCOUNT) - 1
+        s = s + " " + Str(PeekI(NesBandBase + k * #NES_BAND_BYTES)) + "-" + Str(PeekI(NesBandBase + k * #NES_BAND_BYTES + 8)) + ":" + Hex(PeekI(NesBandBase + k * #NES_BAND_BYTES + 24))
+      Next
+      LpmDebugPrint(s + " LOST " + Str(PeekI(NesUnitBase + #NES_U_BANDLOST)))
+    EndIf
+    NesShowCheck(q)                       ; the frame before: drawn by now, through the hand-over as it runs
+  CompilerEndIf
+  CompilerIf #VERIFY_FRAME > 0
+    If WorkerFrames + 1 = #VERIFY_FRAME   ; a screenshot checkpoint shows its frame
+      NesShowFinish(p, 2)
+      CompilerIf #NES_SHOW_CHECK
+        LpmRdpFinish() : NesShowCheck(p)
+      CompilerEndIf
+    EndIf
+  CompilerEndIf
+  NesShowSet(q)
+  NesFbGuard = NesFbCountP(p)             ; this frame's rows, until it is drawn (NesFbSlot, NesFbWait)
+EndProcedure
+
+; The ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL waited for.
+Procedure NesFbWait()
+  NesShowFinish(NesShowCur ! 1, 2)
+  While LpmRdpFramesDone() < NesShowTicket(NesShowCur ! 1) : Wend
+  NesFbGuard = 0 : NesShowStat(3) + 1
+EndProcedure
+
+; ---- a CHR-RAM row write while band jobs or handed words may still read the pairs (NesChrPairAt) ----
+; Every job run, the frame before handed whole, the current frame's bands so far handed, the RDP finished (nothing
+; shown); the current frame's next band then starts the RSP's state again (index 0: every sync owed, no pair taken as
+; resident - a pair in TMEM would be the old one), its words from the area's start, which the RDP has read.
+Procedure NesShowDrain()
+  Protected p.i = NesShowCur, n.i, fb.i
+  LpmRspqSync()
+  NesShowFinish(p ! 1, 2)
+  If NesShowBands(p)
+    fb = NesShowFb(p)
+    If fb = 0
+      fb = NesShowGetFb(2)
+      LpmRdpAttach(fb) : LpmRspqRdpFlush(NesShowProg)
+      NesShowFb(p) = fb
+    EndIf
+    n = PeekL(NesShowArea(p) + #NES_SHOW_WORDS * 8) & $FFFFFFFF
+    If n : LpmRspqRdpBlock(NesShowProg, NesShowArea(p), n * 8) : EndIf
+    NesShowBands(p) = 0
+  EndIf
+  LpmRdpFinish()
+  NesShowBusy = 0 : NesShowStat(4) + 1
+EndProcedure
+
+; The emulator has stopped (RunGame's NES STOP): every job run, then one picture, the whole screen red, shown.
+Procedure NesShowStopped()
+  Protected fb.i
+  If NesShowProg = 0 : ProcedureReturn : EndIf
+  LpmRspqSync()
+  NesShowFinish(NesShowCur ! 1, 2)
+  LpmRdpFinish()
+  fb = NesShowGetFb(2)
+  LpmRdpAttach(fb)
+  LpmRdpModeFill(LpmRgb16(31, 0, 0)) : LpmRdpFillRect(0, 0, 320, 240)
+  LpmRspqRdpDetachShow(NesShowProg, fb)
+EndProcedure
+
+CompilerIf #VERIFY_FRAME > 0
+Procedure NesShowReport()
+  Protected k.i, s.s = "NES SHOW"
+  For k = 0 To 14 : s = s + " " + Str(NesShowStat(k)) : Next
+  LpmDebugPrint(s)
+  LpmDebugPrint("NES SHOW FRAMES SHOWN " + Str(NesShowStat(0)) + " NOT SHOWN " + Str(NesShowStat(1)) + " COALESCED " + Str(NesShowStat(14)) + " FALLBACK LINES " + Str(NesShowStat(5)) + " MOST A FRAME " + Str(NesShowStat(6)) + " SPLIT " + Str(NesShowStat(7)) + " LOST BANDS " + Str(NesShowStat(8)))
+  LpmDebugPrint("NES SHOW BAND CLOSE TICKS " + Str(NesShowStat(9)) + " BANDS " + Str(NesShowStat(10)) + " MOST " + Str(NesShowStat(11)) + " WAITS " + Str(NesShowStat(3)) + " DRAINS " + Str(NesShowStat(4)) + " RSP CLOCKS " + Str(NesShowStat(12)) + " MOST A FRAME " + Str(NesShowStat(13)))
+  CompilerIf #NES_SHOW_CHECK
+    LpmDebugPrint("NES SHOW CHR ROW WRITES " + Str(NesShowChr(2)) + " TICKS " + Str(NesShowChr(1)))
+  CompilerEndIf
+EndProcedure
+CompilerEndIf
+
+CompilerElseIf #NES_SHOW_CHECK
+; ---- the reference (--old-show --show-check): the old renderer's picture of the frame, hashed as NesShowHashFb ----
+Global NesShowHash.i
+; Each line's pixel x is its palette's entry (CI8 index & 31) - the palette of the last line up to it whose
+; NesPaletteChange is set (line 0's always is) - as the old blit's copy-mode TLUT writes it. CLOBBERS a0-a6, t0-t3.
+ProcedureNaked NesShowHashRefAsm()
+  ASM
+    la a0, global_linepixels
+    daddiu a0, a0, 15
+    dsrl a0, a0, 4
+    dsll a0, a0, 4                   ; row 0 (NesIndexedPixels)
+    la a6, global_nesindexpalette
+    move a3, a6                      ; line 0's palette
+    la a4, global_nespalettechange
+    move a5, zero                    ; the line
+    la t0, global_nesshowhash
+    ld t3, 0(t0)
+nes_ref_row:
+    daddu t0, a4, a5
+    lbu t0, 0(t0)
+    beqz t0, nes_ref_keep
+    sll t1, a5, 6
+    daddu a3, a6, t1                 ; this line's palette (64 bytes a line)
+nes_ref_keep:
+    daddiu a1, a0, 256
+nes_ref_quad:
+    lbu t2, 0(a0)
+    andi t2, t2, 31
+    sll t2, t2, 1
+    daddu t2, a3, t2
+    lhu t1, 0(t2)
+    lbu t2, 1(a0)
+    andi t2, t2, 31
+    sll t2, t2, 1
+    daddu t2, a3, t2
+    lhu t2, 0(t2)
+    dsll t1, t1, 16
+    or t1, t1, t2
+    lbu t2, 2(a0)
+    andi t2, t2, 31
+    sll t2, t2, 1
+    daddu t2, a3, t2
+    lhu t2, 0(t2)
+    dsll t1, t1, 16
+    or t1, t1, t2
+    lbu t2, 3(a0)
+    andi t2, t2, 31
+    sll t2, t2, 1
+    daddu t2, a3, t2
+    lhu t2, 0(t2)
+    dsll t1, t1, 16
+    or t1, t1, t2                    ; 4 pixels as the picture holds them (the first in the high halfword)
+    daddiu a0, a0, 4
+    xor t3, t3, t1
+    dsll t2, t3, 7
+    dsrl32 t3, t3, 25
+    or t3, t3, t2
+    bne a0, a1, nes_ref_quad
+    daddu t3, t3, t1
+    addiu a5, a5, 1
+    sltiu t0, a5, 240
+    bnez t0, nes_ref_row
+    nop
+    la t0, global_nesshowhash
+    jr ra
+    sd t3, 0(t0)
+  EndASM
+EndProcedure
+Procedure NesShowHashRef()              ; at line 239's publish (host.n64, DisplayFrame)
+  NesShowHash = $351B5058
+  NesShowHashRefAsm()
+  LpmDebugPrint("NES PIC " + Str(WorkerFrames) + " " + Hex(NesShowHash) + " 0")
+EndProcedure
+CompilerEndIf
