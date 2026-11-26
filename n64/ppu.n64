@@ -212,8 +212,8 @@ EndProcedure
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
 ProcedureNaked NesMmc3BatchTile()
   ; s6 holds the last attribute group of four tiles and s5 its palette pair.
-  ; a7 is based 16 KiB below the nametables so both the nametables and
-  ; the CHR bias table fit in signed displacements from one base.
+  ; a7 is based 16 KiB below the nametables (signed displacements reach all of
+  ; them); the CHR bias table is reached by its own address.
   ASM
     andi t2, t0, 0xfff
     addu t2, a7, t2
@@ -223,8 +223,9 @@ ProcedureNaked NesMmc3BatchTile()
     addu t2, a4, t2
     andi t1, t2, 0x1c00
     srl t1, t1, 7
-    addu t1, a7, t1
-    lw t1, global_nesmmc3patternbias-global_nt+0x4004(t1)
+    la t3, global_nesmmc3patternbias  ; by its own address: where the compiler puts the table against
+    addu t1, t3, t1                   ; the name tables is not the program's to assume (t3 is free here)
+    lw t1, 4(t1)
     andi t8, t0, 2
     addu t2, t1, t2
     lhu a5, 0(t2)

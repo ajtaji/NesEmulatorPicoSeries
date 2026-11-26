@@ -1,0 +1,546 @@
+; twin.n64 - THE CPU TWIN OF THE RDP EMITTER (step N4; design note, sections I and N.17). Checking build
+; only (#NES_TWIN_CHECK, --twin-check). Plain compiled code: it is the reference the RSP program's words are
+; compared with, so it must be right, not fast.
+;
+; WHAT IT DOES. At every band record the band cut writes (unit/ppu_cold.n64, ppu_cut_close), NesTwinBand turns
+; the record, the name and attribute tables (Nt, final for the band at its close), the band's OAM snapshot and
+; the CI4 tile pairs (chrpairs.n64) into the RDP's command words for that band, appended to NesTwinCmd. At line
+; 240 (unit/ppu.n64) NesTwinFrame hands the frame's words to the RDP drawing into a SECOND picture (320 x 240
+; RGBA16, the NES picture at x 32 as the design draws the VI buffer; drawn #NES_TWIN_STRIP lines at a time into
+; NesTwinPic, since the RAM below the stack holds no whole second picture), never the one shown, waits for it,
+; and compares it with the renderer's own picture of the frame (the CI8 rows NesIndexedPixels() and the
+; per-line palettes NesIndexPalette the old blit expands): every pixel of every line that is not a fallback
+; line. The renderer's picture stays what the guest and the screen see.
+;
+; THE WORDS, per band (the design's I.1-I.3, the console probe's findings):
+;   one-cycle mode throughout, the TLUT on (RGBA16), point sampling, no dither, alpha compare against a blend
+;   alpha of 128, so a texel is dropped by its TLUT entry's alpha bit (probe: cases 5, 6, 44);
+;   the backdrop: SET_COMBINE = PRIM, SET_PRIM_COLOR = palette entry 0, one FILL_RECTANGLE over the band;
+;   the band's TLUT, 128 entries from an RDRAM block of its own: palette p at entries 16p .. 16p + 3 (p 0-3 the
+;   background's, 4-7 the sprites'), entry 16p + 0 with alpha 0 (transparent), every colour as PpuColours makes
+;   it (Rgb64, the emphasis bits, greyscale);
+;   tiles 0-3: palette descriptors (CI4, a line of one 64-bit word, TMEM 0, palette p or 4 + p): one descriptor
+;   per palette costs nothing (probe); tile 7 the load tile;
+;   TMEM's lower 2 KB: 32 pair slots of 64 bytes, slot k at texel row 8k of one 16-texel-wide CI4 texture, so a
+;   rectangle names its slot by t = 8k + row and its tile of the pair by s = 8 x (tile & 1) + column;
+;   a pair cache for the frame (32 slots, replaced in turn, a slot named by a rectangle not yet written never
+;   replaced): a pair already resident is not loaded again; a load is SET_TEXTURE_IMAGE (the pair as 16-bit
+;   units), SET_TILE 7 at the slot, LOAD_BLOCK of 32 units (64 bytes, dxt 2048: one word a line);
+;   the background as strips (the lines of one tile row: same v but fine Y), a TEXTURE_RECTANGLE per tile and
+;   strip, the first column cut at the left edge by its s start (the fine scroll), the left 8-pixel mask a cut
+;   column (never a scissor: its left bound stays 0); a tile whose rows in the strip are all index 0 is not
+;   drawn (the backdrop shows);
+;   sprites as rectangles (8 x 16 as two tiles), a flip by a negative step (s from the right, t from the bottom),
+;   cut at x 8 by the sprite mask and at x 256, a sprite dropped from a line by the eight-sprite limit drawn as
+;   line-high pieces; priority by draw order: behind-background sprites, the background, front sprites, each
+;   set from the highest OAM index to the lowest (the lowest on top);
+;   every sync as the library's own writers owe it (lpm_rdp.n64, THE SYNCS): SYNC_PIPE before SET_OTHER_MODES,
+;   SET_COMBINE, a colour or SET_TEXTURE_IMAGE when a primitive was drawn since the last one; SYNC_TILE before a
+;   SET_TILE / SET_TILE_SIZE of a tile used since the last one (probe case 25: SET_TILE with no sync draws
+;   wrong); SYNC_LOAD before a load when TMEM was loaded or sampled since the last one.
+; THE LINES IT DOES NOT DRAW, each counted: the split lines (U_SPLIT: a change in the middle of the line, step
+; N5's fallback lines, the old renderer draws them); the lines of a band beyond the 32 records (U_BANDLOST);
+; the lines where the NES's sprite-priority quirk shows (a lower-index behind-background sprite's opaque pixel
+; over a higher-index front sprite's: draw order cannot give it; the design's fallback, I.3).
+CompilerIf #NES_TWIN_CHECK
+
+#NES_TWIN_WORDS = 8192
+Global Dim NesTwinCmd.i(#NES_TWIN_WORDS)           ; the frame's command words, (w0 << 32) | w1
+Global NesTwinN.i, NesTwinOver.i                    ; words written; words that did not fit
+#NES_TWIN_STRIP = 48                                ; the second picture's lines held at once
+Global Dim NesTwinPicSpace.u(320*#NES_TWIN_STRIP+32) ; the second picture, a strip of it at a time
+Global NesTwinPic.i
+Global Dim NesTwinTlutSpace.u(#NES_U_BANDMAX*128+16) ; the bands' TLUT blocks, written uncached
+Global NesTwinTlut.i
+Global NesTwinPipe.i, NesTwinTiles.i, NesTwinTmem.i ; the syncs owed (as the library's lpm_rdp_pipe / tiles / tmem)
+Global Dim NesTwinKey.i(32)                         ; the pair cache: the pair in each slot (-1 none)
+Global Dim NesTwinPin.a(32)                         ; slots named by rectangles not yet written
+Global NesTwinNext.i, NesTwinPinned.i
+Global Dim NesTwinRect.i(4*64)                      ; rectangles waiting for their loads: 2 words, 2 words
+Global NesTwinRects.i
+Global NesTwinDescs.i                               ; the palette set tiles 0-3 hold: 0, 4, or -1 unknown
+Global Dim NesTwinLineV.i(240)
+Global Dim NesTwinDrawn.i(240)                      ; bit i: sprite i drawn on line L (the first eight)
+Global Dim NesTwinLine.a(240)                       ; 1 a band drew the line, 2 the priority quirk shows on it
+Global Dim NesTwinSeen.a(256)
+Global Dim NesTwinBehind.a(256)
+Global Dim NesTwinBandKeys.i(512)                   ; the distinct pairs of the band
+Global NesTwinBandKeyN.i
+; statistics (NesTwinReport): [0] frames compared, then per range (0 all, 1 frames >= 900, 2 the slow sections
+; 1860-1919 and 3360-3419) at 16 x range + 1: bands, split lines, quirk lines, lost lines, lines compared,
+; differing pixels, alpha-only pixels, background rectangles, empty tiles, tiles considered, sprite rectangles,
+; pair loads, distinct pairs summed over bands, command words, frames, differing pixels on quirk lines; maxima at 49+ (frames >= 900): bg
+; rects, loads, words, split lines, quirk lines a frame; distinct pairs in a band (every frame)
+Global Dim NesTwinStat.i(64)
+Global Dim NesTwinF.i(16)                           ; this frame's counters, in the order above
+Global NesTwinFirstDiff.s, NesTwinLines.s
+
+Procedure NesTwinCmdW(w0.i, w1.i)
+  If NesTwinN < #NES_TWIN_WORDS
+    NesTwinCmd(NesTwinN) = ((w0 & $FFFFFFFF) << 32) | (w1 & $FFFFFFFF) : NesTwinN + 1
+  Else
+    NesTwinOver + 1
+  EndIf
+EndProcedure
+Procedure NesTwinSyncPipe()
+  If NesTwinPipe : NesTwinCmdW($27000000, 0) : NesTwinPipe = 0 : EndIf
+EndProcedure
+Procedure NesTwinSyncTile(t.i)
+  If NesTwinTiles & (1 << t) : NesTwinCmdW($28000000, 0) : NesTwinTiles = 0 : EndIf
+EndProcedure
+Procedure NesTwinSyncLoad()
+  If NesTwinTmem : NesTwinCmdW($26000000, 0) : NesTwinTmem = 0 : EndIf
+EndProcedure
+
+; A PpuColours colour (RGBA5551) of palette byte b under PPUMASK m.
+Procedure.i NesTwinColour(b.i, m.i)
+  Protected c.i
+  If m & 1 : b = b & 48 : Else : b = b & 63 : EndIf
+  c = Rgb64(((m >> 5) & 7) * 64 + b)
+  ProcedureReturn (c & $FFC0) | ((c & 31) << 1) | 1
+EndProcedure
+
+; The rectangles waiting for their pairs, written; their slots free again.
+Procedure NesTwinFlush()
+  Protected i.i
+  For i = 0 To NesTwinRects - 1
+    NesTwinCmdW(NesTwinRect(i * 4), NesTwinRect(i * 4 + 1))
+    NesTwinCmdW(NesTwinRect(i * 4 + 2), NesTwinRect(i * 4 + 3))
+    NesTwinTiles = NesTwinTiles | (1 << ((NesTwinRect(i * 4 + 1) >> 24) & 7))
+  Next
+  If NesTwinRects : NesTwinPipe = 1 : NesTwinTmem = 1 : EndIf
+  NesTwinRects = 0
+  For i = 0 To 31 : NesTwinPin(i) = 0 : Next
+  NesTwinPinned = 0
+EndProcedure
+
+; The slot holding pair key (its decoded index: bank << 10 | even tile << 4), loading it when absent.
+Procedure.i NesTwinPair(key.i)
+  Protected s.i, i.i, found.i
+  For i = 0 To NesTwinBandKeyN - 1
+    If NesTwinBandKeys(i) = key : found = 1 : Break : EndIf
+  Next
+  If found = 0 And NesTwinBandKeyN < 512 : NesTwinBandKeys(NesTwinBandKeyN) = key : NesTwinBandKeyN + 1 : EndIf
+  s = -1
+  For i = 0 To 31
+    If NesTwinKey(i) = key : s = i : Break : EndIf
+  Next
+  If s < 0
+    If NesTwinPinned = 32 : NesTwinFlush() : EndIf
+    While NesTwinPin(NesTwinNext) : NesTwinNext = (NesTwinNext + 1) & 31 : Wend
+    s = NesTwinNext : NesTwinNext = (NesTwinNext + 1) & 31
+    NesTwinSyncPipe()
+    NesTwinCmdW($3D100003, (NesChrPairBase + (key << 1)) & $1FFFFFFF)   ; SET_TEXTURE_IMAGE: the pair, 16-bit units
+    NesTwinSyncTile(7)
+    NesTwinCmdW($35100000 | (s * 8), $07000000)                           ; SET_TILE 7 at the slot
+    NesTwinSyncLoad()
+    NesTwinCmdW($33000000, $07000000 | (31 << 12) | 2048)                 ; LOAD_BLOCK 32 units, a word a line
+    NesTwinTiles = NesTwinTiles | 128 : NesTwinTmem = 1
+    NesTwinKey(s) = key
+    NesTwinF(11) + 1
+  EndIf
+  If NesTwinPin(s) = 0 : NesTwinPin(s) = 1 : NesTwinPinned + 1 : EndIf
+  ProcedureReturn s
+EndProcedure
+
+; Tiles 0-3 to the palettes from base (0 the background's, 4 the sprites').
+Procedure NesTwinDescriptors(base.i)
+  Protected t.i
+  If NesTwinDescs = base : ProcedureReturn : EndIf
+  NesTwinFlush()
+  For t = 0 To 3
+    NesTwinSyncTile(t)
+    NesTwinCmdW($35400200, (t << 24) | ((base + t) << 20))                ; SET_TILE t: CI4, line 1, TMEM 0
+    NesTwinCmdW($32000000, (t << 24) | ((15 << 2) << 12) | (255 << 2))   ; SET_TILE_SIZE 16 x 256
+  Next
+  NesTwinDescs = base
+EndProcedure
+
+; A textured rectangle x0..x1 (NES x), y0..y1, descriptor d, s / t at the top left, the steps +1 / -1.
+Procedure NesTwinTexRect(x0.i, x1.i, y0.i, y1.i, d.i, s.i, t.i, ds.i, dt.i)
+  Protected k.i = NesTwinRects * 4
+  If NesTwinRects >= 64 : NesTwinFlush() : k = 0 : EndIf
+  NesTwinRect(k) = $24000000 | (((x1 + 32) << 2) << 12) | (y1 << 2)
+  NesTwinRect(k + 1) = (d << 24) | (((x0 + 32) << 2) << 12) | (y0 << 2)
+  NesTwinRect(k + 2) = (((s << 5) & $FFFF) << 16) | ((t << 5) & $FFFF)
+  NesTwinRect(k + 3) = (((ds * 1024) & $FFFF) << 16) | ((dt * 1024) & $FFFF)
+  NesTwinRects + 1
+EndProcedure
+
+; The decoded row (8 two-bit pixels, the first in the low bits) of pattern address a, the band's banks at rec.
+Procedure.i NesTwinRow(rec.i, a.i)
+  ProcedureReturn PeekU(@Decoded(0) + (PeekA(rec + #NES_B_BANKS + ((a >> 10) & 7)) << 10) + (a & $3FF))
+EndProcedure
+
+Procedure NesTwinBases()
+  If NesTwinPic = 0
+    NesTwinPic = (@NesTwinPicSpace(0) + 63) & ~63
+    NesTwinTlut = ((@NesTwinTlutSpace(0) + 15) & ~15 & $1FFFFFFF) | $A0000000
+  EndIf
+EndProcedure
+
+Procedure NesTwinBand(rec.i)
+  Protected idx.i, first.i, last.i, st.i, ctrl.i, mask.i, fx.i, t.i, oam.i, h.i, i.i, j.i, k.i, p.i, c.i, b.i
+  Protected v.i, L.i, L1.i, n.i, fy.i, x0.i, xs.i, xe.i, xmin.i, vj.i, tile.i, attr.i, pal.i, a.i, key.i, slot.i
+  Protected tl.i, col.i, empty.i, r.i, y.i, at.i, x.i, row.i, cnt.i, phase.i, half.i, r0.i, ta.i, run.i, flip.i
+  NesTwinBases()
+  idx = (rec - NesBandBase) / #NES_BAND_BYTES
+  If idx = 0                                              ; the frame's first band: the RDP's state unknown
+    NesTwinN = 0 : NesTwinOver = 0
+    NesTwinPipe = 1 : NesTwinTiles = 255 : NesTwinTmem = 1
+    For i = 0 To 31 : NesTwinKey(i) = -1 : NesTwinPin(i) = 0 : Next
+    NesTwinNext = 0 : NesTwinPinned = 0 : NesTwinRects = 0
+    For i = 0 To 239 : NesTwinLine(i) = 0 : Next
+    For i = 0 To 15 : NesTwinF(i) = 0 : Next
+  EndIf
+  NesTwinDescs = -1 : NesTwinBandKeyN = 0
+  first = PeekI(rec + #NES_B_FIRST) : last = PeekI(rec + #NES_B_END)
+  st = PeekI(rec + #NES_B_STATE)
+  ctrl = st & 255 : mask = (st >> 8) & 255 : fx = (st >> 16) & 7 : t = (st >> 32) & $7FFF
+  oam = NesOamBase + PeekI(rec + #NES_B_OAM) * 256
+  NesTwinF(0) + 1
+  For L = first To last - 1 : NesTwinLine(L) = 1 : Next
+  ; -- the modes, the backdrop --
+  NesTwinSyncPipe()
+  NesTwinCmdW($2F000000 | $8000 | $C00 | $F0, 1)          ; one cycle, TLUT RGBA16, no dither; alpha compare
+  NesTwinCmdW($39000000, 128)                             ; SET_BLEND_COLOR: the compare's threshold
+  NesTwinCmdW($3CFFFFFF, $FFFC7038 | (3 << 15) | (3 << 9) | (3 << 6) | 3)   ; SET_COMBINE: PRIM
+  col = NesTwinColour(PeekA(rec + #NES_B_PAL), mask)
+  c = ((col >> 11) & 31) : x = ((col >> 6) & 31) : y = ((col >> 1) & 31)
+  NesTwinCmdW($3A000000, (((c << 3) | (c >> 2)) << 24) | (((x << 3) | (x >> 2)) << 16) | (((y << 3) | (y >> 2)) << 8) | 255)
+  NesTwinCmdW($36000000 | ((288 << 2) << 12) | (last << 2), ((32 << 2) << 12) | (first << 2))   ; FILL_RECTANGLE
+  NesTwinPipe = 1
+  ; -- the TLUT --
+  tl = NesTwinTlut + idx * 256
+  For p = 0 To 7
+    For c = 0 To 15
+      col = 0
+      If c < 4
+        If p < 4 : b = p * 4 + c : Else : b = 16 + (p - 4) * 4 + c : EndIf
+        If c = 0 : b = 0 : EndIf
+        col = NesTwinColour(PeekA(rec + #NES_B_PAL + b), mask)
+        If c = 0 : col = col & $FFFE : EndIf
+      EndIf
+      PokeU(tl + (p * 16 + c) * 2, col)
+    Next
+  Next
+  NesTwinSyncPipe()
+  NesTwinCmdW($3D100000 | 127, tl & $1FFFFFFF)            ; SET_TEXTURE_IMAGE: RGBA16, 128 entries
+  NesTwinSyncTile(7)
+  NesTwinCmdW($35800100, $07000000)                       ; SET_TILE 7: I4 at TMEM word 256
+  NesTwinSyncLoad()
+  NesTwinCmdW($30000000, $07000000 | ((127 << 2) << 12))  ; LOAD_TLUT
+  NesTwinTiles = NesTwinTiles | 128 : NesTwinTmem = 1
+  NesTwinCmdW($3CFFFFFF, $FFFC7038 | (1 << 15) | (1 << 9) | (1 << 6) | 1)   ; SET_COMBINE: TEXEL0 (no primitive since the sync)
+  ; -- the lines' v, the sprites each line shows --
+  h = 8 : If ctrl & 32 : h = 16 : EndIf
+  v = PeekI(rec + #NES_B_V)
+  For L = first To last - 1
+    NesTwinLineV(L) = v
+    If mask & 24
+      If (v & $7000) <> $7000
+        v = v + $1000
+      Else
+        v = v & $0FFF : y = (v >> 5) & 31
+        If y = 29 : v = v ! $0800 : y = 0 : Else : y = (y + 1) & 31 : EndIf
+        v = (v & $7C1F) | (y << 5)
+      EndIf
+      v = (v & $7BE0) | (t & $041F)
+    EndIf
+    NesTwinDrawn(L) = 0
+  Next
+  If mask & 16
+    For L = first To last - 1
+      cnt = 0
+      For i = 0 To 63
+        r = L - 1 - PeekA(oam + i * 4)
+        If r >= 0 And r < h And cnt < 8 : NesTwinDrawn(L) = NesTwinDrawn(L) | (1 << i) : cnt + 1 : EndIf
+      Next
+      ; the priority quirk: the lowest-index opaque sprite pixel is behind and a higher-index front one is opaque
+      For x = 0 To 255 : NesTwinSeen(x) = 0 : Next
+      For i = 0 To 63
+        If (NesTwinDrawn(L) >> i) & 1
+          tile = PeekA(oam + i * 4 + 1) : at = PeekA(oam + i * 4 + 2) : x0 = PeekA(oam + i * 4 + 3)
+          r = L - 1 - PeekA(oam + i * 4) : If at & 128 : r = h - 1 - r : EndIf
+          If h = 8 : a = ((ctrl & 8) << 9) | (tile << 4) | (r << 1) : Else : a = ((tile & 1) << 12) | (((tile & 254) + (r >> 3)) << 4) | ((r & 7) << 1) : EndIf
+          row = NesTwinRow(rec, a)
+          For j = 0 To 7
+            x = x0 + j
+            If x < 256 And (x >= 8 Or mask & 4)
+              If at & 64 : p = (row >> ((7 - j) * 2)) & 3 : Else : p = (row >> (j * 2)) & 3 : EndIf
+              If p
+                If NesTwinSeen(x) = 0
+                  NesTwinSeen(x) = 1 : NesTwinBehind(x) = Bool(at & 32)
+                ElseIf NesTwinBehind(x) And (at & 32) = 0
+                  NesTwinLine(L) = 2
+                EndIf
+              EndIf
+            EndIf
+          Next
+        EndIf
+      Next
+    Next
+  EndIf
+  ; -- the three layers --
+  For phase = 0 To 2
+    If phase = 1
+      If mask & 8
+        NesTwinDescriptors(0)
+        xmin = 0 : If (mask & 2) = 0 : xmin = 8 : EndIf
+        L = first
+        While L < last
+          v = NesTwinLineV(L) : L1 = L + 1
+          While L1 < last And NesTwinLineV(L1) = NesTwinLineV(L1 - 1) + $1000 : L1 + 1 : Wend
+          fy = (v >> 12) & 7 : n = L1 - L
+          For j = 0 To 32
+            x0 = j * 8 - fx : xs = x0 : xe = x0 + 8
+            If xs < xmin : xs = xmin : EndIf
+            If xe > 256 : xe = 256 : EndIf
+            If xe > xs
+              NesTwinF(9) + 1
+              vj = (v & 31) | ((v >> 5) & 32) : vj = vj + j
+              vj = (v & $7BE0) | (vj & 31) | ((vj & 32) << 5)
+              tile = Nt(vj & $FFF)
+              attr = Nt($3C0 | (vj & $C00) | ((vj >> 4) & $38) | ((vj >> 2) & 7))
+              pal = (attr >> (((vj >> 4) & 4) | (vj & 2))) & 3
+              a = ((ctrl & 16) << 8) | (tile << 4)
+              empty = 1
+              For r = 0 To n - 1
+                If NesTwinRow(rec, a | ((fy + r) << 1)) : empty = 0 : Break : EndIf
+              Next
+              If empty
+                NesTwinF(8) + 1
+              Else
+                key = (PeekA(rec + #NES_B_BANKS + ((a >> 10) & 7)) << 10) | (a & $3E0)
+                slot = NesTwinPair(key)
+                NesTwinTexRect(xs, xe, L, L1, pal, (tile & 1) * 8 + (xs - x0), slot * 8 + fy, 1, 1)
+                NesTwinF(7) + 1
+              EndIf
+            EndIf
+          Next
+          NesTwinFlush()
+          L = L1
+        Wend
+      EndIf
+    ElseIf mask & 16
+      ; sprites: phase 0 the behind-background ones, phase 2 the front ones, the highest index first
+      For i = 63 To 0 Step -1
+        at = PeekA(oam + i * 4 + 2)
+        If Bool(at & 32) = Bool(phase = 0)
+          tile = PeekA(oam + i * 4 + 1) : x0 = PeekA(oam + i * 4 + 3) : y = PeekA(oam + i * 4)
+          xs = x0 : If (mask & 4) = 0 And xs < 8 : xs = 8 : EndIf
+          xe = x0 + 8 : If xe > 256 : xe = 256 : EndIf
+          flip = Bool(at & 128)
+          L = first
+          While L < last And xe > xs
+            If ((NesTwinDrawn(L) >> i) & 1) = 0 : L + 1 : Continue : EndIf
+            r = L - 1 - y : If flip : r = h - 1 - r : EndIf
+            half = r >> 3
+            L1 = L + 1
+            While L1 < last And ((NesTwinDrawn(L1) >> i) & 1)
+              r0 = L1 - 1 - y : If flip : r0 = h - 1 - r0 : EndIf
+              If (r0 >> 3) <> half : Break : EndIf
+              L1 + 1
+            Wend
+            If h = 8 : ta = tile : a = ((ctrl & 8) << 9) | (ta << 4) : Else : ta = (tile & 254) + half : a = ((tile & 1) << 12) | (ta << 4) : EndIf
+            empty = 1
+            For k = L To L1 - 1
+              r0 = k - 1 - y : If flip : r0 = h - 1 - r0 : EndIf
+              If NesTwinRow(rec, a | ((r0 & 7) << 1)) : empty = 0 : Break : EndIf
+            Next
+            If empty = 0
+              NesTwinDescriptors(4)
+              key = (PeekA(rec + #NES_B_BANKS + ((a >> 10) & 7)) << 10) | (a & $3E0)
+              slot = NesTwinPair(key)
+              If at & 64
+                NesTwinTexRect(xs, xe, L, L1, at & 3, (ta & 1) * 8 + 7 - (xs - x0), slot * 8 + (r & 7), -1, 1 - 2 * flip)
+              Else
+                NesTwinTexRect(xs, xe, L, L1, at & 3, (ta & 1) * 8 + (xs - x0), slot * 8 + (r & 7), 1, 1 - 2 * flip)
+              EndIf
+              NesTwinF(10) + 1
+            EndIf
+            L = L1
+          Wend
+        EndIf
+      Next
+      NesTwinFlush()
+    EndIf
+  Next
+  NesTwinF(12) + NesTwinBandKeyN
+  If NesTwinBandKeyN > NesTwinStat(54) : NesTwinStat(54) = NesTwinBandKeyN : EndIf
+EndProcedure
+
+; The cold part's way in (unit/ppu_cold.n64, ppu_cut_close): t2 = the record. Keeps every register the cut's
+; callers may hold (a0-a7, t0-t9, v0, v1, hi / lo): the compiled twin clobbers the caller-saved ones.
+ProcedureNaked NesTwinBandCall()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    jal nestwinband
+    move a0, t2
+    ld t0, 136(sp)
+    mthi t0
+    ld t0, 144(sp)
+    mtlo t0
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld a4, 40(sp)
+    ld a5, 48(sp)
+    ld a6, 56(sp)
+    ld a7, 64(sp)
+    ld t0, 72(sp)
+    ld t1, 80(sp)
+    ld t2, 88(sp)
+    ld t3, 96(sp)
+    ld t8, 104(sp)
+    ld t9, 112(sp)
+    ld v0, 120(sp)
+    ld v1, 128(sp)
+    jr ra
+    daddiu sp, sp, 176
+  EndASM
+EndProcedure
+
+; At line 240 (unit/ppu.n64): the frame's words drawn into the second picture, then every line compared.
+Procedure NesTwinFrame()
+  Protected i.i, w.i, y.i, x.i, pal.i, row.i, old.i, new.i, q.i, f.i, k.i, split.i, ranges.i, m.i, y0.i
+  NesTwinBases()
+  f = WorkerFrames
+  If PeekI(NesUnitBase + #NES_U_BANDCOUNT) = 0 : ProcedureReturn : EndIf
+  ; The picture a strip of #NES_TWIN_STRIP lines at a time (the RAM below the stack holds no whole second
+  ; picture): the colour image placed so that line y0 of the frame is the strip's first, the scissor those lines
+  ; (its left bound 0), every word of the frame, the library's modes back, the SYNC_FULL waited for; then those
+  ; lines compared. The RDP writes nothing outside the scissor.
+  pal = @NesIndexPalette(0)
+  For y0 = 0 To 239 Step #NES_TWIN_STRIP
+    LpmRdpAttach(NesTwinPic)
+    LpmRdpCmd($27000000, 0)
+    LpmRdpCmd($3F10013F, (NesTwinPic - y0 * 640) & $1FFFFFFF)                  ; SET_COLOR_IMAGE RGBA16, 320 wide
+    LpmRdpCmd($2D000000 | (y0 << 2), ((320 << 2) << 12) | ((y0 + #NES_TWIN_STRIP) << 2))   ; SET_SCISSOR
+    i = 0
+    While i < NesTwinN
+      w = NesTwinCmd(i)
+      If ((w >> 56) & $3F) = $24
+        LpmRdpRoom(16)
+        LpmRdpCmd((w >> 32) & $FFFFFFFF, w & $FFFFFFFF)
+        w = NesTwinCmd(i + 1)
+        LpmRdpCmd((w >> 32) & $FFFFFFFF, w & $FFFFFFFF)
+        i + 2
+      Else
+        LpmRdpCmd((w >> 32) & $FFFFFFFF, w & $FFFFFFFF)
+        i + 1
+      EndIf
+    Wend
+    If lpm_rdp_cycle <> -1                                ; the library's own modes back, as it believes them set
+      LpmRdpCmd($27000000, 0)
+      LpmRdpCmd($2F000000 | lpm_rdp_om_hi, lpm_rdp_om_lo)
+    EndIf
+    LpmRdpDetachWait()
+    LpmRdpForget() : LpmRdpTmemReset()
+    For y = y0 To y0 + #NES_TWIN_STRIP - 1
+      If NesPaletteChange(y) : pal = @NesIndexPalette(y * 8) : EndIf
+      split = (PeekA(NesUnitBase + #NES_U_SPLIT + (y >> 3)) >> (y & 7)) & 1
+      If split
+        NesTwinF(1) + 1
+      ElseIf NesTwinLine(y) = 0
+        NesTwinF(3) + 1
+      ElseIf NesTwinLine(y) = 2
+        NesTwinF(2) + 1
+        q = ((NesTwinPic & $1FFFFFFF) | $A0000000) + ((y - y0) * 320 + 32) * 2   ; compared, counted apart
+        row = NesIndexedPixels() + y * 256
+        For x = 0 To 255
+          k = PeekA(row + x)
+          If (PeekU(pal + (k & 31) * 2) ! PeekU(q + x * 2)) & $FFFE : NesTwinF(15) + 1 : EndIf
+        Next
+      Else
+        NesTwinF(4) + 1
+        row = NesIndexedPixels() + y * 256
+        q = ((NesTwinPic & $1FFFFFFF) | $A0000000) + ((y - y0) * 320 + 32) * 2
+        For x = 0 To 255
+          k = PeekA(row + x)
+          old = PeekU(pal + (k & 31) * 2)
+          new = PeekU(q + x * 2)
+          If (old ! new) & $FFFE Or k > 31
+            NesTwinF(5) + 1
+            If NesTwinFirstDiff = ""
+              NesTwinFirstDiff = "frame " + Str(f) + " line " + Str(y) + " x " + Str(x) + " index " + Str(k) + " renderer $" + Hex(old) + " twin $" + Hex(new)
+            EndIf
+          ElseIf (old ! new) & 1
+            NesTwinF(6) + 1
+          EndIf
+        Next
+      EndIf
+    Next
+  Next
+  NesTwinF(13) = NesTwinN : NesTwinF(14) = 1
+  If f = 1860                                             ; one slow frame's excluded lines, by number
+    NesTwinLines = "NES TWIN LINES 1860 split"
+    For y = 0 To 239
+      If (PeekA(NesUnitBase + #NES_U_SPLIT + (y >> 3)) >> (y & 7)) & 1 : NesTwinLines = NesTwinLines + " " + Str(y) : EndIf
+    Next
+    NesTwinLines = NesTwinLines + " quirk"
+    For y = 0 To 239
+      If NesTwinLine(y) = 2 : NesTwinLines = NesTwinLines + " " + Str(y) : EndIf
+    Next
+    For i = 0 To PeekI(NesUnitBase + #NES_U_BANDCOUNT) - 1
+      NesTwinLines = NesTwinLines + " band " + Str(PeekI(NesBandBase + i * #NES_BAND_BYTES)) + "-" + Str(PeekI(NesBandBase + i * #NES_BAND_BYTES + 8))
+    Next
+  EndIf
+  If NesTwinOver And NesTwinFirstDiff = "" : NesTwinFirstDiff = "frame " + Str(f) + ": " + Str(NesTwinOver) + " words did not fit" : EndIf
+  ; -- the statistics --
+  NesTwinStat(0) + 1
+  ranges = 1
+  If f >= 900 : ranges = ranges | 2 : EndIf
+  If (f >= 1860 And f < 1920) Or (f >= 3360 And f < 3420) : ranges = ranges | 4 : EndIf
+  For m = 0 To 2
+    If ranges & (1 << m)
+      For k = 0 To 15 : NesTwinStat(m * 16 + 1 + k) + NesTwinF(k) : Next
+    EndIf
+  Next
+  If f >= 900
+    If NesTwinF(7) > NesTwinStat(49) : NesTwinStat(49) = NesTwinF(7) : EndIf
+    If NesTwinF(11) > NesTwinStat(50) : NesTwinStat(50) = NesTwinF(11) : EndIf
+    If NesTwinF(13) > NesTwinStat(51) : NesTwinStat(51) = NesTwinF(13) : EndIf
+    If NesTwinF(1) > NesTwinStat(52) : NesTwinStat(52) = NesTwinF(1) : EndIf
+    If NesTwinF(2) > NesTwinStat(53) : NesTwinStat(53) = NesTwinF(2) : EndIf
+  EndIf
+EndProcedure
+
+Procedure NesTwinReport()
+  Protected m.i, k.i, s.s
+  For m = 0 To 2
+    s = "NES TWIN RANGE " + Str(m)
+    For k = 0 To 15 : s = s + " " + Str(NesTwinStat(m * 16 + 1 + k)) : Next
+    LpmDebugPrint(s)
+  Next
+  s = "NES TWIN MAX"
+  For k = 49 To 54 : s = s + " " + Str(NesTwinStat(k)) : Next
+  LpmDebugPrint(s)
+  If NesTwinLines <> "" : LpmDebugPrint(NesTwinLines) : EndIf
+  LpmDebugPrint("NES TWIN FRAMES " + Str(NesTwinStat(0)) + " FIRST DIFFERENCE " + NesTwinFirstDiff)
+EndProcedure
+
+CompilerEndIf

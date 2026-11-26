@@ -77,7 +77,7 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   Global Dim NesUnitSpace.a(8192+#NES_UNIT_BYTES+16)
   Global Dim NesUnitSets.a(512)
   Global NesUnitBase.i
-  ; THE BAND LOG (step N4; design note, section N.15): the frame's band records, #NES_BAND_BYTES
+  ; THE BAND LOG (step N4; design note, section N.17): the frame's band records, #NES_BAND_BYTES
   ; each, written by the band cut in the unit's cold part (unit/ppu_cold.n64), and the OAM
   ; snapshots they name, 256 bytes each. Read by the emitter (the CPU twin today, the RSP next);
   ; never by the hot code. 16-byte aligned for the RSP's DMA; NesBandBase / NesOamBase hold the
@@ -356,6 +356,7 @@ Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
 EndProcedure
 
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  XIncludeFile "twin.n64"
   XIncludeFile "mmc3_run.n64"
 CompilerEndIf
 

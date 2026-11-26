@@ -405,6 +405,14 @@ ppu_adv_next_line:
     move v0, s6
     jal ppu_cut_close               ; the visible lines are over: close the frame's last band
     addiu t3, zero, 240
+  EndASM
+  CompilerIf #NES_TWIN_CHECK
+    ASM
+      jal nestwinframe              ; the emitter twin's picture of the frame against the renderer's
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
 ppu_adv_line_count:
     ld t0, global_ppulinecount-global_ppuline(s4)
     bne s1, t0, ppu_adv_store_line
