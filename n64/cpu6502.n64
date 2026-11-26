@@ -3090,6 +3090,7 @@ c65_s_indx:
   XIncludeFile "../n64/unit/ppu_check.n64"
   XIncludeFile "../n64/unit/apu_cold.n64"
   XIncludeFile "../n64/unit/cold.n64"
+  XIncludeFile "../n64/unit/a12_cold.n64"
   ASM
 
     ; --- data (read through the D-cache only) -------------------------------------

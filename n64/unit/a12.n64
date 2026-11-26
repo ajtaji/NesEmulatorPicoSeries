@@ -28,9 +28,24 @@
 ;   only a pending high falls at the first decision dot; with the background at $1000 the level
 ;   alternates every 4 dots, so of all its rises only the FIRST can follow 10 low dots (every later
 ;   one follows exactly 4), and the region's end state is read off its last decision dot. Only the
-;   sprite region, whose levels come from the eight slots, is stepped dot by dot, and only when a
-;   slot or the level is high. A rise's clock is MapDots + (p - Dot), the clock is advanced once per
-;   region.
+;   sprite region, whose levels come from the eight slots, is solved in closed form when the call
+;   covers it whole from dot 257 with the level low (design note N.45), and otherwise stepped dot by
+;   dot, only when a slot or the level is high. A rise's clock is MapDots + (p - Dot), the clock is
+;   advanced once per region. A background region at $0000 entered low is advanced at once.
+;
+; THE PLAIN TWIN of the closed form and of the slot fetch done in place (what the assembly computes):
+;   at dot 257:  if PPUCTRL & 32 = 0:  S = 255 if PPUCTRL & 8 else 0
+;                else: L = line + 1 (261 -> 0); if L >= 240 or OamCacheDirty: S = MapperSpriteFetch(line)
+;                      else: S = 255; for i < min(CachedCount(L), 8):
+;                              if Oam(CachedSprite(L * 8 + i) * 4 + 1) & 1 = 0: S = S & ~(1 << i)
+;                MapSpriteBits = S
+;   region (257, 320], entered at 257 with A12 low and >= 63 dots to go, S <> 0:
+;                j0 = lowest set bit of S; k = highest set bit of S & $7F; runs = runs of set bits
+;                if MapDots + 4 + 8 j0 - MapLowSince >= 10: clock the counter
+;                clock the counter runs - 1 times
+;                if S & $7F: MapLowSince = MapDots + 8 + 8 k
+;                A12 = S >> 7;  MapDots += 63; dot = 320
+;   (j0, k and runs - 1 are one byte of the table a12_sprite_form, in unit/a12_cold.n64.)
 ;
 ; REGISTERS in the walk (those of the exact walk): a0 dots still to advance, a1 line, a2 dot, a3 odd,
 ;   a6 = global_mapdots, v0 the dot clock at a2, v1 MapLowSince, t8 the level, t9 PPUCTRL with bit 8
@@ -108,53 +123,14 @@ mmc3_fetch_full_sprite:
     bnez t0, mmc3_fetch_with_edges
     ld a3, global_nesmmc3line-global_mapdots(a2)
     sltiu t0, a3, 240
-    bnez t0, mmc3_fetch_sprite_width
+    bnez t0, mmc3_fetch_sprite_width   ; (a12_cold.n64)
     addiu a4, zero, 341
     addiu t0, zero, 261
     bne a3, t0, mmc3_fetch_with_edges
     nop
     ld t0, global_nesmmc3odd-global_mapdots(a2)
+    j mmc3_fetch_sprite_width
     subu a4, a4, t0
-mmc3_fetch_sprite_width:
-    sltu t0, t2, a4
-    bnez t0, mmc3_fetch_sprite_once
-    subu a5, t2, a4
-    sltiu t0, a5, 257
-    beqz t0, mmc3_fetch_with_edges
-    nop
-    move t2, a5
-    addiu a3, a3, 1
-    addiu t0, zero, 262
-    bne a3, t0, mmc3_fetch_sprite_line
-    nop
-    ld t0, global_nesmmc3odd-global_mapdots(a2)
-    move a3, zero
-    xori t0, t0, 1
-    sd t0, global_nesmmc3odd-global_mapdots(a2)
-mmc3_fetch_sprite_line:
-    sd a3, global_nesmmc3line-global_mapdots(a2)
-mmc3_fetch_sprite_once:
-    sd t2, global_nesmmc3dot-global_mapdots(a2)
-    ld t3, 0(a2)
-    dsubu t1, t3, t1
-    daddu t3, t3, a1
-    ld t0, global_maplowsince-global_mapdots(a2)
-    addiu a3, zero, 255
-    sd a3, global_mapspritebits-global_mapdots(a2)
-    sd t3, 0(a2)
-    daddiu t3, t1, 321
-    sd t3, global_maplowsince-global_mapdots(a2)
-    daddiu t2, t1, 261
-    dsubu t2, t2, t0
-    sltiu t2, t2, 10
-    bnez t2, mmc3_fetch_sprite_done
-    nop
-    j u_mapperclockirq
-    nop
-mmc3_fetch_sprite_done:
-    jr ra
-    nop
-
 
 mmc3_fetch_with_edges:            ; the fast paths above fall back here: a1 = dots, a2 = global_mapdots
   EndASM
@@ -232,6 +208,10 @@ a12_bg:
     move t2, a0
 a12_bg_end:
     addu a5, a2, t2               ; a5 = e
+    andi t3, t9, 16
+    or t3, t3, t8
+    beqz t3, a12_bg_after         ; background at $0000 and the level low: no decision dot changes it
+    nop
     beqz a2, a12_bg_q0            ; q0 = the first decision dot after a2: 1 at a line's start,
     addiu a4, zero, 1             ;      else ((a2 - 1) & ~3) + 5
     addiu a4, a2, -1
@@ -253,74 +233,13 @@ a12_bg_q1:
     bnez t2, a12_bg_after         ; no decision dot in the region's part
     srl t2, t9, 4
     andi t2, t2, 1
-    bnez t2, a12_bg_high
+    bnez t2, a12_bg_high          ; (a12_cold.n64)
     move a7, zero                 ; a7 = 1 when the region's first rise counts
     ; background at $0000: every decision dot is low; a high level falls at q0
     beqz t8, a12_bg_after
     subu t2, a4, a2
     daddu v1, v0, t2              ; MapLowSince = clock(q0)
-    b a12_bg_after
     move t8, zero
-
-a12_bg_high:                      ; background at $1000: high on p mod 8 = 5, low on p mod 8 = 1
-    move t1, t8                   ; t1 = the level on entry
-    andi t2, a4, 7
-    addiu t3, zero, 5
-    beq t2, t3, a12_bgh_rise_first
-    nop
-    bnez t8, a12_bgh_fall_first   ; q0 is a fall dot
-    addiu t2, a4, 4               ; r = q0 + 4, the first rise dot
-    slt t3, t0, t2
-    bnez t3, a12_bgh_state        ; r is past the region's part: no rise
-    subu t3, t2, a2
-    daddu t3, v0, t3              ; clock(r)
-    dsubu t3, t3, v1
-    sltiu t3, t3, 10
-    b a12_bgh_state
-    xori a7, t3, 1                ; low for 10 dots or more: the rise counts
-a12_bgh_fall_first:               ; high on entry: falls at q0, so the rise at q0 + 4 follows 4 low dots
-    subu t3, a4, a2
-    daddu v1, v0, t3
-    b a12_bgh_state
-    move t8, zero
-a12_bgh_rise_first:               ; q0 is a rise dot
-    bnez t8, a12_bgh_state        ; already high: no edge
-    subu t3, a4, a2
-    daddu t3, v0, t3
-    dsubu t3, t3, v1
-    sltiu t3, t3, 10
-    xori a7, t3, 1
-a12_bgh_state:                    ; the level and the last fall at q1 (t0); t1 = the entry level
-    andi t2, t0, 7
-    addiu t3, zero, 5
-    beq t2, t3, a12_bgh_end_high
-    addiu t2, t0, -4
-    ; q1 is a fall dot: low at the end; it falls there when q1 - 4 (high) is in the part
-    slt t3, t2, a4
-    bnez t3, a12_bg_clock         ; q1 = q0: handled above
-    move t8, zero
-    subu t2, t0, a2
-    b a12_bg_clock
-    daddu v1, v0, t2              ; MapLowSince = clock(q1)
-a12_bgh_end_high:                 ; q1 is a rise dot: high at the end
-    addiu t8, zero, 1
-    slt t3, t2, a4
-    bnez t3, a12_bg_clock         ; q1 = q0: no fall in the part
-    addiu t3, t0, -8
-    slt t3, t3, a4
-    beqz t3, a12_bgh_fall_q1m4    ; q1 - 8 (high) in the part: q1 - 4 fell
-    nop
-    beqz t1, a12_bg_clock         ; q1 - 4 = q0 and the level was low: nothing fell
-    nop
-a12_bgh_fall_q1m4:
-    subu t2, t2, a2
-    daddu v1, v0, t2              ; MapLowSince = clock(q1 - 4)
-a12_bg_clock:
-    beqz a7, a12_bg_after
-    nop
-    la a7, a12_bg_after           ; the counted rise clocks the MMC3 counter
-    j mmc3_irq_update
-    nop
 a12_bg_after:                     ; the clock and the position move to e
     subu t2, a5, a2
     daddu v0, v0, t2
@@ -328,31 +247,62 @@ a12_bg_after:                     ; the clock and the position move to e
     addiu t3, zero, 257
     bne a5, t3, a12_next
     move a2, a5
-    ; dot 257: the line's sprite slots are fetched, then the dot's level is low
-    daddiu sp, sp, -80
-    sd ra, 0(sp)
-    sd a0, 8(sp)
-    sd a1, 16(sp)
-    sd a2, 24(sp)
-    sd a3, 32(sp)
-    sd a6, 40(sp)
-    sd v0, 48(sp)
-    sd v1, 56(sp)
-    sd t8, 64(sp)
-    sd t9, 72(sp)
-    jal mapperspritefetch         ; MapSpriteBits for line a1
-    move a0, a1
-    ld ra, 0(sp)
-    ld a0, 8(sp)
-    ld a1, 16(sp)
-    ld a2, 24(sp)
-    ld a3, 32(sp)
-    ld a6, 40(sp)
-    ld v0, 48(sp)
-    ld v1, 56(sp)
-    ld t8, 64(sp)
-    ld t9, 72(sp)
-    daddiu sp, sp, 80
+    ; dot 257: the line's sprite slots are fetched (MapperSpriteFetch's two common paths in place, no
+    ; register saved), then the dot's level is low. S = MapSpriteBits: bit j = slot j fetches at $1000.
+    andi t0, t9, 32
+    bnez t0, a12_fetch_tall
+    andi t0, t9, 8                ; 8x8: every slot at PPUCTRL bit 3's table
+    sltu t0, zero, t0
+    subu t0, zero, t0
+    b a12_fetch_store
+    andi t3, t0, 255
+a12_fetch_tall:                   ; 8x16: the next line's candidates (261 -> 0), tile bit 0 = the table
+    addiu t1, a1, 1
+    addiu t0, zero, 262
+    bne t1, t0, a12_fetch_row
+    nop
+    move t1, zero
+a12_fetch_row:
+    sltiu t0, t1, 240
+    beqz t0, a12_fetch_call       ; past the lists' last row: the procedure scans OAM (a12_cold.n64)
+    nop
+    la t2, global_oamcachedirty
+    ld t2, 0(t2)
+    bnez t2, a12_fetch_call       ; OAM changed: the procedure rebuilds the lists first
+    nop
+    la t0, global_cachedcount
+    daddu t0, t0, t1
+    lbu t2, 0(t0)                 ; candidates on the row (9: more than eight)
+    beqz t2, a12_fetch_flip       ; none: every slot fetches tile $FF, at $1000
+    move t3, zero                 ; t3 = the slots at $0000
+    sltiu t0, t2, 9
+    bnez t0, a12_fetch_n
+    sll a4, t1, 3
+    addiu t2, zero, 8
+a12_fetch_n:
+    la t0, global_cachedsprite
+    daddu t0, t0, a4              ; this row's OAM indices, in OAM order
+    daddu t2, t0, t2              ; their end
+    la a5, global_oam
+    addiu a7, zero, 1             ; the slot's bit
+a12_fetch_next:
+    lbu t1, 0(t0)
+    addiu t0, t0, 1
+    sll t1, t1, 2
+    daddu t1, a5, t1
+    lbu t1, 1(t1)                 ; the tile number
+    xori t1, t1, 1
+    andi t1, t1, 1                ; 1: an even tile, at $0000
+    subu t1, zero, t1
+    and t1, t1, a7
+    or t3, t3, t1
+    bne t0, t2, a12_fetch_next
+    sll a7, a7, 1
+a12_fetch_flip:
+    xori t3, t3, 255
+a12_fetch_store:
+    sd t3, global_mapspritebits-global_mapdots(a6)
+a12_fetch_done:
     beqz t8, a12_next
     nop
     move v1, v0                   ; a high level falls at 257
@@ -375,6 +325,52 @@ a12_spr_end:
     beqz t8, a12_spr_after        ; no slot high and the level low: nothing can change
     nop
 a12_spr_walk:
+    ; THE CLOSED FORM (design note N.45) for a whole region entered at 257 with the level low:
+    ; the first rise (slot j0) counts iff clock(261 + 8 j0) - MapLowSince >= 10; every later run of
+    ; set bits starts >= 12 low dots after the last fall, so it counts; the level at 320 is slot 7's;
+    ; MapLowSince = clock(265 + 8k), k = the highest set bit of S & $7F (if any).
+    addiu t2, zero, 257
+    bne a2, t2, a12_spr_stepped
+    addiu t2, zero, 320
+    bne a5, t2, a12_spr_stepped
+    nop
+    bnez t8, a12_spr_stepped
+    nop
+    la t1, a12_sprite_form        ; (a12_cold.n64) byte S: j0 | k << 3 | (runs - 1) << 6
+    daddu t1, t1, t0
+    lbu a4, 0(t1)
+    move a5, t0                   ; S, kept over the clocks
+    andi t2, a4, 7
+    sll t2, t2, 3
+    daddu t2, v0, t2
+    daddiu t2, t2, 4              ; clock(261 + 8 j0)
+    dsubu t2, t2, v1
+    sltiu t2, t2, 10
+    bnez t2, a12_spr_form_runs    ; fewer than 10 low dots: not counted
+    nop
+    la a7, a12_spr_form_runs
+    j mmc3_irq_update
+    nop
+a12_spr_form_runs:                ; the later runs, each counted (a4's low six bits survive the -64s)
+    sltiu t2, a4, 64
+    bnez t2, a12_spr_form_end
+    addiu a4, a4, -64
+    la a7, a12_spr_form_runs
+    j mmc3_irq_update
+    nop
+a12_spr_form_end:
+    andi t0, a5, 127
+    beqz t0, a12_spr_form_level   ; no fall inside the region
+    srl t2, a4, 3
+    andi t2, t2, 7
+    sll t2, t2, 3
+    daddu v1, v0, t2
+    daddiu v1, v1, 8              ; MapLowSince = clock(265 + 8k)
+a12_spr_form_level:
+    srl t8, a5, 7                 ; slot 7 high: high at 320 (it falls at 321)
+    b a12_spr_after
+    addiu a5, zero, 320
+a12_spr_stepped:                  ; the region in part, or entered high: dot by dot
     addiu a4, a2, -1              ; a4 = the first decision dot after a2
     srl a4, a4, 2
     sll a4, a4, 2
@@ -427,138 +423,3 @@ a12_done:
     jr ra
     nop
   EndASM
-CompilerIf #NES_A12_CHECK
-  ASM
-    ; --- the checking build: both walks on the same state, every call ---------------------------
-    ; NesA12Check (64-bit words): 0 calls, 1 the first call that differed (0: none), 2-13 the state
-    ; on entry, 14-25 the exact walk's result, 26 the dots, 27 the caller's link. The twelve state
-    ; words are the walk's own and everything mmc3_irq_update and MapperSpriteFetch write.
-    ; On a difference the guest CPU is stopped (Stopped = 1), so the run ends on that call.
-a12_check:
-    la t0, global_nesa12check
-    sd ra, 216(t0)
-    sd a1, 208(t0)
-    jal a12_check_copy            ; the globals -> words 2-13
-    addiu a4, t0, 16
-    jal mmc3_exact_walk           ; the reference (mmc3_ticks.n64), a1 = dots, a2 = global_mapdots
-    nop
-    la t0, global_nesa12check
-    jal a12_check_copy            ; its result -> words 14-25
-    addiu a4, t0, 112
-    la t0, global_nesa12check
-    jal a12_check_restore         ; words 2-13 -> the globals
-    addiu a4, t0, 16
-    la t0, global_nesa12check
-    ld a1, 208(t0)
-    la a2, global_mapdots
-    jal a12_walk                  ; the analytic walk on the same state
-    nop
-    la t0, global_nesa12check
-    ld t1, 0(t0)
-    daddiu t1, t1, 1
-    sd t1, 0(t0)                  ; calls + 1
-    jal a12_check_copy            ; its result -> words 2-13 (the entry state is no longer needed)
-    addiu a4, t0, 16
-    la t0, global_nesa12check
-    move t3, zero
-    addiu t2, zero, 12
-a12_check_cmp:                    ; t3 = 1 if any word differs
-    ld a5, 16(t0)
-    ld a6, 112(t0)
-    xor a5, a5, a6
-    sltu a5, zero, a5
-    or t3, t3, a5
-    addiu t2, t2, -1
-    bnez t2, a12_check_cmp
-    daddiu t0, t0, 8
-    la t0, global_nesa12check
-    beqz t3, a12_check_out
-    ld t1, 8(t0)
-    bnez t1, a12_check_out        ; keep the first difference
-    ld t1, 0(t0)
-    sd t1, 8(t0)
-    la t2, global_stopped
-    addiu t1, zero, 1
-    sd t1, 0(t2)
-a12_check_out:
-    ld ra, 216(t0)
-    jr ra
-    nop
-a12_check_copy:                   ; leaf: the twelve state words -> a4 (t1 scratch)
-    la t1, global_mapdots
-    ld t1, 0(t1)
-    sd t1, 0(a4)
-    la t1, global_maplowsince
-    ld t1, 0(t1)
-    sd t1, 8(a4)
-    la t1, global_mapa12
-    ld t1, 0(t1)
-    sd t1, 16(a4)
-    la t1, global_nesmmc3line
-    ld t1, 0(t1)
-    sd t1, 24(a4)
-    la t1, global_nesmmc3dot
-    ld t1, 0(t1)
-    sd t1, 32(a4)
-    la t1, global_nesmmc3odd
-    ld t1, 0(t1)
-    sd t1, 40(a4)
-    la t1, global_mapspritebits
-    ld t1, 0(t1)
-    sd t1, 48(a4)
-    la t1, global_mapirqcount
-    ld t1, 0(t1)
-    sd t1, 56(a4)
-    la t1, global_mapreload
-    ld t1, 0(t1)
-    sd t1, 64(a4)
-    la t1, global_mapirqclocks
-    ld t1, 0(t1)
-    sd t1, 72(a4)
-    la t1, global_mapirq
-    ld t1, 0(t1)
-    sd t1, 80(a4)
-    la t1, global_mapirqassertions
-    ld t1, 0(t1)
-    jr ra
-    sd t1, 88(a4)
-a12_check_restore:                ; leaf: a4 -> the twelve state words (t1, t2 scratch)
-    ld t1, 0(a4)
-    la t2, global_mapdots
-    sd t1, 0(t2)
-    ld t1, 8(a4)
-    la t2, global_maplowsince
-    sd t1, 0(t2)
-    ld t1, 16(a4)
-    la t2, global_mapa12
-    sd t1, 0(t2)
-    ld t1, 24(a4)
-    la t2, global_nesmmc3line
-    sd t1, 0(t2)
-    ld t1, 32(a4)
-    la t2, global_nesmmc3dot
-    sd t1, 0(t2)
-    ld t1, 40(a4)
-    la t2, global_nesmmc3odd
-    sd t1, 0(t2)
-    ld t1, 48(a4)
-    la t2, global_mapspritebits
-    sd t1, 0(t2)
-    ld t1, 56(a4)
-    la t2, global_mapirqcount
-    sd t1, 0(t2)
-    ld t1, 64(a4)
-    la t2, global_mapreload
-    sd t1, 0(t2)
-    ld t1, 72(a4)
-    la t2, global_mapirqclocks
-    sd t1, 0(t2)
-    ld t1, 80(a4)
-    la t2, global_mapirq
-    sd t1, 0(t2)
-    ld t1, 88(a4)
-    la t2, global_mapirqassertions
-    jr ra
-    sd t1, 0(t2)
-  EndASM
-CompilerEndIf

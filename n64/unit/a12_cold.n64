@@ -1,0 +1,288 @@
+; unit/a12_cold.n64 - the A12 walk's cold paths and its sprite-region table (design note N.45).
+; Part of the hot unit's COLD part: included after c65_fetch_slow in cpu6502.n64's procedure (the
+; shipped build) and in the holder in mmc3_run.n64 (the reference build), never on its own.
+; Moved here from unit/a12.n64 unchanged, by measured heat (0 cycles a guest frame in the SMB3
+; replay profile): the 8x8 full-phase fast path of u_mapperpputicks, the background-at-$1000
+; region of the walk, and the slot fetch's call of MapperSpriteFetch (OAM changed, or the rows
+; past 239), which the walk now does in place for its two common paths; and the checking build's
+; dual walk (a12_check, #NES_A12_CHECK only), which with N7's growth no longer fitted the hot span.
+  ASM
+mmc3_fetch_sprite_width:
+    sltu t0, t2, a4
+    bnez t0, mmc3_fetch_sprite_once
+    subu a5, t2, a4
+    sltiu t0, a5, 257
+    beqz t0, mmc3_fetch_with_edges
+    nop
+    move t2, a5
+    addiu a3, a3, 1
+    addiu t0, zero, 262
+    bne a3, t0, mmc3_fetch_sprite_line
+    nop
+    ld t0, global_nesmmc3odd-global_mapdots(a2)
+    move a3, zero
+    xori t0, t0, 1
+    sd t0, global_nesmmc3odd-global_mapdots(a2)
+mmc3_fetch_sprite_line:
+    sd a3, global_nesmmc3line-global_mapdots(a2)
+mmc3_fetch_sprite_once:
+    sd t2, global_nesmmc3dot-global_mapdots(a2)
+    ld t3, 0(a2)
+    dsubu t1, t3, t1
+    daddu t3, t3, a1
+    ld t0, global_maplowsince-global_mapdots(a2)
+    addiu a3, zero, 255
+    sd a3, global_mapspritebits-global_mapdots(a2)
+    sd t3, 0(a2)
+    daddiu t3, t1, 321
+    sd t3, global_maplowsince-global_mapdots(a2)
+    daddiu t2, t1, 261
+    dsubu t2, t2, t0
+    sltiu t2, t2, 10
+    bnez t2, mmc3_fetch_sprite_done
+    nop
+    j u_mapperclockirq
+    nop
+mmc3_fetch_sprite_done:
+    jr ra
+    nop
+
+a12_bg_high:                      ; background at $1000: high on p mod 8 = 5, low on p mod 8 = 1
+    move t1, t8                   ; t1 = the level on entry
+    andi t2, a4, 7
+    addiu t3, zero, 5
+    beq t2, t3, a12_bgh_rise_first
+    nop
+    bnez t8, a12_bgh_fall_first   ; q0 is a fall dot
+    addiu t2, a4, 4               ; r = q0 + 4, the first rise dot
+    slt t3, t0, t2
+    bnez t3, a12_bgh_state        ; r is past the region's part: no rise
+    subu t3, t2, a2
+    daddu t3, v0, t3              ; clock(r)
+    dsubu t3, t3, v1
+    sltiu t3, t3, 10
+    b a12_bgh_state
+    xori a7, t3, 1                ; low for 10 dots or more: the rise counts
+a12_bgh_fall_first:               ; high on entry: falls at q0, so the rise at q0 + 4 follows 4 low dots
+    subu t3, a4, a2
+    daddu v1, v0, t3
+    b a12_bgh_state
+    move t8, zero
+a12_bgh_rise_first:               ; q0 is a rise dot
+    bnez t8, a12_bgh_state        ; already high: no edge
+    subu t3, a4, a2
+    daddu t3, v0, t3
+    dsubu t3, t3, v1
+    sltiu t3, t3, 10
+    xori a7, t3, 1
+a12_bgh_state:                    ; the level and the last fall at q1 (t0); t1 = the entry level
+    andi t2, t0, 7
+    addiu t3, zero, 5
+    beq t2, t3, a12_bgh_end_high
+    addiu t2, t0, -4
+    ; q1 is a fall dot: low at the end; it falls there when q1 - 4 (high) is in the part
+    slt t3, t2, a4
+    bnez t3, a12_bg_clock         ; q1 = q0: handled above
+    move t8, zero
+    subu t2, t0, a2
+    b a12_bg_clock
+    daddu v1, v0, t2              ; MapLowSince = clock(q1)
+a12_bgh_end_high:                 ; q1 is a rise dot: high at the end
+    addiu t8, zero, 1
+    slt t3, t2, a4
+    bnez t3, a12_bg_clock         ; q1 = q0: no fall in the part
+    addiu t3, t0, -8
+    slt t3, t3, a4
+    beqz t3, a12_bgh_fall_q1m4    ; q1 - 8 (high) in the part: q1 - 4 fell
+    nop
+    beqz t1, a12_bg_clock         ; q1 - 4 = q0 and the level was low: nothing fell
+    nop
+a12_bgh_fall_q1m4:
+    subu t2, t2, a2
+    daddu v1, v0, t2              ; MapLowSince = clock(q1 - 4)
+a12_bg_clock:
+    beqz a7, a12_bg_after
+    nop
+    la a7, a12_bg_after           ; the counted rise clocks the MMC3 counter
+    j mmc3_irq_update
+    nop
+
+a12_fetch_call:                   ; MapperSpriteFetch(a1) with the walk's registers saved
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a6, 40(sp)
+    sd v0, 48(sp)
+    sd v1, 56(sp)
+    sd t8, 64(sp)
+    sd t9, 72(sp)
+    jal mapperspritefetch         ; MapSpriteBits for line a1
+    move a0, a1
+    ld ra, 0(sp)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld a2, 24(sp)
+    ld a3, 32(sp)
+    ld a6, 40(sp)
+    ld v0, 48(sp)
+    ld v1, 56(sp)
+    ld t8, 64(sp)
+    ld t9, 72(sp)
+    daddiu sp, sp, 80
+    j a12_fetch_done
+    nop
+
+    ; --- data (read through the D-cache only) -------------------------------------
+    ; a12_sprite_form: one byte per S = MapSpriteBits (bit j = slot j fetches at $1000):
+    ; bits 0-2 j0 = the lowest set bit; bits 3-5 k = the highest set bit of S & $7F (0 when none);
+    ; bits 6-7 runs - 1 = the maximal runs of set bits less one. Byte 0 (S = 0) is not read.
+    ; Written by:  for S: j0 = ctz(S); k = msb(S & 127); runs = rises of S read from bit 0 up.
+    .align 2
+a12_sprite_form:
+    .word 0x00000908, 0x12501110, 0x1B585958, 0x1A581918, 0x24606160, 0x62A06160, 0x23606160, 0x22602120
+    .word 0x2D686968, 0x6AA86968, 0x6BA8A9A8, 0x6AA86968, 0x2C686968, 0x6AA86968, 0x2B686968, 0x2A682928
+    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
+    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
+    .word 0x07404948, 0x52905150, 0x5B989998, 0x5A985958, 0x64A0A1A0, 0xA2E0A1A0, 0x63A0A1A0, 0x62A06160
+    .word 0x6DA8A9A8, 0xAAE8A9A8, 0xABE8E9E8, 0xAAE8A9A8, 0x6CA8A9A8, 0xAAE8A9A8, 0x6BA8A9A8, 0x6AA86968
+    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
+    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
+  EndASM
+CompilerIf #NES_A12_CHECK
+  ASM
+    ; --- the checking build: both walks on the same state, every call ---------------------------
+    ; NesA12Check (64-bit words): 0 calls, 1 the first call that differed (0: none), 2-13 the state
+    ; on entry, 14-25 the exact walk's result, 26 the dots, 27 the caller's link. The twelve state
+    ; words are the walk's own and everything mmc3_irq_update and MapperSpriteFetch write.
+    ; On a difference the guest CPU is stopped (Stopped = 1), so the run ends on that call.
+a12_check:
+    la t0, global_nesa12check
+    sd ra, 216(t0)
+    sd a1, 208(t0)
+    jal a12_check_copy            ; the globals -> words 2-13
+    addiu a4, t0, 16
+    jal mmc3_exact_walk           ; the reference (mmc3_ticks.n64), a1 = dots, a2 = global_mapdots
+    nop
+    la t0, global_nesa12check
+    jal a12_check_copy            ; its result -> words 14-25
+    addiu a4, t0, 112
+    la t0, global_nesa12check
+    jal a12_check_restore         ; words 2-13 -> the globals
+    addiu a4, t0, 16
+    la t0, global_nesa12check
+    ld a1, 208(t0)
+    la a2, global_mapdots
+    jal a12_walk                  ; the analytic walk on the same state
+    nop
+    la t0, global_nesa12check
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)                  ; calls + 1
+    jal a12_check_copy            ; its result -> words 2-13 (the entry state is no longer needed)
+    addiu a4, t0, 16
+    la t0, global_nesa12check
+    move t3, zero
+    addiu t2, zero, 12
+a12_check_cmp:                    ; t3 = 1 if any word differs
+    ld a5, 16(t0)
+    ld a6, 112(t0)
+    xor a5, a5, a6
+    sltu a5, zero, a5
+    or t3, t3, a5
+    addiu t2, t2, -1
+    bnez t2, a12_check_cmp
+    daddiu t0, t0, 8
+    la t0, global_nesa12check
+    beqz t3, a12_check_out
+    ld t1, 8(t0)
+    bnez t1, a12_check_out        ; keep the first difference
+    ld t1, 0(t0)
+    sd t1, 8(t0)
+    la t2, global_stopped
+    addiu t1, zero, 1
+    sd t1, 0(t2)
+a12_check_out:
+    ld ra, 216(t0)
+    jr ra
+    nop
+a12_check_copy:                   ; leaf: the twelve state words -> a4 (t1 scratch)
+    la t1, global_mapdots
+    ld t1, 0(t1)
+    sd t1, 0(a4)
+    la t1, global_maplowsince
+    ld t1, 0(t1)
+    sd t1, 8(a4)
+    la t1, global_mapa12
+    ld t1, 0(t1)
+    sd t1, 16(a4)
+    la t1, global_nesmmc3line
+    ld t1, 0(t1)
+    sd t1, 24(a4)
+    la t1, global_nesmmc3dot
+    ld t1, 0(t1)
+    sd t1, 32(a4)
+    la t1, global_nesmmc3odd
+    ld t1, 0(t1)
+    sd t1, 40(a4)
+    la t1, global_mapspritebits
+    ld t1, 0(t1)
+    sd t1, 48(a4)
+    la t1, global_mapirqcount
+    ld t1, 0(t1)
+    sd t1, 56(a4)
+    la t1, global_mapreload
+    ld t1, 0(t1)
+    sd t1, 64(a4)
+    la t1, global_mapirqclocks
+    ld t1, 0(t1)
+    sd t1, 72(a4)
+    la t1, global_mapirq
+    ld t1, 0(t1)
+    sd t1, 80(a4)
+    la t1, global_mapirqassertions
+    ld t1, 0(t1)
+    jr ra
+    sd t1, 88(a4)
+a12_check_restore:                ; leaf: a4 -> the twelve state words (t1, t2 scratch)
+    ld t1, 0(a4)
+    la t2, global_mapdots
+    sd t1, 0(t2)
+    ld t1, 8(a4)
+    la t2, global_maplowsince
+    sd t1, 0(t2)
+    ld t1, 16(a4)
+    la t2, global_mapa12
+    sd t1, 0(t2)
+    ld t1, 24(a4)
+    la t2, global_nesmmc3line
+    sd t1, 0(t2)
+    ld t1, 32(a4)
+    la t2, global_nesmmc3dot
+    sd t1, 0(t2)
+    ld t1, 40(a4)
+    la t2, global_nesmmc3odd
+    sd t1, 0(t2)
+    ld t1, 48(a4)
+    la t2, global_mapspritebits
+    sd t1, 0(t2)
+    ld t1, 56(a4)
+    la t2, global_mapirqcount
+    sd t1, 0(t2)
+    ld t1, 64(a4)
+    la t2, global_mapreload
+    sd t1, 0(t2)
+    ld t1, 72(a4)
+    la t2, global_mapirqclocks
+    sd t1, 0(t2)
+    ld t1, 80(a4)
+    la t2, global_mapirq
+    sd t1, 0(t2)
+    ld t1, 88(a4)
+    la t2, global_mapirqassertions
+    jr ra
+    sd t1, 0(t2)
+  EndASM
+CompilerEndIf
