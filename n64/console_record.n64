@@ -10,16 +10,19 @@
 ; and why the emulator stopped, if it did.
 ;
 ; WHERE: the flash cart's SDRAM (a SummerCart64), which the coordinator dumps over USB after the run, the console
-; off: SDRAM 0x01600000 - 0x01688FFF (KSEG1 $B1600000), used by no other cart of the project. The cart asks the SC64
-; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable). On
-; anything that is not an SC64 nothing is written and the game runs the same.
+; off: SDRAM 0x01600000 - 0x016A8FFF (KSEG1 $B1600000), used by no other cart of the project. The cart asks the SC64
+; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable); the
+; record is kept only if its header reads back, and the side bands say so (show.n64: green kept, yellow not).
 ;   +$0000   the header, 16 words: "NESC", the ROM's CRC (the cartridge's word at $10), the version, the power-ons
 ;            seen, the run slot this power-on writes
-;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x $11000:
+;   +$1000   run slot k (k = power-on - 1 mod 8) at +$1000 + k x $15000:
 ;            +0      the summary, #NES_REC_WORDS words (the #R_ list below); "NRUN" in word 0 once it is valid
 ;            +$1000  the series: one entry of 4 words for every 60 guest frames (about a second), up to 4,096
 ;                    (68 minutes): shown | not shown << 8 | underruns << 16 | frames with a button held << 24;
 ;                    the worst period; the worst work; the RSP's clocks in those 60 frames
+;            +$11000 the events (NesRecEvent): 512 entries of 8 words - the first 256 kept, then a ring of the
+;                    latest 256 - one for every guest frame with a sound underrun, a picture skipped, a drain, or
+;                    work over one NES frame (779,970 ticks); the #E_ list below says what each holds
 ;   rdp-tools\console_record.py decodes it.
 ;
 ; HOW IT STAYS OUT OF THE GAME'S WAY: everything is counted in RAM once a guest frame (NesRecFrame, called from
@@ -33,9 +36,12 @@
 #NES_REC = $B1600000                    ; KSEG1: cartridge $11600000 = SDRAM 0x01600000
 #NES_REC_MAGIC = $4E455343              ; "NESC"
 #NES_REC_RUN_MAGIC = $4E52554E          ; "NRUN"
-#NES_REC_VERSION = 1
+#NES_REC_VERSION = 2
 #NES_REC_SLOTS = 8
-#NES_REC_SLOT = $11000                  ; a run slot: summary 4 KB + series 64 KB
+#NES_REC_SLOT = $15000                  ; a run slot: summary 4 KB + series 64 KB + events 16 KB
+#NES_REC_EVENTS = $11000                ; the events, from the slot's start
+#NES_REC_EVENT_MAX = 512                ; entries of 32 bytes: 0-255 the first, 256-511 a ring of the latest
+#NES_REC_SLOW = 779970                  ; one NES frame in Count ticks (46.875 MHz / 60.0988 Hz): work over it is an event
 #NES_REC_SERIES = $1000                 ; the series, from the slot's start
 #NES_REC_SERIES_MAX = 4096              ; entries of 16 bytes
 #NES_REC_WORDS = 192
@@ -80,8 +86,21 @@
 #R_ENTRIES = 45                         ; series entries written
 #R_UPDATES = 46                         ; times the summary went out
 #R_SLEEP = 49                          ; Count ticks slept for a buffer, all told (lo, hi)
+#R_EVENTS = 51                          ; events seen (written: the first 256 and the latest 256)
 #R_PHIST = 64                           ; the period's histogram: words 64-127, 1 ms each, the last 63 ms and over
 #R_WHIST = 128                          ; the work's histogram: words 128-191
+; an event's words (NesRecEvent)
+#E_FRAME = 0                            ; the guest frame
+#E_FLAGS = 1                            ; why: 1 an underrun, 2 a picture skipped, 4 work over one NES frame, 8 a drain,
+                                        ; 16 a wait | underruns << 8 | pictures skipped << 16 | PPUMASK << 24
+#E_WORK = 2                             ; the frame's work, Count ticks
+#E_PERIOD = 3                           ; the frame's period, Count ticks
+#E_SOUND = 4                            ; the sound buffer: samples made and not yet given to the AI (16 bits) | the AI's
+                                        ; current DMA, samples left (AI_LEN / 4) << 16
+#E_BANKS = 5                            ; CHR 1 KB slots switched | PRG slots switched << 8 | palette bytes changed << 16
+                                        ; | PPUCTRL << 24 (each against the frame before)
+#E_NT = 6                               ; name-table 64-byte blocks changed (of 64) | bands << 8 | drains << 16 | waits << 24
+#E_MORE = 7                             ; fallback lines (12 bits) | tenths of a second since the first frame << 12
 ; THE SC64'S OWN REGISTERS (the hardware carts' RsScCmd / RsScEnable)
 #NES_SC_ST = $BFFF0000
 #NES_SC_D0 = $BFFF0004
@@ -95,6 +114,13 @@ Global NesRecOn.i, NesRecBase.i, NesRecScD1.i
 Global NesRecLast.i, NesRecLastWait.i, NesRecFirst.i
 Global NesRecPSum.i, NesRecWSum.i, NesRecRspSeen.i, NesRecShownSeen.i, NesRecNotSeen.i, NesRecStarveSeen.i
 Global NesRecWinP.i, NesRecWinW.i, NesRecWinHeld.i
+; the frame before, for the events' "what changed in this frame"
+Global NesRecBandsSeen.i, NesRecFbSeen.i, NesRecDrainSeen.i, NesRecWaitSeen.i, NesRecSkipSeen.i, NesRecStarveFrame.i
+Global Dim NesRecChrLast.i(8)
+Global Dim NesRecPrgLast.i(4)
+Global Dim NesRecPalLast.a(32)
+Global Dim NesRecNtSig.i(64)
+Global Dim NesRecE.i(8)                 ; the event being written (NesRecEventCheck, NesRecEvent)
 Global Dim NesRecDpcLast.i(4)
 Global Dim NesRecDpcSum.i(4)
 Global Dim NesRecW.i(#NES_REC_WORDS)    ; the summary as counted
@@ -116,10 +142,13 @@ Procedure.i NesRecScCmd(cmd.i, d0.i, d1.i)
   ProcedureReturn 1
 EndProcedure
 
-; The SC64 unlocked and its ROM space made writable (config 1, "ROM write enable"). 0 when an SC64 refused it.
-; Without the SC64's identifier nothing is switched and 1 is returned: whether a write lands is then decided by
-; reading the header back (NesRecOpen) - the project's emulator answers $000C000C there and keeps cartridge writes
-; without being asked; a cart with no writable ROM space keeps nothing and says so.
+; The SC64 unlocked and its ROM space made writable (config 1, "ROM write enable"), as the NES tile probe and the
+; neon-port carts do (their RsScEnable). WHETHER A WRITE LANDS IS DECIDED ONLY BY READING THE HEADER BACK
+; (NesRecOpen), never by the value config 1 reads: on the owner's SC64 (firmware 2.20.2) it reads back 4 once set,
+; not 1 (the tile probe's console log: "rom write was 0, now 4 (read 1, set 1, read back 1)"; run 69's listener
+; left it at 4). The first console cart demanded 1 here, returned before writing anything and kept nothing - its
+; dump was all zeros (2026-11-26). The project's emulator answers the identifier with $000C000C and keeps cartridge
+; writes without being asked. Returns 1 always; the line printed says what the SC64 answered.
 Procedure.i NesRecScEnable()
   Protected id.i, r.i
   LpmDebugIoWrite(#NES_SC_KEY, 0)
@@ -133,10 +162,7 @@ Procedure.i NesRecScEnable()
   r = NesRecScCmd($63, 1, 0)                             ; read config 1
   If r = 1 And NesRecScD1 = 0 : NesRecScCmd($43, 1, 1) : EndIf   ; set it
   r = NesRecScCmd($63, 1, 0)
-  If r <> 1 Or NesRecScD1 <> 1
-    LpmDebugPrint("NES RECORD: the SC64 did not allow ROM writes (" + Str(r) + ", " + Str(NesRecScD1) + "), nothing kept")
-    ProcedureReturn 0
-  EndIf
+  LpmDebugPrint("NES RECORD: SummerCart64, ROM write config reads " + Str(NesRecScD1) + " (command " + Str(r) + ")")
   ProcedureReturn 1
 EndProcedure
 
@@ -170,7 +196,7 @@ Procedure NesRecOpen()
   LpmDebugIoWrite(NesRecBase + #R_BOOT * 4, boots) : NesRecShadow(#R_BOOT) = boots
   LpmDebugIoWrite(NesRecBase + #R_STATE * 4, 1) : NesRecShadow(#R_STATE) = 1
   LpmDebugIoWrite(NesRecBase, #NES_REC_RUN_MAGIC)
-  NesRecOn = 1
+  NesRecOn = 1 : NesRecKept = 1         ; the side bands green (show.n64); yellow if this point is never reached
   LpmDebugPrint("NES RECORD: flash cart SDRAM $01600000, power-on " + Str(boots) + ", slot " + Str(slot))
 EndProcedure
 
@@ -224,6 +250,74 @@ Procedure NesRecFlush(frame.i, entry.i)
   NesRecPutAll()
 EndProcedure
 
+; What the game changed since the frame before, from state the port keeps anyway (no counter in the hot unit):
+; the eight 1 KB CHR slots and the four PRG slots (MapChrSlots / MapPrgSlots: a bank switch), the 32 palette bytes,
+; and the name tables as 64 blocks of 64 bytes, each folded to one word (rotate-xor of its 8 doublewords) and
+; compared with the frame before's fold - a screen being redrawn (a world entered, a map shown) changes many blocks,
+; a scrolling playfield a few. OUT: chr | prg << 8 | pal << 16 | nt << 24 (each 8 bits), the baselines moved on.
+; Its cost: ~600 loads a frame, compiled code at the frame's wrap.
+Procedure.i NesRecChanges()
+  Protected k.i, j.i, x.i, v.i, nchr.i, nprg.i, npal.i, blocks.i, a.i
+  For k = 0 To 7
+    If MapChrSlots(k) <> NesRecChrLast(k) : nchr + 1 : NesRecChrLast(k) = MapChrSlots(k) : EndIf
+  Next
+  For k = 0 To 3
+    If MapPrgSlots(k) <> NesRecPrgLast(k) : nprg + 1 : NesRecPrgLast(k) = MapPrgSlots(k) : EndIf
+  Next
+  For k = 0 To 31
+    If Pal(k) <> NesRecPalLast(k) : npal + 1 : NesRecPalLast(k) = Pal(k) : EndIf
+  Next
+  a = @Nt(0)
+  For k = 0 To 63
+    x = 0
+    For j = 0 To 7
+      v = PeekQ(a) : a + 8
+      x = ((x << 7) | ((x >> 57) & $7F)) ! v
+    Next
+    If x <> NesRecNtSig(k) : blocks + 1 : NesRecNtSig(k) = x : EndIf
+  Next
+  ProcedureReturn nchr | (nprg << 8) | (npal << 16) | (blocks << 24)
+EndProcedure
+
+; One event out (8 words, PI writes): entries 0-255 are the run's first events, 256-511 a ring of the latest.
+Procedure NesRecEvent()          ; the event in NesRecE
+  Protected n.i = NesRecW(#R_EVENTS), slot.i, a.i, k.i
+  If n < 256 : slot = n : Else : slot = 256 + ((n - 256) & 255) : EndIf
+  a = NesRecBase + #NES_REC_EVENTS + slot * 32
+  For k = 0 To 7 : LpmDebugIoWrite(a + k * 4, NesRecE(k) & $FFFFFFFF) : Next
+  NesRecW(#R_EVENTS) + 1
+EndProcedure
+
+; Every frame: an event when the frame had a sound underrun, a picture skipped, a drain or a wait, or its work
+; exceeded one NES frame - with what the frame did (NesRecChanges) and the sound buffer at this moment.
+Procedure NesRecEventCheck(frame.i, d.i, w.i)
+  Protected ch.i, starve.i, skip.i, bands.i, fb.i, drains.i, waits.i, why.i, q.i, ai.i
+  ch = NesRecChanges()
+  starve = HostAiStarvations - NesRecStarveFrame : NesRecStarveFrame = HostAiStarvations
+  skip = NesShowStat(1) + NesShowStat(14) - NesRecSkipSeen : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14)
+  bands = NesShowStat(10) - NesRecBandsSeen : NesRecBandsSeen = NesShowStat(10)
+  fb = NesShowStat(5) - NesRecFbSeen : NesRecFbSeen = NesShowStat(5)
+  drains = NesShowStat(4) - NesRecDrainSeen : NesRecDrainSeen = NesShowStat(4)
+  waits = NesShowStat(3) - NesRecWaitSeen : NesRecWaitSeen = NesShowStat(3)
+  If starve : why | 1 : EndIf
+  If skip : why | 2 : EndIf
+  If w > #NES_REC_SLOW : why | 4 : EndIf
+  If drains : why | 8 : EndIf
+  If waits : why | 16 : EndIf
+  If why = 0 : ProcedureReturn : EndIf
+  q = ApuProduced - HostPcmRead : If q < 0 : q = 0 : EndIf : If q > $FFFF : q = $FFFF : EndIf
+  ai = (PeekL($A4500004) & $3FFFF) >> 2                  ; AI_LEN: bytes left of the DMA playing, as samples
+  NesRecE(#E_FRAME) = frame
+  NesRecE(#E_FLAGS) = why | ((starve & 255) << 8) | ((skip & 255) << 16) | ((PpuMask & 255) << 24)
+  NesRecE(#E_WORK) = w : NesRecE(#E_PERIOD) = d
+  NesRecE(#E_SOUND) = q | ((ai & $FFFF) << 16)
+  NesRecE(#E_BANKS) = (ch & $FFFFFF) | ((PpuCtrl & 255) << 24)
+  NesRecE(#E_NT) = ((ch >> 24) & 255) | ((bands & 255) << 8) | ((drains & 255) << 16) | ((waits & 255) << 24)
+  q = NesRecPSum / 4687500 : If fb > 4095 : fb = 4095 : EndIf
+  NesRecE(#E_MORE) = fb | ((q & $FFFFF) << 12)
+  NesRecEvent()
+EndProcedure
+
 ; Once a guest frame, at its wrap (NesHostGuestFrame): the period since the last wrap, the work in it, the RDP's
 ; counters, the pads; every #NES_REC_WINDOW frames the summary and a series entry out.
 Procedure NesRecFrame(frame.i)
@@ -234,6 +328,9 @@ Procedure NesRecFrame(frame.i)
     NesRecFirst = 1
     NesRecW(#R_STATE) = 2
     For k = 0 To 3 : NesRecDpcLast(k) = PeekL($A4100010 + 4 * k) & $FFFFFF : Next
+    NesRecChanges()                                      ; the baselines of "what changed in a frame"
+    NesRecBandsSeen = NesShowStat(10) : NesRecFbSeen = NesShowStat(5) : NesRecDrainSeen = NesShowStat(4)
+    NesRecWaitSeen = NesShowStat(3) : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14) : NesRecStarveFrame = HostAiStarvations
   Else
     d = (now - NesRecLast) & $FFFFFFFF
     w = d - (NesRecWait - NesRecLastWait)
@@ -253,6 +350,7 @@ Procedure NesRecFrame(frame.i)
       NesRecDpcSum(k) + v : NesRecDpcLast(k) = c
       If k = 2 And v > NesRecW(#R_PIPEMAX) : NesRecW(#R_PIPEMAX) = v : EndIf
     Next
+    NesRecEventCheck(frame, d, w)
   EndIf
   NesRecLast = now : NesRecLastWait = NesRecWait
   If (NesController | NesController2) <> 0 : NesRecW(#R_HELD) + 1 : NesRecWinHeld + 1 : EndIf

@@ -500,6 +500,7 @@ EndProcedure
 ; until one frees, unless the sound reserve runs low (then 0: the frame is not shown); 2 until one frees.
 CompilerIf #NES_CONSOLE_RECORD
   Global NesRecWait.i, NesRecWaitFrom.i ; the console record (console_record.n64): Count ticks slept here for a buffer
+  Global NesRecKept.i                   ; 1 once the record's header read back from the flash cart (the bands' colour)
 CompilerEndIf
 Procedure.i NesShowGetFb(wait.i)
   Protected fb.i, seen.i
@@ -582,7 +583,13 @@ Procedure.i NesShowFinish(p.i, wait.i)
     CompilerIf #VERIFY_FRAME = 0
       ; THE CONSOLE MARK (the playable cart only): the 32-pixel borders, which no NES pixel covers, green on every
       ; picture shown - running and healthy. NesShowStopped turns the whole screen red.
-      LpmRdpModeFill(LpmRgb16(0, 24, 0)) : LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
+      CompilerIf #NES_CONSOLE_RECORD
+        ; with the console record: GREEN while the record is kept, YELLOW when the flash cart did not keep it
+        If NesRecKept : LpmRdpModeFill(LpmRgb16(0, 24, 0)) : Else : LpmRdpModeFill(LpmRgb16(24, 24, 0)) : EndIf
+      CompilerElse
+        LpmRdpModeFill(LpmRgb16(0, 24, 0))
+      CompilerEndIf
+      LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
     CompilerEndIf
     LpmRspqRdpFlush(NesShowProg)
   EndIf
