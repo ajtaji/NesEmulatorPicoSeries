@@ -46,8 +46,8 @@
 ; record or segment entry was free: the old renderer's).
 CompilerIf #NES_TWIN_CHECK
 
-CompilerIf #NES_RSP_CHECK                           ; room for the RSP checking build's areas (rspband.n64)
-  #NES_TWIN_WORDS = 4096
+CompilerIf #NES_RSP_CHECK                           ; room for the RSP checking build's areas (rspband.n64) and the
+  #NES_TWIN_WORDS = 3072                            ; split lines' segments (N.60): a frame's most so far is 2,076
 CompilerElse
   #NES_TWIN_WORDS = 6144                           ; (the frame maximum is 2,076: room for the split lines, N.60)
 CompilerEndIf

@@ -58,6 +58,7 @@ Global Dim NesShowFb.i(2)               ; the buffer it is drawn into, once atta
 Global Dim NesShowShown.i(2)            ; the buffer it was shown in (0: not shown)
 Global Dim NesShowTicket.i(2)           ; lpm_rdp_frames_sent after its SYNC_FULL
 Global Dim NesShowFrameNo.i(2)          ; WorkerFrames at its line 240
+Global Dim NesShowClk.i(2)              ; its RSP clocks counted (NesShowStat 12 / 13)
 Global Dim NesFbCountP.i(2)
 Global Dim NesFbOverP.i(2)
 Global Dim NesFbFirstP.i(2)              ; its first row in the ring
@@ -511,6 +512,7 @@ EndProcedure
 Procedure NesShowSet(p.i)               ; the current frame takes set p (its state cleared)
   NesShowCur = p
   NesShowDone(p) = 0 : NesShowEnded(p) = 0 : NesShowBands(p) = 0 : NesShowFb(p) = 0 : NesShowShown(p) = 0
+  NesShowClk(p) = 0
   NesFbN = 0 : NesFbOver = 0
   NesFbFirst = NesFbHead
   NesFbRowBase = NesFbRows : NesFbPalBase = NesFbPals
@@ -726,8 +728,11 @@ Procedure.i NesShowFinish(p.i, wait.i)
   st = NesShowArea(p) + #NES_SHOW_WORDS * 8
   If NesShowBands(p)
     n = PeekL(st) & $FFFFFFFF : over = PeekL(st + 4) & $FFFFFFFF
-    NesShowStat(12) + (PeekL(st + 8) & $FFFFFFFF)
-    If (PeekL(st + 8) & $FFFFFFFF) > NesShowStat(13) : NesShowStat(13) = PeekL(st + 8) & $FFFFFFFF : EndIf
+    If NesShowClk(p) = 0                  ; the frame's RSP clocks, once (this runs at every check point until it is
+      NesShowClk(p) = 1                   ; handed: a check point with no buffer free comes back here)
+      NesShowStat(12) + (PeekL(st + 8) & $FFFFFFFF)
+      If (PeekL(st + 8) & $FFFFFFFF) > NesShowStat(13) : NesShowStat(13) = PeekL(st + 8) & $FFFFFFFF : EndIf
+    EndIf
   EndIf
   fb = NesShowFb(p)
   If over Or NesFbOverP(p)

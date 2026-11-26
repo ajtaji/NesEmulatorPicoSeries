@@ -19,7 +19,6 @@ CompilerIf #NES_RDP_SHOW
 CompilerElse
   #NES_SEG_POOL = 64                    ; the checking builds' (6 KB; ppu_cold.n64's line 0 says 6144)
 CompilerEndIf
-#NES_SEG_CHECK_AT = $E400               ; the checking builds' pool, from #NES_CART_LOW_END (rspband.n64's area)
 
 CompilerIf #NES_WB_MEASURE Or #NES_RSP_CHECK
 
@@ -130,7 +129,7 @@ Procedure NesRspInit()
   EndIf
   need = LpmCartFileLen(1) + 128
   space = #NES_RSP_AREA + #NES_RSP_PROG_AT
-  If need > #NES_SEG_CHECK_AT - #NES_RSP_PROG_AT       ; (the split lines' segment pool is above it)
+  If need > $10000 - #NES_RSP_PROG_AT
     LpmDebugPrint("NES RSP CHECK REFUSED: the program's file is " + Str(need - 128) + " bytes") : NesRspHalt = 1 : ProcedureReturn
   EndIf
   NesRspOut = (#NES_RSP_AREA & $1FFFFFFF) | $A0000000
@@ -308,8 +307,8 @@ CompilerEndIf
 ;   +0 the row of the table with bit 10 = 0 (32 bytes)   +32 bit 10 = 1   +64 / +72 their attribute rows (8 each)
 ;   +80 k0  +81 k1 (spans [k0, k1))  +82 fine X  +83 PPUCTRL  +84 PPUMASK  +85 0  +86 v (16 bits)  +88 the 8 bank numbers
 ; A segment with PPUMASK bit 3 clear draws no tile and stores nothing. THE POOL: a frame set's (the show's two
-; sets by NesShowCur: 42 entries each, in the gaps between the band-input slots; the checking builds one set of 64
-; at #NES_CART_LOW_END + $E400, which they wait on at every line 240). A line has at most 32 segments that store (one span each at least), so 32 free
+; sets by NesShowCur: 42 entries each, in the gaps between the band-input slots; the checking builds one set of 64,
+; NesSegCheckSpace, which they wait on at every line 240). A line has at most 32 segments that store (one span each at least), so 32 free
 ; entries at the first cut make the line's segments certain.
 ; ======================================================================
 CompilerIf #NES_TWIN_CHECK Or #NES_RDP_SHOW
@@ -322,6 +321,8 @@ Global Dim NesSegStat.i(8)              ; [0] split lines by record [1] segments
                                         ; [3] most segments in a line [4] of [2]: no record free
 CompilerIf #NES_RDP_SHOW
   Declare NesShowBand(rec.i)
+CompilerElse
+  Global Dim NesSegCheckSpace.a(#NES_SEG_POOL*#NES_SEG_BYTES+16)   ; the checking builds' one pool
 CompilerEndIf
 
 Procedure NesSegInit(nt.i)               ; nt: the show's band-input slots (NesShowNtBase; 0 in the checking builds)
@@ -332,8 +333,9 @@ Procedure NesSegInit(nt.i)               ; nt: the show's band-input slots (NesS
     NesSegBaseP(0) = ((nt + 4096) & $1FFFFFFF) | $A0000000
     NesSegBaseP(1) = ((nt + 4096 + 8192) & $1FFFFFFF) | $A0000000
   CompilerElse
-    LpmCacheWritebackInvalidateData(#NES_CART_LOW_END + #NES_SEG_CHECK_AT, #NES_SEG_POOL * #NES_SEG_BYTES)
-    NesSegBaseP(0) = ((#NES_CART_LOW_END + #NES_SEG_CHECK_AT) & $1FFFFFFF) | $A0000000
+    Protected a.i = (@NesSegCheckSpace(0) + 15) & ~15
+    LpmCacheWritebackInvalidateData(a, #NES_SEG_POOL * #NES_SEG_BYTES)   ; no stale line may land on it later
+    NesSegBaseP(0) = (a & $1FFFFFFF) | $A0000000
     NesSegBaseP(1) = NesSegBaseP(0)
   CompilerEndIf
   NesSegFrame(0)
