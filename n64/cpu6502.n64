@@ -73,14 +73,15 @@
 ; specification; see the note for the findings):
 ;   - the access phase each opcode publishes and its moves around RMW
 ;     accesses (read at phase-2, the two writes at phase-1 and phase);
-;   - DEC abs ($CE) charging 3 cycles with phase 2, as the generated
-;     interpreter does (a defect of the reference, kept until fixed there);
+;   - DEC abs ($CE): 6 cycles, phase 5, as INC abs (the reference's 3 / 2 was
+;     a defect of the shared generator, fixed there and here together);
 ;   - the read-modify-write double write (unchanged value, then the result);
 ;   - the page-cross cycle of indexed reads charged BEFORE the read, so a
 ;     device sees the same time stamp;
-;   - the BNE -6 / BEQ -7 / BEQ -4 polling shapes, which read their pattern
-;     from PrgBias+PC (the linear PRG, not the banked view), and the JMP-to-
-;     self idle batching;
+;   - the BNE -6 / BEQ -7 / BEQ -4 polling shapes and the BNE -3 DEX / DEY
+;     countdown, which read their pattern through the bank mapped at PC
+;     (NesMmc3Bias), only when every pattern byte lies in PC's 8 KB slot,
+;     and the JMP-to-self idle batching;
 ;   - the $2002 poll batching after LDA abs / BIT abs when the read ended
 ;     the window.
 ; WHAT IT DOES NOT DO: execute code fetched from device space or disabled
@@ -1288,9 +1289,9 @@ c65_op_cd:  ; $CD CMP abs cycles 4 phase 3
     addiu v0, zero, 3
     b c65_cmp
     daddiu a2, a2, -4
-c65_op_ce:  ; $CE DEC abs cycles 3 phase 2
+c65_op_ce:  ; $CE DEC abs cycles 6 phase 5
     jal c65_e_abs
-    or v0, zero, zero        ; phase 2 - 2: the reference's own figures
+    addiu v0, zero, 3        ; phase 5 - 2: the read, 3 cycles from the end
     b c65_op_ce_rest
     nop
 c65_op_cf:  ; illegal
@@ -1558,6 +1559,8 @@ c65_op_d0_rest:
     nop
     addiu t0, zero, -6
     beq t2, t0, c65_bne_shape
+    addiu t0, zero, -3
+    beq t2, t0, c65_bne_shape3
     nop
     b c65_next
     daddiu a2, a2, -2
@@ -1944,7 +1947,7 @@ c65_op_ce_rest:
     addiu fp, v1, -1
     andi fp, fp, 0xFF
     b c65_rmw_write_res
-    addiu t0, zero, 3
+    addiu t0, zero, 6
 c65_op_d6_rest:
     b c65_incdec_zp
     addiu a0, zero, 6
@@ -2752,12 +2755,15 @@ c65_bne_shape:               ; BNE -6: the LDA $2002 / INX / BNE wait (t1 = Base
     ori t0, zero, 0xFFFB
     sltu t0, a1, t0
     beqz t0, c65_shape_done  ; PC <= $FFFA
+    andi t0, a1, 0x1FFF
+    sltiu t0, t0, 0x1FFB
+    beqz t0, c65_shape_done  ; (PC & $1FFF) <= $1FFA: every pattern byte in PC's 8 KB slot
     nop
     jal c65_shape_now        ; t0 = now, true when now < PpuStatusDeadline
     sd t1, global_c65count-global_nesmmc3bias(a3)
     beqz a0, c65_shape_done
     nop
-    jal c65_shape_ptr        ; t0 = NesPollPtr = PrgBias + PC
+    jal c65_shape_ptr        ; t0 = NesPollPtr, PC through its mapped bank
     nop
     lbu t2, 0(t0)
     xori t2, t2, 0xAD
@@ -2804,6 +2810,83 @@ c65_bne_count:
     b c65_shape_done
     addiu v1, zero, 0xFA     ; NesOpenBus = $FA
 
+c65_bne_shape3:              ; BNE -3: a DEX / BNE or DEY / BNE countdown onto itself (t1 = Base)
+    ; The reference's fourth shortcut (rp2040/generate_cpu.py, the countdown superinstruction):
+    ; a timing delay that only decrements X or Y. Its further passes are run at once: each is
+    ; 5 cycles (6 when the branch crosses a page) and 2 instructions, the counter falls by one,
+    ; nothing touches the bus. The taken branch just run still owes its final two cycles
+    ; (Left - 3), and the batch stops one pass short of zero, so the ordinary dispatch runs the
+    ; DEX / BNE that ends the loop. Tmp and Ea, the reference's scratch globals, are not stored:
+    ; every instruction that reads them writes them first.
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_shape_done
+    slti t0, a2, 9
+    bnez t0, c65_shape_done  ; Left > 8
+    andi t0, a1, 0x8000
+    beqz t0, c65_shape_done  ; PC >= $8000
+    ori t0, zero, 0xFFFE
+    sltu t0, a1, t0
+    beqz t0, c65_shape_done  ; PC <= $FFFD
+    andi t0, a1, 0x1FFF
+    sltiu t0, t0, 0x1FFE
+    beqz t0, c65_shape_done  ; (PC & $1FFF) <= $1FFD: the three bytes in PC's 8 KB slot
+    nop
+    sd t1, global_c65count-global_nesmmc3bias(a3)
+    jal c65_shape_ptr
+    nop
+    lbu t2, 1(t0)
+    xori t2, t2, 0xD0
+    bnez t2, c65_shape_done  ; PeekA(NesPollPtr+1) = $D0 (BNE)
+    lbu t2, 2(t0)
+    xori t2, t2, 0xFD
+    bnez t2, c65_shape_done  ; PeekA(NesPollPtr+2) = $FD (-3)
+    lbu t2, 0(t0)            ; t2 = Tmp: the decrement
+    or a6, t2, zero          ; kept in a6 (c65_shape_charge uses t2)
+    xori a0, t2, 0xCA
+    beqz a0, c65_cnt_go      ; $CA DEX: the counter is X
+    or a4, s6, zero
+    xori a0, t2, 0x88
+    bnez a0, c65_shape_done  ; neither DEX nor $88 DEY: no batch
+    or a4, s7, zero          ; DEY: the counter is Y
+c65_cnt_go:
+    ld t1, global_c65count-global_nesmmc3bias(a3)            ; NesPollCycles = 5, 6 across a page
+    xor t1, t1, a1
+    srl t1, t1, 8
+    sltu t1, zero, t1
+    addiu t1, t1, 5
+    la t0, global_nespollcycles
+    sd t1, 0(t0)
+    daddiu t0, a2, -3        ; NesPollCount = NesDiv(Left-3, NesPollCycles)
+    ddiv t0, t1
+    mflo t0
+    addiu a0, a4, -1
+    andi a0, a0, 0xFF        ; at most (counter - 1) & 255 passes: stop one short of zero
+    slt a5, a0, t0
+    beqz a5, c65_cnt_count
+    nop
+    or t0, a0, zero
+c65_cnt_count:
+    la a0, global_nespollcount
+    sd t0, 0(a0)
+    blez t0, c65_shape_done
+    addiu a0, zero, 2
+    jal c65_shape_charge     ; Left, NesInstructions, NesIdleBatched (2 a pass); t0 kept
+    nop
+    dsubu a4, a4, t0
+    andi a4, a4, 0xFF        ; counter = (counter - NesPollCount) & 255
+    xori a6, a6, 0xCA
+    bnez a6, c65_cnt_y
+    or t8, a4, zero          ; FN = counter
+    b c65_cnt_done
+    or s6, a4, zero          ; X = counter
+c65_cnt_y:
+    or s7, a4, zero          ; Y = counter
+c65_cnt_done:
+    or fp, a4, zero          ; FZ = counter
+    b c65_shape_done
+    addiu v1, zero, 0xFD     ; NesOpenBus = $FD
+
 c65_beq_shape7:              ; BEQ -7: the LDA $2002 / AND #$40 / BEQ wait
     la t0, global_nesidleenabled
     ld t0, 0(t0)
@@ -2822,6 +2905,9 @@ c65_beq_shape7:              ; BEQ -7: the LDA $2002 / AND #$40 / BEQ wait
     ori t0, zero, 0xFFFA
     sltu t0, a1, t0
     beqz t0, c65_shape_done  ; PC <= $FFF9
+    andi t0, a1, 0x1FFF
+    sltiu t0, t0, 0x1FFA
+    beqz t0, c65_shape_done  ; (PC & $1FFF) <= $1FF9: every pattern byte in PC's 8 KB slot
     nop
     jal c65_shape_now
     sd t1, global_c65count-global_nesmmc3bias(a3)
@@ -2879,6 +2965,9 @@ c65_beq_shape4:              ; BEQ -4: the LDA zp / BEQ wait on a RAM byte
     ori t0, zero, 0xFFFD
     sltu t0, a1, t0
     beqz t0, c65_shape_done  ; PC <= $FFFC
+    andi t0, a1, 0x1FFF
+    sltiu t0, t0, 0x1FFD
+    beqz t0, c65_shape_done  ; (PC & $1FFF) <= $1FFC: every pattern byte in PC's 8 KB slot
     nop
     sd t1, global_c65count-global_nesmmc3bias(a3)
     jal c65_shape_ptr
@@ -2930,8 +3019,11 @@ c65_shape_now:               ; leaf: t0 = NesRunStart+Budget-Left; a0 = (t0 < Pp
     ld t2, 0(t2)
     jr ra
     slt a0, t0, t2
-c65_shape_ptr:               ; leaf: t0 = NesPollPtr = PrgBias + PC (stored)
-    la t0, global_prgbias
+c65_shape_ptr:               ; leaf: t0 = NesPollPtr = NesMmc3Bias(PC >> 13 & 3) + PC (stored):
+    srl t0, a1, 13           ; the host address of PC through the bank mapped at its 8 KB slot
+    andi t0, t0, 3           ; (PrgBias is the linear start of PRG, not the banked view); the
+    sll t0, t0, 3            ; callers keep every pattern byte inside that slot
+    daddu t0, t0, a3         ; a3 = &NesMmc3Bias(0), 8-byte entries
     ld t0, 0(t0)
     daddu t0, t0, a1
     la t2, global_nespollptr
