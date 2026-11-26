@@ -88,6 +88,12 @@ def one_vector(op, mode):
         cycles0 = mpu.processorCycles
         mpu.step()
         cycles = mpu.processorCycles - cycles0
+        # The one documented exception to the oracle: py65's cycle table gives DEC absolute ($CE)
+        # 3 cycles; the documented NMOS 6502 figure is 6, as for INC absolute ($EE), and the core
+        # charges 6. Every other count is py65's.
+        if op == 0xCE:
+            assert cycles == 3, cycles
+            cycles = 6
         after_data = [mem[0x600 + i] for i in range(16)]
         after_zp = [mem[0xF0 + i] for i in range(16)]
         after_stack = [mem[0x100 + ((s - 2 + i) & 255)] for i in range(4)]
