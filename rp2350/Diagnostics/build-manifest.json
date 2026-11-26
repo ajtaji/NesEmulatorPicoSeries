@@ -12,7 +12,6 @@
   "checks": 1926732,
   "failures": 0,
   "game_samples_seconds": 40,
-  "diagnostic_source_commit": "bde60af365a05cc96ed1a699958701dd3adbb302",
   "display": {
     "rotation": 0,
     "width": 320,

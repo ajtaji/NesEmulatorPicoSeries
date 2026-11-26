@@ -4,7 +4,6 @@
   "full_board_checks": 1926732,
   "output_board_checks": 80,
   "failures": 0,
-  "protected_algorithms_source_commit": "df6baf0066a28bf2ca8ae2424849d27a6a7e24b3",
   "rp2040_status": "compile tested; not attached for hardware retest",
   "rp2350_status": "hardware tested on COM6; stock150MHz/75MHzSPI",
   "artifacts": {
