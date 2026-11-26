@@ -161,9 +161,9 @@ c65_rw_window:
     or t0, t0, t1
     bnez t0, c65_rw_stop
     nop
-    jal mappercpubudget
+    jal u_mappercpubudget
     nop
-    jal nesramcpuwindow
+    jal u_nesramcpuwindow
     move a1, zero
 
     ld a0, 0(s0)
@@ -174,7 +174,7 @@ c65_rw_window:
     slt t0, t0, a0
     beqz t0, c65_rw_stalls
     nop
-    jal nesmmc3advancecputime
+    jal u_nesmmc3advancecputime
     nop
 c65_rw_stalls:
     ld t0, global_workerdmccycles-global_cpucycles(s0)
@@ -184,7 +184,7 @@ c65_rw_stalls:
     ld a0, 0(s0)
     sd t0, global_nesseendmc-global_cpucycles(s0)
     daddu a0, a0, t1
-    jal nesmmc3advancecputime
+    jal u_nesmmc3advancecputime
     sd a0, 0(s0)
     b c65_rw_stalls
     nop
@@ -2346,7 +2346,7 @@ c65_wr_call:                 ; everything else: the call-out to NesWrite
     jal c65_out
     sd t2, global_ea-global_nesmmc3bias(a3)
     or a0, t2, zero
-    jal neswrite
+    jal u_neswrite
     ld a1, global_c65value-global_nesmmc3bias(a3)
     jal c65_in
     nop
@@ -2484,6 +2484,15 @@ c65_refetch:
     addu t0, a1, s3
     b c65_dispatch
     lbu a0, 0(t0)
+  EndASM
+  ; --- the rest of the hot unit (design note, section N): the window code, the time advance
+  ; and the bus write, placed here, after the core's hot part and before its cold part, so that
+  ; all of it lies in one span under 16 KB and no two of its hot lines share an I-cache set.
+  XIncludeFile "../n64/unit/window.n64"
+  XIncludeFile "../n64/unit/advance.n64"
+  XIncludeFile "../n64/unit/write.n64"
+  ASM
+    ; --- the core's cold part: the slow fetch, the status byte, the illegal stop, the shapes
 c65_fetch_slow:              ; copy the instruction's bytes into the buffer
     jal c65_peek
     or t2, a1, zero

@@ -10,6 +10,13 @@ ProcedureNaked.i NesRunMapper4(start.i)
   EndASM
 EndProcedure
 CompilerElse
+; The reference (compiled 6502) build: the hot unit's other parts live in this holder, which is
+; never called; their u_ entry labels are reached from the stubs and from each other.
+ProcedureNaked NesHotHolder()
+  XIncludeFile "../n64/unit/window.n64"
+  XIncludeFile "../n64/unit/advance.n64"
+  XIncludeFile "../n64/unit/write.n64"
+EndProcedure
 ProcedureNaked.i NesRunMapper4(start.i)
   ASM
     daddiu sp, sp, -32
@@ -24,9 +31,9 @@ nes_mmc3_run_window:
     or t0, t0, t1
     bnez t0, nes_mmc3_run_stop
     nop
-    jal mappercpubudget
+    jal u_mappercpubudget
     nop
-    jal nesramcpuwindow
+    jal u_nesramcpuwindow
     move a1, zero
 
     ld a0, 0(s0)
@@ -37,7 +44,7 @@ nes_mmc3_run_window:
     slt t0, t0, a0
     beqz t0, nes_mmc3_run_stalls
     nop
-    jal nesmmc3advancecputime
+    jal u_nesmmc3advancecputime
     nop
 nes_mmc3_run_stalls:
     ld t0, global_workerdmccycles-global_cpucycles(s0)
@@ -47,7 +54,7 @@ nes_mmc3_run_stalls:
     ld a0, 0(s0)
     sd t0, global_nesseendmc-global_cpucycles(s0)
     daddu a0, a0, t1
-    jal nesmmc3advancecputime
+    jal u_nesmmc3advancecputime
     sd a0, 0(s0)
     b nes_mmc3_run_stalls
     nop

@@ -4,342 +4,39 @@ Global NesMmc3ApuClock.i, NesMmc3FetchClock.i
 Global NesMmc3ApuLimit.i=-1, NesMmc3FetchLimit.i=-1
 
 ProcedureNaked.i NesMmc3FetchDeadline()
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    la a1, global_nesmmc3apuclock
-    ld t0, global_mapirq-global_nesmmc3apuclock(a1)
-    bnez t0, mmc3_fetch_deadline_now
-    ld t0, global_ppumask-global_nesmmc3apuclock(a1)
-    andi t0, t0, 24
-    beqz t0, mmc3_fetch_deadline_never
-    ld t0, global_mapirqcount-global_nesmmc3apuclock(a1)
-    ld t1, global_mapreload-global_nesmmc3apuclock(a1)
-    bnez t1, mmc3_fetch_deadline_reload
+    j u_nesmmc3fetchdeadline
     nop
-    bnez t0, mmc3_fetch_deadline_count
-    nop
-mmc3_fetch_deadline_reload:
-    ld t0, global_mapirqlatch-global_nesmmc3apuclock(a1)
-    addiu t0, t0, 1
-mmc3_fetch_deadline_count:
-    slti t1, t0, 40
-    bnez t1, mmc3_fetch_deadline_now
-    addiu t0, t0, -40
-    ; After this bound every intervening CPU window is still 128 cycles.
-    sll t1, t0, 2
-    addu t1, t1, t0
-    sll a2, t1, 1
-    ld t1, global_ppuctrl-global_nesmmc3apuclock(a1)
-    andi t1, t1, 16
-    bnez t1, mmc3_fetch_deadline_convert
-    move a3, zero
-
-    ; A low background restricts qualified rises to the sprite region.
-    srl t0, t0, 2
-    addiu t1, zero, 340
-    multu t0, t1
-    ld a4, global_nesmmc3line-global_nesmmc3apuclock(a1)
-    ld a5, global_nesmmc3dot-global_nesmmc3apuclock(a1)
-    mflo t0
-    addiu t0, t0, -64
-    slt t1, a2, t0
-    beqz t1, mmc3_fetch_deadline_sprite
-    sltiu t1, a4, 240
-    move a2, t0
-mmc3_fetch_deadline_sprite:
-    bnez t1, mmc3_fetch_deadline_visible
-    sltiu t1, a4, 261
-    beqz t1, mmc3_fetch_deadline_visible
-    addiu t0, zero, 261
-    subu t0, t0, a4
-    addiu t1, zero, 341
-    multu t0, t1
-    addiu t1, zero, 261
-    subu a3, t1, a5
-    mflo t0
-    b mmc3_fetch_deadline_convert
-    addu a3, a3, t0
-mmc3_fetch_deadline_visible:
-    sltiu t0, a5, 261
-    addiu t1, zero, 261
-    bnez t0, mmc3_fetch_deadline_convert
-    subu a3, t1, a5
-    sltiu t0, a5, 321
-    bnez t0, mmc3_fetch_deadline_convert
-    move a3, zero
-    addiu t1, zero, 601
-    b mmc3_fetch_deadline_convert
-    subu a3, t1, a5
-
-mmc3_fetch_deadline_convert:
-    ; For the bounded nonnegative dot count, floor(n / 3) is
-    ; high32(n * $AAAAAAAB) >> 1.
-    ; a3 is zero in the sprite fetch interval or with a high background.
-    addu t0, a2, a3
-    addiu t0, t0, 2
-    lui t1, 0xAAAA
-    ori t1, t1, 0xAAAB
-    multu t0, t1
-    ld a0, global_nesmmc3fetchclock-global_nesmmc3apuclock(a1)
-    mfhi t0
-    srl t0, t0, 1
-    jr ra
-    daddu a0, a0, t0
-mmc3_fetch_deadline_now:
-    jr ra
-    ld a0, global_nesmmc3fetchclock-global_nesmmc3apuclock(a1)
-mmc3_fetch_deadline_never:
-    daddiu a0, zero, -1
-    jr ra
-    dsrl a0, a0, 1
   EndASM
 EndProcedure
 
 ProcedureNaked WorkerAdvance(stamp.i)
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    la a1, global_nesmmc3apuclock
-    ld t0, global_workerclock-global_nesmmc3apuclock(a1)
-    slt t0, a0, t0
-    bnez t0, mmc3_worker_backwards
+    j u_workeradvance
     nop
-    daddiu sp, sp, -32
-    sd ra, 0(sp)
-    sd s0, 8(sp)
-    sd s1, 16(sp)
-    move s0, a0
-    move s1, a1
-
-    ; This synchronization revokes the existing proofs before any callback.
-    daddiu t1, zero, -1
-    sd t1, global_nesstatushorizon-global_nesmmc3apuclock(s1)
-    sd t1, global_nescpuhorizon-global_nesmmc3apuclock(s1)
-    ld t0, 0(s1)
-    dsubu a0, s0, t0
-    blez a0, mmc3_worker_fetch
-    nop
-    jal apuadvance
-    nop
-    sd s0, 0(s1)
-mmc3_worker_fetch:
-    ld t0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
-    dsubu a0, s0, t0
-    blez a0, mmc3_worker_render
-    nop
-    jal mapperpputicks
-    nop
-    sd s0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
-mmc3_worker_render:
-    ; A following bus access may change the next APU or mapper deadline.
-    daddiu t1, zero, -1
-    sd t1, global_nesmmc3apulimit-global_nesmmc3apuclock(s1)
-    sd t1, global_nesmmc3fetchlimit-global_nesmmc3apuclock(s1)
-    sd s0, global_workerclock-global_nesmmc3apuclock(s1)
-    ld t0, global_ppuclock-global_nesmmc3apuclock(s1)
-    dsubu a0, s0, t0
-    blez a0, mmc3_worker_done
-    nop
-    jal ppuadvance
-    nop
-    sd s0, global_ppuclock-global_nesmmc3apuclock(s1)
-    daddiu t1, zero, -1
-    sd t1, global_nesmmc3renderlimit-global_nesmmc3apuclock(s1)
-mmc3_worker_done:
-    ld ra, 0(sp)
-    ld s0, 8(sp)
-    ld s1, 16(sp)
-    jr ra
-    daddiu sp, sp, 32
-mmc3_worker_backwards:
-    addiu t0, zero, 20
-    jr ra
-    sd t0, global_workererror-global_nesmmc3apuclock(a1)
   EndASM
 EndProcedure
 
 ProcedureNaked NesMmc3AdvanceCpuTime(stamp.i)
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    la a1, global_nesmmc3apuclock
-    ld t0, global_nesmmc3renderlimit-global_nesmmc3apuclock(a1)
-    bltz t0, mmc3_cpu_render_limit
+    j u_nesmmc3advancecputime
     nop
-mmc3_cpu_render_ready:
-    slt t1, t0, a0
-    bnez t1, mmc3_cpu_full_sync
-    ld t0, global_workerclock-global_nesmmc3apuclock(a1)
-    slt t1, a0, t0
-    bnez t1, mmc3_cpu_full_sync
-    daddiu t1, zero, -1
-    sd t1, global_nesstatushorizon-global_nesmmc3apuclock(a1)
-    sd t1, global_nescpuhorizon-global_nesmmc3apuclock(a1)
-    ld t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)
-    bltz t0, mmc3_cpu_apu_limit
-    nop
-mmc3_cpu_apu_ready:
-    slt t1, a0, t0
-    beqz t1, mmc3_cpu_slow
-    addiu a2, zero, 1
-
-    ; With IRQs disabled, leave the fetch clock to the next bus sync.
-    ld t0, global_mapirqenable-global_nesmmc3apuclock(a1)
-    beqz t0, mmc3_cpu_done
-    ld t0, global_nesmmc3fetchlimit-global_nesmmc3apuclock(a1)
-    bltz t0, mmc3_cpu_slow
-    move a2, zero
-    slt t1, a0, t0
-    beqz t1, mmc3_cpu_slow
-    nop
-mmc3_cpu_done:
-    jr ra
-    sd a0, global_workerclock-global_nesmmc3apuclock(a1)
-mmc3_cpu_full_sync:
-    j workeradvance
-    nop
-
-mmc3_cpu_render_limit:
-    ld t1, global_ppuline-global_nesmmc3apuclock(a1)
-    ld t2, global_ppudot-global_nesmmc3apuclock(a1)
-    ; CPU-visible bus operations synchronize separately. Otherwise flush
-    ; at line 224 for controller service, 240, vblank, or frame handoff.
-    sltiu t0, t1, 224
-    bnez t0, mmc3_cpu_render_visible
-    addiu t0, zero, 224
-    sltiu t0, t1, 240
-    bnez t0, mmc3_cpu_render_visible
-    addiu t0, zero, 240
-    beq t1, t0, mmc3_cpu_render_vblank
-    addiu t0, zero, 241
-    bne t1, t0, mmc3_cpu_render_frame
-    nop
-    beqz t2, mmc3_cpu_render_vblank
-    nop
-mmc3_cpu_render_frame:
-    addiu t0, zero, 262
-    b mmc3_cpu_render_distance
-    addiu t2, t2, 2
-mmc3_cpu_render_visible:
-    addiu t2, t2, 1
-mmc3_cpu_render_vblank:
-mmc3_cpu_render_distance:
-    subu t0, t0, t1
-    addiu t3, zero, 341
-    multu t0, t3
-    lui t3, 0x5555
-    ori t3, t3, 0x5556
-    ld t1, global_ppuclock-global_nesmmc3apuclock(a1)
-    mflo t0
-    subu t0, t0, t2
-    ; Signed divide by three, rounding toward zero at the odd-frame edge.
-    mult t0, t3
-    sra t2, t0, 31
-    mfhi t0
-    subu t0, t0, t2
-    daddu t0, t1, t0
-    b mmc3_cpu_render_ready
-    sd t0, global_nesmmc3renderlimit-global_nesmmc3apuclock(a1)
-
-mmc3_cpu_apu_limit:
-    ld t1, global_dmcbytes-global_nesmmc3apuclock(a1)
-    bgtz t1, mmc3_cpu_apu_at_stamp
-    ld t1, global_apuinhibit-global_nesmmc3apuclock(a1)
-    ld t2, global_apufive-global_nesmmc3apuclock(a1)
-    or t1, t1, t2
-    bnez t1, mmc3_cpu_apu_never
-    ld t1, global_apuresetdelay-global_nesmmc3apuclock(a1)
-    bgtz t1, mmc3_cpu_apu_at_stamp
-    ld t0, 0(a1)
-    ld t1, global_apustep4-global_nesmmc3apuclock(a1)
-    ld t2, global_apuframeclock-global_nesmmc3apuclock(a1)
-    daddu t0, t0, t1
-    dsubu t0, t0, t2
-    b mmc3_cpu_apu_ready
-    sd t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)
-mmc3_cpu_apu_never:
-    daddiu t0, zero, -1
-    dsrl t0, t0, 1
-    b mmc3_cpu_apu_ready
-    sd t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)
-mmc3_cpu_apu_at_stamp:
-    move t0, a0
-    b mmc3_cpu_apu_ready
-    sd t0, global_nesmmc3apulimit-global_nesmmc3apuclock(a1)
-
-mmc3_cpu_slow:
-    ; Only a call to an observable device or deadline calculation needs
-    ; a frame. a2 records whether the APU has reached its deadline.
-    daddiu sp, sp, -32
-    sd ra, 0(sp)
-    sd s0, 8(sp)
-    sd s1, 16(sp)
-    move s0, a0
-    beqz a2, mmc3_cpu_fetch_limit
-    move s1, a1
-    ld t0, 0(s1)
-    dsubu a0, s0, t0
-    blez a0, mmc3_cpu_apu_synced
-    nop
-    jal apuadvance
-    nop
-    sd s0, 0(s1)
-mmc3_cpu_apu_synced:
-    daddiu t1, zero, -1
-    sd t1, global_nesmmc3apulimit-global_nesmmc3apuclock(s1)
-    ld t0, global_mapirqenable-global_nesmmc3apuclock(s1)
-    beqz t0, mmc3_cpu_slow_done
-    nop
-mmc3_cpu_fetch_limit:
-    ld a0, global_nesmmc3fetchlimit-global_nesmmc3apuclock(s1)
-    bgez a0, mmc3_cpu_fetch_ready
-    nop
-    jal nesmmc3fetchdeadline
-    nop
-    sd a0, global_nesmmc3fetchlimit-global_nesmmc3apuclock(s1)
-mmc3_cpu_fetch_ready:
-    slt t0, s0, a0
-    bnez t0, mmc3_cpu_slow_done
-    ld t0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
-    dsubu a0, s0, t0
-    blez a0, mmc3_cpu_fetch_synced
-    nop
-    jal mapperpputicks
-    nop
-    sd s0, global_nesmmc3fetchclock-global_nesmmc3apuclock(s1)
-mmc3_cpu_fetch_synced:
-    daddiu t1, zero, -1
-    sd t1, global_nesmmc3fetchlimit-global_nesmmc3apuclock(s1)
-mmc3_cpu_slow_done:
-    sd s0, global_workerclock-global_nesmmc3apuclock(s1)
-    ld ra, 0(sp)
-    ld s0, 8(sp)
-    ld s1, 16(sp)
-    jr ra
-    daddiu sp, sp, 32
   EndASM
 EndProcedure
 
 ; APU register accesses and PRG bank changes need current audio state.
 ; The CPU scheduler still services raster and mapper IRQ deadlines.
 ProcedureNaked NesMmc3SyncApu(stamp.i)
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    daddiu sp, sp, -32
-    sd ra, 0(sp)
-    jal nesmmc3advancecputime
-    sd a0, 8(sp)
-    la t0, global_nesmmc3apuclock
-    ld t1, 8(sp)
-    ld t2, 0(t0)
-    dsubu a0, t1, t2
-    blez a0, mmc3_register_apu_synced
+    j u_nesmmc3syncapu
     nop
-    jal apuadvance
-    nop
-    la t0, global_nesmmc3apuclock
-    ld t1, 8(sp)
-    sd t1, 0(t0)
-mmc3_register_apu_synced:
-    ; An APU register write can move the next DMA or IRQ deadline.
-    daddiu t1, zero, -1
-    sd t1, global_nesmmc3apulimit-global_nesmmc3apuclock(t0)
-    ld ra, 0(sp)
-    jr ra
-    daddiu sp, sp, 32
   EndASM
 EndProcedure

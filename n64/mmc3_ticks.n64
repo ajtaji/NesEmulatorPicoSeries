@@ -108,7 +108,7 @@ mmc3_fetch_sprite_once:
     sltiu t2, t2, 10
     bnez t2, mmc3_fetch_sprite_done
     nop
-    j mapperclockirq
+    j u_mapperclockirq
     nop
 mmc3_fetch_sprite_done:
     jr ra
@@ -328,36 +328,10 @@ mmc3_fetch_done:
 EndProcedure
 
 ProcedureNaked MapperClockIrq()
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    move a7, ra
-mmc3_irq_update:
-    la t0, global_mapirqcount
-    ld t1, 0(t0)
-    ld t2, global_mapreload-global_mapirqcount(t0)
-    ld t3, global_mapirqclocks-global_mapirqcount(t0)
-    daddiu t3, t3, 1
-    sd t3, global_mapirqclocks-global_mapirqcount(t0)
-    beqz t1, mmc3_irq_reload
-    daddiu t1, t1, -1
-    beqz t2, mmc3_irq_counted
-    nop
-mmc3_irq_reload:
-    ld t1, global_mapirqlatch-global_mapirqcount(t0)
-mmc3_irq_counted:
-    sd t1, 0(t0)
-    bnez t1, mmc3_irq_done
-    sd zero, global_mapreload-global_mapirqcount(t0)
-    ld t1, global_mapirqenable-global_mapirqcount(t0)
-    beqz t1, mmc3_irq_done
-    ld t2, global_mapirq-global_mapirqcount(t0)
-    bnez t2, mmc3_irq_done
-    addiu t1, zero, 1
-    ld t2, global_mapirqassertions-global_mapirqcount(t0)
-    sd t1, global_mapirq-global_mapirqcount(t0)
-    daddiu t2, t2, 1
-    sd t2, global_mapirqassertions-global_mapirqcount(t0)
-mmc3_irq_done:
-    jr a7
+    j u_mapperclockirq
     nop
   EndASM
 EndProcedure
@@ -381,7 +355,7 @@ mmc3_a12_rise:
     slti t1, t1, 10
     bnez t1, mmc3_a12_done
     nop
-    j mapperclockirq
+    j u_mapperclockirq
     nop
 mmc3_a12_done:
     jr ra

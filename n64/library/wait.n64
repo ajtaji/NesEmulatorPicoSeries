@@ -123,84 +123,11 @@ Procedure NesRuntimeIndexMmc3Waits()
 EndProcedure
 
 ProcedureNaked.i NesRamCpuWindow(n.i, coalesce.i=0)
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    blez a0, nes_mmc3_wait_scalar
+    j u_nesramcpuwindow
     nop
-    la t2, global_pc
-    ld t1, global_stopped-global_pc(t2)
-    ld t0, global_nesstall-global_pc(t2)
-    or t1, t1, t0
-    bnez t1, nes_mmc3_wait_scalar
-    ld t1, global_nesidleenabled-global_pc(t2)
-    beqz t1, nes_mmc3_wait_scalar
-    ld t0, 0(t2)
-    andi t1, t0, 0x8000
-    beqz t1, nes_mmc3_wait_scalar
-    andi t1, t0, 0x6000
-    srl t1, t1, 10
-    daddiu t1, t1, global_mapprgslots-global_pc
-    addu t1, t1, t2
-    lw t1, 4(t1)
-    daddiu t2, t2, global_nesmmc3waitindex-global_pc
-    ld t3, 0(t2)
-    beqz t3, nes_mmc3_wait_cache_lookup
-    sll a2, t1, 13
-    andi a3, t0, 8191
-    daddu t3, t3, a2
-    daddu t3, t3, a3
-    lbu a2, 0(t3)
-    beqz a2, nes_mmc3_wait_scalar
-    addiu t3, zero, 255
-    beq a2, t3, nes_mmc3_wait_cache_lookup
-    sll a2, a2, 2
-    ld t2, global_nesmmc3waitrules-global_nesmmc3waitindex(t2)
-    sll t1, t1, 10
-    daddu t2, t2, t1
-    daddu t2, t2, a2
-    b nes_mmc3_wait_decoded
-    lw a2, 0(t2)
-nes_mmc3_wait_cache_lookup:
-    sll t2, t1, 16
-    or t2, t2, t0
-    srl t3, t0, 6
-    xor t3, t3, t0
-    xor t3, t3, t1
-    andi t3, t3, 1023
-    sll t3, t3, 3
-    la t1, global_nesmmc3waitcache
-    addu t3, t3, t1
-    lw t1, 0(t3)
-    bne t1, t2, nes_mmc3_wait_miss
-    lw a2, 4(t3)
-nes_mmc3_wait_decoded:
-    beqz a2, nes_mmc3_wait_scalar
-    nop
-    j nesmmc3ramwaitbatch
-    nop
-nes_mmc3_wait_miss:
-    daddiu sp, sp, -48
-    sd ra, 32(sp)
-    sd a0, 24(sp)
-    sd a1, 16(sp)
-    sd t3, 8(sp)
-    sd t2, 0(sp)
-    jal nesramwaitrule
-    or a0, t0, zero
-    or a2, a0, zero
-    ld t2, 0(sp)
-    ld t3, 8(sp)
-    ld a1, 16(sp)
-    ld a0, 24(sp)
-    ld ra, 32(sp)
-    sw t2, 0(t3)
-    sw a2, 4(t3)
-    b nes_mmc3_wait_decoded
-    daddiu sp, sp, 48
-nes_mmc3_wait_scalar:
-    j cpurun
-    nop
-    ; Preserve the instruction cache placement of the following CPU code.
-    .word 0,0,0,0,0,0,0,0,0,0
   EndASM
 EndProcedure
 CompilerEndIf

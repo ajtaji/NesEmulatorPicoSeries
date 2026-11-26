@@ -16,7 +16,7 @@ nes_wait_enter:
     sltiu t0, a0, 129
     beqz t0, nes_wait_general
     nop
-    j nesmmc3signwait
+    j u_nesmmc3signwait
     nop
 nes_wait_general:
     daddiu sp, sp, -80
@@ -292,94 +292,10 @@ nes_wait_compare_flag:
 EndProcedure
 
 ProcedureNaked.i NesMmc3SignWait(n.i,coalesce.i,rule.i)
+  ; The body is in the hot unit (n64/unit/, inside cpu6502.n64's procedure) so that it
+  ; cannot share I-cache sets with the core; outside callers enter it here.
   ASM
-    la a1, global_pc
-    ld t0, 0(a1)
-    srl a3, a2, 22
-    andi a3, a3, 1
-    srl t9, a2, 25
-    andi t9, t9, 1
-    addiu t9, t9, 3
-    move a4, a0
-    move a5, zero
-    move a6, zero
-    srl t1, a2, 26
-    andi t1, t1, 1
-    beqz t1, mmc3_sign_read
-    nop
-    ld t1, global_fn-global_pc(a1)
-    srl t1, t1, 7
-    andi t1, t1, 1
-    bne t1, a3, mmc3_sign_scalar
-    subu a4, a4, t9
-    move a5, t9
-    addiu a6, zero, 1
-    blez a4, mmc3_sign_branch_entry
-    addiu t0, t0, -2
-mmc3_sign_read:
-    andi t1, a2, 255
-    la t2, global_m
-    daddu t1, t1, t2
-    lbu a7, 0(t1)
-    srl t1, a7, 7
-    bne t1, a3, mmc3_sign_scalar
-    addiu a4, a4, -1
-    addiu t1, zero, 3
-    bne t9, t1, mmc3_sign_div_seven
-    addiu t2, zero, 43
-    multu a4, t2
-    mflo t2
-    b mmc3_sign_charge
-    srl t2, t2, 8
-mmc3_sign_div_seven:
-    addiu t2, zero, 147
-    multu a4, t2
-    mflo t2
-    srl t2, t2, 10
-mmc3_sign_charge:
-    addiu t1, t9, 3
-    multu t1, t2
-    sd a7, global_a-global_pc(a1)
-    sd a7, global_fn-global_pc(a1)
-    sd a7, global_fz-global_pc(a1)
-    mflo t1
-    subu a4, a4, t1
-    addu a5, a5, t1
-    addiu a5, a5, 3
-    sll t2, t2, 1
-    addu a6, a6, t2
-    addiu a6, a6, 1
-    sltiu t1, a4, 3
-    beqz t1, mmc3_sign_branch_end
-    nop
-    b mmc3_sign_commit
-    addiu t0, t0, 2
-mmc3_sign_branch_end:
-    addu a5, a5, t9
-    addiu a6, a6, 1
-mmc3_sign_branch_entry:
-    addiu a7, zero, 252
-mmc3_sign_commit:
-    sd t0, 0(a1)
-    sd a7, global_nesopenbus-global_pc(a1)
-    ld t0, global_cpucycles-global_pc(a1)
-    sd t0, global_nesrunstart-global_pc(a1)
-    daddu t0, t0, a5
-    sd t0, global_cpucycles-global_pc(a1)
-    sd a0, global_budget-global_pc(a1)
-    dsubu t0, a0, a5
-    sd t0, global_left-global_pc(a1)
-    sd zero, global_cpuinwindow-global_pc(a1)
-    ld t0, global_nesinstructions-global_pc(a1)
-    ld t1, global_nesidlebatched-global_pc(a1)
-    daddu t0, t0, a6
-    daddu t1, t1, a6
-    sd t0, global_nesinstructions-global_pc(a1)
-    sd t1, global_nesidlebatched-global_pc(a1)
-    jr ra
-    move a0, a5
-mmc3_sign_scalar:
-    j cpurun
+    j u_nesmmc3signwait
     nop
   EndASM
 EndProcedure

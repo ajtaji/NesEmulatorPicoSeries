@@ -95,6 +95,24 @@ def trace_bus_writes(code):
     return code
 
 
+def check_hot_unit(symbols):
+    """The hot unit's guarantee (design note, section N): the core, the window code, the time
+    advance and the bus write lie in ONE procedure, and its hot span - from the procedure's
+    start to c65_fetch_slow, where its cold part begins - is under the VR4300's 16 KB
+    direct-mapped I-cache, so no two of its hot lines can share a set. Read from the build's own
+    symbol file; nothing is asked of the compiler."""
+    sym = {}
+    for line in symbols.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            sym[parts[1]] = int(parts[0], 16)
+    start, cold = sym["cpurun"], sym["c65_fetch_slow"]
+    span = cold - start
+    if not 0 < span <= 16384:
+        raise RuntimeError(f"hot unit span {span} bytes is not inside the 16384-byte I-cache")
+    print(f"NES hot unit: {span} bytes hot span from ${start:08X}, {16384 - span} bytes to spare")
+
+
 def build(args, *, controller_trace=()):
     controller_trace = tuple(controller_trace)
     telemetry = getattr(args, "telemetry", False)
@@ -241,7 +259,7 @@ def build(args, *, controller_trace=()):
             (app / "save_backing.pmi").write_text(save_copy_source(save), encoding="utf-8")
             (app / "save_restore.pmi").write_text(save.restore + "\n", encoding="utf-8")
         if cpu_trace:
-            write = app / "mmc3_cpu_write.n64"
+            write = app / "unit" / "write.n64"
             write.write_text(trace_bus_writes(write.read_text(encoding="utf-8")), encoding="utf-8")
         oscillator = app / "oscillators.n64"
         oscillator.write_text(stage_oscillators(oscillator.read_text(encoding="utf-8"), cart.mapper), encoding="utf-8")
@@ -262,6 +280,8 @@ def build(args, *, controller_trace=()):
         if result.returncode or not (app / "nes.z64").is_file():
             raise RuntimeError(log)
         check_storage_layout(log)
+        if cpu_core == "asm":
+            check_hot_unit(app / "nes.bin.sym")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         image = (app / "nes.z64").read_bytes()
         if save_bytes:
