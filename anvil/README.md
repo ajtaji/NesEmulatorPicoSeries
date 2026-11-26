@@ -20,15 +20,18 @@ instead of rebuilding the text list every frame. See
 ## Build
 
 An explicit checkout of [Anvil](https://github.com/ajtaji/Anvil) supplies the
-Neon Arcade, Vulkan, MMU and BCM2711 device libraries. The build helper
-follows the file layout of Anvil's main branch, but against that branch the
-build currently stops at assembly ("stack top $3000000 is inside this
-image's BSS"): this image's variables now come to 34,036,992 bytes, most of
-them Anvil's Vulkan and Neon libraries, and this port's memory map gives its
-variables 15 MiB, from `0x02000000` to 1 MiB below the stack top at
-`0x03000000`. The last Anvil this port built against is the main branch of
-2026-10-16, whose Vulkan backend was still at its earlier paths.
+Neon Arcade, Vulkan, MMU and BCM2711 device libraries. It builds against
+Anvil's main branch. The memory map it builds with has not yet been run on a
+board.
 Use `PureMetalForge.exe --compile`; the build helper invokes that compiler.
+
+Every fixed address of this port is in `memory_map.pi4`, with the map as a
+table: each region, its size, whether it is cached, and what else must agree
+with it. The build helper takes the image, BSS and stack addresses from it and
+refuses a build, naming the regions, when two regions overlap, when a
+no-cache list disagrees with the regions, when an address Anvil owns differs
+from the Anvil checkout, when the image outgrows its room, or when the BSS
+leaves its window less than the stated margin free.
 
 ```powershell
 python tools/build_anvil.py --compiler <PureMetalForge.exe> --anvil <Anvil-checkout> --out <work-folder>/nes.img
@@ -123,8 +126,8 @@ in the selector with an error message. Cartridge RAM is volatile: battery-backed
   sample cadence; ultrasonic periods retain their DAC mean without alias buzz.
   Cartridge output is mixed before the APU publishes its PCM write index.
   Base APU channels/filter, stereo SBC and Bluetooth device code are preserved.
-  The default video plugin retains its complete menu image at `0x07400000`
-  (4,096,000 bytes). List changes trigger a full GPU redraw; FPS changes draw
+  The default video plugin retains its complete menu image in the MENU region
+  of `memory_map.pi4` (4,096,000 bytes). List changes trigger a full GPU redraw; FPS changes draw
   only the HUD strip. Each presentation still publishes a complete frame by
   DMA at vertical sync. The normal game render path is unchanged.
 * `hud.pi4` and `ui.pi4` draw host controls and separate VIDEO/EMU FPS
@@ -155,7 +158,10 @@ opcode, PPU pixel or APU sample. The video and PCM contracts are the same as
   consume menu contacts.
 * Audio: `AudioStop()` releases the device; `AudioDiagnostics(address)`
   stores plugin-specific diagnostics (the Bluetooth plugin reserves 192 bytes).
-* Video: `VideoDiagnostics(address)` stores four u64 timing totals. The
+* Video: `VideoDiagnostics(address)` stores four u64 timing totals.
+  `VideoMemoryDiagnostics(address)` stores four u64: the Neon arena's size and
+  the part of it in use, and the Vulkan heap's size and the highest end of any
+  live allocation seen once a frame (result record +$1E0). The
   scheduler retains the frame buffers until `VideoPoll()` reports completion
   and aborts a failed or timed-out transfer.
   Selector builds also require a synchronous `VideoMenuDraw()` that reads the
@@ -201,7 +207,7 @@ host-generated FNV-1a expectations. Those three files must be in `2:/NES`.
 
 `return_test.pi4` is the small, standalone one-second return proof. The
 compiler must be given `--entry-returns --wants-services`, with separate image,
-BSS and stack addresses as in `build_anvil.py`.
+BSS and stack addresses as in `memory_map.pi4`.
 
 The Anvil mapper set is **0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 34, 41, 47, 64, 66, 68, 69, 71, 79, 105, 118, 119, 144, 148, 158, 206, 228, 232 and 234**. Mapper 1 implements standard
 MMC1 serial registers, PRG/CHR modes, one-screen/H/V mirroring and 8 KiB RAM.
