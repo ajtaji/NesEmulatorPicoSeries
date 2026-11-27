@@ -782,8 +782,9 @@ EndProcedure
 ; SprCount, s4 OamCacheDirty, s5 the record's tr (saved). NesFbSlot clobbers t0-t3 / v0 only; the old renderer's
 ; NesMmc3DrawSprites / PpuClearSprites / NesRenderTo are called as the compiled body called them (s-registers kept).
 ; REACHED BY: a split line when the frame's 32 records or its segment pool's 32 entries are used up - no cart of the
-; proof set does that ("ON THE OLD PATH 0" in every --show-check run); a test cart with more than 32 split lines in
-; a frame (a $2001 / $2006 write on each of 33+ lines) under --show-check would.
+; proof set does that ("ON THE OLD PATH 0" in every --show-check run). THE CHECK (N.76): the bench's test cart
+; carts/split33.s (~50 lines a frame split by PPUMASK writes, so ~18 a frame take this path) under --show-check, the
+; compiled twin's build against this one: every frame's picture hash the same.
 ; THE PLAIN TWIN:
 ;   Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty, tr.i
 ;   CompilerIf #NES_CONSOLE_RECORD : tr = LpmCpuCount() : CompilerEndIf
@@ -2708,8 +2709,8 @@ CompilerEndIf
 
 ; ---- NesFbWait(): the ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL
 ; slept for. Assembly (N.73). REACHED BY: a frame needing more fallback rows than the ring leaves (240 less the frame
-; before's) - never in the proof set (0 fallback lines); a test cart drawing 121+ fallback lines in each of two
-; frames under --show-check would.
+; before's) - never in the proof set (0 fallback lines). THE CHECK (N.76): carts/fall121.s (every visible line split,
+; ~200 fallback lines a frame) under --show-check, the compiled twin's build against this one.
 ; THE PLAIN TWIN:
 ;   Protected q.i = NesShowCur ! 1
 ;   NesShowAdvance(2, 0)
@@ -2748,7 +2749,8 @@ EndProcedure
 ; Every job run, the frame before handed whole, the current frame's bands so far handed, the RDP finished (nothing
 ; shown); the current frame's next band then starts the RSP's state again. Assembly (N.73). REACHED BY: a CHR-RAM cart
 ; writing pattern rows while the frame's bands are queued - none of the proof set (SMB3 / MM4 / the two test carts:
-; "DRAINS 0"); a CHR-RAM game (or test cart) under --show-check / --rsp-check would.
+; "DRAINS 0"). THE CHECK (N.76): carts/chrdrain.s (MMC3, CHR-RAM, a pattern row written every vblank) under
+; --show-check, the compiled twin's build against this one.
 ; THE PLAIN TWIN:
 ;   Protected p.i = NesShowCur                       (the record: tr, w0, s0 as NesShowPollE)
 ;   LpmRspqSync()
@@ -2855,8 +2857,10 @@ nsdr_finish:
 EndProcedure
 
 ; ---- NesShowStopped(): the emulator has stopped (RunGame's NES STOP): every job run, then one picture, the whole
-; screen red, shown. Assembly (N.73). REACHED BY: a worker error (a stop) - never in a passing run; a cart that stops
-; the core (an unsupported opcode, KIL) under --show-check would show it (one red frame, hashed).
+; screen red, shown. Assembly (N.73). REACHED BY: a worker error (a stop) - never in a passing run - and ONLY in the
+; builds without a verify frame (nes.n64 calls it under #VERIFY_FRAME = 0: the playable cart, the replay), so never
+; under --show-check (an oracle build). THE CHECK (N.76): carts/kil.s (KIL after 40 frames) on the playable build's
+; replay, the compiled twin's build against this one: the final picture (the red screen) byte for byte.
 ; THE PLAIN TWIN:
 ;   Protected fb.i
 ;   If NesShowProg = 0 : ProcedureReturn : EndIf

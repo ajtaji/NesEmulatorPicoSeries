@@ -64,7 +64,11 @@ Procedure NesSaveChanged(offset.i)
 EndProcedure
 CompilerEndIf
 
-CompilerIf #GAME_SAVE_LINEAR
+; #NES_SAVE_PROC: NesSaveWrite is the compiled procedure (1) or the library's LpmSramWrite (0); NesSaveFlush's
+; assembly calls whichever it is. The build chooses it with #GAME_SAVE_LINEAR; a bench tree may set it to 1 to run the
+; procedure form on a cart whose save is not linear (N.76's check of both forms).
+#NES_SAVE_PROC = #GAME_SAVE_LINEAR
+CompilerIf #NES_SAVE_PROC
 ; SummerCart64 SRAM 1M exposes all 128 KiB consecutively on PI domain 2.
 Procedure.i NesSaveRead(offset.i, page.i, bytes.i)
   Protected ticket.i=LpmPiRead(#LPM_SAVE_BASE+offset,page,bytes)
@@ -110,22 +114,157 @@ Procedure NesSaveLoad()
   NesSaveOnline=1
 EndProcedure
 
-Procedure NesSaveFlush()
-  Protected page.i=(@NesSaveStaging(0)+15)&~15, i.i, offset.i, bytes.i
-  For i=0 To (NesSaveLimit-1)/#NES_SAVE_PAGE
-    If NesSaveDirty(i)
-      offset=i*#NES_SAVE_PAGE
-      bytes=NesSaveLimit-offset
-      If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
-      NesSaveCopy(offset,page,bytes,0)
-      If NesSaveWrite(offset,page,bytes)<>#LPM_SAVE_OK
-        If NesSaveWriteError=0 : LpmDebugPrint("NES SRAM write pending") : EndIf
-        NesSaveWriteError=1
-        ProcedureReturn
-      EndIf
-      NesSaveDirty(i)=0
-    EndIf
-  Next
-  NesSavePending=0
-  NesSaveWriteError=0
+CompilerIf #NES_RUNTIME_ROM=0
+  Global NesSaveFixedBytes.i = #GAME_SAVE_BYTES    ; NesSaveLimit for the assembly below
+CompilerEndIf
+CompilerIf #NES_SAVE_PAGE<>256
+  CompilerError "save.n64: NesSaveFlush's assembly takes #NES_SAVE_PAGE = 256 (offset = i << 8)"
+CompilerEndIf
+Procedure NesSaveWritePending()                ; NesSaveFlush's one printed line (a string: compiled)
+  LpmDebugPrint("NES SRAM write pending")
+EndProcedure
+
+; ---- NesSaveFlush(): the battery save's dirty pages written to the cartridge's save memory, at the frame's wrap
+; (NesHostGuestFrame, when NesSavePending). Each 256-byte page i (0 .. (NesSaveLimit - 1) / 256) marked in
+; NesSaveDirty is copied out of the guest's backing (NesSaveCopy, save_backing.pmi: the mapper's PRG-RAM) into the
+; staging page (NesSaveStaging, 16-aligned: the PI DMA's alignment, a cache-line page of its own) and written
+; (NesSaveWrite), then unmarked. A refused write stops the flush with the page still marked and the save still pending
+; (the next frame tries again), the "pending" line printed once until a flush completes; a complete flush clears
+; NesSavePending and NesSaveWriteError.
+; NesSaveWrite IS CHOSEN BY BUILD: #GAME_SAVE_LINEAR (a 128 KB save on linear SRAM) - the compiled procedure above
+; (nessavewrite: the PI write between LpmResetHold / LpmResetRelease); otherwise the macro, which is the library's
+; LpmSramWrite (lpmsramwrite). Both take (offset, page, bytes) and return #LPM_SAVE_OK on success: the call below is
+; one jal to whichever the build has. NesSaveLimit: the runtime cart's NesRuntimeSaveBytes, or the built-in game's
+; #GAME_SAVE_BYTES held in NesSaveFixedBytes.
+; WHY ASSEMBLY (design note N.76, the owner's order: the emulator is assembly, glue included). Compiled it rebuilt
+; each global's address in the loop and kept the loop's values in a frame; the page work is the PI write itself.
+; MEASURED (N.76, carts/save.s, 150 frames, pc.txt, this routine's own lines): compiled 21,559 cycles a frame, here
+; 18,233 (-15 %); with the procedure form of NesSaveWrite 21,487 -> 17,928.
+; HOW: s0 the staging page, s1 the limit, s2 i, s3 the last page; the last page is (limit - 1) / 256 truncated toward
+; zero as the compiled division is (a limit of 0 gives page 0, whose dirty byte is never set: NesSaveChanged tests
+; the offset against the limit). The "pending" line is NesSaveWritePending (compiled: a string).
+; IN: nothing. OUT: nothing. KEEPS s0-s3 (saved); clobbers what a compiled call may. Frame 64: ra, s0-s3, the
+; page's offset (40) and bytes (48) across NesSaveCopy.
+; THE CHECK: carts/save.s (the bench's MMC3 battery cart, N.76) - its PRG-RAM writes mark pages for 100 frames - on
+; the compiled twin's build and this one: every NES FRAME line, the PNG, the WAV, the save's state words and the
+; staging page dumped the same, pc.txt showing this routine run; and once more with the procedure form of
+; NesSaveWrite (#NES_SAVE_PROC = 1 in both trees: the form #GAME_SAVE_LINEAR selects).
+; THE PLAIN TWIN:
+;   Protected page.i=(@NesSaveStaging(0)+15)&~15, i.i, offset.i, bytes.i
+;   For i=0 To (NesSaveLimit-1)/#NES_SAVE_PAGE
+;     If NesSaveDirty(i)
+;       offset=i*#NES_SAVE_PAGE
+;       bytes=NesSaveLimit-offset
+;       If bytes>#NES_SAVE_PAGE : bytes=#NES_SAVE_PAGE : EndIf
+;       NesSaveCopy(offset,page,bytes,0)
+;       If NesSaveWrite(offset,page,bytes)<>#LPM_SAVE_OK
+;         If NesSaveWriteError=0 : LpmDebugPrint("NES SRAM write pending") : EndIf
+;         NesSaveWriteError=1
+;         ProcedureReturn
+;       EndIf
+;       NesSaveDirty(i)=0
+;     EndIf
+;   Next
+;   NesSavePending=0
+;   NesSaveWriteError=0
+ProcedureNaked NesSaveFlush()
+  ASM
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)                    ; 40 / 48: the page's offset and bytes across NesSaveCopy
+    la t0, global_nessavestaging
+    daddiu s0, t0, 15
+    addiu t1, zero, -16
+    and s0, s0, t1                   ; page = (@NesSaveStaging(0) + 15) & ~15
+  EndASM
+  CompilerIf #NES_RUNTIME_ROM
+  ASM
+    la t0, global_nesruntimesavebytes
+  EndASM
+  CompilerElse
+  ASM
+    la t0, global_nessavefixedbytes
+  EndASM
+  CompilerEndIf
+  ASM
+    ld s1, 0(t0)                     ; the limit (NesSaveLimit)
+    daddiu s3, s1, -1
+    bgez s3, nsf_last
+    nop
+    move s3, zero                    ; limit 0: (0 - 1) / 256 = 0 (truncated toward zero)
+nsf_last:
+    dsra s3, s3, 8                   ; the last page: (limit - 1) / 256
+    move s2, zero                    ; i = 0
+nsf_page:
+    la t0, global_nessavedirty
+    daddu t0, t0, s2
+    lbu t0, 0(t0)
+    beqz t0, nsf_next                ; page i not marked
+    dsll a0, s2, 8                   ; (delay slot) offset = i * 256
+    dsubu a2, s1, a0                 ; bytes = limit - offset
+    slti t0, a2, 257
+    bnez t0, nsf_bytes
+    nop
+    addiu a2, zero, 256              ; at most a page
+nsf_bytes:
+    sd a0, 40(sp)                    ; offset and bytes kept across the copy
+    sd a2, 48(sp)
+    move a1, s0                      ; page
+    jal nessavecopy                  ; NesSaveCopy(offset, page, bytes, 0): the guest's bytes into the page
+    move a3, zero                    ; (delay slot) restore = 0
+    ld a0, 40(sp)                    ; offset
+    ld a2, 48(sp)                    ; bytes
+    move a1, s0                      ; page
+  EndASM
+  CompilerIf #NES_SAVE_PROC
+  ASM
+    jal nessavewrite                 ; NesSaveWrite(offset, page, bytes): the compiled procedure (linear SRAM)
+    nop
+  EndASM
+  CompilerElse
+  ASM
+    jal lpmsramwrite                 ; NesSaveWrite(offset, page, bytes): the macro, LpmSramWrite
+    nop
+  EndASM
+  CompilerEndIf
+  ASM
+    addiu t0, zero, #LPM_SAVE_OK
+    beq a0, t0, nsf_written
+    nop
+    la t0, global_nessavewriteerror  ; refused: the page stays marked, the save pending
+    ld t1, 0(t0)
+    bnez t1, nsf_error
+    nop
+    jal nessavewritepending          ; the line, once
+    nop
+nsf_error:
+    la t0, global_nessavewriteerror
+    addiu t1, zero, 1
+    b nsf_ret
+    sd t1, 0(t0)                     ; (delay slot) NesSaveWriteError = 1
+nsf_written:
+    la t0, global_nessavedirty
+    daddu t0, t0, s2
+    sb zero, 0(t0)                   ; NesSaveDirty(i) = 0
+nsf_next:
+    daddiu s2, s2, 1                 ; i + 1
+    slt t0, s3, s2
+    beqz t0, nsf_page                ; i <= the last page: on
+    nop
+    la t0, global_nessavepending
+    sd zero, 0(t0)                   ; NesSavePending = 0
+    la t0, global_nessavewriteerror
+    sd zero, 0(t0)                   ; NesSaveWriteError = 0
+nsf_ret:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
 EndProcedure

@@ -1,14 +1,53 @@
 ; RAM and PRG are stable during a CPU run window on these boards. The
 ; scheduler still chooses the budget and handles interrupts afterwards.
-Procedure.i NesRamBranchTaken(condition.i, negative.i, zeroValue.i, carry.i, overflow.i)
-  Protected set.i
-  Select condition>>1
-    Case 0 : set=(negative&128)<>0
-    Case 1 : set=(overflow&128)<>0
-    Case 2 : set=(carry&256)<>0
-    Case 3 : set=(zeroValue&255)=0
-  EndSelect
-  ProcedureReturn set=(condition&1)
+
+; ---- NesRamBranchTaken(condition, negative, zeroValue, carry, overflow): 1 when the RAM-wait pair's branch is taken
+; with these flag values, else 0. condition = the branch's 3-bit code from the rule (rule >> 22 & 7): bits 2-1 the
+; flag (0 N, 1 V, 2 C, 3 Z, as the 6502's branch opcodes $10 / $50 / $90 / $D0 number them), bit 0 the value the
+; branch is taken on. The flags are held as the core holds them (anvil/cpu2a03.pi4): N is bit 7 of FN, V bit 7 of FV,
+; C bit 8 of FC, Z "the low byte of FZ is 0".
+; WHY ASSEMBLY (design note N.76, the owner's order: the emulator is assembly): it is NesRamWaitBatch's helper, called
+; once or twice a batch; compiled it built a frame for a five-way Select. Here: the flag bit picked by three compares
+; on condition >> 1 (each branch's delay slot loads the next candidate bit, so the bit for the case taken is in t1),
+; made 0 / 1, and compared with condition & 1.
+; IN: a0 condition, a1 negative, a2 zeroValue, a3 carry, a4 overflow. OUT: a0 = 1 taken, 0 not. A leaf: CLOBBERS
+; t0-t2 and a0 ONLY - NesRamWaitBatch keeps its state in a1-a7, t3, t8, t9, v0, v1 across the call (a contract).
+; THE CHECK: carts/wait.s (the bench's NROM test cart, N.76): the compiled twin's build and this one, every NES FRAME
+; line, the PNG, the WAV and the RAM-wait counters the same; pc.txt shows the routine run.
+; THE PLAIN TWIN:
+;   Protected set.i
+;   Select condition>>1
+;     Case 0 : set=(negative&128)<>0
+;     Case 1 : set=(overflow&128)<>0
+;     Case 2 : set=(carry&256)<>0
+;     Case 3 : set=(zeroValue&255)=0
+;   EndSelect
+;   ProcedureReturn set=(condition&1)
+ProcedureNaked.i NesRamBranchTaken(condition.i, negative.i, zeroValue.i, carry.i, overflow.i)
+  ASM
+    dsra t0, a0, 1                   ; the flag: condition >> 1
+    beqz t0, nrbt_bit                ; 0: N
+    andi t1, a1, 128                 ; (delay slot) N = bit 7 of negative
+    addiu t2, t0, -1
+    beqz t2, nrbt_bit                ; 1: V
+    andi t1, a4, 128                 ; (delay slot) V = bit 7 of overflow
+    addiu t2, t0, -2
+    beqz t2, nrbt_bit                ; 2: C
+    andi t1, a3, 256                 ; (delay slot) C = bit 8 of carry
+    addiu t2, t0, -3
+    bnez t2, nrbt_cmp                ; no case: set = 0 (the Select leaves it 0)
+    move t1, zero                    ; (delay slot)
+    andi t1, a2, 255                 ; 3: Z is set when the low byte of zeroValue is 0
+    b nrbt_cmp
+    sltiu t1, t1, 1                  ; (delay slot) set = (low byte = 0)
+nrbt_bit:
+    sltu t1, zero, t1                ; set = (the bit <> 0)
+nrbt_cmp:
+    andi t2, a0, 1                   ; the value the branch is taken on
+    xor t1, t1, t2                   ; 0 when set equals it
+    jr ra
+    sltiu a0, t1, 1                  ; (delay slot) taken = (set = condition & 1)
+  EndASM
 EndProcedure
 
 CompilerIf #NES_NATIVE_RAM_WAIT=0
@@ -27,83 +66,436 @@ Procedure.i NesRamCpuWindow(n.i, coalesce.i=0)
 EndProcedure
 CompilerEndIf
 
-Procedure.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
-  Protected action.i, mode.i, condition.i, startPc.i, length.i=2
-  Protected addr.i, indexed.i, dataByte.i, readCycles.i=3, branchCycles.i
-  Protected nn.i, zz.i, cc.i, vv.i, result.i
-  Protected remaining.i, loops.i, count.i, spent.i, nextPc.i, bus.i
-  Protected horizon.i, repeatRow.i, repeatCycles.i, skippedCycles.i
-  action=(rule>>16)&7 : mode=(rule>>19)&7 : condition=(rule>>22)&7
-  addr=rule&$FFFF
-  If mode=1 Or mode=4 : indexed=X : EndIf
-  If mode=2 Or mode=5 : indexed=Y : EndIf
-  If mode<3
-    addr=(addr+indexed)&255
-    If mode<>0 : readCycles=4 : EndIf
-  Else
-    length=3 : readCycles=4
-    result=(addr+indexed)&$FFFF
-    If ((result!addr)&$FF00)<>0 : readCycles+=1 : EndIf
-    addr=result
-    If addr>=$2000 : ProcedureReturn CpuRun(n) : EndIf
-  EndIf
-  branchCycles=3+((rule>>25)&1)
-  startPc=PC : remaining=n
-  If rule&$4000000
-    ; An interrupt may have changed RAM since the read in the last window.
-    ; The branch already in progress must use its original condition.
-    If NesRamBranchTaken(condition,FN,FZ,FC,FV)=0 : ProcedureReturn CpuRun(n) : EndIf
-    startPc-=length : spent=branchCycles : count=1 : remaining-=branchCycles
-  EndIf
-  nextPc=startPc : bus=256-length-2
-  If remaining>0
-    dataByte=M(addr&$7FF)
-    nn=dataByte : zz=dataByte : cc=FC : vv=FV
-    Select action
-      Case 4 : result=A-dataByte : nn=result : zz=result : cc=~result
-      Case 5 : result=X-dataByte : nn=result : zz=result : cc=~result
-      Case 6 : result=Y-dataByte : nn=result : zz=result : cc=~result
-      Case 7 : zz=A&dataByte : vv=dataByte<<1
-    EndSelect
-    ; Each accepted read leaves the same condition for the backward branch.
-    If NesRamBranchTaken(condition,nn,zz,cc,vv)=0 : ProcedureReturn CpuRun(n) : EndIf
-    ; The CPU would use the same budget again while both devices stay behind a proven horizon.
-    ; Skip whole periods of those scheduled windows, leaving the last window's metadata exact.
-    If coalesce And n=128
-      horizon=NesCpuHorizon : If NesStatusHorizon>horizon : horizon=NesStatusHorizon : EndIf
-      If horizon-CpuCycles>=128 And WorkerNmi=NesSeenNmi And WorkerDmcCycles=NesSeenDmc
-        If FI Or (WorkerIrq|MapIrq)=0
-          repeatRow=((readCycles-3)*4+(branchCycles-3)*2+((rule>>26)&1))*4
-          repeatCycles=PeekU(?NesRamWaitPeriods+repeatRow)
-          loops=(horizon-CpuCycles)/repeatCycles
-          skippedCycles=loops*repeatCycles
-          count+=loops*PeekU(?NesRamWaitPeriods+repeatRow+2)
-          CpuCycles+=skippedCycles
-        EndIf
-      EndIf
-    EndIf
-    ; Leave at least one cycle for the last pair, so its read or branch
-    ; ends the window at the same instruction boundary as CpuRun.
-    loops=(remaining-1)/(readCycles+branchCycles)
-    remaining-=loops*(readCycles+branchCycles)
-    spent+=loops*(readCycles+branchCycles)+readCycles : count+=loops*2+1
-    If remaining<=readCycles
-      nextPc=startPc+length : bus=dataByte
-    Else
-      spent+=branchCycles : count+=1
-    EndIf
-    Select action
-      Case 1 : A=dataByte
-      Case 2 : X=dataByte
-      Case 3 : Y=dataByte
-    EndSelect
-    FN=nn : FZ=zz : FC=cc : FV=vv
-    If mode>=3 : AccessPhase=3 : EndIf
-  EndIf
-  PC=nextPc : NesOpenBus=bus
-  NesRunStart=CpuCycles : Budget=n : Left=n-spent : CpuInWindow=0
-  CpuCycles+=spent : NesInstructions+=count : NesIdleBatched+=count
-  ProcedureReturn spent+skippedCycles
+; ---- NesRamWaitBatch(n, coalesce, rule): a CPU window of n cycles in which the guest polls RAM - a read (LDA / LDX /
+; LDY / CMP / CPX / CPY / BIT of zero page or absolute RAM, indexed or not) and a backward branch to it - run without
+; the core: the read gives the same byte every time (RAM cannot change inside a window: nothing but the CPU writes it,
+; and interrupts are taken at window ends), so the flags and the branch are the same every pass. If the branch
+; leaves the loop the core runs the window (CpuRun). Otherwise whole read / branch pairs are counted off, the last pair
+; cut so the window ends at the instruction boundary CpuRun would end it at, and the guest state is left as the core
+; would leave it (PC, A / X / Y, the flags, the open bus, the window's bookkeeping, the instruction counts).
+; THE COALESCE PATH (coalesce <> 0 and n = 128, the reference scheduler's NesRamCpuWindow(128, 1)): while no device
+; event can come before the later of NesCpuHorizon / NesStatusHorizon and no NMI, DMC stall or acceptable IRQ is
+; pending, the windows in between would each repeat this one: they are skipped whole, by the period table
+; NesRamWaitPeriods (stage_ramwait.py: cycles and instructions of a run of windows for each read / branch timing).
+; THE RULE (stage_ramwait.py / library/wait.n64 build it): bits 0-15 the address, 16-18 the action (1 LDA, 2 LDX,
+; 3 LDY, 4 CMP, 5 CPX, 6 CPY, 7 BIT), 19-21 the mode (0 zp, 1 zp,x, 2 zp,y, 3 abs, 4 abs,x, 5 abs,y), 22-24 the branch
+; condition (NesRamBranchTaken), 25 the branch's page-cross cycle, 26 the window starts at the branch (the read done
+; in the window before: the branch is decided by the flags as they are).
+; WHY ASSEMBLY (design note N.76, the owner's order): compiled, each of the ~25 globals it reads or writes was
+; addressed afresh and the five-argument helper call built frames; it is the RAM-wait batch of the reference
+; scheduler (NROM, MMC1 onward) and the coalesce entry of NesMmc3RamWaitBatch. MEASURED (N.76, carts/wait.s, 300
+; frames, pc.txt, this routine and NesRamBranchTaken): compiled 155,317 cycles a frame, here 155,563 - the same within
+; the profile's resolution; the time is not in the instruction count (the cause was not measured further). It is
+; converted for the order, not for speed.
+; HOW: the decode first (action t3, mode t8, condition v1, the address, the read's cycles s3, the branch's s4), the
+; address indexed and, for the absolute modes, the page-cross cycle added and anything at $2000 or above handed back
+; to the core; then, when the window starts at the branch, that branch decided on the current flags; then the read's
+; byte and the flags it gives (CMP-likes: reg - byte, carry = NOT of the difference, the core's own forms; BIT: Z from
+; A AND byte, V from byte << 1) and the branch decided on them; the coalesce skip; then the pairs that fit:
+; loops = (remaining - 1) / (read + branch) - "- 1" keeps at least one cycle for the last pair, whose read (or read
+; and branch) ends the window as CpuRun ends it. HI / LO: each mflo / mfhi is followed by two instructions before the
+; next ddiv / dmult (the VR4300's HI / LO hazard).
+; REGISTERS: s0 n, s1 coalesce, s2 rule, s3 readCycles, s4 branchCycles, s5 startPc, s6 spent, s7 count (saved);
+; a5 length, a6 remaining, a7 the address, then the byte; a1-a4 nn / zz / cc / vv (NesRamBranchTaken keeps them);
+; t3 action, t8 mode, v1 condition, v0 nextPc, t9 skippedCycles; 72(sp) the open bus. IN: a0 n, a1 coalesce, a2 rule.
+; OUT: a0 = the cycles run (spent + skipped), or CpuRun(n)'s (a tail jump). KEEPS s0-s7.
+; THE CHECK: carts/wait.s (N.76) on the NROM runtime build (the window always coalesce = 1): the compiled twin's
+; build and this one, every NES FRAME line, the PNG, the WAV and NesIdleBatched / NesInstructions the same; pc.txt
+; shows this routine and NesRamBranchTaken run. In the runtime-MMC3 builds it is not reached: their run loops call
+; the window with coalesce = 0 (cpu6502.n64, mmc3_run.n64), so NesMmc3RamWaitBatch's jump here is never taken.
+; THE PLAIN TWIN:
+;   Protected action.i, mode.i, condition.i, startPc.i, length.i=2
+;   Protected addr.i, indexed.i, dataByte.i, readCycles.i=3, branchCycles.i
+;   Protected nn.i, zz.i, cc.i, vv.i, result.i
+;   Protected remaining.i, loops.i, count.i, spent.i, nextPc.i, bus.i
+;   Protected horizon.i, repeatRow.i, repeatCycles.i, skippedCycles.i
+;   action=(rule>>16)&7 : mode=(rule>>19)&7 : condition=(rule>>22)&7
+;   addr=rule&$FFFF
+;   If mode=1 Or mode=4 : indexed=X : EndIf
+;   If mode=2 Or mode=5 : indexed=Y : EndIf
+;   If mode<3
+;     addr=(addr+indexed)&255
+;     If mode<>0 : readCycles=4 : EndIf
+;   Else
+;     length=3 : readCycles=4
+;     result=(addr+indexed)&$FFFF
+;     If ((result!addr)&$FF00)<>0 : readCycles+=1 : EndIf
+;     addr=result
+;     If addr>=$2000 : ProcedureReturn CpuRun(n) : EndIf
+;   EndIf
+;   branchCycles=3+((rule>>25)&1)
+;   startPc=PC : remaining=n
+;   If rule&$4000000
+;     If NesRamBranchTaken(condition,FN,FZ,FC,FV)=0 : ProcedureReturn CpuRun(n) : EndIf
+;     startPc-=length : spent=branchCycles : count=1 : remaining-=branchCycles
+;   EndIf
+;   nextPc=startPc : bus=256-length-2
+;   If remaining>0
+;     dataByte=M(addr&$7FF)
+;     nn=dataByte : zz=dataByte : cc=FC : vv=FV
+;     Select action
+;       Case 4 : result=A-dataByte : nn=result : zz=result : cc=~result
+;       Case 5 : result=X-dataByte : nn=result : zz=result : cc=~result
+;       Case 6 : result=Y-dataByte : nn=result : zz=result : cc=~result
+;       Case 7 : zz=A&dataByte : vv=dataByte<<1
+;     EndSelect
+;     If NesRamBranchTaken(condition,nn,zz,cc,vv)=0 : ProcedureReturn CpuRun(n) : EndIf
+;     If coalesce And n=128
+;       horizon=NesCpuHorizon : If NesStatusHorizon>horizon : horizon=NesStatusHorizon : EndIf
+;       If horizon-CpuCycles>=128 And WorkerNmi=NesSeenNmi And WorkerDmcCycles=NesSeenDmc
+;         If FI Or (WorkerIrq|MapIrq)=0
+;           repeatRow=((readCycles-3)*4+(branchCycles-3)*2+((rule>>26)&1))*4
+;           repeatCycles=PeekU(?NesRamWaitPeriods+repeatRow)
+;           loops=(horizon-CpuCycles)/repeatCycles
+;           skippedCycles=loops*repeatCycles
+;           count+=loops*PeekU(?NesRamWaitPeriods+repeatRow+2)
+;           CpuCycles+=skippedCycles
+;         EndIf
+;       EndIf
+;     EndIf
+;     loops=(remaining-1)/(readCycles+branchCycles)
+;     remaining-=loops*(readCycles+branchCycles)
+;     spent+=loops*(readCycles+branchCycles)+readCycles : count+=loops*2+1
+;     If remaining<=readCycles
+;       nextPc=startPc+length : bus=dataByte
+;     Else
+;       spent+=branchCycles : count+=1
+;     EndIf
+;     Select action
+;       Case 1 : A=dataByte
+;       Case 2 : X=dataByte
+;       Case 3 : Y=dataByte
+;     EndSelect
+;     FN=nn : FZ=zz : FC=cc : FV=vv
+;     If mode>=3 : AccessPhase=3 : EndIf
+;   EndIf
+;   PC=nextPc : NesOpenBus=bus
+;   NesRunStart=CpuCycles : Budget=n : Left=n-spent : CpuInWindow=0
+;   CpuCycles+=spent : NesInstructions+=count : NesIdleBatched+=count
+;   ProcedureReturn spent+skippedCycles
+ProcedureNaked.i NesRamWaitBatch(n.i, coalesce.i, rule.i)
+  ASM
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    sd s6, 56(sp)
+    sd s7, 64(sp)
+    move s0, a0                      ; n
+    move s1, a1                      ; coalesce
+    move s2, a2                      ; rule
+    dsra t0, s2, 16
+    andi t3, t0, 7                   ; action = (rule >> 16) & 7
+    dsra t0, s2, 19
+    andi t8, t0, 7                   ; mode = (rule >> 19) & 7
+    dsra t0, s2, 22
+    andi v1, t0, 7                   ; condition = (rule >> 22) & 7
+    andi a7, s2, 0xFFFF              ; addr = rule & $FFFF
+    move t2, zero                    ; indexed: 0, X for modes 1 / 4, Y for 2 / 5
+    addiu t0, t8, -1
+    beqz t0, nrwb_x
+    addiu t1, t8, -4                 ; (delay slot)
+    beqz t1, nrwb_x
+    addiu t0, t8, -2                 ; (delay slot)
+    beqz t0, nrwb_y
+    addiu t1, t8, -5                 ; (delay slot)
+    bnez t1, nrwb_indexed
+    nop
+nrwb_y:
+    la t0, global_y
+    b nrwb_indexed
+    ld t2, 0(t0)                     ; (delay slot) indexed = Y
+nrwb_x:
+    la t0, global_x
+    ld t2, 0(t0)                     ; indexed = X
+nrwb_indexed:
+    addiu a5, zero, 2                ; length = 2
+    sltiu t0, t8, 3
+    beqz t0, nrwb_abs                ; modes 3-5: absolute
+    addiu s3, zero, 3                ; (delay slot) readCycles = 3
+    daddu a7, a7, t2
+    beqz t8, nrwb_decoded            ; zero page: 3 cycles
+    andi a7, a7, 255                 ; (delay slot) addr = (addr + indexed) & 255 (the index wraps in page 0)
+    b nrwb_decoded
+    addiu s3, zero, 4                ; (delay slot) zp,x / zp,y: 4 cycles
+nrwb_abs:
+    addiu a5, zero, 3                ; length = 3
+    addiu s3, zero, 4                ; readCycles = 4
+    daddu t0, a7, t2
+    andi t0, t0, 0xFFFF              ; result = (addr + indexed) & $FFFF
+    xor t1, t0, a7
+    andi t1, t1, 0xFF00              ; the high byte changed: the indexed read's extra cycle
+    beqz t1, nrwb_nocross
+    move a7, t0                      ; (delay slot) addr = result
+    addiu s3, zero, 5                ; readCycles + 1
+nrwb_nocross:
+    sltiu t0, a7, 0x2000
+    beqz t0, nrwb_cpurun             ; addr >= $2000 (not RAM): the core runs the window
+    nop
+nrwb_decoded:
+    dsra t0, s2, 25
+    andi t0, t0, 1
+    addiu s4, t0, 3                  ; branchCycles = 3 + ((rule >> 25) & 1)
+    la t0, global_pc
+    ld s5, 0(t0)                     ; startPc = PC
+    move a6, s0                      ; remaining = n
+    move s6, zero                    ; spent = 0
+    move s7, zero                    ; count = 0
+    move t9, zero                    ; skippedCycles = 0
+    lui t0, 0x0400
+    and t0, s2, t0
+    beqz t0, nrwb_read               ; rule & $4000000: the window starts at the branch
+    nop
+    la t0, global_fn                 ; the branch in progress uses the flags as they are
+    ld a1, 0(t0)
+    la t0, global_fz
+    ld a2, 0(t0)
+    la t0, global_fc
+    ld a3, 0(t0)
+    la t0, global_fv
+    ld a4, 0(t0)
+    jal nesrambranchtaken            ; NesRamBranchTaken(condition, FN, FZ, FC, FV)
+    move a0, v1                      ; (delay slot) condition
+    beqz a0, nrwb_cpurun             ; it leaves the loop: the core runs the window
+    nop
+    dsubu s5, s5, a5                 ; startPc -= length (the pair's read)
+    move s6, s4                      ; spent = branchCycles
+    addiu s7, zero, 1                ; count = 1
+    dsubu a6, a6, s4                 ; remaining -= branchCycles
+nrwb_read:
+    move v0, s5                      ; nextPc = startPc
+    addiu t0, zero, 254
+    dsubu t0, t0, a5
+    blez a6, nrwb_publish            ; remaining <= 0: no read in this window
+    sd t0, 72(sp)                    ; (delay slot) bus = 256 - length - 2 (the branch's offset byte)
+    andi t1, a7, 0x7FF
+    la t0, global_m
+    daddu t0, t0, t1
+    lbu a7, 0(t0)                    ; dataByte = M(addr & $7FF) (the 2 KB of RAM, mirrored)
+    move a1, a7                      ; nn = dataByte
+    move a2, a7                      ; zz = dataByte
+    la t0, global_fc
+    ld a3, 0(t0)                     ; cc = FC
+    la t0, global_fv
+    ld a4, 0(t0)                     ; vv = FV
+    addiu t0, t3, -4
+    beqz t0, nrwb_cmp_a              ; 4 CMP
+    addiu t1, t3, -5                 ; (delay slot)
+    beqz t1, nrwb_cmp_x              ; 5 CPX
+    addiu t0, t3, -6                 ; (delay slot)
+    beqz t0, nrwb_cmp_y              ; 6 CPY
+    addiu t1, t3, -7                 ; (delay slot)
+    bnez t1, nrwb_test               ; 1-3 the loads: the byte's own N and Z
+    nop
+    la t0, global_a                  ; 7 BIT
+    ld t0, 0(t0)
+    and a2, t0, a7                   ; zz = A & dataByte
+    b nrwb_test
+    dsll a4, a7, 1                   ; (delay slot) vv = dataByte << 1 (V = bit 6 of the byte)
+nrwb_cmp_x:
+    la t0, global_x
+    b nrwb_cmp
+    ld t0, 0(t0)                     ; (delay slot)
+nrwb_cmp_y:
+    la t0, global_y
+    b nrwb_cmp
+    ld t0, 0(t0)                     ; (delay slot)
+nrwb_cmp_a:
+    la t0, global_a
+    ld t0, 0(t0)
+nrwb_cmp:
+    dsubu a1, t0, a7                 ; result = reg - dataByte: nn = result
+    move a2, a1                      ; zz = result
+    nor a3, a1, zero                 ; cc = ~result (bit 8 set when no borrow)
+nrwb_test:
+    jal nesrambranchtaken            ; NesRamBranchTaken(condition, nn, zz, cc, vv)
+    move a0, v1                      ; (delay slot) condition
+    beqz a0, nrwb_cpurun             ; the read's flags leave the loop: the core runs it
+    nop
+    beqz s1, nrwb_pairs              ; the coalesce path: coalesce <> 0 ...
+    addiu t0, s0, -128               ; (delay slot)
+    bnez t0, nrwb_pairs              ; ... and n = 128
+    nop
+    la t0, global_nescpuhorizon
+    ld t1, 0(t0)                     ; horizon = NesCpuHorizon
+    la t0, global_nesstatushorizon
+    ld t0, 0(t0)
+    slt t2, t1, t0
+    beqz t2, nrwb_horizon
+    nop
+    move t1, t0                      ; NesStatusHorizon > horizon: horizon = NesStatusHorizon
+nrwb_horizon:
+    la t0, global_cpucycles
+    ld t0, 0(t0)
+    dsubu t1, t1, t0                 ; horizon - CpuCycles
+    slti t2, t1, 128
+    bnez t2, nrwb_pairs              ; less than one window ahead
+    nop
+    la t0, global_workernmi
+    ld t0, 0(t0)
+    la t2, global_nesseennmi
+    ld t2, 0(t2)
+    bne t0, t2, nrwb_pairs           ; an NMI pending
+    nop
+    la t0, global_workerdmccycles
+    ld t0, 0(t0)
+    la t2, global_nesseendmc
+    ld t2, 0(t2)
+    bne t0, t2, nrwb_pairs           ; a DMC stall pending
+    nop
+    la t0, global_fi
+    ld t0, 0(t0)
+    bnez t0, nrwb_skip               ; I set: an IRQ is not taken
+    nop
+    la t0, global_workerirq
+    ld t0, 0(t0)
+    la t2, global_mapirq
+    ld t2, 0(t2)
+    or t0, t0, t2
+    bnez t0, nrwb_pairs              ; an IRQ line up with I clear
+    nop
+nrwb_skip:
+    addiu t0, s3, -3
+    dsll t0, t0, 2                   ; (readCycles - 3) * 4
+    addiu t2, s4, -3
+    dsll t2, t2, 1                   ; + (branchCycles - 3) * 2
+    daddu t0, t0, t2
+    dsra t2, s2, 26
+    andi t2, t2, 1                   ; + the at-branch bit
+    daddu t0, t0, t2
+    dsll t0, t0, 2                   ; repeatRow: 4 bytes a row
+    la t2, nesramwaitperiods
+    daddu t0, t0, t2
+    lhu t2, 0(t0)                    ; repeatCycles
+    lhu t0, 2(t0)                    ; the instructions in that period
+    ddiv t1, t2                      ; loops = (horizon - CpuCycles) / repeatCycles
+    mfhi t2                          ; the remainder
+    mflo a0                          ; loops (a0 is free here)
+    dsubu t9, t1, t2                 ; skippedCycles = loops * repeatCycles (the dividend less the remainder)
+    dmult a0, t0                     ; (two instructions after the mflo: the HI / LO hazard)
+    mflo t0                          ; loops * the period's instructions
+    la t2, global_cpucycles
+    ld t1, 0(t2)
+    daddu s7, s7, t0                 ; count += them
+    daddu t1, t1, t9
+    sd t1, 0(t2)                     ; CpuCycles += skippedCycles
+nrwb_pairs:
+    daddu t0, s3, s4                 ; a pair: readCycles + branchCycles
+    daddiu t1, a6, -1
+    ddiv t1, t0                      ; loops = (remaining - 1) / pair (two instructions after the last mflo)
+    mflo t1
+    nop
+    nop
+    dmult t1, t0
+    mflo t2                          ; loops * pair
+    dsll t1, t1, 1
+    daddiu t1, t1, 1
+    daddu s7, s7, t1                 ; count += loops * 2 + 1
+    dsubu a6, a6, t2                 ; remaining -= loops * pair
+    daddu s6, s6, t2
+    daddu s6, s6, s3                 ; spent += loops * pair + readCycles
+    slt t0, s3, a6
+    bnez t0, nrwb_last_branch        ; remaining > readCycles: the last branch fits too
+    nop
+    daddu v0, s5, a5                 ; nextPc = startPc + length (the window ends after a read)
+    b nrwb_load
+    sd a7, 72(sp)                    ; (delay slot) bus = dataByte
+nrwb_last_branch:
+    daddu s6, s6, s4                 ; spent += branchCycles
+    daddiu s7, s7, 1                 ; count += 1
+nrwb_load:
+    addiu t0, t3, -1
+    beqz t0, nrwb_store              ; 1 LDA: A
+    nop
+    addiu t0, t3, -2
+    beqz t0, nrwb_store_xy           ; 2 LDX: X
+    nop
+    addiu t0, t3, -3
+    bnez t0, nrwb_flags              ; 4-7 change no register
+    nop
+    la t0, global_y                  ; 3 LDY: Y
+    b nrwb_store_reg
+    nop
+nrwb_store_xy:
+    la t0, global_x
+    b nrwb_store_reg
+    nop
+nrwb_store:
+    la t0, global_a
+nrwb_store_reg:
+    sd a7, 0(t0)                     ; the register = dataByte
+nrwb_flags:
+    la t0, global_fn
+    sd a1, 0(t0)                     ; FN = nn
+    la t0, global_fz
+    sd a2, 0(t0)                     ; FZ = zz
+    la t0, global_fc
+    sd a3, 0(t0)                     ; FC = cc
+    la t0, global_fv
+    sd a4, 0(t0)                     ; FV = vv
+    sltiu t0, t8, 3
+    bnez t0, nrwb_publish            ; zero page: AccessPhase unchanged
+    nop
+    la t0, global_accessphase
+    addiu t1, zero, 3
+    sd t1, 0(t0)                     ; mode >= 3: AccessPhase = 3
+nrwb_publish:
+    la t0, global_pc
+    sd v0, 0(t0)                     ; PC = nextPc
+    ld t1, 72(sp)
+    la t0, global_nesopenbus
+    sd t1, 0(t0)                     ; NesOpenBus = bus
+    la t2, global_cpucycles
+    ld t1, 0(t2)                     ; CpuCycles (after the coalesce skip)
+    la t0, global_nesrunstart
+    sd t1, 0(t0)                     ; NesRunStart = CpuCycles
+    la t0, global_budget
+    sd s0, 0(t0)                     ; Budget = n
+    dsubu t3, s0, s6
+    la t0, global_left
+    sd t3, 0(t0)                     ; Left = n - spent
+    la t0, global_cpuinwindow
+    sd zero, 0(t0)                   ; CpuInWindow = 0
+    daddu t1, t1, s6
+    sd t1, 0(t2)                     ; CpuCycles += spent
+    la t0, global_nesinstructions
+    ld t1, 0(t0)
+    daddu t1, t1, s7
+    sd t1, 0(t0)                     ; NesInstructions += count
+    la t0, global_nesidlebatched
+    ld t1, 0(t0)
+    daddu t1, t1, s7
+    sd t1, 0(t0)                     ; NesIdleBatched += count
+    daddu a0, s6, t9                 ; the cycles run: spent + skippedCycles
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    jr ra
+    daddiu sp, sp, 80
+nrwb_cpurun:
+    move a0, s0                      ; CpuRun(n): the core runs the window and returns to our caller
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    ld s6, 56(sp)
+    ld s7, 64(sp)
+    j cpurun
+    daddiu sp, sp, 80                ; (delay slot)
+  EndASM
 EndProcedure
 
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
