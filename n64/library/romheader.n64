@@ -46,7 +46,8 @@ Procedure.i NesRomSize(header.i)
   mapper=NesRomMapper(header) : sub=NesRomSubmapper(header)
   table=?NesRomBoards+mapper*16
   If (PeekL(table+12)&(1<<sub))=0 : ProcedureReturn 0 : EndIf
-  If (flags&8) And mapper<>4 And mapper<>206 : ProcedureReturn 0 : EndIf
+  ; (four-screen VRAM, flags bit 3, is a board property any mapper may have: accepted for every mapper; the loader
+  ;  sets MapFourScreen and MapperMirror gives it CIRAM's 4 KB, MapCiram's four pages)
   p=PeekA(header+4) : c=PeekA(header+5)
   If p=0 Or p>PeekL(table) Or c>PeekL(table+4) : ProcedureReturn 0 : EndIf
   If ((p&(p-1)) And mapper<>228) Or (c&(c-1)) : ProcedureReturn 0 : EndIf
