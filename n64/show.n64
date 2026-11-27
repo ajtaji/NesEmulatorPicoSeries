@@ -767,30 +767,152 @@ EndProcedure
 ; PpuDot and PpuV as at dot 0, draw the same pixels: the sprite row, then spans [0, dot). OAM written since the line
 ; began (OamCacheDirty: such a write changes the sprites from the next line on) is set aside for the band's snapshot,
 ; which is OAM as at this line's start. PpuDot, PpuV and PpuStatus (the renderer writes v and bit 6) are put back.
-Procedure NesFbCatchUp()
-  Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty, tr.i
+; HOW (design note N.73: in assembly, the owner's order - cold is not an exemption): s0 dot, s1 v, s2 status, s3
+; SprCount, s4 OamCacheDirty, s5 the record's tr (saved). NesFbSlot clobbers t0-t3 / v0 only; the old renderer's
+; NesMmc3DrawSprites / PpuClearSprites / NesRenderTo are called as the compiled body called them (s-registers kept).
+; REACHED BY: a split line when the frame's 32 records or its segment pool's 32 entries are used up - no cart of the
+; proof set does that ("ON THE OLD PATH 0" in every --show-check run); a test cart with more than 32 split lines in
+; a frame (a $2001 / $2006 write on each of 33+ lines) under --show-check would.
+; THE PLAIN TWIN:
+;   Protected dot.i = PpuDot, v.i = PpuV, st.i = PpuStatus, n.i = SprCount, snap.i, i.i, dirty.i = OamCacheDirty, tr.i
+;   CompilerIf #NES_CONSOLE_RECORD : tr = LpmCpuCount() : CompilerEndIf
+;   NesFbSlot()
+;   If PeekI(NesUnitBase + #NES_U_LIVE) = 0 : ProcedureReturn : EndIf
+;   NesShowStat(7) + 1
+;   If dirty
+;     snap = NesOamBase + PeekI(NesUnitBase + #NES_U_BANDOAM) * 256
+;     For i = 0 To 255 Step 8
+;       PokeQ(@NesShowOamKeep(0) + i, PeekQ(@Oam(0) + i)) : PokeQ(@Oam(0) + i, PeekQ(snap + i))
+;     Next
+;   EndIf
+;   PpuDot = 0 : PpuV = PeekI(NesUnitBase + #NES_U_LINEV)
+;   If n : NesMmc3DrawSprites(PpuLine, n, PpuMask) : Else : PpuClearSprites() : EndIf
+;   If dirty
+;     For i = 0 To 255 Step 8 : PokeQ(@Oam(0) + i, PeekQ(@NesShowOamKeep(0) + i)) : Next
+;   EndIf
+;   NesRenderTo(dot)
+;   PpuDot = dot : PpuV = v : PpuStatus = st
+;   CompilerIf #NES_CONSOLE_RECORD : NesRecAdd(1, tr) : CompilerEndIf
+ProcedureNaked NesFbCatchUp()
+  ASM
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    la t0, global_ppudot
+    ld s0, 0(t0)                     ; dot
+    la t0, global_ppuv
+    ld s1, 0(t0)                     ; v
+    la t0, global_ppustatus
+    ld s2, 0(t0)                     ; st
+    la t0, global_sprcount
+    ld s3, 0(t0)                     ; n
+    la t0, global_oamcachedirty
+    ld s4, 0(t0)                     ; dirty
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    tr = LpmCpuCount()
+  ASM
+    mfc0 s5, $9
+    nop
+    dsll32 s5, s5, 0
+    dsrl32 s5, s5, 0                 ; tr
+  EndASM
   CompilerEndIf
-  NesFbSlot()
-  If PeekI(NesUnitBase + #NES_U_LIVE) = 0 : ProcedureReturn : EndIf
-  NesShowStat(7) + 1
-  If dirty
-    snap = NesOamBase + PeekI(NesUnitBase + #NES_U_BANDOAM) * 256
-    For i = 0 To 255 Step 8
-      PokeQ(@NesShowOamKeep(0) + i, PeekQ(@Oam(0) + i)) : PokeQ(@Oam(0) + i, PeekQ(snap + i))
-    Next
-  EndIf
-  PpuDot = 0 : PpuV = PeekI(NesUnitBase + #NES_U_LINEV)
-  If n : NesMmc3DrawSprites(PpuLine, n, PpuMask) : Else : PpuClearSprites() : EndIf
-  If dirty
-    For i = 0 To 255 Step 8 : PokeQ(@Oam(0) + i, PeekQ(@NesShowOamKeep(0) + i)) : Next
-  EndIf
-  NesRenderTo(dot)
-  PpuDot = dot : PpuV = v : PpuStatus = st
+  ASM
+    jal nesfbslot                    ; the line's row (U_LIVE), or none
+    nop
+    la t9, global_nesunitbase
+    ld t9, 0(t9)
+    ld t0, #NES_U_LIVE(t9)
+    beqz t0, nsfc_out                ; no row: the old path is not taken either
+    nop
+    la t0, global_nesshowstat
+    ld t1, 56(t0)
+    daddiu t1, t1, 1
+    sd t1, 56(t0)                    ; (7) split lines on the old path
+    beqz s4, nsfc_draw
+    nop
+    ld t0, #NES_U_BANDOAM(t9)
+    dsll t0, t0, 8
+    la t1, global_nesoambase
+    ld t1, 0(t1)
+    daddu t0, t0, t1                 ; snap: the band's OAM snapshot (OAM at the line's start)
+    la t1, global_oam
+    la t2, global_nesshowoamkeep
+    daddiu t3, t1, 256
+nsfc_keep:
+    ld t8, 0(t1)
+    sd t8, 0(t2)                     ; OAM now, set aside
+    ld t8, 0(t0)
+    sd t8, 0(t1)                     ; OAM as at the line's start
+    daddiu t1, t1, 8
+    daddiu t2, t2, 8
+    bne t1, t3, nsfc_keep
+    daddiu t0, t0, 8                 ; (delay slot)
+nsfc_draw:
+    la t0, global_ppudot
+    sd zero, 0(t0)                   ; PpuDot = 0
+    ld t1, #NES_U_LINEV(t9)
+    la t0, global_ppuv
+    sd t1, 0(t0)                     ; PpuV = v at the line's dot 0
+    beqz s3, nsfc_clear
+    nop
+    la t0, global_ppuline
+    ld a0, 0(t0)
+    move a1, s3
+    la t0, global_ppumask
+    jal nesmmc3drawsprites           ; the line's sprite row
+    ld a2, 0(t0)                     ; (delay slot)
+    b nsfc_back
+    nop
+nsfc_clear:
+    jal ppuclearsprites
+    nop
+nsfc_back:
+    beqz s4, nsfc_spans
+    nop
+    la t1, global_oam
+    la t2, global_nesshowoamkeep
+    daddiu t3, t1, 256
+nsfc_put:
+    ld t8, 0(t2)
+    sd t8, 0(t1)                     ; OAM put back
+    daddiu t1, t1, 8
+    bne t1, t3, nsfc_put
+    daddiu t2, t2, 8                 ; (delay slot)
+nsfc_spans:
+    jal nesrenderto                  ; spans [0, dot)
+    move a0, s0                      ; (delay slot)
+    la t0, global_ppudot
+    sd s0, 0(t0)
+    la t0, global_ppuv
+    sd s1, 0(t0)
+    la t0, global_ppustatus
+    sd s2, 0(t0)
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecAdd(1, tr)
+  ASM
+    addiu a0, zero, 1
+    jal nesrecadd                    ; NesRecAdd(1, tr): the fallback lines
+    move a1, s5                      ; (delay slot)
+  EndASM
   CompilerEndIf
+  ASM
+nsfc_out:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
 EndProcedure
 
 CompilerIf #NES_CONSOLE_RECORD
@@ -2573,55 +2695,212 @@ Procedure NesShowCheckPrev(p.i)
 EndProcedure
 CompilerEndIf
 
-; The ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL slept for.
-Procedure NesFbWait()
-  Protected q.i = NesShowCur ! 1
-  NesShowAdvance(2, 0)
-  NesShowSleepDrawn(NesShowTicket(q))
-  NesFbGuard = 0 : NesShowStat(3) + 1
+; ---- NesFbWait(): the ring's next row is the frame before's, which may not be drawn yet: finished, its SYNC_FULL
+; slept for. Assembly (N.73). REACHED BY: a frame needing more fallback rows than the ring leaves (240 less the frame
+; before's) - never in the proof set (0 fallback lines); a test cart drawing 121+ fallback lines in each of two
+; frames under --show-check would.
+; THE PLAIN TWIN:
+;   Protected q.i = NesShowCur ! 1
+;   NesShowAdvance(2, 0)
+;   NesShowSleepDrawn(NesShowTicket(q))
+;   NesFbGuard = 0 : NesShowStat(3) + 1
+ProcedureNaked NesFbWait()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    la t0, global_nesshowcur
+    ld s0, 0(t0)
+    xori s0, s0, 1                   ; q
+    addiu a0, zero, 2
+    jal nesshowadvance               ; NesShowAdvance(2, 0)
+    move a1, zero                    ; (delay slot)
+    la t0, global_nesshowticket
+    dsll t1, s0, 3
+    daddu t0, t0, t1
+    jal nesshowsleepdrawn            ; its picture drawn
+    ld a0, 0(t0)                     ; (delay slot)
+    la t0, global_nesfbguard
+    sd zero, 0(t0)
+    la t0, global_nesshowstat
+    ld t1, 24(t0)
+    daddiu t1, t1, 1
+    sd t1, 24(t0)                    ; (3) waits
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
 EndProcedure
 
-; ---- a CHR-RAM row write while band jobs or handed words may still read the pairs (NesChrPairAt) ----
+; ---- NesShowDrain(): a CHR-RAM row write while band jobs or handed words may still read the pairs (NesChrPairAt).
 ; Every job run, the frame before handed whole, the current frame's bands so far handed, the RDP finished (nothing
-; shown); the current frame's next band then starts the RSP's state again (index 0: every sync owed, no pair taken as
-; resident - a pair in TMEM would be the old one), its words from the area's start, which the RDP has read.
-Procedure NesShowDrain()
-  Protected p.i = NesShowCur, tr.i, w0.i
+; shown); the current frame's next band then starts the RSP's state again. Assembly (N.73). REACHED BY: a CHR-RAM cart
+; writing pattern rows while the frame's bands are queued - none of the proof set (SMB3 / MM4 / the two test carts:
+; "DRAINS 0"); a CHR-RAM game (or test cart) under --show-check / --rsp-check would.
+; THE PLAIN TWIN:
+;   Protected p.i = NesShowCur                       (the record: tr, w0, s0 as NesShowPollE)
+;   LpmRspqSync()
+;   NesShowAdvance(2, 0)
+;   If NesShowBands(p)
+;     If NesShowAtt(p) = 0
+;       NesShowAttach(p, 2)
+;       LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
+;     Else
+;       LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
+;     EndIf
+;     LpmRspqSync()
+;     NesShowBands(p) = 0 : NesShowAtt(p) = 0
+;   EndIf
+;   LpmRdpFinish()
+;   NesShowBusy = 0 : NesShowStat(4) + 1
+;   (the record: NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0))
+; HOW: s0 p, s1 p x 8; the record's s5-s7 (saved). The two branches' commands are the same: written once.
+ProcedureNaked NesShowDrain()
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s5, 24(sp)
+    sd s6, 32(sp)
+    sd s7, 40(sp)
+    la t0, global_nesshowcur
+    ld s0, 0(t0)
+    dsll s1, s0, 3
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    Protected s0.i                      ; the record: the synthesis's ticks at the start
-    tr = LpmCpuCount() : w0 = NesRecWait : s0 = NesRecT(9)
+  ASM
+    jal nes_show_rec_from
+    nop
+  EndASM
   CompilerEndIf
-  LpmRspqSync()
-  NesShowAdvance(2, 0)                    ; the frame before attached and detached
-  If NesShowBands(p)
-    If NesShowAtt(p) = 0                  ; this frame's words so far handed (its attach, then the HAND step that
-      NesShowAttach(p, 2)                 ; ends its attachment: the next band restarts the RSP's state)
-      LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
-    Else
-      LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(p) & $1FFFFFFF, p | 256)
-    EndIf
-    LpmRspqSync()
-    NesShowBands(p) = 0 : NesShowAtt(p) = 0  ; the next band restarts the RSP's state; attached again (the same buffer)
-  EndIf
-  LpmRdpFinish()
-  NesShowBusy = 0 : NesShowStat(4) + 1
+  ASM
+    jal lpmrspqsync                  ; every job run
+    nop
+    addiu a0, zero, 2
+    jal nesshowadvance               ; the frame before attached and detached
+    move a1, zero                    ; (delay slot)
+    la t0, global_nesshowbands
+    daddu t0, t0, s1
+    ld t0, 0(t0)
+    beqz t0, nsdr_finish             ; no band of this frame yet
+    nop
+    la t0, global_nesshowatt
+    daddu t0, t0, s1
+    ld t0, 0(t0)
+    bnez t0, nsdr_hand
+    nop
+    move a0, s0
+    jal nesshowattach                ; NesShowAttach(p, 2)
+    addiu a1, zero, 2                ; (delay slot)
+nsdr_hand:
+    la t0, global_nesshowarea
+    daddu t0, t0, s1
+    ld a3, 0(t0)
+    lui t1, 0x1FFF
+    ori t1, t1, 0xFFFF
+    and a3, a3, t1                   ; b: the frame area, physical
+    move a2, zero                    ; a: record 0 (the HAND step)
+    ori a4, s0, 256                  ; c: p | 256 (the rest; the attachment ends)
+    la t0, global_nesshowprog
+    ld a0, 0(t0)
+    jal lpmrspqcmdcall
+    addiu a1, zero, #NES_RSP_BAND    ; (delay slot)
+    jal lpmrspqsync
+    nop
+    la t0, global_nesshowbands
+    daddu t0, t0, s1
+    sd zero, 0(t0)                   ; the next band restarts the RSP's state
+    la t0, global_nesshowatt
+    daddu t0, t0, s1
+    sd zero, 0(t0)                   ; attached again (the same buffer)
+nsdr_finish:
+    jal lpmrdpfinish
+    nop
+    la t0, global_nesshowbusy
+    sd zero, 0(t0)
+    la t0, global_nesshowstat
+    ld t1, 32(t0)
+    daddiu t1, t1, 1
+    sd t1, 32(t0)                    ; (4) drains
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecAdd(3, tr) : NesRecT(3) - (NesRecWait - w0) - (NesRecT(9) - s0)
+  ASM
+    jal nes_show_rec_to3
+    nop
+  EndASM
   CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s5, 24(sp)
+    ld s6, 32(sp)
+    ld s7, 40(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
 EndProcedure
 
-; The emulator has stopped (RunGame's NES STOP): every job run, then one picture, the whole screen red, shown.
-Procedure NesShowStopped()
-  Protected fb.i
-  If NesShowProg = 0 : ProcedureReturn : EndIf
-  LpmRspqSync()
-  NesShowAdvance(2, 0)
-  LpmRdpFinish()
-  fb = NesShowGetFb(2)
-  LpmRdpAttach(fb)
-  NesShowRdpAdopt()                       ; (the RSP's words left their modes: fill mode sent as such, as NesShowBorders)
-  LpmRdpModeFill(LpmRgb16(31, 0, 0)) : LpmRdpFillRect(0, 0, 320, 240)
-  LpmRspqRdpDetachShow(NesShowProg, fb)
+; ---- NesShowStopped(): the emulator has stopped (RunGame's NES STOP): every job run, then one picture, the whole
+; screen red, shown. Assembly (N.73). REACHED BY: a worker error (a stop) - never in a passing run; a cart that stops
+; the core (an unsupported opcode, KIL) under --show-check would show it (one red frame, hashed).
+; THE PLAIN TWIN:
+;   Protected fb.i
+;   If NesShowProg = 0 : ProcedureReturn : EndIf
+;   LpmRspqSync()
+;   NesShowAdvance(2, 0)
+;   LpmRdpFinish()
+;   fb = NesShowGetFb(2)
+;   LpmRdpAttach(fb)
+;   NesShowRdpAdopt()
+;   LpmRdpModeFill(LpmRgb16(31, 0, 0)) : LpmRdpFillRect(0, 0, 320, 240)
+;   LpmRspqRdpDetachShow(NesShowProg, fb)
+; HOW: LpmRgb16(31, 0, 0) = (31 & 248) << 8 | 1 = $1801 (lpm_display.n64's formula); the mode through
+; NesShowRdpModeFill (the macro written out), the rectangle through LpmRdpFillRectCall. s0 fb (saved).
+ProcedureNaked NesShowStopped()
+  ASM
+    la t0, global_nesshowprog
+    ld t0, 0(t0)
+    bnez t0, nsst_on
+    nop
+    jr ra                            ; the show was refused at its start
+    nop
+nsst_on:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    jal lpmrspqsync
+    nop
+    addiu a0, zero, 2
+    jal nesshowadvance               ; NesShowAdvance(2, 0)
+    move a1, zero                    ; (delay slot)
+    jal lpmrdpfinish
+    nop
+    jal nesshowgetfb                 ; a buffer, waited for
+    addiu a0, zero, 2                ; (delay slot)
+    move s0, a0
+    jal lpmrdpattach
+    move a0, s0                      ; (delay slot)
+    jal nesshowrdpadopt
+    nop
+    jal nesshowrdpmodefill
+    addiu a0, zero, 0x1801           ; (delay slot) LpmRgb16(31, 0, 0)
+    move a0, zero
+    move a1, zero
+    addiu a2, zero, 320
+    jal lpmrdpfillrectcall
+    addiu a3, zero, 240              ; (delay slot)
+    la t0, global_nesshowprog
+    ld a0, 0(t0)
+    jal lpmrspqrdpdetachshow         ; shown
+    move a1, s0                      ; (delay slot)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
 EndProcedure
 
 CompilerIf #VERIFY_FRAME > 0

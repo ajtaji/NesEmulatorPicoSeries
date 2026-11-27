@@ -1,5 +1,119 @@
 ; Decode the current mapped bytes when a CPU window begins. A ROM bank
 ; change takes effect through the same pointer as the next opcode fetch.
+; NesRuntimeWaitPair(readPc, branchPc, atBranch): the rule of the read / branch pair at readPc / branchPc (0: not a
+; wait pair). IN ASSEMBLY for MMC3 (design note N.73, the owner's order; it runs at the load's index and at every miss
+; of the hashed rule cache, ~10 times a frame in the record cart's SMB3 replay): the pointer is NesMmc3Pointer(readPc) =
+; NesMmc3Bias((readPc >> 13) & 3) + readPc; the other mappers' builds keep the compiled form below.
+; IN: a0 readPc, a1 branchPc, a2 atBranch. OUT: a0 the rule. A leaf: changes t0-t3, t8, t9, v0, v1, a3.
+; THE PLAIN TWIN:
+;     Protected ptr.i, op.i, length.i=2, mode.i, branch.i, addr.i, rule.i
+;     If readPc<$8000 Or branchPc>$FFFD Or ((readPc ! (branchPc+1))&#NES_PRG_PROBE_MASK)
+;       ProcedureReturn 0
+;     EndIf
+;     ptr=NesRuntimePrgPointer(readPc)
+;     op=PeekA(?NesRuntimeWaitOpcodes+PeekA(ptr))
+;     If op=0 : ProcedureReturn 0 : EndIf
+;     mode=op&7
+;     If mode>=3 : length=3 : EndIf
+;     If readPc+length<>branchPc : ProcedureReturn 0 : EndIf
+;     branch=PeekA(ptr+length)
+;     If (branch&31)<>16 Or PeekA(ptr+length+1)<>254-length : ProcedureReturn 0 : EndIf
+;     addr=PeekA(ptr+1)
+;     If length=3
+;       addr=addr|(PeekA(ptr+2)<<8)
+;       If addr>=$2000 And (mode=3 Or addr<=$FF00) : ProcedureReturn 0 : EndIf
+;     EndIf
+;     rule=addr|((op>>3)<<16)|(mode<<19)|((branch>>5)<<22)
+;     If ((readPc ! (branchPc+2))&$FF00) : rule|$2000000 : EndIf
+;     If atBranch : rule|$4000000 : EndIf
+;     ProcedureReturn rule
+; HOW: every compare signed 64-bit as compiled ($8000 / $FFFD / $FF01 by ori: beyond slti's reach); length = 2 + (mode
+; >= 3); the bytes read in the twin's order.
+CompilerIf #GAME_MAPPER=4
+ProcedureNaked.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
+  ASM
+    ori t1, zero, 0x8000
+    slt t0, a0, t1
+    bnez t0, nes_rwp_none            ; readPc < $8000
+    ori t1, zero, 0xFFFD             ; (delay slot)
+    slt t0, t1, a1
+    bnez t0, nes_rwp_none            ; branchPc > $FFFD
+    daddiu t1, a1, 1                 ; (delay slot)
+    xor t1, a0, t1
+    andi t1, t1, #NES_PRG_PROBE_MASK
+    bnez t1, nes_rwp_none            ; the pair across a PRG window
+    dsrl t0, a0, 13                  ; (delay slot)
+    andi t0, t0, 3
+    dsll t0, t0, 3
+    la t1, global_nesmmc3bias
+    daddu t1, t1, t0
+    ld t1, 0(t1)
+    daddu t8, t1, a0                 ; ptr = NesMmc3Pointer(readPc)
+    lbu t0, 0(t8)
+    la t1, nesruntimewaitopcodes
+    daddu t1, t1, t0
+    lbu t9, 0(t1)                    ; op = the read opcode's entry
+    beqz t9, nes_rwp_none
+    andi t2, t9, 7                   ; (delay slot) mode
+    sltiu t3, t2, 3
+    xori t3, t3, 1
+    daddiu t3, t3, 2                 ; length: 3 for mode >= 3, else 2
+    daddu t0, a0, t3
+    bne t0, a1, nes_rwp_none         ; readPc + length <> branchPc
+    daddu t0, t8, t3                 ; (delay slot) ptr + length
+    lbu v0, 0(t0)                    ; branch
+    andi t1, v0, 31
+    addiu v1, zero, 16
+    bne t1, v1, nes_rwp_none         ; not a branch opcode
+    lbu t1, 1(t0)                    ; (delay slot) its offset byte
+    addiu v1, zero, 254
+    dsubu v1, v1, t3
+    bne t1, v1, nes_rwp_none         ; not back to the read
+    lbu a3, 1(t8)                    ; (delay slot) addr's low byte
+    addiu t0, zero, 3
+    bne t3, t0, nes_rwp_rule         ; a 2-byte read: a zero-page address
+    nop
+    lbu t1, 2(t8)
+    dsll t1, t1, 8
+    or a3, a3, t1                    ; addr
+    sltiu t1, a3, 0x2000
+    bnez t1, nes_rwp_rule            ; RAM
+    nop
+    beq t2, t0, nes_rwp_none         ; mode 3 beyond RAM: no
+    ori v1, zero, 0xFF01             ; (delay slot)
+    slt t1, a3, v1
+    bnez t1, nes_rwp_none            ; addr <= $FF00 beyond RAM: no
+    nop
+nes_rwp_rule:
+    dsrl t1, t9, 3
+    dsll t1, t1, 16
+    or a3, a3, t1                    ; | (op >> 3) << 16
+    dsll t1, t2, 19
+    or a3, a3, t1                    ; | mode << 19
+    dsrl t1, v0, 5
+    dsll t1, t1, 22
+    or a3, a3, t1                    ; | (branch >> 5) << 22
+    daddiu t1, a1, 2
+    xor t1, a0, t1
+    andi t1, t1, 0xFF00
+    beqz t1, nes_rwp_page
+    nop
+    lui t1, 0x200
+    or a3, a3, t1                    ; the branch crosses a page: | $2000000
+nes_rwp_page:
+    beqz a2, nes_rwp_out
+    nop
+    lui t1, 0x400
+    or a3, a3, t1                    ; atBranch: | $4000000
+nes_rwp_out:
+    jr ra
+    move a0, a3                      ; (delay slot) the rule
+nes_rwp_none:
+    jr ra
+    move a0, zero                    ; (delay slot) 0
+  EndASM
+EndProcedure
+CompilerElse
 Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
   Protected ptr.i, op.i, length.i=2, mode.i, branch.i, addr.i, rule.i
   If readPc<$8000 Or branchPc>$FFFD Or ((readPc ! (branchPc+1))&#NES_PRG_PROBE_MASK)
@@ -23,6 +137,7 @@ Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
   If atBranch : rule|$4000000 : EndIf
   ProcedureReturn rule
 EndProcedure
+CompilerEndIf
 
 ; ---- NesRamWaitRule(pc): the RAM-wait rule of the instruction at guest pc (0: none) - the read / branch pair that
 ; makes a wait loop, decoded by NesRuntimeWaitPair. At a branch opcode (op & 31 = 16) the pair is the 2- or 3-byte
