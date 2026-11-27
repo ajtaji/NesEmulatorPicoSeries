@@ -1,0 +1,497 @@
+; modules/mmc3x.n64 - the MMC3-FAMILY VARIANTS' module, hot part, as it runs in the mapper slot (unit/slot.n64; the
+; mapper-modules design note, sections 2-3 and step 4): the MMC3 multicart board TQROM-style "47" (Super Spike V'Ball /
+; Nintendo World Cup: two MMC3 games, an outer bank chosen by a $6000 write) and the Tengen RAMBO-1 (64: the MMC3's
+; register shape with three PRG registers, two more 1 KB CHR registers, and an IRQ counter clocked by A12 or by CPU
+; cycles). One source, two modules (#NES_SLOT_MODULE = 47 or 64; build.py compiles once per module). The cold part is
+; modules/mmc3x_cold.n64.
+;
+; WHAT IS THE MMC3'S, UNCHANGED, AND HOW IT IS SHARED: the A12 walk (modules/mmc3_a12.n64) and the window budget
+; (modules/mmc3_window.n64) are INCLUDED here as the MMC3 module includes them; mapper 47 also includes the IRQ
+; horizon and counter (modules/mmc3_irq.n64) - its IRQ is the MMC3's. What those files reach by name that is the
+; MMC3 module's own (the A12 notice mmc3_e_a12, the untimed look write_fast, the sync decision write_sync, the register
+; write and its handlers - modules/mmc3_write.n64; the A12 walk's cold paths - modules/mmc3_a12_cold.n64 included by
+; the cold part; the select / mirroring / protect paths and the sprite-form table - modules/mmc3_cold.n64) is COPIED
+; here, instruction for instruction, where it is the same, and changed where the board differs; each copy names its
+; source. (Those files are the MMC3 worker's: a change there is to be mirrored here, or, better, given a hook so
+; this module can include them - listed in the hand-back.) The register write and its handlers run in THIS slot
+; (the MMC3 module's hot slot is full to 8 bytes; the A12 walk is 1,244 of this slot's 2,896, so the writes fit here).
+;
+; MAPPER 47 (the reference: anvil/mappers.pi4 MapperPrg / MapperChr's CartMapper = 47 lines and mapper_extra.pi4's
+; case 47): the MMC3 exactly, plus an OUTER bank: a write to $6000-$7FFF while $A001 enables (bit 7) and does not
+; protect (bit 6) sets ExtraOuter = value & 1 (there is no work RAM on the board: the write stores nothing, a read is
+; the open bus - MapRamEnable stays 0 and $A001's two bits live in ExtraFlags), and every PRG bank the MMC3 registers
+; name is (bank & 15) | ExtraOuter << 4 (8 KB banks: 128 KB a game), every CHR bank (bank & 127) | ExtraOuter << 7. The outer bank applies in the bank
+; data write (below, the four places that hand a bank to MapperPrg / MapperChr) and in the full republication after a
+; $8000 mode change or an outer change (the cold part's m47_update: the MMC3's MapperUpdate rules with the outer bank).
+; MAPPER 64 (the reference: anvil/mapper_extra_bus.pi4 ExtraRamboWrite / ExtraRamboUpdate / ExtraRamboClock /
+; ExtraCpuTicks / ExtraBudget): $8000 select (bits 0-3 the register, bit 5 the 1 KB CHR mode, bit 6 the PRG mode,
+; bit 7 the CHR flip); $8001 data into ExtraRegs(select & 15): 0-5 the MMC3's CHR registers, 6, 7, 15 the three 8 KB
+; PRG banks ($8000 / $A000 / $C000, the last 8 KB fixed; bit 6 rotates them: $8000 gets 15, $A000 gets 6, $C000 gets
+; 7), 8, 9 the 1 KB CHR banks at $0400 / $0C00 when bit 5 is set (else registers 0 / 1 give 2 KB pairs as the MMC3);
+; $A000 mirroring; $C000 the IRQ latch; $C001 the IRQ mode (bit 0: 0 the A12 clock, 1 CPU cycles through a /4
+; prescaler, reset here) and the reload flag; $E000 disable and acknowledge; $E001 enable. THE COUNTER (the
+; reference's ExtraRamboClock): a clock first reloads when the reload flag is set (latch + 1, or latch + 2 when the
+; latch is above 1) or when the count is 0 (latch + 1), then counts down; reaching 0 with the IRQ enabled asserts the
+; IRQ a DELAY later - 2 CPU cycles after an A12 clock, 1 after a prescaler clock (ExtraPending). AS BUILT: the counter
+; is the MMC3's code with the latch stored as RAMBO-1's first-reload value (the sequences are the same from the first
+; clock on: the comment at m64_write_latch); the A12 clock's 2-cycle delay is not modelled (the walk places the clock
+; at its span's end in any case); the prescaler's clock lands a cycle after its wrap (ExtraPending), the cycle side
+; stepped a cycle at a time as the reference did (m64_cycles), the windows in cycle mode bounded to the next wrap /
+; the pending clock (m64_bound, the reference's ExtraBudget) - 1 to 4 cycles, so the loop is short. A first version
+; in closed form (events, an exact horizon) did not fit the slot beside the MMC3's window budget, and without that
+; budget every window shrank to one cycle whenever the scanline count was under 40 (Shinobi ran at a quarter speed).
+;
+; THE ENTRIES (unit/slot.n64): as the MMC3 module's, except: write (+32) is the untimed $6000-$7FFF entry (47: the
+; outer-bank register, sent to the common timed path; 64: nothing, no work RAM); write_sync and the register write's
+; sync decision are this module's copy (cold / hot as noted); 64's budget, horizon and clock are its own.
+; THE CONTRACT (modules/mmc3.n64's): in through the table; out by j / jal to common labels only; a relative branch
+; never leaves the two slots (build.py, check_mapper_slot).
+; CHECKED BY: the conformance carts (bench: conform_mmc3x.py: the registers, the outer bank, the three PRG registers,
+; the 1 KB CHR mode, the IRQ counter in both modes with the reload rule) and one smoke run per game (smoke_walk.py).
+  ASM
+u_mappercpubudget:                  ; +0
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    b mmc3_e_budget                 ; the MMC3's window budget (modules/mmc3_window.n64)
+    nop
+u_nesmmc3fetchdeadline:             ; +8
+    b mmc3_e_fetchdeadline          ; the MMC3's IRQ horizon (modules/mmc3_irq.n64)
+    nop
+u_mapperpputicks:                   ; +16
+    b mmc3_e_pputicks               ; the MMC3's A12 walk (modules/mmc3_a12.n64)
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    b m64_budget                    ; the MMC3's budget, bounded by the prescaler's next clock / the pending IRQ
+    nop
+u_nesmmc3fetchdeadline:             ; +8
+    b m64_deadline                  ; the MMC3's horizon, bounded the same way
+    nop
+u_mapperpputicks:                   ; +16
+    b m64_pputicks                  ; the cycle counter over the span, then the A12 walk
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+u_mappera12:                        ; +24
+    b mx_e_a12
+    nop
+u_mapperwrite:                      ; +32 the untimed $6000-$7FFF entry
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    j nes_mmc3_bus_write_timed      ; 47: the outer-bank register: stamped, synced (write_sync), then applied
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    jr ra                           ; 64: no work RAM, nothing at $6000-$7FFF
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_slot_write_sync:                ; +40 the sync decision and the write (cold: modules/mmc3x_cold.n64)
+    j mx_e_write_sync
+    nop
+nes_slot_write_fast:                ; +48
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    b mx_e_write_fast               ; the MMC3's untimed look (copied below)
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    j nes_mmc3_bus_write_timed      ; 64: every register write timed (the select's mode bits may change)
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+u_mapperclockirq:                   ; +56
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    b mmc3_e_clockirq               ; the MMC3's counter (modules/mmc3_irq.n64)
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    b mmc3_e_clockirq               ; the MMC3's counter: RAMBO-1's sequence with the latch stored as its first reload
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_slot_cpu_ticks:                 ; +64 (the cycle counter is advanced from ppu_ticks: the common advance calls that)
+    jr ra
+    nop
+nes_slot_read:                      ; +72 open bus
+    jr ra
+    move v0, zero
+  EndASM
+  XIncludeFile "mmc3_window.n64"
+  XIncludeFile "mmc3_irq.n64"
+  XIncludeFile "mmc3_a12.n64"
+
+; ---- mx_e_a12: the A12 watch on a PPU bus access (copied from modules/mmc3_write.n64's mmc3_e_a12, unchanged but for
+; the clock it jumps to). a0 the address, a1 the dot clock. A fall records the dot; a rise after at least 10 low dots
+; clocks the IRQ counter (a tail jump). Clobbers t0, t1, a0.
+  ASM
+mx_e_a12:
+    srl a0, a0, 12
+    la t0, global_mapa12
+    ld t1, 0(t0)
+    andi a0, a0, 1
+    beq a0, t1, mx_a12_done
+    nop
+    sd a0, 0(t0)
+    bnez a0, mx_a12_rise
+    nop
+    jr ra
+    sd a1, global_maplowsince-global_mapa12(t0)
+mx_a12_rise:
+    ld t1, global_maplowsince-global_mapa12(t0)
+    dsubu t1, a1, t1
+    slti t1, t1, 10
+    bnez t1, mx_a12_done
+    nop
+  EndASM
+  ASM
+    j mmc3_e_clockirq
+    nop
+mx_a12_done:
+    jr ra
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+; ---- write_fast (47): the MMC3's untimed look (copied from modules/mmc3_write.n64's mmc3_e_write_fast, unchanged):
+; a $8000 bank-select write that keeps bits 6-7 changes nothing the raster sees: stored at once. In: a0 addr, a1 value,
+; t0 = @NesOpenBus, t1 = addr & $E001. Clobbers t1, t2.
+mx_e_write_fast:
+    ori t2, zero, 0x8000
+    bne t1, t2, mx_write_fast_timed
+    ld t1, global_mapselect-global_nesopenbus(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    bnez t1, mx_write_fast_timed
+    nop
+    jr ra
+    sd a1, global_mapselect-global_nesopenbus(t0)
+mx_write_fast_timed:
+    j nes_mmc3_bus_write_timed
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+
+; ---- mx_e_write: the register write, devices synced (called by write_sync in the cold part). In: a0 address
+; ($6000-$FFFF), a1 value, a2 stamp (unused). The dispatch is the MMC3's (modules/mmc3_write.n64, mmc3_e_write: the
+; register by A14-A13 and A0, a jump through the 8-word table copied into NesUnitData at load from the cold part's
+; nes_cold_maptable); the handlers are this module's. Clobbers t0-t3, a0, a1 (and what the bank helpers may).
+mx_e_write:
+    andi t0, a0, 0x8000
+    beqz t0, mx_write_low           ; $6000-$7FFF
+    andi t0, a0, 1
+    srl t1, a0, 12
+    andi t1, t1, 6
+    or t1, t1, t0                   ; the register: A14-A13 and A0
+    la t2, global_nesunitbase
+    ld t2, 0(t2)
+    sll t1, t1, 2
+    daddu t2, t2, t1
+    lw t2, #NES_U_MAPTABLE(t2)      ; the register's handler (nes_cold_maptable's word)
+    jr t2
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+; ---- 47: $8001, the bank data (modules/mmc3_write.n64's mmc3_write_data with the OUTER BANK applied before each bank
+; reaches MapperChr / MapperPrg: CHR (bank & 127) | outer << 7, PRG (bank & 15) | outer << 4 - the reference's lines
+; in MapperChr / MapperPrg). The registers keep the written value, as the MMC3's do.
+; THE PLAIN TWIN: r = MapSelect & 7 : If MapRegs(r) <> value : MapRegs(r) = value
+;   If r < 2 : s = (MapSelect & 128) >> 5 | r * 2 : MapperChr(s, O(value & 254)) : MapperChr(s + 1, O(value | 1))
+;   ElseIf r < 6 : MapperChr(((MapSelect & 128) >> 5 ! 4) + r - 2, O(value))
+;   ElseIf r = 6 : MapperPrg((MapSelect & 64) >> 5, P(value & 63)) : Else : MapperPrg(r - 6, P(value & 63)) : EndIf
+;   (O(b) = (b & 127) | ExtraOuter << 7, P(b) = (b & 15) | ExtraOuter << 4)
+mx_write_data:
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    la t1, global_mapregs
+    andi t2, t0, 7
+    sll t3, t2, 3
+    daddu t1, t1, t3
+    ld t3, 0(t1)
+    beq t3, a1, mx_write_done       ; the value it already holds: nothing changes
+    sltiu t3, t2, 2
+    sd a1, 0(t1)
+    bnez t3, mx_write_chr_pair      ; registers 0-1: a 2 KB CHR pair
+    andi a0, t0, 128
+    sltiu t3, t2, 6
+    beqz t3, mx_write_prg           ; registers 6-7: PRG
+    srl a0, a0, 5
+    xori a0, a0, 4
+    addu a0, a0, t2
+    addiu a0, a0, -2                ; registers 2-5: one 1 KB slot, (4 ! flip) + r - 2
+    la t3, global_extraouter
+    ld t3, 0(t3)
+    sll t3, t3, 7
+    andi a1, a1, 127
+    j mapperchr
+    or a1, a1, t3                   ; the outer bank's CHR
+mx_write_chr_pair:
+    srl a0, a0, 5
+    sll t2, t2, 1
+    or a0, a0, t2                   ; the pair's first slot: flip | r * 2
+    la t3, global_extraouter
+    ld t3, 0(t3)
+    sll t3, t3, 7
+    andi a1, a1, 127
+    or a1, a1, t3                   ; the outer bank's CHR
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    jal mapperchr                   ; the even 1 KB bank in the first slot ...
+    andi a1, a1, 254
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld ra, 0(sp)
+    addiu a0, a0, 1
+    daddiu sp, sp, 32
+    j mapperchr                     ; ... the odd one in the next
+    ori a1, a1, 1
+mx_write_prg:
+    addiu a0, t2, -6
+    bnez a0, mx_write_prg_bank      ; register 7: slot 1
+    andi a1, a1, 15                 ; (& 63 then & 15: the outer bank's 16 banks)
+    andi a0, t0, 64
+    srl a0, a0, 5                   ; register 6: slot 0, or 2 with $8000 bit 6
+mx_write_prg_bank:
+    la t3, global_extraouter
+    ld t3, 0(t3)
+    sll t3, t3, 4
+    j mapperprg
+    or a1, a1, t3                   ; the outer bank's PRG
+; ---- 47: $C000-$E001 (modules/mmc3_write.n64's mmc3_write_latch / reload / ack / enable, unchanged) ----
+mx_write_latch:                     ; $C000
+    la t0, global_mapirqlatch
+    jr ra
+    sd a1, 0(t0)
+mx_write_reload:                    ; $C001: the counter reloads at the next counted rise
+    la t0, global_mapreload
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+mx_write_ack:                       ; $E000: disable and acknowledge
+    la t0, global_mapirqenable
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    jr ra
+    sd zero, 0(t0)
+mx_write_enable:                    ; $E001
+    la t0, global_mapirqenable
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+; ---- 47: the $6000-$7FFF write, synced: the OUTER BANK (the reference's case 47; its MapRamEnable / MapRamProtect are
+; ExtraFlags' bits 7 / 6 here, so that MapRamEnable can stay 0 - no work RAM, the open bus on a read). THE PLAIN TWIN:
+;   If ExtraFlags & $C0 = $80 : ExtraOuter = value & 1 : m47_update() : EndIf   (nothing is stored)
+mx_write_low:
+    la t0, global_extraflags        ; $A001's bits 7-6 (mx_write_protect): enabled and not protected = $80
+    ld t1, 0(t0)
+    xori t1, t1, 0x80
+    bnez t1, mx_write_done
+    andi a1, a1, 1
+    la t0, global_extraouter
+    sd a1, 0(t0)                    ; ExtraOuter = value & 1
+    j m47_update                    ; every bank again, in the new outer bank (cold); it returns to the caller
+    nop
+    EndASM
+  CompilerElse
+    ASM
+mx_write_low:                       ; 64: no work RAM (not reached: the untimed entry returns)
+    EndASM
+  CompilerEndIf
+  ASM
+mx_write_done:
+    jr ra
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=64
+    ASM
+; ---- RAMBO-1's short register paths (the reference's ExtraRamboWrite; the long ones - data, mode, the republication -
+; are in the cold part, modules/mmc3x_cold.n64). In: a0 address, a1 value.
+m64_write_select:                   ; $8000: MapSelect = value, then every bank again (the modes may have changed)
+    la t0, global_mapselect
+    sd a1, 0(t0)
+    j m64_update
+    nop
+m64_write_latch:                    ; $C000: the latch, STORED AS RAMBO-1's FIRST RELOAD VALUE: v + 1 when v > 1, else v
+    la t0, global_mapirqlatch       ; (RAMBO-1 reloads v + 1 / v + 2 and counts down at once, so after each clock its
+    sltiu t1, a1, 2                 ;  count is the MMC3's with latch v + 1 / v: the MMC3 counter code gives the sequence)
+    xori t1, t1, 1
+    addu a1, a1, t1
+    jr ra
+    sd a1, 0(t0)
+m64_write_ack:                      ; $E000: disable, acknowledge, and drop a pending assertion
+    la t0, global_mapirqenable
+    sd zero, 0(t0)
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    la t0, global_extrapending
+    jr ra
+    sd zero, 0(t0)
+m64_write_enable:                   ; $E001
+    la t0, global_mapirqenable
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+
+; ======== RAMBO-1's CPU-cycle side ========
+; THE COUNTER is the MMC3's (modules/mmc3_irq.n64, mmc3_irq_update: reload or zero -> the latch, else count - 1; an
+; IRQ when the count reaches 0 with the IRQ enabled), with the latch stored as RAMBO-1's first-reload value (v + 1 for
+; v > 1, else v: m64_write_latch): RAMBO-1 reloads v + 2 / v + 1 and counts down in the same clock, so from the second
+; clock on its count is the MMC3's with that latch, and the zero clock is the same clock. NOT MODELLED: RAMBO-1 asserts
+; 2 CPU cycles after an A12 clock; the MMC3 code asserts at the clock (the walk places the clock at its span's end in
+; any case, 8h). The prescaler clock asserts 1 cycle after its clock: kept (ExtraPending below).
+; State (the reference's): ExtraIrqMode (1 = CPU cycles), ExtraIrqDivider (the prescaler, 0-3), ExtraFlags (one more
+; prescaler clock owed after leaving cycle mode), ExtraPending (1: the prescaler clock lands this cycle).
+;
+; ---- m64_cycles: the cycle side advanced by a0 cycles, the reference's loop (ExtraCpuTicks: a cycle at a time; in
+; cycle mode the windows are 1-4 cycles, so the loop is short): a pending clock is applied first (the MMC3 counter,
+; which asserts the IRQ), then the prescaler counts and a wrap owes a clock for the NEXT cycle (ExtraPending = 1), and
+; pays the owed clock of a mode change. In: a0 cycles. Clobbers t0-t3, a0-a3, a7. FRAME (16 B): 0 ra
+; THE PLAIN TWIN (the reference, with the prescaler clock's assertion a cycle after the wrap):
+;   For i = 1 To cycles
+;     If ExtraPending : ExtraPending = 0 : MapperClockIrq() : EndIf
+;     If ExtraIrqMode Or ExtraFlags : ExtraIrqDivider = (ExtraIrqDivider + 1) & 3
+;       If ExtraIrqDivider = 0 : ExtraPending = 1 : ExtraFlags = 0 : EndIf : EndIf : Next
+m64_cycles:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la a1, global_extrapending
+m64_cycle:
+    blez a0, m64_cycles_done
+    ld t0, 0(a1)
+    beqz t0, m64_cycle_prescale
+    addiu a0, a0, -1
+    sd zero, 0(a1)                  ; the owed clock lands
+    la a7, m64_cycle_prescale
+    j mmc3_irq_update               ; the MMC3 counter's clock (jr a7)
+    nop
+m64_cycle_prescale:
+    ld t0, global_extrairqmode-global_extrapending(a1)
+    ld t1, global_extraflags-global_extrapending(a1)
+    or t0, t0, t1
+    beqz t0, m64_cycle              ; the prescaler stopped
+    ld t2, global_extrairqdivider-global_extrapending(a1)
+    addiu t2, t2, 1
+    andi t2, t2, 3
+    bnez t2, m64_cycle
+    sd t2, global_extrairqdivider-global_extrapending(a1)
+    addiu t3, zero, 1
+    sd t3, 0(a1)                    ; the wrap: a clock next cycle
+    b m64_cycle
+    sd zero, global_extraflags-global_extrapending(a1)   ; the owed clock paid
+m64_cycles_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+
+; ---- m64_bound: the cycle side's bound from the fetch clock's state: 1 while a clock is pending, else the cycles to
+; the prescaler's next wrap (4 - divider) while it runs, else none (a0 = 0). Clobbers t0-t2. A leaf.
+m64_bound:
+    la t0, global_extrapending
+    ld t1, 0(t0)
+    bnez t1, m64_bound_one
+    ld t1, global_extrairqmode-global_extrapending(t0)
+    ld t2, global_extraflags-global_extrapending(t0)
+    or t1, t1, t2
+    beqz t1, m64_bound_none
+    ld t2, global_extrairqdivider-global_extrapending(t0)
+    addiu a0, zero, 4
+    jr ra
+    subu a0, a0, t2
+m64_bound_one:
+    jr ra
+    addiu a0, zero, 1
+m64_bound_none:
+    jr ra
+    move a0, zero
+
+; ---- m64_budget: the MMC3's window budget (A12 side, the masked-IRQ and DMC bounds: modules/mmc3_window.n64),
+; bounded by the cycle side's bound less the fetch clock's lag behind the CPU (at least 1). Out a0. FRAME (32 B): 0 ra
+; | 8 the MMC3's budget.  THE PLAIN TWIN: n = Mmc3Budget() : b = Bound() : If b : n = Min(n, Max(1, b - (CpuCycles -
+; FetchClock))) : EndIf   (the reference's ExtraBudget took the bound alone)
+m64_budget:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    jal mmc3_e_budget
+    nop
+    sd a0, 8(sp)
+    jal m64_bound
+    nop
+    beqz a0, m64_budget_mmc3
+    nop
+    la t0, global_cpucycles
+    ld t1, 0(t0)
+    la t0, global_nesmmc3fetchclock
+    ld t2, 0(t0)
+    dsubu t1, t1, t2                ; the lag
+    dsubu a0, a0, t1
+    bgtz a0, m64_budget_min
+    nop
+    addiu a0, zero, 1               ; due: one cycle, the advance delivers it
+m64_budget_min:
+    ld t1, 8(sp)
+    slt t0, a0, t1
+    bnez t0, m64_budget_out
+    nop
+m64_budget_mmc3:
+    ld a0, 8(sp)
+m64_budget_out:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+
+; ---- m64_deadline: the MMC3's IRQ horizon (modules/mmc3_irq.n64) or, if earlier, the fetch clock + the cycle side's
+; bound. Out a0. FRAME (32 B): 0 ra | 8 the MMC3's horizon
+m64_deadline:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    jal mmc3_e_fetchdeadline
+    nop
+    sd a0, 8(sp)
+    jal m64_bound
+    nop
+    beqz a0, m64_deadline_mmc3
+    nop
+    la t0, global_nesmmc3fetchclock
+    ld t1, 0(t0)
+    daddu a0, a0, t1
+    ld t1, 8(sp)
+    slt t0, a0, t1
+    bnez t0, m64_deadline_out
+    nop
+m64_deadline_mmc3:
+    ld a0, 8(sp)
+m64_deadline_out:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+
+; ---- m64_pputicks: the span handed to the module (a0 = CPU cycles): the cycle side first (the reference's order:
+; ExtraCpuTicks before PpuAdvance), then the MMC3's A12 walk with the same span. FRAME (32 B): 0 ra | 8 a0
+m64_pputicks:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    jal m64_cycles
+    nop
+    ld a0, 8(sp)
+    ld ra, 0(sp)
+    daddiu sp, sp, 32
+    b mmc3_e_pputicks               ; the A12 walk (modules/mmc3_a12.n64): it returns to the caller
+    nop
+    EndASM
+  CompilerEndIf

@@ -1,0 +1,423 @@
+; modules/mmc3x_cold.n64 - the MMC3-family variants' COLD part (47: the MMC3 multicart with an outer bank; 64: Tengen
+; RAMBO-1), assembled in the cold slot (unit/cold_slot.n64). The hot part is modules/mmc3x.n64, which says what is the
+; MMC3's unchanged (included), copied, or this module's own.
+;
+; THE TABLE (the layout every module's cold part opens with, modules/mmc3_cold.n64): nes_cold_init +0 (the power-on),
+; +8 reserved, nes_cold_maptable +16 (the register write's 8-word handler table, copied into NesUnitData at load, where
+; mx_e_write's dispatch reads it), nes_cold_moddata +48 (256 bytes copied into NesUnitData + #NES_U_MODDATA: the A12
+; walk's sprite-form table, THE SAME BYTES as modules/mmc3_cold.n64's a12_sprite_form - the walk, included unchanged,
+; reads them there). Then the A12 walk's cold paths (modules/mmc3_a12_cold.n64, included as the MMC3's cold part
+; includes it), then this module's register paths and republication.
+;
+; nes_cold_init - the power-on after the shared MapperInit (LoadGame calls it for 47 and 64: the MMC3 state's power-on,
+; ExtraMapperInit's zeroing of ExtraOuter / ExtraRegs / the IRQ side, then MMC3's publication). 47: the board has no
+; work RAM (MapRamEnable = 0: a $6000-$7FFF read is the open bus; the conformance cart read MapRam's 0 before this),
+; $A001's enable / protect bits live in ExtraFlags ($80 at power-on, as the reference's MapRamEnable = 1 for 47), and
+; MMC3's publication is not the board's: its fixed banks are the ROM's last two (30, 31), the board's are outer bank
+; 0's last two (14, 15) - m47_update (the cart found this: Super Spike V'Ball ran its second game's bytes and halted).
+; 64: the MMC3's publication is not RAMBO-1's (three PRG registers, the reference's ExtraRamboUpdate): m64_update.
+; In / out: nothing; clobbers what a bank helper may.
+  ASM
+nes_cold_init:                      ; +0
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    b m47_init                      ; 47: no work RAM, the outer-bank register enabled, every bank in outer bank 0
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    j m64_update                    ; 64: RAMBO-1's own publication of the power-on registers
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+nes_cold_reserved:                  ; +8
+    jr ra
+    nop
+nes_cold_maptable:                  ; +16: $8000 select, $8001 data, $A000 mirroring, $A001 protect, $C000 latch,
+                                    ; $C001 reload / mode, $E000 disable / acknowledge, $E001 enable
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    .word mx_write_select, mx_write_data, mx_write_mirror, mx_write_protect
+    .word mx_write_latch, mx_write_reload, mx_write_ack, mx_write_enable
+    EndASM
+  CompilerElse
+    ASM
+    .word m64_write_select, m64_write_data, mx_write_mirror, mx_write_done
+    .word m64_write_latch, m64_write_mode, m64_write_ack, m64_write_enable
+    EndASM
+  CompilerEndIf
+  ASM
+nes_cold_moddata:                   ; +48: the A12 walk's sprite-form table (modules/mmc3_cold.n64's a12_sprite_form,
+mmc3x_form_data:                    ; the same 256 bytes: one byte per S = MapSpriteBits - bits 0-2 the lowest set bit,
+                                    ; bits 3-5 the highest set bit of S & $7F, bits 6-7 the runs of set bits less one)
+    .word 0x00000908, 0x12501110, 0x1B585958, 0x1A581918, 0x24606160, 0x62A06160, 0x23606160, 0x22602120
+    .word 0x2D686968, 0x6AA86968, 0x6BA8A9A8, 0x6AA86968, 0x2C686968, 0x6AA86968, 0x2B686968, 0x2A682928
+    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
+    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
+    .word 0x07404948, 0x52905150, 0x5B989998, 0x5A985958, 0x64A0A1A0, 0xA2E0A1A0, 0x63A0A1A0, 0x62A06160
+    .word 0x6DA8A9A8, 0xAAE8A9A8, 0xABE8E9E8, 0xAAE8A9A8, 0x6CA8A9A8, 0xAAE8A9A8, 0x6BA8A9A8, 0x6AA86968
+    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
+    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
+mmc3x_form_data_end:
+  EndASM
+  XIncludeFile "mmc3_a12_cold.n64"
+
+; ---- write_sync: the register write's sync decision (copied from modules/mmc3_write.n64's mmc3_e_write_sync, the
+; write it calls this module's). Entered by jump from the slot's table with the common timed path's 32-byte frame on
+; the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. PRG-RAM protection ($A001) and a bank write of the value
+; already held have no raster effect: only the CPU clock moves; a PRG register write with a sample playing first
+; serves the pending DMC fetch; else all devices sync (a $6000-$7FFF write - 47's outer bank - is "else": full sync).
+; Then the write, then the common close (it pops the frame and returns).
+  ASM
+mx_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    andi t0, a0, 0xE001
+    ori t1, zero, 0xA001
+    beq t0, t1, mx_sync_only_clock
+    ori t1, zero, 0x8001
+    bne t0, t1, mx_sync_full
+    nop
+    la t0, global_mapselect
+    ld t0, 0(t0)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+    andi t0, t0, 7
+    la t1, global_mapregs
+    EndASM
+  CompilerElse
+    ASM
+    andi t0, t0, 15                 ; RAMBO-1: sixteen registers (ExtraRegs)
+    la t1, global_extraregs
+    EndASM
+  CompilerEndIf
+  ASM
+    sll t2, t0, 3
+    daddu t1, t1, t2
+    ld t1, 0(t1)
+    beq a1, t1, mx_sync_only_clock  ; the value already held
+    sltiu t0, t0, 6
+    bnez t0, mx_sync_full           ; a CHR register
+    nop
+    la t0, global_dmcbytes          ; a PRG register: serve a pending DMC read before replacing its mapping
+    ld t0, 0(t0)
+    blez t0, mx_sync_only_clock
+    nop
+    jal u_nesmmc3syncapu
+    move a0, a2
+    b mx_sync_synced
+    nop
+mx_sync_only_clock:
+    jal u_nesmmc3advancecputime
+    move a0, a2
+    b mx_sync_synced
+    nop
+mx_sync_full:
+    jal u_workeradvance
+    move a0, a2
+mx_sync_synced:
+    la t0, global_cpucycles         ; the stamp again, after the devices moved
+    ld a2, 0(t0)
+    ld t1, global_accessphase-global_cpucycles(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal mx_e_write                  ; the register write (modules/mmc3x.n64)
+    daddu a2, a2, t1
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64)
+    nop
+
+; ---- the MMC3 paths SMB3 never runs, copied from modules/mmc3_cold.n64 (mmc3_write_mirror, mmc3_write_protect
+; unchanged; mmc3_write_select with this module's republication). In: a0 address, a1 value.
+mx_write_mirror:                    ; $A000: vertical (0) or horizontal (1), not with four-screen VRAM
+    la t0, global_mapfourscreen
+    ld t1, 0(t0)
+    bnez t1, mx_cold_done
+    andi a0, a1, 1
+    j mappermirror
+    xori a0, a0, 1
+mx_cold_done:
+    jr ra
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=47
+    ASM
+mx_write_select:                    ; $8000: the bank select; a change of the PRG / CHR mode bits remaps
+    la t0, global_mapselect
+    ld t1, 0(t0)
+    sd a1, 0(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    beqz t1, mx_cold_done           ; only the register index changed
+    nop
+    j m47_update                    ; (the MMC3's MapperUpdate would publish without the outer bank)
+    nop
+mx_write_protect:                   ; $A001: bit 7 enables the outer-bank register, bit 6 protects it (ExtraFlags = value
+    la t0, global_extraflags        ; & $C0; MapRamEnable stays 0: no work RAM on the board, $6000 reads the open bus)
+    andi a1, a1, 0xC0
+    jr ra
+    sd a1, 0(t0)
+m47_init:                           ; the power-on (nes_cold_init): no work RAM, the register enabled, outer bank 0's banks
+    la t0, global_mapramenable
+    sd zero, 0(t0)
+    la t0, global_extraflags
+    addiu t1, zero, 0x80
+    sd t1, 0(t0)
+    j m47_update
+    nop
+
+; ---- m47_update: every bank from the MMC3 registers in the outer bank (the reference's MapperUpdate, ExtraMmc3
+; branch, with MapperPrg / MapperChr's CartMapper = 47 lines). FRAME (32 B): 0 ra | 8 MapSelect | 16 scratch
+; THE PLAIN TWIN: b = MapRegs(6) & 63 : If MapSelect & 64 : MapperPrg(0, P(n - 2)) : MapperPrg(2, P(b))
+;   Else : MapperPrg(0, P(b)) : MapperPrg(2, P(n - 2)) : EndIf : MapperPrg(1, P(MapRegs(7) & 63)) : MapperPrg(3, P(n - 1))
+;   base = 4 * Bool(MapSelect & 128) : MapperChr(base, O(r0 & 254)) : MapperChr(base + 1, O(r0 | 1))
+;   MapperChr(base + 2, O(r1 & 254)) : MapperChr(base + 3, O(r1 | 1)) : For i = 0 To 3 : MapperChr((base ! 4) + i, O(r(i + 2))) : Next
+;   (P(b) = (b & 15) | ExtraOuter << 4; O(b) = (b & 127) | ExtraOuter << 7; n = the ROM's 8 KB banks)
+m47_update:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    sd t0, 8(sp)
+    la t1, global_mapregs
+    ld a1, 48(t1)                   ; MapRegs(6)
+    la t2, global_mapprgbytes
+    ld t2, 0(t2)
+    dsrl t2, t2, 13
+    addiu a3, t2, -2                ; n - 2
+    andi t0, t0, 64
+    beqz t0, m47_prg_plain
+    move a0, zero
+    move a2, a1                     ; swapped: slot 0 gets n - 2, slot 2 the register
+    move a1, a3
+    move a3, a2
+m47_prg_plain:
+    jal m47_prg                     ; MapperPrg(0, ...)
+    nop
+    la t1, global_mapregs
+    ld a1, 56(t1)                   ; MapRegs(7)
+    jal m47_prg                     ; MapperPrg(1, ...)
+    addiu a0, zero, 1
+    la t2, global_mapprgbytes
+    ld t2, 0(t2)
+    dsrl t2, t2, 13
+    ld t0, 8(sp)
+    andi t0, t0, 64
+    la t1, global_mapregs
+    ld a1, 48(t1)
+    bnez t0, m47_prg_slot2          ; swapped: slot 2 gets the register
+    nop
+    addiu a1, t2, -2                ; else n - 2
+m47_prg_slot2:
+    jal m47_prg                     ; MapperPrg(2, ...)
+    addiu a0, zero, 2
+    la t2, global_mapprgbytes
+    ld t2, 0(t2)
+    dsrl t2, t2, 13
+    addiu a1, t2, -1
+    jal m47_prg                     ; MapperPrg(3, n - 1)
+    addiu a0, zero, 3
+    ld t0, 8(sp)
+    andi t0, t0, 128
+    srl a0, t0, 5                   ; base: 4 with bit 7
+    la t1, global_mapregs
+    ld a1, 0(t1)                    ; r0
+    sd a0, 16(sp)
+    jal m47_chr
+    andi a1, a1, 254
+    ld a0, 16(sp)
+    la t1, global_mapregs
+    ld a1, 0(t1)
+    addiu a0, a0, 1
+    jal m47_chr
+    ori a1, a1, 1
+    ld a0, 16(sp)
+    la t1, global_mapregs
+    ld a1, 8(t1)                    ; r1
+    addiu a0, a0, 2
+    jal m47_chr
+    andi a1, a1, 254
+    ld a0, 16(sp)
+    la t1, global_mapregs
+    ld a1, 8(t1)
+    addiu a0, a0, 3
+    jal m47_chr
+    ori a1, a1, 1
+    ld a0, 16(sp)
+    xori a0, a0, 4                  ; the other half: registers 2-5, one slot each
+    sd a0, 16(sp)
+    sd zero, 24(sp)                 ; i
+m47_chr_single:
+    ld t0, 24(sp)
+    la t1, global_mapregs
+    sll t2, t0, 3
+    daddu t1, t1, t2
+    ld a1, 16(t1)                   ; r(i + 2)
+    ld a0, 16(sp)
+    jal m47_chr
+    addu a0, a0, t0
+    ld t0, 24(sp)
+    daddiu t0, t0, 1
+    sltiu t1, t0, 4
+    bnez t1, m47_chr_single
+    sd t0, 24(sp)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+m47_prg:                            ; MapperPrg(a0, (a1 & 15) | outer << 4)
+    la t3, global_extraouter
+    ld t3, 0(t3)
+    sll t3, t3, 4
+    andi a1, a1, 15
+    j mapperprg
+    or a1, a1, t3
+m47_chr:                            ; MapperChr(a0, (a1 & 127) | outer << 7)
+    la t3, global_extraouter
+    ld t3, 0(t3)
+    sll t3, t3, 7
+    andi a1, a1, 127
+    j mapperchr
+    or a1, a1, t3
+    EndASM
+  CompilerElse
+    ASM
+; ======== RAMBO-1's register paths (the reference's ExtraRamboWrite) and republication (ExtraRamboUpdate) ========
+; (m64_write_select, m64_write_latch, m64_write_ack and m64_write_enable are in the hot part, modules/mmc3x.n64: the
+;  cold slot holds 1,536 bytes and RAMBO-1's cold part was 36 over with them; the hot slot has the room)
+m64_write_data:                     ; $8001: ExtraRegs(MapSelect & 15) = value, then every bank again
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    andi t0, t0, 15
+    sll t0, t0, 3
+    la t1, global_extraregs
+    daddu t1, t1, t0
+    sd a1, 0(t1)
+    j m64_update
+    nop
+m64_write_mode:                     ; $C001: bit 0 the mode (1: CPU cycles); leaving cycle mode owes one prescaler clock
+                                    ; (ExtraFlags); entering it resets the prescaler; the reload flag is set either way
+    la t0, global_extrairqmode
+    ld t1, 0(t0)
+    andi a1, a1, 1
+    beqz t1, m64_mode_store         ; was A12 mode: no clock owed
+    nop
+    bnez a1, m64_mode_store         ; stays cycle mode
+    nop
+    addiu t2, zero, 1
+    sd t2, global_extraflags-global_extrairqmode(t0)       ; ExtraFlags = 1
+m64_mode_store:
+    sd a1, 0(t0)                    ; ExtraIrqMode = bit 0
+    beqz a1, m64_mode_reload
+    nop
+    sd zero, global_extrairqdivider-global_extrairqmode(t0)  ; cycle mode: the prescaler from 0
+m64_mode_reload:
+    la t0, global_mapreload
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)                    ; MapReload = 1
+
+; ---- m64_update: every bank from the registers (the reference's ExtraRamboUpdate). FRAME (32 B): 0 ra | 8 MapSelect
+; | 16 base | 24 i
+; THE PLAIN TWIN: If MapSelect & 64 : MapperPrg(0, r15) : MapperPrg(1, r6) : MapperPrg(2, r7)
+;   Else : MapperPrg(0, r6) : MapperPrg(1, r7) : MapperPrg(2, r15) : EndIf : MapperPrg(3, n - 1)
+;   base = (MapSelect >> 5) & 4 : MapperChr(base, r0) : MapperChr(base ! 2, r1) : For i = 0 To 3 : MapperChr((i + 4) ! base, r(i + 2)) : Next
+;   If MapSelect & 32 : MapperChr(base ! 1, r8) : MapperChr(base ! 3, r9)
+;   Else : MapperChr(base ! 1, r0 + 1) : MapperChr(base ! 3, r1 + 1) : EndIf
+m64_update:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    sd t0, 8(sp)
+    la t1, global_extraregs
+    andi t0, t0, 64
+    ld a1, 48(t1)                   ; r6
+    ld a2, 56(t1)                   ; r7
+    ld a3, 120(t1)                  ; r15
+    beqz t0, m64_prg_order
+    nop
+    move t2, a1                     ; bit 6: $8000 r15, $A000 r6, $C000 r7
+    move a1, a3
+    move a3, a2
+    move a2, t2
+m64_prg_order:
+    sd a2, 16(sp)
+    sd a3, 24(sp)
+    jal mapperprg                   ; MapperPrg(0, ...)
+    move a0, zero
+    ld a1, 16(sp)
+    jal mapperprg                   ; MapperPrg(1, ...)
+    addiu a0, zero, 1
+    ld a1, 24(sp)
+    jal mapperprg                   ; MapperPrg(2, ...)
+    addiu a0, zero, 2
+    la t2, global_mapprgbytes
+    ld t2, 0(t2)
+    dsrl t2, t2, 13
+    addiu a1, t2, -1
+    jal mapperprg                   ; MapperPrg(3, n - 1)
+    addiu a0, zero, 3
+    ld t0, 8(sp)
+    srl t0, t0, 5
+    andi t0, t0, 4                  ; base
+    sd t0, 16(sp)
+    la t1, global_extraregs
+    ld a1, 0(t1)                    ; r0
+    jal mapperchr                   ; MapperChr(base, r0)
+    move a0, t0
+    ld a0, 16(sp)
+    la t1, global_extraregs
+    ld a1, 8(t1)                    ; r1
+    jal mapperchr                   ; MapperChr(base ! 2, r1)
+    xori a0, a0, 2
+    sd zero, 24(sp)
+m64_chr_single:
+    ld t0, 24(sp)
+    la t1, global_extraregs
+    sll t2, t0, 3
+    daddu t1, t1, t2
+    ld a1, 16(t1)                   ; r(i + 2)
+    ld a0, 16(sp)
+    addiu t0, t0, 4
+    jal mapperchr                   ; MapperChr((i + 4) ! base, r(i + 2))
+    xor a0, a0, t0
+    ld t0, 24(sp)
+    daddiu t0, t0, 1
+    sltiu t1, t0, 4
+    bnez t1, m64_chr_single
+    sd t0, 24(sp)
+    ld t0, 8(sp)
+    andi t0, t0, 32
+    la t1, global_extraregs
+    beqz t0, m64_chr_pairs
+    ld a0, 16(sp)
+    ld a1, 64(t1)                   ; bit 5: r8 at base ! 1 ...
+    jal mapperchr
+    xori a0, a0, 1
+    ld a0, 16(sp)
+    la t1, global_extraregs
+    ld a1, 72(t1)                   ; ... r9 at base ! 3
+    jal mapperchr
+    xori a0, a0, 3
+    b m64_update_done
+    nop
+m64_chr_pairs:
+    ld a1, 0(t1)                    ; the 2 KB pairs: r0 + 1 at base ! 1 ...
+    daddiu a1, a1, 1
+    jal mapperchr
+    xori a0, a0, 1
+    ld a0, 16(sp)
+    la t1, global_extraregs
+    ld a1, 8(t1)                    ; ... r1 + 1 at base ! 3
+    daddiu a1, a1, 1
+    jal mapperchr
+    xori a0, a0, 3
+m64_update_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+    EndASM
+  CompilerEndIf
