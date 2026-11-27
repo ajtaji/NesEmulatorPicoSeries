@@ -1,10 +1,17 @@
 ; Poll stable RAM within one scheduled CPU window. Keep the read/branch
 ; phase, instruction count, and bus value at the original window boundary.
+; THE COALESCING JUMP BELOW IS NEVER TAKEN (the glue worker's N.76, checked in mapper modules step 2): both callers
+; pass coalesce = 0 - the unit's run loop (cpu6502.n64, c65_run_mapper4) and the reference build's (mmc3_run.n64) - so
+; the generic batch (ramwait.n64's NesRamWaitBatch) is not entered from here; it runs in the reference scheduler's
+; builds (NesRamCpuWindow(128, 1)). It is kept on purpose: it is the unit build's only reference to NesRamWaitBatch,
+; and the compiler lays a procedure out after its first referrer - without it, NesRamWaitBatch and NesPollStatusDone
+; moved differently in the two modules' compiles and the image outside the mapper slots differed (measured, build.py's
+; per-module check); a table entry in its place moved 9,700 symbols. Removing it is a layout change of its own.
 ProcedureNaked.i NesMmc3RamWaitBatch(n.i,coalesce.i,rule.i)
   ASM
-    beqz a1, nes_wait_enter
+    beqz a1, nes_wait_enter         ; coalesce = 0 at both callers: always taken
     nop
-    j nesramwaitbatch
+    j nesramwaitbatch               ; (never reached; kept as the layout's reference, above)
     nop
 nes_wait_enter:
     ; A zero-page LDA and a sign branch need only A, N and Z. Keep

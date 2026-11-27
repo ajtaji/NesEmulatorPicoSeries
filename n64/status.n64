@@ -333,35 +333,226 @@ Procedure NesSetStatusHorizon(stamp.i)
 EndProcedure
 CompilerEndIf
 
-; The CPU can run through ordinary raster work until a device could signal
-; an interrupt or the host could observe a frame boundary. Timestamped MMIO
-; still catches both devices up before it reads or changes either device.
-Procedure NesSetCpuHorizon(stamp.i)
-  Protected dots.i, cycles.i, event.i
+; NesSetCpuHorizon(stamp) - THE CPU HORIZON of the reference scheduler's builds (the other-mappers run loop, nes.n64's
+; RunGame, and the staged NesWriteRegister's deferred writes): the CPU may run through ordinary raster work until a
+; device could signal an interrupt or the host could observe a frame boundary; timestamped MMIO still catches both
+; devices up before it reads or changes either. In assembly (mapper modules, step 2; it was compiled, with
+; rasterdeadline.n64's text included twice - that file is folded in here and removed).
+; WHAT: NesCpuHorizon = stamp + cycles when cycles > 0, cycles being the CPU cycles to the first of: the raster limit
+; (the vblank start at line 241 dot 1, else the pre-render line's end; on a visible line at most the host's service
+; interval - 64 lines' bound with the chained 20 kHz windows, else 2,728 dots), the APU frame counter's step 4, its
+; reset delay, and (#NES_DMC_RASTER_DEADLINE) the DMC's next byte fetch. Nothing while a DMC fetch is due (DmcBytes > 0;
+; with the raster deadline: and the buffer empty), nor at line 241 dot 0 (the vblank edge itself is the next event).
+; With the raster deadline the raster limit is kept as NesPpuLimit (the PPU clock it falls at) until revoked (-1).
+; HOW: the twin's steps in its order; dots * 341 by mult (products < 2^17, so mflo's 32-bit result is exact); the
+; division by 3 is ddiv's quotient (truncation toward zero, as the compiled "/", also for dots - 1 = -1); PAL's >> 2 is
+; dsra (the compiled ">>" on a signed value). The VR4300's HI/LO rule: two instructions between an mflo and the next
+; mult / div. In: a0 stamp. Clobbers t0-t3, a1-a3 (a leaf). a1 = cycles, a2 = dots / event.
+; THE PLAIN TWIN (the compiled procedure, rasterdeadline.n64's text in place):
+;   Protected dots.i, cycles.i, event.i
+;   If DmcBytes>0 And (#NES_DMC_RASTER_DEADLINE=0 Or DmcEmpty) : ProcedureReturn : EndIf
+;   If #NES_DMC_RASTER_DEADLINE=0 Or NesPpuLimit<0
+;     If PpuLine<241 : dots=(241-PpuLine)*341-PpuDot+1
+;     ElseIf PpuLine=241 And PpuDot=0 : ProcedureReturn
+;     Else : dots=(PpuPreLine+1-PpuLine)*341-PpuDot-1 : EndIf
+;     If #NES_CHAIN_WINDOWS And #NES_AUDIO_RATE=20000
+;       If PpuLine<240 : event=(64-((PpuLine+32)&63))*341-PpuDot : If event<dots : dots=event : EndIf : EndIf
+;     Else : If dots>2728 : dots=2728 : EndIf : EndIf
+;     cycles=(dots-1)/3                                   ; #GAME_PAL: (dots-1)>>2
+;     If #NES_DMC_RASTER_DEADLINE : NesPpuLimit=PpuClock+cycles : EndIf
+;   EndIf
+;   If #NES_DMC_RASTER_DEADLINE : cycles=NesPpuLimit-stamp : EndIf
+;   If ApuInhibit=0 And ApuFive=0 : event=ApuStep4-ApuFrameClock-1 : If event<cycles : cycles=event : EndIf : EndIf
+;   If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+;   If #NES_DMC_RASTER_DEADLINE And DmcBytes>0
+;     event=DmcTimer+(DmcBits-1)*DmcTable(ApuReg(16)&15)-1 : If event<cycles : cycles=event : EndIf
+;   EndIf
+;   If cycles>0 : NesCpuHorizon=stamp+cycles : EndIf
+; CHECKED BY: the reference cores' builds of other mappers (the folder walk's reference runs: the guest digest, the
+; checkpoints, the WAV), twin against assembly on the same carts (twin_tree.py).
+ProcedureNaked NesSetCpuHorizon(stamp.i)
+  ASM
+    la t0, global_dmcbytes
+    ld t1, 0(t0)
+    blez t1, nsch_go                ; no DMC byte pending
+    nop
+  EndASM
   CompilerIf #NES_DMC_RASTER_DEADLINE
-    If DmcBytes>0 And DmcEmpty : ProcedureReturn : EndIf
+    ASM
+      la t0, global_dmcempty
+      ld t1, 0(t0)
+      bnez t1, nsch_none            ; a fetch is due: no horizon
+      nop
+    EndASM
   CompilerElse
-    If DmcBytes>0 : ProcedureReturn : EndIf
+    ASM
+      b nsch_none                   ; a DMC byte pending: no horizon
+      nop
+    EndASM
   CompilerEndIf
+  ASM
+nsch_go:
+  EndASM
   CompilerIf #NES_DMC_RASTER_DEADLINE
-    ; Advancing only the APU leaves the next raster edge at the same timestamp.
-    If NesPpuLimit<0
-      IncludeFile "../n64/rasterdeadline.n64"
-      NesPpuLimit=PpuClock+cycles
-    EndIf
-    cycles=NesPpuLimit-stamp
+    ASM
+      la t0, global_nesppulimit
+      ld t1, 0(t0)
+      bgez t1, nsch_limit           ; the raster limit is still standing
+      nop
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_ppuline
+    ld t1, 0(t0)                    ; PpuLine
+    la t0, global_ppudot
+    ld t2, 0(t0)                    ; PpuDot
+    slti t3, t1, 241
+    beqz t3, nsch_late
+    addiu t3, zero, 241
+    subu t3, t3, t1                 ; 241 - PpuLine
+    addiu a3, zero, 341
+    mult t3, a3
+    mflo a2
+    subu a2, a2, t2
+    b nsch_dots
+    addiu a2, a2, 1                 ; dots = (241 - PpuLine) * 341 - PpuDot + 1
+nsch_late:
+    xori t3, t1, 241
+    bnez t3, nsch_pre
+    nop
+    beqz t2, nsch_none              ; line 241 dot 0: the vblank edge is next
+    nop
+nsch_pre:
+    la t0, global_ppupreline
+    ld t3, 0(t0)
+    addiu t3, t3, 1
+    subu t3, t3, t1                 ; PpuPreLine + 1 - PpuLine
+    addiu a3, zero, 341
+    mult t3, a3
+    mflo a2
+    subu a2, a2, t2
+    addiu a2, a2, -1                ; dots = (PpuPreLine + 1 - PpuLine) * 341 - PpuDot - 1
+nsch_dots:
+  EndASM
+  CompilerIf #NES_CHAIN_WINDOWS And #NES_AUDIO_RATE=20000
+    ASM
+      slti t3, t1, 240
+      beqz t3, nsch_bound_done      ; not a visible line
+      addiu t3, t1, 32
+      andi t3, t3, 63
+      addiu a3, zero, 64
+      subu t3, a3, t3               ; 64 - ((PpuLine + 32) & 63)
+      addiu a3, zero, 341
+      mult t3, a3
+      mflo t3
+      subu t3, t3, t2               ; event = that * 341 - PpuDot
+      slt a3, t3, a2
+      beqz a3, nsch_bound_done      ; event not smaller: dots stays
+      nop
+      move a2, t3                   ; dots = event
+nsch_bound_done:
+    EndASM
   CompilerElse
-    IncludeFile "../n64/rasterdeadline.n64"
+    ASM
+      slti t3, a2, 2729
+      bnez t3, nsch_bound_done
+      nop
+      addiu a2, zero, 2728          ; dots = 2728 at most
+nsch_bound_done:
+    EndASM
   CompilerEndIf
-  If ApuInhibit=0 And ApuFive=0
-    event=ApuStep4-ApuFrameClock-1
-    If event<cycles : cycles=event : EndIf
-  EndIf
-  If ApuResetDelay>0 And cycles>=ApuResetDelay : cycles=ApuResetDelay-1 : EndIf
+  CompilerIf #GAME_PAL
+    ASM
+      daddiu a1, a2, -1
+      dsra a1, a1, 2                ; cycles = (dots - 1) >> 2
+    EndASM
+  CompilerElse
+    ASM
+      daddiu a1, a2, -1
+      addiu t3, zero, 3
+      ddiv a1, t3
+      mflo a1                       ; cycles = (dots - 1) / 3, toward zero
+    EndASM
+  CompilerEndIf
   CompilerIf #NES_DMC_RASTER_DEADLINE
-    NesBoundDmcFetch(cycles,event)
+    ASM
+      la t0, global_ppuclock
+      ld t1, 0(t0)
+      daddu t1, t1, a1
+      la t0, global_nesppulimit
+      sd t1, 0(t0)                  ; NesPpuLimit = PpuClock + cycles
+nsch_limit:
+      la t0, global_nesppulimit
+      ld t1, 0(t0)
+      dsubu a1, t1, a0              ; cycles = NesPpuLimit - stamp
+    EndASM
   CompilerEndIf
-  If cycles>0 : NesCpuHorizon=stamp+cycles : EndIf
+  ASM
+    la t0, global_apuinhibit
+    ld t1, 0(t0)
+    la t0, global_apufive
+    ld t2, 0(t0)
+    or t1, t1, t2
+    bnez t1, nsch_frame_done        ; no frame IRQ step to come
+    nop
+    la t0, global_apustep4
+    ld t1, 0(t0)
+    la t0, global_apuframeclock
+    ld t2, 0(t0)
+    dsubu t1, t1, t2
+    daddiu t1, t1, -1               ; event = ApuStep4 - ApuFrameClock - 1
+    slt t2, t1, a1
+    beqz t2, nsch_frame_done
+    nop
+    move a1, t1
+nsch_frame_done:
+    la t0, global_apuresetdelay
+    ld t1, 0(t0)
+    blez t1, nsch_reset_done
+    slt t2, a1, t1                  ; cycles < ApuResetDelay
+    bnez t2, nsch_reset_done
+    nop
+    daddiu a1, t1, -1               ; cycles = ApuResetDelay - 1
+nsch_reset_done:
+  EndASM
+  CompilerIf #NES_DMC_RASTER_DEADLINE
+    ASM
+      la t0, global_dmcbytes
+      ld t1, 0(t0)
+      blez t1, nsch_dmc_done        ; no byte pending
+      nop
+      la t0, global_apureg
+      lbu t1, 16(t0)
+      andi t1, t1, 15
+      sll t1, t1, 1
+      la t0, global_dmctable
+      daddu t0, t0, t1
+      lhu t1, 0(t0)                 ; DmcTable(ApuReg(16) & 15)
+      la t0, global_dmcbits
+      ld t2, 0(t0)
+      addiu t2, t2, -1
+      mult t2, t1
+      mflo t2                       ; (DmcBits - 1) * the rate
+      la t0, global_dmctimer
+      ld t3, 0(t0)
+      daddu t2, t2, t3
+      daddiu t2, t2, -1             ; the next fetch's edge
+      slt t3, t2, a1
+      beqz t3, nsch_dmc_done
+      nop
+      move a1, t2
+nsch_dmc_done:
+    EndASM
+  CompilerEndIf
+  ASM
+    blez a1, nsch_none
+    daddu a1, a0, a1
+    la t0, global_nescpuhorizon
+    sd a1, 0(t0)                    ; NesCpuHorizon = stamp + cycles
+nsch_none:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
 ; DMC reads and CPU stalls can advance the APU before the next PPU event.

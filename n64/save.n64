@@ -77,14 +77,62 @@ Procedure.i NesSaveRead(offset.i, page.i, bytes.i)
   ProcedureReturn #LPM_SAVE_OK
 EndProcedure
 
-Procedure.i NesSaveWrite(offset.i, page.i, bytes.i)
-  Protected ticket.i
-  If LpmResetHold(1000+bytes)=0 : ProcedureReturn #LPM_SAVE_RESET : EndIf
-  ticket=LpmPiWrite(page,#LPM_SAVE_BASE+offset,bytes)
-  If ticket : LpmPiWait(ticket) : EndIf
-  LpmResetRelease()
-  If ticket=0 : ProcedureReturn #LPM_SAVE_ALIGN : EndIf
-  ProcedureReturn #LPM_SAVE_OK
+; NesSaveWrite(offset, page, bytes) - the linear save's write (SummerCart64 SRAM 1M: the 128 KiB on PI domain 2 from
+; #LPM_SAVE_BASE), called by NesSaveFlush; in assembly (mapper modules, step 2: the save path's last compiled routine).
+; WHAT: holds the reset button off for the write (LpmResetHold(1000 + bytes) microseconds; 0: the reset is already
+; pressed, so nothing is written: #LPM_SAVE_RESET), starts the PI DMA of bytes from the RDRAM page to the cart's
+; #LPM_SAVE_BASE + offset (LpmPiWrite; 0: refused - alignment), waits for it (LpmPiWait), releases the reset.
+; Out a0: #LPM_SAVE_OK, #LPM_SAVE_ALIGN (the DMA refused) or #LPM_SAVE_RESET.
+; HOW: the library calls in the compiled procedure's order, the arguments kept in the frame across them.
+; FRAME (48 B): 0 ra | 8 offset | 16 page | 24 bytes | 32 the ticket. Clobbers what a compiled call may.
+; THE PLAIN TWIN:
+;   Protected ticket.i
+;   If LpmResetHold(1000+bytes)=0 : ProcedureReturn #LPM_SAVE_RESET : EndIf
+;   ticket=LpmPiWrite(page,#LPM_SAVE_BASE+offset,bytes)
+;   If ticket : LpmPiWait(ticket) : EndIf
+;   LpmResetRelease()
+;   If ticket=0 : ProcedureReturn #LPM_SAVE_ALIGN : EndIf
+;   ProcedureReturn #LPM_SAVE_OK
+; CHECKED BY: the save cart (rdp-tools/carts/save.s, battery MMC3) with #NES_SAVE_PROC = 1, twin against assembly
+; (twin_tree.py): the staging page, the dirty bytes, pending, the write error, the run's lines.
+ProcedureNaked.i NesSaveWrite(offset.i, page.i, bytes.i)
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    jal lpmresethold                ; LpmResetHold(1000 + bytes)
+    daddiu a0, a2, 1000
+    beqz a0, nsw_reset              ; the reset is pressed: no write
+    ld a0, 16(sp)                   ; (delay slot) page: the RDRAM source
+    ld a1, 8(sp)
+    lui t0, 0x0800                  ; #LPM_SAVE_BASE ($08000000): the save's cart address
+    daddu a1, a1, t0                ; #LPM_SAVE_BASE + offset
+    jal lpmpiwrite                  ; ticket = LpmPiWrite(page, cart, bytes)
+    ld a2, 24(sp)
+    beqz a0, nsw_release            ; refused: nothing to wait for
+    sd a0, 32(sp)                   ; (delay slot) the ticket
+    jal lpmpiwait                   ; LpmPiWait(ticket)
+    nop
+nsw_release:
+    jal lpmresetrelease
+    nop
+    ld t0, 32(sp)
+    ld ra, 0(sp)
+    beqz t0, nsw_align
+    daddiu sp, sp, 48
+    jr ra
+    addiu a0, zero, #LPM_SAVE_OK
+nsw_align:
+    jr ra
+    addiu a0, zero, #LPM_SAVE_ALIGN
+nsw_reset:
+    ld ra, 0(sp)
+    daddiu sp, sp, 48
+    jr ra
+    addiu a0, zero, #LPM_SAVE_RESET
+  EndASM
 EndProcedure
 CompilerElse
 Macro NesSaveRead(offset,page,bytes)
