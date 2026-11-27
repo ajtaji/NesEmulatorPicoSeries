@@ -1709,9 +1709,6 @@ c65_op_08_rest:
     addiu a1, a1, 1
     b c65_next
     daddiu a2, a2, -3
-c65_op_16_rest:
-    b c65_rmw_zp
-    addiu a0, zero, 6
 c65_op_24_rest:
     sll t1, v1, 1
     sd t1, global_fv-global_nesmmc3bias(a3)
@@ -1774,10 +1771,6 @@ c65_op_50_rest:
     nop
     b c65_br_take
     nop
-c65_op_56_rest:
-    srl t2, v1, 1
-    b c65_store_zp
-    addiu a0, zero, 6
 c65_op_66_rest:
     andi t2, t2, 0x80
     srl t0, v1, 1
@@ -1838,10 +1831,6 @@ c65_op_94_rest:
     or v1, s7, zero
     b c65_next
     daddiu a2, a2, -4
-c65_op_96_rest:
-    or v1, s6, zero
-    b c65_next
-    daddiu a2, a2, -4
 c65_op_c6_rest:
     b c65_incdec_zp
     addiu a0, zero, 5
@@ -1878,9 +1867,6 @@ c65_op_ee_rest:
 c65_op_f6_rest:
     b c65_incdec_zp
     addiu a0, zero, 6
-c65_op_f8_rest:
-    b c65_next
-    daddiu a2, a2, -2
 c65_op_fe_rest:
     jal c65_rd_ea
     nop
@@ -2438,10 +2424,10 @@ c65_refetch:
   ; all of it lies in one span under 16 KB and no two of its hot lines share an I-cache set.
   XIncludeFile "../n64/unit/window.n64"
   XIncludeFile "../n64/unit/advance.n64"
-  XIncludeFile "../n64/unit/a12.n64"
   XIncludeFile "../n64/unit/write.n64"
   XIncludeFile "../n64/unit/ppu.n64"
   XIncludeFile "../n64/unit/apu.n64"
+  XIncludeFile "../n64/unit/slot.n64"     ; the mapper slot, the hot span's last bytes (mapper modules)
   ASM
     ; --- the core's cold part: the slow fetch, the status byte, the illegal stop, the shapes
 c65_fetch_slow:              ; copy the instruction's bytes into the buffer
@@ -2758,6 +2744,23 @@ c65_s_zpy:
     andi t2, t2, 0xFF
     jr ra
     addu t1, t2, s1
+    ; --- four handler rests moved out of the hot span to make room for the mapper slot's save mark (mapper-modules
+    ; design note, section 8c): 0 cycles a guest frame in the step-1 measuring run (ASL / LSR zp,X, STX zp,Y, SED);
+    ; each is entered by its slot's branch and leaves by a branch, so the move changes no path ---
+c65_op_16_rest:
+    b c65_rmw_zp
+    addiu a0, zero, 6
+c65_op_56_rest:
+    srl t2, v1, 1
+    b c65_store_zp
+    addiu a0, zero, 6
+c65_op_96_rest:
+    or v1, s6, zero
+    b c65_next
+    daddiu a2, a2, -4
+c65_op_f8_rest:
+    b c65_next
+    daddiu a2, a2, -2
 c65_illegal:                 ; an undocumented opcode stops the CPU
     daddiu t3, t3, -1        ; it does not count as executed
     jal c65_rd_ea            ; BadOpcode = NesRead(PC)

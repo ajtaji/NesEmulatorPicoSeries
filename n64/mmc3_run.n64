@@ -15,12 +15,12 @@ CompilerElse
 ProcedureNaked NesHotHolder()
   XIncludeFile "../n64/unit/window.n64"
   XIncludeFile "../n64/unit/advance.n64"
-  XIncludeFile "../n64/unit/a12.n64"
   XIncludeFile "../n64/unit/write.n64"
   XIncludeFile "../n64/unit/ppu.n64"
   XIncludeFile "../n64/unit/ppu_cold.n64"
   XIncludeFile "../n64/unit/ppu_check.n64"
   XIncludeFile "../n64/unit/apu.n64"
+  XIncludeFile "../n64/unit/slot.n64"
   XIncludeFile "../n64/unit/apu_cold.n64"
   XIncludeFile "../n64/unit/cold.n64"
   XIncludeFile "../n64/unit/a12_cold.n64"

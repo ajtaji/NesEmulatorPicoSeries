@@ -80,141 +80,6 @@ nes_mmc3_wait_none:
     move a2, zero
   EndASM
 
-; ---- mappercpubudget, from mmc3_budget.n64 ----
-  ; The runtime core only accepts NTSC mapper 4. Preserve its existing
-  ; stop points while avoiding the generic board dispatch and division.
-  ASM
-u_mappercpubudget:
-    la a1, global_mapirq
-    ld t1, global_mapirqenable-global_mapirq(a1)
-    beqz t1, mmc3_budget_full
-    ld t1, 0(a1)
-    bnez t1, mmc3_budget_pending
-    ld t1, global_ppumask-global_mapirq(a1)
-    andi t1, t1, 24
-    beqz t1, mmc3_budget_full
-    ld t1, global_mapirqcount-global_mapirq(a1)
-    ld t2, global_mapreload-global_mapirq(a1)
-    bnez t2, mmc3_budget_reload
-    nop
-    bnez t1, mmc3_budget_count
-    nop
-mmc3_budget_reload:
-    ld t1, global_mapirqlatch-global_mapirq(a1)
-    addiu t1, t1, 1
-mmc3_budget_count:
-    addiu t1, t1, -1
-    beqz t1, mmc3_budget_raster
-    sll a0, t1, 2
-    ; A qualified rise needs ten low dots. The first rise can be immediate.
-    addu a0, a0, t1
-    sll a0, a0, 1
-    srl a2, t1, 2
-    beqz a2, mmc3_budget_convert
-    ld t0, global_ppuctrl-global_mapirq(a1)
-    andi t0, t0, 16
-    bnez t0, mmc3_budget_convert
-    ld t0, global_dmcbytes-global_mapirq(a1)
-    bnez t0, mmc3_budget_convert
-    ld t0, global_workerirq-global_mapirq(a1)
-    bnez t0, mmc3_budget_convert
-    ld a3, global_cpucycles-global_mapirq(a1)
-    ; The widened window must also precede APU and raster deadlines.
-    daddiu t2, a3, 136
-    ld t0, global_nesmmc3renderlimit-global_mapirq(a1)
-    slt t0, t2, t0
-    beqz t0, mmc3_budget_convert
-    ld t0, global_nesmmc3apulimit-global_mapirq(a1)
-    slt t0, t2, t0
-    beqz t0, mmc3_budget_convert
-    ld t0, global_nesmmc3fetchclock-global_mapirq(a1)
-    ; A low background restricts qualified rises to the eight sprite slots
-    ; starting at dot 261. Even alternating sprite banks permit at most
-    ; four qualified rises per scanline. Use 340 dots for the shortest line.
-    dsubu a3, a3, t0
-    dsll t0, a3, 1
-    daddu a3, a3, t0
-    addiu t0, zero, 340
-    multu a2, t0
-    ld t0, global_nesmmc3dot-global_mapirq(a1)
-    mflo a2
-    addiu a2, a2, 261
-    dsubu a2, a2, t0
-    dsubu a2, a2, a3
-    ; Allow seven CPU cycles for the instruction that closes the window.
-    addiu a2, a2, -21
-    slt t0, a0, a2
-    beqz t0, mmc3_budget_convert
-    nop
-    b mmc3_budget_convert
-    move a0, a2
-
-mmc3_budget_raster:
-    ld t1, global_nesmmc3line-global_mapirq(a1)
-    ld t2, global_nesmmc3dot-global_mapirq(a1)
-    sltiu t0, t1, 240
-    bnez t0, mmc3_budget_visible
-    sltiu t0, t1, 261
-    beqz t0, mmc3_budget_visible
-    addiu t3, zero, 261
-    subu t1, t3, t1
-    addiu t3, zero, 341
-    multu t1, t3
-    mflo a0
-    b mmc3_budget_convert
-    subu a0, a0, t2
-
-mmc3_budget_visible:
-    sltiu t0, t2, 257
-    beqz t0, mmc3_budget_one
-    ld t0, global_ppuctrl-global_mapirq(a1)
-    andi t0, t0, 16
-    beqz t0, mmc3_budget_sprite_edge
-    sltiu t0, t2, 5
-    bnez t0, mmc3_budget_one
-    sltiu t0, t1, 240
-    beqz t0, mmc3_budget_one
-    ld t0, global_mapa12-global_mapirq(a1)
-    beqz t0, mmc3_budget_one
-    nop
-mmc3_budget_sprite_edge:
-    addiu a0, zero, 257
-    subu a0, a0, t2
-
-mmc3_budget_convert:
-    sltiu t0, a0, 384
-    beqz t0, mmc3_budget_full
-    sltiu t0, a0, 3
-    bnez t0, mmc3_budget_one
-    addiu t0, zero, 171
-    ; floor(dots * 171 / 512) equals floor(dots / 3) for dots < 384.
-    multu a0, t0
-    mflo a0
-    b mmc3_budget_exit
-    srl a0, a0, 9
-
-mmc3_budget_pending:
-    ld t1, global_fi-global_mapirq(a1)
-    beqz t1, mmc3_budget_one
-    nop
-    j u_nesmmc3maskedbudget
-    nop
-mmc3_budget_one:
-    jr ra
-    addiu a0, zero, 1
-mmc3_budget_full:
-    addiu a0, zero, 128
-mmc3_budget_exit:
-    ; C3b, the owner's ruling "exact cycle" (design note N.46): while a sample plays the window ends at its next
-    ; byte fetch, so the fetch's 4-cycle stall lands at the instruction boundary at or after the fetch's cycle F,
-    ; not at the end of the 128-cycle window holding F. The bound is computed in the cold part (unit/cold.n64).
-    ;   If DmcBytes>0 : n=Min(n, F-CpuCycles) : EndIf      ; DmcEmpty with bytes left: 1 (the fetch is due now)
-    ld t0, global_dmcbytes-global_mapirq(a1)
-    bgtz t0, mmc3_budget_dmc
-    nop
-    jr ra
-    nop
-  EndASM
 
 ; ---- nesmmc3maskedbudget, from mmc3_budget.n64 ----
   ; An asserted IRQ stays masked until CLI/PLP/RTI. Stop at DMC DMA,
@@ -264,17 +129,8 @@ mmc3_masked_raster:
     mflo t0
     subu t0, t0, t2
     addiu t0, t0, 1
-    bgtz t0, mmc3_masked_distance
-    nop
-mmc3_masked_frame:
-    la t0, global_ppupreline
-    ld t0, 0(t0)
-    addiu t0, t0, 1
-    subu t0, t0, t1
-    mult t0, t3
-    mflo t0
-    subu t0, t0, t2
-    addiu t0, t0, -1
+    blez t0, mmc3_masked_frame      ; (unit/cold.n64 since the mapper slot's step 1: 0 cycles a guest frame; the
+    nop                             ;  distance in frames to come, then back to mmc3_masked_distance)
 mmc3_masked_distance:
     addiu t0, t0, 2
     slti t1, t0, 384
@@ -341,11 +197,8 @@ mmc3_sign_read:
     mflo t2
     b mmc3_sign_charge
     srl t2, t2, 8
-mmc3_sign_div_seven:
-    addiu t2, zero, 147
-    multu a4, t2
-    mflo t2
-    srl t2, t2, 10
+    ; (mmc3_sign_div_seven, the seven-cycle charge's divide: 0 cycles a guest frame, in unit/cold.n64 since the
+    ; mapper slot's step 1, design note "mapper modules" section 8; it branches back to mmc3_sign_charge)
 mmc3_sign_charge:
     addiu t1, t9, 3
     multu t1, t2

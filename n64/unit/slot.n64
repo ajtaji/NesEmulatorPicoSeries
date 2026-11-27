@@ -1,0 +1,73 @@
+; unit/slot.n64 - THE MAPPER SLOT: the last #NES_SLOT_BYTES of the hot unit's hot span, where the module of the
+; cartridge's mapper runs (the mapper-modules design note, sections 2-3).
+; Part of the hot unit: included inside cpu6502.n64's procedure after the common hot code and before the cold part
+; (c65_fetch_slow), or in the reference build's holder (mmc3_run.n64), never on its own.
+;
+; WHAT: a fixed table of entry points at the slot's start, then the module's code, then zero fill to the slot's
+; fixed size. Common code calls (or, for write_fast / write_sync, branches to) the ENTRY labels below; their
+; addresses do not depend on the module, so the common code is the same for every mapper. A module's first
+; first 80 bytes (10 entries x 8) are its own table, one "b body" + delay slot an entry, in this order.
+;
+; HOW IT STAYS FAST: one table entry costs one taken branch and its delay slot (2 cycles) on top of the call it
+; replaces; ~850 calls a guest frame, ~0.02 ms (design note, section 3). The table and the module lie in the hot
+; span: the span check (build.py, check_hot_unit) holds for every module, since the slot's size is fixed.
+;
+; THE ENTRIES (in: / out: as the MMC3 bodies, which keep the conventions of the procedures they came from):
+;   +0  u_mappercpubudget       the window budget: a0 = cycles; a1 = @MapIrq for the common DMC tail
+;   +8  u_nesmmc3fetchdeadline  the IRQ horizon: a0 = the CPU cycle of the next possible IRQ edge (or never)
+;   +16 u_mapperpputicks        the PPU fetch clock: a0 = CPU cycles to advance it by
+;   +24 u_mappera12             the PPU address-bus notice: a0 = address, a1 = the dot clock
+;   +32 u_mapperwrite           the register / work-RAM write: a0 addr, a1 value, a2 stamp
+;   +40 nes_slot_write_sync     (branch target) the timed register write's sync decision, frame on the stack
+;   +48 nes_slot_write_fast     (branch target) the untimed look at $8000-$FFFF: t0 = @NesOpenBus, t1 = addr & $E001
+;   +56 u_mapperclockirq        the scanline / IRQ counter's clock (for outside callers)
+;   +64 nes_slot_cpu_ticks      CPU-cycle timers (FME-7, VRC, ...): a0 = cycles; MMC3 has none (returns)
+;   +72 nes_slot_read           an expansion read $4020-$7FFF: a0 addr, v0 the byte; MMC3: not called
+;
+; THE FILL: ".space nes_mapper_slot + #NES_SLOT_BYTES - nes_mapper_slot_fill" (the assembler resolves the label
+; expression); the build refuses a module larger than the slot (build.py, check_mapper_slot: nes_mapper_slot_end -
+; nes_mapper_slot = #NES_SLOT_BYTES exactly).
+;
+; THE MODULE IN PLACE: the default module (MMC3, modules/mmc3.n64) is assembled here, so every build runs it as it
+; was assembled. The loader (library/runtime.n64, NesModuleInstall) copies the cartridge's module from the module
+; store over the slot at load and makes the caches see it (D written back, I invalidated over the slot).
+  ASM
+    .align 16                       ; the slot's first byte on a D-cache line (the loader's DMA and cache ops)
+nes_mapper_slot:
+u_mappercpubudget:
+    b mmc3_e_budget
+    nop
+u_nesmmc3fetchdeadline:
+    b mmc3_e_fetchdeadline
+    nop
+u_mapperpputicks:
+    b mmc3_e_pputicks
+    nop
+u_mappera12:
+    b mmc3_e_a12
+    nop
+u_mapperwrite:
+    b mmc3_e_write
+    nop
+nes_slot_write_sync:
+    b mmc3_e_write_sync
+    nop
+nes_slot_write_fast:
+    b mmc3_e_write_fast
+    nop
+u_mapperclockirq:
+    b mmc3_e_clockirq
+    nop
+nes_slot_cpu_ticks:
+    jr ra
+    nop
+nes_slot_read:
+    jr ra
+    move v0, zero
+  EndASM
+  XIncludeFile "../modules/mmc3.n64"
+  ASM
+nes_mapper_slot_fill:
+    .space nes_mapper_slot+#NES_SLOT_BYTES-nes_mapper_slot_fill
+nes_mapper_slot_end:
+  EndASM

@@ -437,6 +437,45 @@ nes_mmc3_bus_write_stall:
     daddu t1, t1, t2
     b nes_mmc3_bus_write_close_done
     sd t1, global_nesstall-global_cpucycles(t0)
+  EndASM
+
+; ---- moved out of the hot span to make room for the mapper slot (mapper-modules design note, section 8), each 0
+; cycles a guest frame in the step-1 measuring run (rdp-m1-cart's profile), unchanged but for the one branch noted:
+; nes_mmc3_bus_write_ram, the internal-RAM write of u_neswrite (the core stores RAM inline; only outside callers of
+; NesWrite reach it), entered by branch from write.n64 and leaving by jr; mmc3_sign_div_seven, the RAM-wait sign's
+; divide for a seven-cycle loop (window.n64), entered by branch, which used to fall into mmc3_sign_charge and now
+; branches there (+1 instruction and its delay slot, on a path that does not run); mmc3_masked_frame, the masked
+; budget's distance past the visible lines (window.n64), the same way (its hot side: bgtz-not-taken became blez-taken,
+; one instruction either way). ----
+  ASM
+nes_mmc3_bus_write_ram:
+    la t0, global_m
+    andi a0, a0, 0x7FF
+    addu t0, t0, a0
+    jr ra
+    sb a1, 0(t0)
+mmc3_sign_div_seven:
+    addiu t2, zero, 147
+    multu a4, t2
+    mflo t2
+    b mmc3_sign_charge
+    srl t2, t2, 10
+mmc3_worker_backwards:              ; u_workeradvance asked to go back in time (advance.n64): the stop, WorkerError 20
+    addiu t0, zero, 20              ; (a1 = @NesMmc3ApuClock, as at the branch)
+    jr ra
+    sd t0, global_workererror-global_nesmmc3apuclock(a1)
+mmc3_masked_frame:                  ; the masked budget's distance past line 241 (window.n64): it used to lie between
+    la t0, global_ppupreline        ; its two entries, the bltz and the not-taken bgtz (now a taken blez) of
+    ld t0, 0(t0)                    ; mmc3_masked_raster, and fall into mmc3_masked_distance; it now branches there
+    addiu t0, t0, 1
+    subu t0, t0, t1
+    mult t0, t3
+    mflo t0
+    subu t0, t0, t2
+    b mmc3_masked_distance
+    addiu t0, t0, -1
+  EndASM
+  ASM
     .align 2
 mmc3_write_table:
     .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect

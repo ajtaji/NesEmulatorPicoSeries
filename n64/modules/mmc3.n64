@@ -1,0 +1,26 @@
+; modules/mmc3.n64 - the MMC3 (mapper 4) mapper module: its hot code, as it runs in the mapper slot
+;
+; WHAT: everything of the hot unit that is the MMC3's own and nothing else (the mapper-modules design note, section 3):
+;   the window budget's IRQ horizon (mmc3_window.n64), the IRQ deadline and the scanline counter (mmc3_irq.n64), the
+;   A12 walk (mmc3_a12.n64), the register write with its sync decision, the register file and the A12 notice
+;   (mmc3_write.n64). Each piece was moved unchanged from the common unit files it lived in (unit/window.n64,
+;   unit/advance.n64, unit/a12.n64, unit/write.n64); only their entry labels changed (u_<name> is now the slot's
+;   entry, unit/slot.n64; the body opens at mmc3_e_<name>), and three transfers that left the module by a relative
+;   branch now leave by an absolute jump, so the code may run from the slot after being copied there (below).
+;
+; THE MODULE'S CONTRACT (every module keeps it; the slot's entry table is in unit/slot.n64):
+;   - the common code enters only through the slot's entry labels; the module leaves by j / jal to common labels;
+;   - inside the module, any transfer (MMC3 keeps its own la a7 + j link convention, its own tables by la);
+;   - no relative branch from the module to a label outside it and its cold part (unit/a12_cold.n64, between
+;     nes_mapper_cold and nes_mapper_cold_end: MMC3's A12 cold paths and table): a module's bytes are assembled at
+;     the slot's address, and a branch out of them would say nothing the next module keeps. The build checks the
+;     module's words (build.py, check_mapper_slot).
+;   MMC3 is the default module: it is assembled in place in the slot, so the bytes copied in at load (the module
+;   store, library/runtime.n64's loader) are the bytes the slot already holds - checked by the build, byte for byte.
+;
+; THE PLAIN TWIN of each piece is in its file, unchanged; the check is the guest's (digests every frame, the oracles,
+; the pictures) and --a12-check for the walk.
+  XIncludeFile "mmc3_window.n64"
+  XIncludeFile "mmc3_irq.n64"
+  XIncludeFile "mmc3_a12.n64"
+  XIncludeFile "mmc3_write.n64"

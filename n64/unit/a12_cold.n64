@@ -7,6 +7,7 @@
 ; past 239), which the walk now does in place for its two common paths; and the checking build's
 ; dual walk (a12_check, #NES_A12_CHECK only), which with N7's growth no longer fitted the hot span.
   ASM
+nes_mapper_cold:                    ; the mapper module's cold part (unit/slot.n64): here, MMC3's A12 cold paths and table
 mmc3_fetch_sprite_width:
     sltu t0, t2, a4
     bnez t0, mmc3_fetch_sprite_once
@@ -286,3 +287,6 @@ a12_check_restore:                ; leaf: a4 -> the twelve state words (t1, t2 s
     sd t1, 0(t2)
   EndASM
 CompilerEndIf
+  ASM
+nes_mapper_cold_end:
+  EndASM

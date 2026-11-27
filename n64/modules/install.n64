@@ -1,0 +1,143 @@
+; modules/install.n64 - the mapper-module store and its installer (the mapper-modules design note, sections 3 and 5)
+;
+; THE STORE: the cartridge file "modules.bin" (written by build.py, check_mapper_slot / module_store): every mapper
+; module of this cart, each as the bytes it runs as in the mapper slot (unit/slot.n64), assembled AT the slot's
+; address - position-dependent code, never relocated. Layout (big-endian words):
+;   +0  "NESM" "ODST"         the store's mark (the installer finds the file by it, whatever its file number)
+;   +8  count, slot bytes      the modules, and #NES_SLOT_BYTES of the build that made it (checked)
+;   +16 count x 16 B           mapper, offset of its bytes in the file (16-aligned), its bytes, 0
+;   ...                        the modules' bytes
+; MMC3 is assembled in place in the slot of every build, so its store bytes are the slot's own bytes: build.py
+; refuses the cart unless the store's MMC3 bytes equal the image's slot word for word.
+;
+; NesModuleInstall(mapper) - WHAT: finds mapper's module in the store and puts it into the slot so that the CPU
+; runs it: out a0 = 1 installed, 0 when this cart has no module for that mapper (the loader refuses the ROM).
+; HOW (and why each step):
+;   1. the store's file: the cartridge directory's files are tried in order for the mark (LpmCartFiles / LpmCartFile /
+;      LpmCartLong, the library's directory readers) - the file number differs between builds (the RSP program is
+;      a file only in the builds that show the RSP's picture);
+;   2. its header and table (544 bytes, up to 32 modules) by PI DMA into the slot itself (no buffer of its own: no
+;      variable moves; the slot's bytes are replaced in step 5 or the load is refused), after a write-back and
+;      invalidate of the slot's D lines (step 4's reason), so that the loads below read what the DMA wrote;
+;   3. the mapper's row; its byte count must be #NES_SLOT_BYTES (a store made for another slot size is refused);
+;   4. Hit_Writeback_Invalidate_D over the slot (LpmCacheWritebackInvalidateData): the PI DMA writes RDRAM behind
+;      the D-cache, so no D line of the slot may be left to be written back over the new bytes later, or read stale;
+;   5. the module's bytes by PI DMA from the cartridge straight into the slot (NesCartRead; the slot is 16-aligned);
+;   6. Hit_Invalidate_I over the slot (LpmCacheInvalidateCode): the I-cache is not coherent with RDRAM writes, so
+;      a line of the old module still in it would run instead of the new bytes. Instruction fetch then reads RDRAM.
+;   Once at load, before the CPU first enters the unit (LoadGame -> NesRuntimeLoad). ~180 D and ~90 I cache ops and
+;   one 2.9 KB DMA (R: well under 0.1 ms).
+; FRAME (64 B): 0 ra | 8 mapper | 16 the store's PI address | 24 file number | 32 file count | 40 table pointer |
+;   48 the module's offset in the file
+; THE PLAIN TWIN:
+;   For n = 0 To LpmCartFiles() - 1
+;     file = LpmCartFile(n)
+;     If LpmCartLong(file) = $4E45534D And LpmCartLong(file + 4) = $4F445354 : Break : EndIf
+;   Next : If n = LpmCartFiles() : ProcedureReturn 0 : EndIf
+;   table = ?nes_mapper_slot : LpmCacheWritebackInvalidateData(table, #NES_SLOT_BYTES)
+;   If NesCartRead(file, table, 544) = 0 : ProcedureReturn 0 : EndIf
+;   If PeekL(table + 12) <> #NES_SLOT_BYTES : ProcedureReturn 0 : EndIf
+;   For i = 0 To Min(PeekL(table + 8), 32) - 1
+;     row = table + 16 + i * 16
+;     If PeekL(row) = mapper And PeekL(row + 8) = #NES_SLOT_BYTES
+;       LpmCacheWritebackInvalidateData(?nes_mapper_slot, #NES_SLOT_BYTES)
+;       If NesCartRead(file + PeekL(row + 4), ?nes_mapper_slot, #NES_SLOT_BYTES) = 0 : ProcedureReturn 0 : EndIf
+;       LpmCacheInvalidateCode(?nes_mapper_slot, #NES_SLOT_BYTES) : ProcedureReturn 1
+;     EndIf
+;   Next : ProcedureReturn 0
+ASM
+  .cartfile "modules.bin"
+EndASM
+
+ProcedureNaked.i NesModuleInstall(mapper.i)
+  ASM
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    jal lpmcartfiles
+    nop
+    sd a0, 32(sp)
+    sd zero, 24(sp)
+nmi_find:
+    ld t0, 24(sp)
+    ld t1, 32(sp)
+    slt t1, t0, t1
+    beqz t1, nmi_none               ; no file carries the mark: no store in this cart
+    nop
+    jal lpmcartfile
+    move a0, t0
+    sd a0, 16(sp)
+    jal lpmcartlong
+    nop
+    li t0, 0x4E45534D               ; "NESM"
+    bne a0, t0, nmi_next
+    nop
+    ld a0, 16(sp)
+    jal lpmcartlong
+    daddiu a0, a0, 4
+    li t0, 0x4F445354               ; "ODST"
+    beq a0, t0, nmi_found
+    nop
+nmi_next:
+    ld t0, 24(sp)
+    daddiu t0, t0, 1
+    b nmi_find
+    sd t0, 24(sp)
+nmi_found:
+    la a0, nes_mapper_slot          ; the slot's D lines out first: the table is read into the slot itself
+    jal lpmcachewritebackinvalidatedata
+    addiu a1, zero, #NES_SLOT_BYTES
+    la a1, nes_mapper_slot
+    sd a1, 40(sp)
+    ld a0, 16(sp)
+    jal nescartread                 ; the header and the table, into the slot (its bytes are replaced next anyway)
+    addiu a2, zero, 544
+    beqz a0, nmi_none
+    ld t0, 40(sp)
+    lw t1, 12(t0)
+    addiu t2, zero, #NES_SLOT_BYTES
+    bne t1, t2, nmi_none            ; a store made for another slot size
+    lw t3, 8(t0)                    ; the count
+    sltiu t1, t3, 33
+    bnez t1, nmi_rows
+    nop
+    addiu t3, zero, 32
+nmi_rows:
+    daddiu t0, t0, 16               ; the first row
+    ld t8, 8(sp)                    ; the mapper
+nmi_row:
+    beqz t3, nmi_none
+    addiu t3, t3, -1
+    lw t1, 0(t0)
+    bne t1, t8, nmi_row
+    daddiu t0, t0, 16
+    lw t1, -8(t0)                   ; the row's bytes
+    bne t1, t2, nmi_row
+    nop
+    lw t1, -12(t0)                  ; the row's offset in the file
+    sd t1, 48(sp)
+    la a0, nes_mapper_slot
+    jal lpmcachewritebackinvalidatedata
+    addiu a1, zero, #NES_SLOT_BYTES
+    ld a0, 16(sp)
+    ld t1, 48(sp)
+    daddu a0, a0, t1
+    la a1, nes_mapper_slot
+    jal nescartread                 ; the module's bytes into the slot
+    addiu a2, zero, #NES_SLOT_BYTES
+    beqz a0, nmi_none
+    nop
+    la a0, nes_mapper_slot
+    jal lpmcacheinvalidatecode
+    addiu a1, zero, #NES_SLOT_BYTES
+    ld ra, 0(sp)
+    addiu a0, zero, 1
+    jr ra
+    daddiu sp, sp, 64
+nmi_none:
+    ld ra, 0(sp)
+    move a0, zero
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
+EndProcedure

@@ -1,0 +1,264 @@
+; ---- write_fast: the untimed look at a register write (moved from u_neswrite, unit/write.n64, unchanged) ----
+; A $8000 bank-select write that keeps bits 6-7 (the PRG and CHR modes) changes nothing the raster sees: it is
+; stored at once, without the stamp or the sync. Anything else goes on to the common timed path.
+; In: a0 addr, a1 value, t0 = @NesOpenBus, t1 = addr & $E001. Clobbers t1, t2.
+; THE PLAIN TWIN:  If addr & $E001 = $8000 And ((MapSelect ! value) & $C0) = 0 : MapSelect = value : ProcedureReturn
+;                  EndIf : (the timed path)
+  ASM
+mmc3_e_write_fast:
+    ori t2, zero, 0x8000
+    bne t1, t2, mmc3_write_fast_timed
+    ld t1, global_mapselect-global_nesopenbus(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    bnez t1, mmc3_write_fast_timed
+    nop
+    jr ra
+    sd a1, global_mapselect-global_nesopenbus(t0)
+mmc3_write_fast_timed:
+    j nes_mmc3_bus_write_timed      ; the common timed path (unit/write.n64): the stamp, then the slot's write_sync
+    nop
+
+; ---- write_sync: a register write's sync decision (moved from u_neswrite's timed path, unit/write.n64, unchanged) ----
+; Entered by branch from the common timed path with its 32-byte frame on the stack (0(sp) = ra): a0 addr, a1 value,
+; a2 the stamp. PRG-RAM protection and a bank write of the value already held have no raster effect: only the CPU
+; clock moves; a PRG register write with a sample playing first serves the pending DMC fetch; else all devices sync.
+; Then the register write, then the common window close (it pops the frame and returns).
+  EndASM
+  ASM
+mmc3_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    andi t0, a0, 0xE001
+    ; PRG-RAM protection and unchanged bank values have no raster effect.
+    ori t1, zero, 0xA001
+    beq t0, t1, nes_mmc3_mapper_only_clock
+    ori t1, zero, 0x8001
+    bne t0, t1, nes_mmc3_mapper_full_sync
+    nop
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    andi t0, t0, 7
+    la t1, global_mapregs
+    sll t2, t0, 3
+    daddu t1, t1, t2
+    ld t1, 0(t1)
+    beq a1, t1, nes_mmc3_mapper_only_clock
+    sltiu t0, t0, 6
+    bnez t0, nes_mmc3_mapper_full_sync
+    nop
+    ; Service any pending DMC read before replacing its PRG mapping.
+    la t0, global_dmcbytes
+    ld t0, 0(t0)
+    blez t0, nes_mmc3_mapper_only_clock
+    nop
+    jal u_nesmmc3syncapu
+    move a0, a2
+    b nes_mmc3_mapper_synced
+    nop
+nes_mmc3_mapper_only_clock:
+    jal u_nesmmc3advancecputime
+    move a0, a2
+    b nes_mmc3_mapper_synced
+    nop
+nes_mmc3_mapper_full_sync:
+    jal u_workeradvance
+    move a0, a2
+nes_mmc3_mapper_synced:
+    ; Read the current stamp again after device advancement, as before.
+    la t0, global_cpucycles
+    ld a2, 0(t0)
+    ld t1, global_accessphase-global_cpucycles(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal mmc3_e_write               ; MapperWrite(addr, value, stamp), in the unit (below, C4)
+    daddu a2, a2, t1
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64): an absolute jump, the module may run elsewhere
+    nop
+  EndASM
+
+; ---- mapperwrite, from mmc3_registers.n64 (C4, design note N.46b: moved unchanged, instruction for instruction) ----
+; WHAT: the MMC3's CPU write at $6000-$FFFF after u_neswrite has synced the devices: work RAM at $6000-$7FFF (enable
+; and protect honoured, the save tracking called when the cart saves), else the register picked by A14-A13 and A0:
+; $8000 bank select, $8001 bank data, $A000 mirroring, $A001 RAM protect, $C000 IRQ latch, $C001 IRQ reload,
+; $E000 IRQ disable (and acknowledge), $E001 IRQ enable. HOW: index = (addr >> 12) & 6 | addr & 1, a jump through the
+; 8-word table; the bank-data path stores the register and hands the bank to MapperChr (registers 0-1 as a 2 KB pair
+; of 1 KB slots, 2-5 as one slot each, the slot flipped by $8000 bit 7) or MapperPrg (6 by $8000 bit 6, 7), each a
+; tail jump that returns to mmc3_e_write's caller; a write of the value already held does nothing. WHY IN THE UNIT:
+; ~81 calls a guest frame (36 register writes, 45 work-RAM writes in SMB3), whose lines missed outside the unit at
+; every NMI batch (N.46b: ~3,300 of the 4,767 cycles a frame were misses). The never-run paths (select, mirroring,
+; protect: 0 cycles a frame) live in unit/cold.n64, reached through the same table. MapperWrite (outside) is now a
+; one-jump stub to this label. In: a0 address, a1 value, a2 stamp (unused here). Clobbers t0-t3, a0, a1 (as before).
+; THE PLAIN TWIN:
+;   If addr & $8000 = 0                                   ; $6000-$7FFF
+;     If MapRamEnable And MapRamProtect = 0 : MapRam(addr & 8191) = value : NesSaveChanged() : EndIf
+;   Else
+;     Select (addr >> 12 & 6) | (addr & 1)
+;       Case 0 : old = MapSelect : MapSelect = value : If (old ! value) & $C0 : MapperUpdate() : EndIf
+;       Case 1 : r = MapSelect & 7 : If MapRegs(r) <> value
+;                  MapRegs(r) = value
+;                  If r < 2 : s = (MapSelect & 128) >> 5 | r * 2 : MapperChr(s, value & 254) : MapperChr(s + 1, value | 1)
+;                  ElseIf r < 6 : MapperChr(((MapSelect & 128) >> 5 ! 4) + r - 2, value)
+;                  ElseIf r = 6 : MapperPrg((MapSelect & 64) >> 5, value & 63) : Else : MapperPrg(r - 6, value & 63)
+;                  EndIf : EndIf
+;       Case 2 : If MapFourScreen = 0 : MapperMirror((value & 1) ! 1) : EndIf
+;       Case 3 : MapRamEnable = value >> 7 & 1 : MapRamProtect = value >> 6 & 1
+;       Case 4 : MapIrqLatch = value
+;       Case 5 : MapReload = 1
+;       Case 6 : MapIrq = 0 : MapIrqEnable = 0
+;       Case 7 : MapIrqEnable = 1
+;     EndSelect
+;   EndIf
+  ASM
+mmc3_e_write:
+    andi t0, a0, 0x8000
+    beqz t0, mmc3_write_ram         ; $6000-$7FFF: work RAM
+    andi t0, a0, 1
+    srl t1, a0, 12
+    andi t1, t1, 6
+    or t1, t1, t0                   ; the register: A14-A13 and A0
+    la t2, global_nesunitbase
+    ld t2, 0(t2)                    ; NesUnitData (C7, design note N.49): the handler table is its
+    sll t1, t1, 2                   ; #NES_U_MAPTABLE words, on the window's own D-cache sets (copied at load)
+    daddu t2, t2, t1
+    lw t2, #NES_U_MAPTABLE(t2)      ; the register's handler (mmc3_write_table's word)
+    jr t2
+    nop
+mmc3_write_data:                    ; $8001: the bank register MapSelect & 7 gets the value
+    la t0, global_mapselect
+    ld t0, 0(t0)
+    la t1, global_mapregs
+    andi t2, t0, 7
+    sll t3, t2, 3
+    daddu t1, t1, t3
+    ld t3, 0(t1)
+    beq t3, a1, mmc3_write_done     ; the value it already holds: nothing changes
+    sltiu t3, t2, 2
+    sd a1, 0(t1)
+    bnez t3, mmc3_write_chr_pair    ; registers 0-1: a 2 KB CHR pair
+    andi a0, t0, 128
+    sltiu t3, t2, 6
+    beqz t3, mmc3_write_prg         ; registers 6-7: PRG
+    srl a0, a0, 5                   ; $8000 bit 7 as 4: the CHR half that is flipped
+    xori a0, a0, 4
+    addu a0, a0, t2
+    j mapperchr                     ; registers 2-5: one 1 KB slot, (4 ! flip) + r - 2
+    addiu a0, a0, -2
+mmc3_write_chr_pair:
+    srl a0, a0, 5
+    sll t2, t2, 1
+    or a0, a0, t2                   ; the pair's first slot: flip | r * 2
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    jal mapperchr                   ; the even 1 KB bank in the first slot ...
+    andi a1, a1, 254
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    ld ra, 0(sp)
+    addiu a0, a0, 1
+    daddiu sp, sp, 32
+    j mapperchr                     ; ... the odd one in the next
+    ori a1, a1, 1
+mmc3_write_prg:
+    addiu a0, t2, -6
+    bnez a0, mmc3_write_prg_bank    ; register 7: slot 1
+    andi a1, a1, 63
+    andi a0, t0, 64
+    srl a0, a0, 5                   ; register 6: slot 0, or 2 with $8000 bit 6
+mmc3_write_prg_bank:
+    j mapperprg
+    nop
+mmc3_write_latch:                   ; $C000
+    la t0, global_mapirqlatch
+    jr ra
+    sd a1, 0(t0)
+mmc3_write_reload:                  ; $C001: the counter reloads at the next counted rise
+    la t0, global_mapreload
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+mmc3_write_ack:                     ; $E000: disable and acknowledge
+    la t0, global_mapirqenable
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    jr ra
+    sd zero, 0(t0)
+mmc3_write_enable:                  ; $E001
+    la t0, global_mapirqenable
+    addiu t1, zero, 1
+    jr ra
+    sd t1, 0(t0)
+mmc3_write_ram:                     ; $6000-$7FFF, enabled and not protected
+    la t0, global_mapramenable
+    ld t1, 0(t0)
+    beqz t1, mmc3_write_done
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, mmc3_write_done
+    andi a0, a0, 8191
+    la t0, global_mapram
+    daddu t0, t0, a0
+  EndASM
+  CompilerIf #GAME_SAVE_BYTES>0
+    ; THE SAVE MARK in place (mapper-modules design note, section 8c): the battery RAM's 256-byte page is marked dirty
+    ; here, not by a call of the compiled NesSaveChanged (save.n64), whose code outside the unit the compiler placed on
+    ; the core's I-cache sets (~45 calls a frame). a0 = the offset (addr & 8191, so >= 0), a1 the value, t0 the byte.
+    ; THE PLAIN TWIN (save.n64's NesSaveChanged, unchanged there):
+    ;   If NesSaveOnline And offset>=0 And offset<NesSaveLimit : NesSaveDirty(offset>>8)=1 : NesSavePending=1 : EndIf
+    ;   (NesSaveLimit = NesRuntimeSaveBytes in the runtime cart, the only one with the slot)
+    ASM
+      sb a1, 0(t0)                  ; the store
+      la t0, global_nessaveonline
+      ld t1, 0(t0)                  ; NesSaveOnline (0 until the save is read at load)
+      ld t2, global_nesruntimesavebytes-global_nessaveonline(t0)
+      beqz t1, mmc3_write_done
+      slt t2, a0, t2                ; offset < NesSaveLimit
+      beqz t2, mmc3_write_done
+      srl t1, a0, 8                 ; the page
+      la t3, global_nessavedirty
+      daddu t3, t3, t1
+      addiu t1, zero, 1
+      sb t1, 0(t3)                  ; NesSaveDirty(page) = 1
+      jr ra
+      sd t1, global_nessavepending-global_nessaveonline(t0)   ; NesSavePending = 1
+    EndASM
+  CompilerElse
+    ASM
+      jr ra
+      sb a1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+mmc3_write_done:
+    jr ra
+    nop
+  EndASM
+
+; ---- mappera12, from mmc3_ticks.n64 (N7: moved unchanged) ----
+; MMC3 A12 watch on a PPU bus access: a0 the address, a1 the dot clock. A fall records the dot; a rise after
+; at least 10 low dots clocks the IRQ counter (mmc3_e_clockirq, a tail jump). Clobbers t0, t1, a0.
+  ASM
+mmc3_e_a12:
+    srl a0, a0, 12
+    la t0, global_mapa12
+    ld t1, 0(t0)
+    andi a0, a0, 1
+    beq a0, t1, mmc3_a12_done
+    nop
+    sd a0, 0(t0)
+    bnez a0, mmc3_a12_rise
+    nop
+    jr ra
+    sd a1, global_maplowsince-global_mapa12(t0)
+mmc3_a12_rise:
+    ld t1, global_maplowsince-global_mapa12(t0)
+    dsubu t1, a1, t1
+    slti t1, t1, 10
+    bnez t1, mmc3_a12_done
+    nop
+    j mmc3_e_clockirq
+    nop
+mmc3_a12_done:
+    jr ra
+    nop
+  EndASM

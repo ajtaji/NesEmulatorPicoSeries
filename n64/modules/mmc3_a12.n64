@@ -57,7 +57,7 @@
 ;   the twelve state words, IRQ counter, reload, assertions and clocks included); then the guest's
 ;   per-instruction digest, checkpoints, picture, PCM and video digest on the shipped build.
   ASM
-u_mapperpputicks:
+mmc3_e_pputicks:
     sll a1, a0, 1
     addu a1, a1, a0
     la a2, global_mapdots

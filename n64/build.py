@@ -113,6 +113,53 @@ def check_hot_unit(symbols):
     print(f"NES hot unit: {span} bytes hot span from ${start:08X}, {16384 - span} bytes to spare")
 
 
+IMAGE_BASE = 0x80000400       # the RDRAM image's load address (nes.bin is the image from there)
+
+
+def module_store(modules, slot_bytes):
+    """The cartridge file modules.bin (modules/install.n64): the mark, the count and the slot size, one 16-byte row a
+    module (mapper, offset, bytes, 0), then each module's bytes as they run in the slot, 16-aligned."""
+    import struct
+    head = b"NESMODST" + struct.pack(">II", len(modules), slot_bytes)
+    rows, body = b"", b""
+    offset = 16 + 16 * len(modules)
+    for mapper, code in sorted(modules.items()):
+        if len(code) != slot_bytes:
+            raise RuntimeError(f"mapper {mapper}'s module is {len(code)} bytes, not the slot's {slot_bytes}")
+        rows += struct.pack(">IIII", mapper, offset + len(body), len(code), 0)
+        body += code + bytes(-len(code) % 16)
+    data = head + rows + body
+    return data + bytes(max(0, 544 - len(data)))   # the installer reads the header and table as 544 bytes
+
+
+def check_mapper_slot(symbols, image, slot_bytes):
+    """The mapper slot's rules (unit/slot.n64), read from the build's own symbols and image: the slot is exactly
+    slot_bytes long from a 16-byte boundary, the module fits it, and no relative branch in the module leaves the
+    slot or the module's cold part (a branch's target moves with the bytes; only j / jal may leave). Returns the
+    slot's bytes (the default module, MMC3, as it runs)."""
+    import struct
+    sym = {}
+    for line in symbols.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            sym[parts[1]] = int(parts[0], 16)
+    slot, fill, end = sym["nes_mapper_slot"], sym["nes_mapper_slot_fill"], sym["nes_mapper_slot_end"]
+    if slot % 16 or end - slot != slot_bytes or not slot <= fill <= end:
+        raise RuntimeError(f"mapper slot ${slot:08X}..${end:08X} (module to ${fill:08X}) is not {slot_bytes} bytes "
+                           "from a 16-byte boundary with the module inside it")
+    cold, cold_end = sym["nes_mapper_cold"], sym["nes_mapper_cold_end"]
+    for pc in range(slot, fill, 4):
+        w = struct.unpack_from(">I", image, pc - IMAGE_BASE)[0]
+        op, rt = w >> 26, (w >> 16) & 31
+        if op in (4, 5, 6, 7, 20, 21, 22, 23) or (op == 1 and rt in (0, 1, 2, 3, 16, 17, 18, 19)):
+            off = w & 0xFFFF
+            target = pc + 4 + ((off - 0x10000 if off & 0x8000 else off) << 2)
+            if not (slot <= target < end or cold <= target < cold_end):
+                raise RuntimeError(f"the mapper module's branch at ${pc:08X} leaves the slot (to ${target:08X})")
+    print(f"NES mapper slot: {slot_bytes} bytes at ${slot:08X}, module {fill - slot} bytes, {end - fill} free")
+    return image[slot - IMAGE_BASE:end - IMAGE_BASE]
+
+
 def build(args, *, controller_trace=()):
     controller_trace = tuple(controller_trace)
     telemetry = getattr(args, "telemetry", False)
@@ -223,6 +270,8 @@ def build(args, *, controller_trace=()):
         "NES_DMC_RASTER_DEADLINE": int(raster_deadline),
         "NES_CHAIN_WINDOWS": int(cart.mapper == 1 or chain_nrom),
         "HOST_AUDIO_FRAMES": 512,
+        # the mapper slot (unit/slot.n64; the mapper-modules design note, section 3): the hot span's last bytes
+        "NES_SLOT_BYTES": 2896,
         "NES_MMC1_ROWS": int(mmc1_rows),
         "NES_RETAINED_ROWS": int(mmc1_rows or (runtime and cart.mapper == 4)),
         "NES_BG_EXPANDED": int(cart.mapper in (0, 2) and chr_size == 8192),
@@ -322,15 +371,35 @@ def build(args, *, controller_trace=()):
         (app / "region.pmi").write_text(render_region(audio_rate))
         (app / "game.pmi").write_text("".join(f"#{k} = {v}\n" for k, v in settings.items()))
         (app / "game.bin").write_bytes(program + cart.chr)
-        result = subprocess.run([str(compiler), "--compile", "nes.n64", "-o", "nes.bin"],
-                                cwd=app, env=dict(os.environ, PMF_ROOT=str(sdk)),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        log = result.stdout.decode(errors="replace")
-        if result.returncode or not (app / "nes.z64").is_file():
-            raise RuntimeError(log)
+        slot_bytes = settings["NES_SLOT_BYTES"]
+        (app / "modules.bin").write_bytes(module_store({4: bytes(slot_bytes)}, slot_bytes))
+
+        def compile_cart():
+            result = subprocess.run([str(compiler), "--compile", "nes.n64", "-o", "nes.bin"],
+                                    cwd=app, env=dict(os.environ, PMF_ROOT=str(sdk)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            log = result.stdout.decode(errors="replace")
+            if result.returncode or not (app / "nes.z64").is_file():
+                raise RuntimeError(log)
+            return log
+
+        log = compile_cart()
         check_storage_layout(log)
         if cpu_core == "asm":
             check_hot_unit(app / "nes.bin.sym")
+        if runtime and cart.mapper == 4:
+            # The mapper slot (mapper-modules design note, section 3): MMC3 is assembled in place, so its store bytes
+            # are the image's own slot bytes. The store is a cartridge file, outside the RDRAM image: the second
+            # compile with the real store must give the same RDRAM image and symbols, byte for byte.
+            first = (app / "nes.bin").read_bytes(), (app / "nes.bin.sym").read_bytes()
+            module = check_mapper_slot(app / "nes.bin.sym", first[0], slot_bytes)
+            store = module_store({4: module}, slot_bytes)
+            (app / "modules.bin").write_bytes(store)
+            log = compile_cart()
+            if ((app / "nes.bin").read_bytes(), (app / "nes.bin.sym").read_bytes()) != first:
+                raise RuntimeError("the mapper store's second compile changed the RDRAM image")
+            if (app / "nes.z64").read_bytes().count(store) != 1:
+                raise RuntimeError("the mapper store is not in the cartridge exactly once")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         image = (app / "nes.z64").read_bytes()
         if save_bytes:

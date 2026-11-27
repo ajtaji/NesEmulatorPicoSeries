@@ -364,6 +364,7 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
     XIncludeFile "console_record.n64"
   CompilerEndIf
   XIncludeFile "mmc3_run.n64"
+  XIncludeFile "modules/install.n64"   ; the mapper-module store and its installer (mapper modules)
 CompilerEndIf
 
 CompilerIf #NES_PPU_CHECK

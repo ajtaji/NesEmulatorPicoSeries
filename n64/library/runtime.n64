@@ -5,63 +5,363 @@ XIncludeFile "boot.n64"
 Global Dim NesRuntimeHeader.a[32]
 Global NesRuntimeSaveBytes.i
 
-Procedure.i NesRuntimeLoad()
-  Protected header.i=(@NesRuntimeHeader[0]+15)&~15, flags.i, prg.i, chrBytes.i, chrAddress.i, size.i
-  Protected base.i=#NES_CART_LOW, chrStorage.i, total.i, offset.i, dest.i
-  If NesCartRead(#NES_RUNTIME_BASE,header,16)=0 : ProcedureReturn 0 : EndIf
-  If NesRomSize(header)=0 : ProcedureReturn 0 : EndIf
-  flags=PeekA(header+6) : CartMapper=NesRomMapper(header) : CartSubmapper=NesRomSubmapper(header)
-  If CartMapper<>#GAME_MAPPER : ProcedureReturn 0 : EndIf
-  prg=PeekA(header+4)*16384 : chrBytes=PeekA(header+5)*8192
-  size=prg
-  If prg=16384 : size=32768 : EndIf
-  If CartMapper=2 : size=prg*2 : EndIf
-  chrStorage=chrBytes
-  If chrStorage=0 : chrStorage=NesRomChrRam(CartMapper) : EndIf
-  If chrStorage>#CART_CHR_BANKS*8192 : ProcedureReturn 0 : EndIf
-  chrAddress=#NES_RUNTIME_BASE+16+prg : total=size+chrStorage
-  NesPrgOnCart=0
-  If total>#NES_CART_LOW_END-#NES_CART_LOW
-    If total<=#NES_CART_HIGH_END-#NES_CART_HIGH And LpmMemorySize()>=$800000
-      base=#NES_CART_HIGH
-    ElseIf (CartMapper=5 Or CartMapper=228) And prg>=32768 And chrStorage<=#NES_CART_LOW_END-#NES_CART_LOW
-      NesPrgOnCart=#NES_RUNTIME_BASE+16
-      size=0
-    Else
-      ProcedureReturn 0
-    EndIf
-  EndIf
-  CartPrg=base : CartChr=base+size
-  If NesPrgOnCart=0
-    If CartMapper=2
-      dest=base
-      For offset=0 To prg-1 Step 16384
-        If NesCartRead(#NES_RUNTIME_BASE+16+offset,dest,16384)=0 : ProcedureReturn 0 : EndIf
-        If offset=0
-          If NesCartRead(#NES_RUNTIME_BASE+prg-16384+16,dest+16384,16384)=0 : ProcedureReturn 0 : EndIf
-        Else
-          MapCopy(dest+16384,base+16384,16384)
-        EndIf
-        dest+32768
-      Next
-    Else
-      If NesCartRead(#NES_RUNTIME_BASE+16,CartPrg,prg)=0 : ProcedureReturn 0 : EndIf
-      If prg=16384 : MapCopy(CartPrg+16384,CartPrg,16384) : EndIf
-    EndIf
-  EndIf
-  CompilerIf #GAME_MAPPER=1
-    NesMmc1Bias(0)=CartPrg-$8000 : NesMmc1Bias(1)=CartPrg-$8000
+; NesRuntimeLoad - the runtime cartridge's ROM loader, in assembly (the owner's order: everything emulator related
+; is assembly but the menu and the settings; the mapper-modules design note, sections 2 and 5).
+; WHAT: reads the iNES header of the file appended at #NES_RUNTIME_BASE, validates it (NesRomSize), installs the
+; mapper module of its mapper into the hot unit's mapper slot (NesModuleInstall, modules/install.n64: a mapper with
+; no module in this cart is refused here - it used to be "any mapper but #GAME_MAPPER"), copies PRG and CHR into
+; RDRAM and sets the cartridge's globals. Out: a0 = 1 loaded, 0 refused (LoadGame refuses the run).
+; HOW: the compiled procedure it replaces, step for step and in the same order (its text is the plain twin below);
+; every local lives in this procedure's own frame, so no callee's register use matters. Calls (compiled, library or
+; header helpers): nescartread, nesromsize, nesrommapper, nesromsubmapper, nesromchrram, nesromram, nesromsavebytes,
+; mapcopy, lpmmemorysize, nesmoduleinstall (assembly). Clobbers what a compiled call may.
+; FRAME (128 B): 0 ra | 8 header | 16 prg | 24 chrBytes | 32 size | 40 chrStorage | 48 base | 56 total | 64 offset |
+;   72 dest | 80 mapper | 88 flags | 96 submapper
+; THE PLAIN TWIN (the compiled procedure, as it was, but the module look-up in place of the #GAME_MAPPER test):
+;   header = (@NesRuntimeHeader[0] + 15) & ~15
+;   If NesCartRead(#NES_RUNTIME_BASE, header, 16) = 0 Or NesRomSize(header) = 0 : ProcedureReturn 0 : EndIf
+;   flags = PeekA(header + 6) : CartMapper = NesRomMapper(header) : CartSubmapper = NesRomSubmapper(header)
+;   If NesModuleInstall(CartMapper) = 0 : ProcedureReturn 0 : EndIf
+;   prg = PeekA(header + 4) * 16384 : chrBytes = PeekA(header + 5) * 8192
+;   size = prg : If prg = 16384 : size = 32768 : EndIf : If CartMapper = 2 : size = prg * 2 : EndIf
+;   chrStorage = chrBytes : If chrStorage = 0 : chrStorage = NesRomChrRam(CartMapper) : EndIf
+;   If chrStorage > #CART_CHR_BANKS * 8192 : ProcedureReturn 0 : EndIf
+;   total = size + chrStorage : NesPrgOnCart = 0 : base = #NES_CART_LOW
+;   If total > #NES_CART_LOW_END - #NES_CART_LOW
+;     If total <= #NES_CART_HIGH_END - #NES_CART_HIGH And LpmMemorySize() >= $800000 : base = #NES_CART_HIGH
+;     ElseIf (CartMapper = 5 Or CartMapper = 228) And prg >= 32768 And chrStorage <= #NES_CART_LOW_END - #NES_CART_LOW
+;       NesPrgOnCart = #NES_RUNTIME_BASE + 16 : size = 0
+;     Else : ProcedureReturn 0 : EndIf
+;   EndIf
+;   CartPrg = base : CartChr = base + size
+;   If NesPrgOnCart = 0
+;     If CartMapper = 2                        ; UxROM: each 16 KB bank paired with the fixed last one, 32 KB a view
+;       dest = base
+;       For offset = 0 To prg - 1 Step 16384
+;         If NesCartRead(#NES_RUNTIME_BASE + 16 + offset, dest, 16384) = 0 : ProcedureReturn 0 : EndIf
+;         If offset = 0 : If NesCartRead(#NES_RUNTIME_BASE + prg - 16384 + 16, dest + 16384, 16384) = 0 : ProcedureReturn 0 : EndIf
+;         Else : MapCopy(dest + 16384, base + 16384, 16384) : EndIf
+;         dest + 32768
+;       Next
+;     Else
+;       If NesCartRead(#NES_RUNTIME_BASE + 16, CartPrg, prg) = 0 : ProcedureReturn 0 : EndIf
+;       If prg = 16384 : MapCopy(CartPrg + 16384, CartPrg, 16384) : EndIf
+;     EndIf
+;   EndIf
+;   (#GAME_MAPPER = 1 builds: NesMmc1Bias(0) = NesMmc1Bias(1) = CartPrg - $8000)
+;   If NesCartRead(#NES_RUNTIME_BASE + 16 + prg, CartChr, chrBytes) = 0 : ProcedureReturn 0 : EndIf
+;   CartPrgBanks = size / 32768 : CartChrBanks = chrStorage / 8192
+;   CartChrRam = Bool(chrBytes = 0) : ChrWritable = CartChrRam : MapChrRam = CartChrRam : MapChrBytes = chrStorage
+;   MapPrgBytes = prg : MapRamBytes = NesRomRam(header, CartMapper)
+;   CartConflicts = Bool(((m = 2 Or m = 3 Or m = 66) And sub <> 1) Or ((m = 7 Or m = 11) And sub = 2) Or (m = 34 And chrBytes = 0))
+;   PpuMirroring = flags & 1 : MapFourScreen = Bool(flags & 8)
+;   NesRuntimeSaveBytes = NesRomSaveBytes(header, CartMapper) : MapBattery = Bool(NesRuntimeSaveBytes)
+;   ProcedureReturn 1
+ProcedureNaked.i NesRuntimeLoad()
+  ASM
+    daddiu sp, sp, -128
+    sd ra, 0(sp)
+    la a1, global_nesruntimeheader
+    daddiu a1, a1, 15
+    daddiu t0, zero, -16
+    and a1, a1, t0                  ; header: the buffer's first 16-byte boundary
+    sd a1, 8(sp)
+    li a0, #NES_RUNTIME_BASE
+    jal nescartread                 ; the 16-byte header from the cartridge
+    addiu a2, zero, 16
+    beqz a0, nrl_fail
+    nop
+    jal nesromsize                  ; 0: not a header this cart can run
+    ld a0, 8(sp)
+    beqz a0, nrl_fail
+    ld t0, 8(sp)
+    lbu t1, 6(t0)
+    sd t1, 88(sp)                   ; flags
+    jal nesrommapper
+    move a0, t0
+    la t0, global_cartmapper
+    sd a0, 0(t0)
+    sd a0, 80(sp)
+    jal nesromsubmapper
+    ld a0, 8(sp)
+    la t0, global_cartsubmapper
+    sd a0, 0(t0)
+    sd a0, 96(sp)
+  EndASM
+  CompilerIf #GAME_MAPPER=4
+    ASM
+      jal nesmoduleinstall          ; the mapper's module into the slot; 0: no module for it in this cart
+      ld a0, 80(sp)
+      beqz a0, nrl_fail
+      nop
+    EndASM
+  CompilerElse
+    ASM
+      ld t0, 80(sp)                 ; the configurations without the slot: one mapper, #GAME_MAPPER
+      addiu t1, zero, #GAME_MAPPER
+      bne t0, t1, nrl_fail
+      nop
+    EndASM
   CompilerEndIf
-  If NesCartRead(chrAddress,CartChr,chrBytes)=0 : ProcedureReturn 0 : EndIf
-  CartPrgBanks=size/32768 : CartChrBanks=chrStorage/8192
-  CartChrRam=Bool(chrBytes=0) : ChrWritable=CartChrRam
-  MapChrRam=CartChrRam : MapChrBytes=chrStorage
-  MapPrgBytes=prg : MapRamBytes=NesRomRam(header,CartMapper)
-  CartConflicts=Bool(((CartMapper=2 Or CartMapper=3 Or CartMapper=66) And CartSubmapper<>1) Or ((CartMapper=7 Or CartMapper=11) And CartSubmapper=2) Or (CartMapper=34 And chrBytes=0))
-  PpuMirroring=flags&1 : MapFourScreen=Bool(flags&8)
-  NesRuntimeSaveBytes=NesRomSaveBytes(header,CartMapper)
-  MapBattery=Bool(NesRuntimeSaveBytes)
-  ProcedureReturn 1
+  ASM
+    ld t0, 8(sp)
+    lbu t1, 4(t0)
+    sll t1, t1, 14                  ; prg = PRG banks x 16 KB
+    sd t1, 16(sp)
+    lbu t2, 5(t0)
+    sll t2, t2, 13                  ; chrBytes = CHR banks x 8 KB
+    sd t2, 24(sp)
+    move t3, t1                     ; size = prg
+    addiu t0, zero, 16384
+    bne t1, t0, nrl_size_mapper
+    nop
+    ori t3, zero, 0x8000            ; a 16 KB PRG is mirrored: 32 KB
+nrl_size_mapper:
+    ld t0, 80(sp)
+    addiu t8, zero, 2
+    bne t0, t8, nrl_size_done
+    nop
+    sll t3, t1, 1                   ; UxROM: each 16 KB bank and the fixed one, 32 KB a view
+nrl_size_done:
+    sd t3, 32(sp)
+    bnez t2, nrl_chr_storage
+    move a0, t2
+    jal nesromchrram                ; CHR-RAM: the board's size
+    move a0, t0
+nrl_chr_storage:
+    sd a0, 40(sp)                   ; chrStorage
+    li t0, #CART_CHR_BANKS
+    sll t0, t0, 13                  ; #CART_CHR_BANKS x 8 KB
+    slt t0, t0, a0
+    bnez t0, nrl_fail               ; more CHR than this cart's pair / mask tables hold
+    ld t1, 32(sp)
+    daddu t1, t1, a0
+    sd t1, 56(sp)                   ; total = size + chrStorage
+    la t0, global_nesprgoncart
+    sd zero, 0(t0)
+    li t0, #NES_CART_LOW
+    sd t0, 48(sp)                   ; base
+    li t0, #NES_CART_LOW_END-#NES_CART_LOW
+    slt t0, t0, t1
+    beqz t0, nrl_placed             ; it fits the low arena
+    nop
+    li t0, #NES_CART_HIGH_END-#NES_CART_HIGH
+    slt t0, t0, t1
+    bnez t0, nrl_on_cart            ; nor the Expansion Pak's arena
+    nop
+    jal lpmmemorysize
+    nop
+    li t0, 0x800000
+    slt t0, a0, t0
+    bnez t0, nrl_on_cart            ; no Expansion Pak
+    nop
+    li t0, #NES_CART_HIGH
+    b nrl_placed
+    sd t0, 48(sp)
+nrl_on_cart:                        ; MMC5 / Action 52 with a large PRG: PRG read from the cartridge in place
+    ld t0, 80(sp)
+    addiu t1, zero, 5
+    beq t0, t1, nrl_on_cart_board
+    addiu t1, zero, 228
+    bne t0, t1, nrl_fail
+    nop
+nrl_on_cart_board:
+    ld t0, 16(sp)
+    ori t1, zero, 0x8000
+    slt t0, t0, t1
+    bnez t0, nrl_fail
+    ld t0, 40(sp)
+    li t1, #NES_CART_LOW_END-#NES_CART_LOW
+    slt t0, t1, t0
+    bnez t0, nrl_fail
+    nop
+    li t0, #NES_RUNTIME_BASE+16
+    la t1, global_nesprgoncart
+    sd t0, 0(t1)
+    sd zero, 32(sp)                 ; size = 0
+nrl_placed:
+    ld t0, 48(sp)
+    la t1, global_cartprg
+    sd t0, 0(t1)
+    ld t2, 32(sp)
+    daddu t2, t0, t2
+    la t1, global_cartchr
+    sd t2, 0(t1)                    ; CartChr = base + size
+    la t1, global_nesprgoncart
+    ld t1, 0(t1)
+    bnez t1, nrl_prg_done
+    ld t0, 80(sp)
+    addiu t1, zero, 2
+    bne t0, t1, nrl_prg_linear
+    nop
+    ; UxROM: view k = bank k at +0, the fixed last bank at +16 KB (the first read; the others copy it)
+    ld t0, 48(sp)
+    sd t0, 72(sp)                   ; dest = base
+    sd zero, 64(sp)                 ; offset = 0
+nrl_ux_loop:
+    ld t0, 64(sp)
+    ld t1, 16(sp)
+    slt t1, t0, t1
+    beqz t1, nrl_prg_done
+    nop
+    li a0, #NES_RUNTIME_BASE+16
+    daddu a0, a0, t0
+    ld a1, 72(sp)
+    jal nescartread
+    addiu a2, zero, 16384
+    beqz a0, nrl_fail
+    ld t0, 64(sp)
+    bnez t0, nrl_ux_copy
+    nop
+    ld t1, 16(sp)
+    li a0, #NES_RUNTIME_BASE+16-16384
+    daddu a0, a0, t1                ; the last bank's place in the file
+    ld a1, 72(sp)
+    daddiu a1, a1, 16384
+    jal nescartread
+    addiu a2, zero, 16384
+    beqz a0, nrl_fail
+    nop
+    b nrl_ux_next
+    nop
+nrl_ux_copy:
+    ld a0, 72(sp)
+    daddiu a0, a0, 16384
+    ld a1, 48(sp)
+    daddiu a1, a1, 16384
+    jal mapcopy                     ; the fixed bank, copied from the first view
+    addiu a2, zero, 16384
+nrl_ux_next:
+    ld t0, 64(sp)
+    daddiu t0, t0, 16384
+    sd t0, 64(sp)
+    ld t1, 72(sp)
+    ori t2, zero, 0x8000
+    daddu t1, t1, t2
+    b nrl_ux_loop
+    sd t1, 72(sp)
+nrl_prg_linear:
+    li a0, #NES_RUNTIME_BASE+16
+    la t0, global_cartprg
+    ld a1, 0(t0)
+    jal nescartread
+    ld a2, 16(sp)
+    beqz a0, nrl_fail
+    ld t1, 16(sp)
+    addiu t0, zero, 16384
+    bne t1, t0, nrl_prg_done
+    nop
+    la t0, global_cartprg
+    ld a1, 0(t0)
+    daddiu a0, a1, 16384
+    jal mapcopy                     ; a 16 KB PRG mirrored into the second half
+    addiu a2, zero, 16384
+nrl_prg_done:
+  EndASM
+  CompilerIf #GAME_MAPPER=1
+    ASM
+      la t0, global_cartprg
+      ld t1, 0(t0)
+      li t2, 0x8000
+      dsubu t1, t1, t2
+      la t0, global_nesmmc1bias
+      sd t1, 0(t0)
+      sd t1, 8(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+    ld t1, 16(sp)
+    li a0, #NES_RUNTIME_BASE+16
+    daddu a0, a0, t1                ; the CHR after the PRG in the file
+    la t0, global_cartchr
+    ld a1, 0(t0)
+    jal nescartread
+    ld a2, 24(sp)
+    beqz a0, nrl_fail
+    ld t0, 32(sp)
+    dsrl t0, t0, 15
+    la t1, global_cartprgbanks
+    sd t0, 0(t1)                    ; CartPrgBanks = size / 32768
+    ld t0, 40(sp)
+    dsrl t1, t0, 13
+    la t2, global_cartchrbanks
+    sd t1, 0(t2)                    ; CartChrBanks = chrStorage / 8192
+    la t2, global_mapchrbytes
+    sd t0, 0(t2)                    ; MapChrBytes = chrStorage
+    ld t0, 24(sp)
+    sltiu t0, t0, 1                 ; CHR-RAM when the file has no CHR
+    la t1, global_cartchrram
+    sd t0, 0(t1)
+    la t1, global_chrwritable
+    sd t0, 0(t1)
+    la t1, global_mapchrram
+    sd t0, 0(t1)
+    ld t0, 16(sp)
+    la t1, global_mapprgbytes
+    sd t0, 0(t1)
+    ld a0, 8(sp)
+    jal nesromram
+    ld a1, 80(sp)
+    la t0, global_maprambytes
+    sd a0, 0(t0)
+    ; CartConflicts: the discrete boards' bus conflicts, by mapper and submapper
+    ld t0, 80(sp)                   ; m
+    ld t1, 96(sp)                   ; sub
+    addiu t2, zero, 2
+    beq t0, t2, nrl_conf_ux
+    addiu t2, zero, 3
+    beq t0, t2, nrl_conf_ux
+    addiu t2, zero, 66
+    beq t0, t2, nrl_conf_ux
+    addiu t2, zero, 7
+    beq t0, t2, nrl_conf_ax
+    addiu t2, zero, 11
+    beq t0, t2, nrl_conf_ax
+    addiu t2, zero, 34
+    beq t0, t2, nrl_conf_bn
+    nop
+    b nrl_conf_write
+    move t3, zero                   ; every other board: none
+nrl_conf_ux:                        ; UxROM / CNROM / GxROM: unless submapper 1
+    xori t3, t1, 1
+    b nrl_conf_write
+    sltu t3, zero, t3
+nrl_conf_ax:                        ; AxROM / Color Dreams: submapper 2
+    xori t3, t1, 2
+    b nrl_conf_write
+    sltiu t3, t3, 1
+nrl_conf_bn:                        ; BNROM / NINA-001: with CHR-RAM
+    ld t3, 24(sp)
+    sltiu t3, t3, 1
+nrl_conf_write:
+    la t0, global_cartconflicts
+    sd t3, 0(t0)
+    ld t0, 88(sp)
+    andi t1, t0, 1
+    la t2, global_ppumirroring
+    sd t1, 0(t2)
+    srl t1, t0, 3
+    andi t1, t1, 1
+    la t2, global_mapfourscreen
+    sd t1, 0(t2)
+    ld a0, 8(sp)
+    jal nesromsavebytes
+    ld a1, 80(sp)
+    la t0, global_nesruntimesavebytes
+    sd a0, 0(t0)
+    sltu t1, zero, a0
+    la t0, global_mapbattery
+    sd t1, 0(t0)
+    ld ra, 0(sp)
+    addiu a0, zero, 1
+    jr ra
+    daddiu sp, sp, 128
+nrl_fail:
+    ld ra, 0(sp)
+    move a0, zero
+    jr ra
+    daddiu sp, sp, 128
+  EndASM
 EndProcedure
 
 
