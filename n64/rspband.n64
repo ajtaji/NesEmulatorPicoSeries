@@ -794,7 +794,7 @@ nes_seg_first_free:
     sltiu t0, t0, 31                 ; (#NES_U_BANDMAX - 1) the band closing now may take a record, the line takes the next
     beqz t0, nes_seg_first_rec
     ld t0, #NES_U_BANDOAM(a3)
-    sltiu t1, t0, #NES_U_BANDMAX
+    sltiu t1, t0, #NES_U_OAMSNAPMAX   ; (the two snapshot sets' indices, N.78)
     beqz t1, nes_seg_first_no        ; (a band with no snapshot is the old path's already)
     nop
     la t1, global_nessegnext

@@ -83,6 +83,7 @@ CompilerIf #NES_UNIT
   #NES_U_BANDOAM = 96
   #NES_U_OAMSNAPS = 104
   #NES_U_BANDMAX = 32
+  #NES_U_OAMSNAPMAX = 64            ; 2 x #NES_U_BANDMAX: the two OAM snapshot sets (N.78; an index at it = no snapshot)
   ; N5 (show.n64, design note N.22): U_LINEV v at the line's dot 0; U_LIVE the fallback slot the line is drawn into
   ; by the old renderer (0: not a fallback line); U_LIVEBAND 1 while the open band cannot be recorded.
   #NES_U_LINEV = 112
@@ -133,7 +134,12 @@ CompilerIf #NES_UNIT
   #NES_APU_LOG_ENTRIES = 256
   #NES_APU_DMC_ENTRIES = 256
   Global Dim NesBandSpace.a(#NES_U_BANDMAX*#NES_BAND_BYTES+16)
-  Global Dim NesOamSpace.a(#NES_U_BANDMAX*256+16)
+  ; The OAM snapshots: TWO sets of #NES_U_BANDMAX, the show's frame parity choosing the set (NesShowCur x 32 is the
+  ; frame's first index; unit/ppu_cold.n64, ppu_line_frame). With one set a frame's first band, opening at line 0,
+  ; overwrote snapshot 0 while the frame before's band jobs could still be queued to read it (the record ring waits
+  ; on its fence at the close; a snapshot is taken at the open, before any wait) - Zelda's frame 39, drawn with the
+  ; OAM of the DMA after it (design note N.78). A set's snapshots are reused two frames later, when its jobs ran.
+  Global Dim NesOamSpace.a(2*#NES_U_BANDMAX*256+16)
   Global NesBandBase.i, NesOamBase.i
   CompilerIf #NES_RSP_CHECK
     Global NesRspHalt.i                 ; the RSP checking build: the first difference ends the run (rspband.n64)

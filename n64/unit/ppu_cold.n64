@@ -23,7 +23,20 @@ ppu_line_frame:                     ; line 0 opens a frame: clear its band log a
     daddiu t2, s6, #NES_U_SPLIT     ; (t1 = 1 is kept for the band open)
     sd zero, #NES_U_BANDCOUNT(s6)
     sd zero, #NES_U_BANDLOST(s6)
-    sd zero, #NES_U_OAMSNAPS(s6)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      la t9, global_nesshowcur      ; the frame's OAM snapshots: the set of its frame parity (NesShowCur x 32; nes.n64,
+      ld t9, 0(t9)                  ; NesOamSpace), so the frame before's queued jobs still find theirs (N.78)
+      dsll t9, t9, 5
+      sd t9, #NES_U_OAMSNAPS(s6)
+    EndASM
+  CompilerElse
+    ASM
+      sd zero, #NES_U_OAMSNAPS(s6)
+    EndASM
+  CompilerEndIf
+  ASM
     sd zero, 0(t2)
     sd zero, 8(t2)
     sd zero, 16(t2)
@@ -66,8 +79,22 @@ ppu_band_oam:
     la t1, global_nesoambase
     ld t1, 0(t1)                    ; t1 = the snapshots
     la t2, global_oam
-    beqz t0, ppu_oam_new            ; none yet this frame
-    dsll v0, t0, 8
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      la t9, global_nesshowcur      ; the set's first index (N.78): at it, none yet this frame
+      ld t9, 0(t9)
+      dsll t9, t9, 5
+      beq t0, t9, ppu_oam_new
+      dsll v0, t0, 8
+    EndASM
+  CompilerElse
+    ASM
+      beqz t0, ppu_oam_new          ; none yet this frame
+      dsll v0, t0, 8
+    EndASM
+  CompilerEndIf
+  ASM
     daddu v0, v0, t1
     daddiu v0, v0, -256             ; v0 = the last snapshot
     move v1, t2
@@ -83,7 +110,21 @@ ppu_oam_cmp:
     jr ra
     sd t0, #NES_U_BANDOAM(s6)
 ppu_oam_new:
-    sltiu t3, t0, #NES_U_BANDMAX
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      la t3, global_nesshowcur      ; the set's #NES_U_BANDMAX snapshots (N.78)
+      ld t3, 0(t3)
+      dsll t3, t3, 5
+      dsubu t3, t0, t3
+      sltiu t3, t3, #NES_U_BANDMAX
+    EndASM
+  CompilerElse
+    ASM
+      sltiu t3, t0, #NES_U_BANDMAX
+    EndASM
+  CompilerEndIf
+  ASM
     beqz t3, ppu_oam_none
     dsll v0, t0, 8
     daddu v0, v0, t1                ; the next free snapshot
@@ -100,7 +141,7 @@ ppu_oam_copy:
     jr ra
     sd t0, #NES_U_OAMSNAPS(s6)
 ppu_oam_none:
-    addiu t3, zero, #NES_U_BANDMAX
+    addiu t3, zero, #NES_U_OAMSNAPMAX   ; past both sets: no snapshot (the close counts the band lost)
   EndASM
   CompilerIf #NES_RDP_SHOW
     ASM
@@ -450,7 +491,7 @@ ppu_cut_close:
     sltu t8, t9, t3
     beqz t8, ppu_cut_done           ; no complete line in it: no record
     ld t8, #NES_U_BANDOAM(v0)
-    sltiu t2, t8, #NES_U_BANDMAX
+    sltiu t2, t8, #NES_U_OAMSNAPMAX  ; (the two sets' indices, N.78)
     beqz t2, ppu_cut_lost           ; no OAM snapshot was free when it opened
     ld t8, #NES_U_BANDCOUNT(v0)
     sltiu t2, t8, #NES_U_BANDMAX
