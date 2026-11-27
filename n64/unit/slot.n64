@@ -42,6 +42,8 @@ nes_mapper_slot:
     XIncludeFile "../modules/mmc3.n64"
   CompilerElseIf #NES_SLOT_MODULE=1
     XIncludeFile "../modules/mmc1.n64"
+  CompilerElse
+    XIncludeFile "../modules/discrete.n64"   ; NROM, UxROM, CNROM, AxROM, Color Dreams, GxROM (0, 2, 3, 7, 11, 66)
   CompilerEndIf
   ASM
 nes_mapper_slot_fill:

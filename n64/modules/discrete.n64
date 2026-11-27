@@ -1,0 +1,367 @@
+; modules/discrete.n64 - the DISCRETE-LATCH mapper modules' hot part, as it runs in the mapper slot (unit/slot.n64; the
+; mapper-modules design note, sections 2-3 and step 3): NROM (0), UxROM (2), CNROM (3), AxROM (7), Color Dreams (11)
+; and GxROM (66). One source, six modules: each compile assembles the board named by #NES_SLOT_MODULE (build.py
+; compiles once per module). Their cold part (the table and the power-on) is modules/discrete_cold.n64.
+;
+; THE BOARDS (each a single 8-bit latch written anywhere in $8000-$FFFF; no IRQ, no PPU clocking, no CPU timer, no
+; registers below $8000, no work RAM). The reference is the project's compiled cores: the shared MapperWrite /
+; MapperUpdate (anvil/mappers.pi4) for 3, 7 and 11, the bus's CartBank (anvil/bridge.pi4, simple_board_bus.n64) for
+; 2 and 66, nothing for 0. v = the value written (after the bus conflict, below):
+;   0  NROM        nothing: 32 KB PRG (a 16 KB PRG mirrored), 8 KB CHR, the header's mirroring
+;   2  UxROM       v selects the 16 KB PRG bank at $8000 (masked by the ROM's size); the last 16 KB fixed at $C000;
+;                  8 KB CHR (RAM)
+;   3  CNROM       v & 3 selects the 8 KB CHR bank; 32 KB PRG fixed
+;   7  AxROM       v & 7 the 32 KB PRG bank; v bit 4 the one-screen name table (0: CIRAM page A, 1: page B); 8 KB CHR
+;   11 Color Dreams  v & 3 the 32 KB PRG bank; v >> 4 the 8 KB CHR bank (bits 2-3: the lockout defeat, unused)
+;   66 GxROM       v >> 4 & 3 the 32 KB PRG bank; v & 3 the 8 KB CHR bank
+; Every bank is published through the common helpers (mmc3_registers.n64): MapperPrg (8 KB slots: the PRG biases the
+; core reads, masked by the ROM's size), MapperChr (1 KB slots, the band cut, the CHR biases or the CHR-RAM copy),
+; MapperMirror (the name-table slots), exactly as MMC1 and MMC3 publish theirs.
+;
+; THE BUS CONFLICT (CartConflicts, set by the loader from the mapper and submapper, library/runtime.n64): on a board
+; whose PRG ROM drives the data bus during the write, the latch sees the written value AND the ROM's byte at that
+; address under the mapping in force BEFORE the write. The rule the loader applies is the reference's (anvil
+; selector.pi4 / runtime.n64) and the documented NES 2.0 submapper rule: UxROM, CNROM and GxROM unless submapper 1;
+; AxROM and Color Dreams only for submapper 2 (AxROM: only AMROM / AOROM conflict, and iNES files are not to be
+; given conflicts; Color Dreams: emulated without them because a prototype board lacks the prevention - "Free Fall"
+; in the ROM folder is that prototype). NROM has no latch. The ROM byte is read as the core reads PRG:
+; NesMmc3Bias((addr >> 13) & 3) + addr.
+;
+; WHAT SYNC EACH WRITE NEEDS (write_sync, below; the reference in brackets):
+;   UxROM   only the 16 KB at $8000-$BFFF changes, which only the CPU reads: the DMC fetches samples from
+;           $C000-$FFFF, the fixed bank, and nothing else reads PRG. So no device is brought to the write; only the
+;           CPU clock moves to it (u_nesmmc3advancecputime, as MMC1's intermediate serial bit). [The old UxROM build:
+;           no device sync either.]
+;   3/7/11/66  CHR or mirroring may change, which the PPU reads: every device to the write first (u_workeradvance),
+;           as the reference's bus did (NesRpc / WorkerAdvance before MapperWrite).
+;   NROM    no register: write_fast returns at once, as the old build's bus did (no window end).
+; Every $8000-$FFFF write of a latch board then ends the CPU window (the common close), as the reference's did.
+; $6000-$7FFF writes are ignored on every one of these boards, as the reference's bus ignored them (the old builds
+; never call MapperWrite for 0 / 2 / 66; the shared MapperWrite returns for 3 / 7 / 11 below $8000).
+;
+; THE ENTRIES (unit/slot.n64): budget the full window and the common DMC bound (as MMC1's); irq_deadline never;
+; ppu_ticks, ppu_addr, clock_irq, cpu_ticks nothing; read open bus (not called: nothing at $4020-$5FFF).
+; THE CONTRACT (modules/mmc3.n64's): in through the table; out by j / jal to common labels only; a relative branch
+; never leaves the two slots (build.py, check_mapper_slot).
+; CHECKED BY: the guest's per-instruction digest every frame against the old compiled build of each mapper and
+; against the unit's compiled core with this module (--cpu-core unit-reference), the oracle's pictures and sound,
+; the shown picture against the old renderer (the folder walk), and the register-exercise carts (rdp-tools carts).
+  ASM
+u_mappercpubudget:                  ; +0
+    b dsc_e_budget
+    nop
+u_nesmmc3fetchdeadline:             ; +8 never: the largest positive cycle
+    b dsc_e_never
+    nop
+u_mapperpputicks:                   ; +16 no PPU clocking
+    jr ra
+    nop
+u_mappera12:                        ; +24 no A12 watch
+    jr ra
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=0
+    ASM
+u_mapperwrite:                      ; +32 NROM: nothing to write (no latch, no work RAM)
+    jr ra
+    nop
+nes_slot_write_sync:                ; +40 never entered (write_fast returns); the common close if it were
+    j nes_mmc3_bus_write_close
+    nop
+nes_slot_write_fast:                ; +48 a $8000-$FFFF write changes nothing on NROM: back to the bus's caller
+    jr ra
+    nop
+    EndASM
+  CompilerElse
+    ASM
+u_mapperwrite:                      ; +32
+    b dsc_e_write
+    nop
+nes_slot_write_sync:                ; +40
+    b dsc_e_write_sync
+    nop
+nes_slot_write_fast:                ; +48 every latch write is timed: the common timed path
+    j nes_mmc3_bus_write_timed
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+u_mapperclockirq:                   ; +56 no IRQ counter
+    jr ra
+    nop
+nes_slot_cpu_ticks:                 ; +64 no CPU timer
+    jr ra
+    nop
+nes_slot_read:                      ; +72 open bus
+    jr ra
+    move v0, zero
+
+; ---- budget: the window's length (as MMC1's: these boards raise no IRQ). The full 128 cycles, bounded by the next
+; DMC fetch while a sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 = @MapIrq).
+; Out a0. THE PLAIN TWIN: n = 128 : If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf (F the next fetch's cycle)
+dsc_e_budget:
+    la a1, global_mapirq            ; the DMC bound's base register
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, dsc_budget_dmc         ; a sample plays: the common bound
+    addiu a0, zero, 128             ; (delay slot) the full window
+    jr ra
+    nop
+dsc_budget_dmc:
+    j mmc3_budget_dmc               ; the common DMC bound (an absolute jump: no relative branch leaves the slots)
+    nop
+
+; ---- irq_deadline: never. Out a0 = $7FFF_FFFF_FFFF_FFFF (all ones shifted right once), as MMC1's.
+dsc_e_never:
+    daddiu a0, zero, -1
+    jr ra
+    dsrl a0, a0, 1
+  EndASM
+  CompilerIf #NES_SLOT_MODULE<>0
+    ASM
+; ---- write_sync: a timed $8000-$FFFF write. Entered by branch from the common timed path with its 32-byte frame
+; on the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. The devices that read what the latch can change are
+; brought to the write (above: none for UxROM, every device for the others), then the write with the stamp read
+; again (after they moved, as MMC1's and MMC3's), then the common close (unit/write.n64: it ends the CPU window,
+; pops the frame and returns).
+; THE PLAIN TWIN:
+;   If UxROM : NesAdvanceCpuTime(stamp) : Else : WorkerAdvance(stamp) : EndIf
+;   MapperWrite(addr, value, CpuCycles + AccessPhase)
+dsc_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    EndASM
+    CompilerIf #NES_SLOT_MODULE=2
+      ASM
+    jal u_nesmmc3advancecputime     ; UxROM: the CPU clock only (no device reads the switched 16 KB)
+    move a0, a2
+      EndASM
+    CompilerElse
+      ASM
+    jal u_workeradvance             ; CHR / mirroring may change: every device to the write
+    move a0, a2
+      EndASM
+    CompilerEndIf
+    ASM
+    la t0, global_cpucycles         ; the stamp again, after the devices moved
+    ld a2, 0(t0)
+    ld t1, global_accessphase-global_cpucycles(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal dsc_e_write                 ; MapperWrite(addr, value, stamp)
+    daddu a2, a2, t1
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64)
+    nop
+
+; ---- write: the latch. In: a0 address ($6000-$FFFF), a1 value (0-255), a2 stamp (unused: a latch has no timing
+; rule). Clobbers t0-t3, a0-a3 (and what the bank helpers clobber, through the publish routines' own frames).
+; THE PLAIN TWIN (the reference's MapperWrite for 3 / 7 / 11, its bus's CartBank path for 2 / 66):
+;   If addr >= $8000
+;     If CartConflicts : value = value & PeekA(NesMmc3Bias((addr >> 13) & 3) + addr) : EndIf
+;     MapPrgReg = value : MapChr0 = value
+;     (UxROM) dsc_prg() (CNROM) dsc_chr() (AxROM) dsc_mirror() : dsc_prg() (11, 66) dsc_prg() : dsc_chr()
+;   EndIf
+dsc_e_write:
+    andi t0, a0, 0x8000
+    beqz t0, dsc_write_done         ; $6000-$7FFF: no work RAM on these boards (ignored, as the reference)
+    nop
+    la t3, global_cartconflicts
+    ld t0, 0(t3)
+    beqz t0, dsc_latch              ; no bus conflict on this board
+    srl t1, a0, 13                  ; (delay slot) the address's 8 KB PRG slot ...
+    andi t1, t1, 3
+    sll t1, t1, 3                   ; ... as a word offset
+    la t2, global_nesmmc3bias
+    daddu t2, t2, t1
+    ld t2, 0(t2)                    ; that slot's bias: the ROM byte of addr is at bias + addr
+    daddu t2, t2, a0
+    lbu t2, 0(t2)                   ; the byte the PRG ROM drives (the mapping before this write)
+    and a1, a1, t2                  ; the latch sees the AND of the two drivers
+dsc_latch:
+    la t0, global_mapprgreg
+    sd a1, 0(t0)                    ; MapPrgReg = the latched value (the reference's state)
+    la t0, global_mapchr0
+    sd a1, 0(t0)                    ; MapChr0 = the same (the reference's MapperWrite stores both)
+    EndASM
+    CompilerIf #NES_SLOT_MODULE=2
+      ASM
+    b dsc_prg                       ; UxROM: the PRG banks only (a tail branch: it returns to the caller)
+    nop
+      EndASM
+    CompilerElseIf #NES_SLOT_MODULE=3
+      ASM
+    b dsc_chr                       ; CNROM: the CHR banks only
+    nop
+      EndASM
+    CompilerElseIf #NES_SLOT_MODULE=7
+      ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal dsc_mirror                  ; AxROM: the one-screen page, then the PRG banks (CHR-RAM: fixed)
+    nop
+    ld ra, 0(sp)
+    b dsc_prg
+    daddiu sp, sp, 16
+      EndASM
+    CompilerElse
+      ASM
+    daddiu sp, sp, -16              ; Color Dreams / GxROM: the PRG banks, then the CHR banks
+    sd ra, 0(sp)
+    jal dsc_prg
+    nop
+    ld ra, 0(sp)
+    b dsc_chr
+    daddiu sp, sp, 16
+      EndASM
+    CompilerEndIf
+    ASM
+dsc_write_done:
+    jr ra
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+
+; ---- dsc_update: every mapping from the latch (MapPrgReg), for the power-on (modules/discrete_cold.n64): the
+; mirroring (AxROM only; the others keep the header's, set by MapperInit), the PRG banks, the CHR banks - the
+; reference's MapperUpdate order. In: nothing. Clobbers t0-t3, a0-a3 and what the helpers may.
+; THE PLAIN TWIN: If AxROM : dsc_mirror() : EndIf : dsc_prg() : dsc_chr()
+dsc_update:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=7
+    ASM
+    jal dsc_mirror
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+    jal dsc_prg
+    nop
+    ld ra, 0(sp)
+    b dsc_chr                       ; a tail branch: dsc_chr returns to dsc_update's caller
+    daddiu sp, sp, 16
+
+; ---- dsc_prg: the four 8 KB PRG slots from the latch. lo = the first 8 KB bank at $8000, hi = the first at $C000:
+;   32 KB boards (0, 3, 7, 11, 66): lo = b * 4, hi = lo + 2, b the latch's 32 KB bank field (0 for NROM / CNROM)
+;   UxROM: lo = v * 2, hi = n - 2 (the last 16 KB; n = the ROM's 8 KB banks)
+; MapperPrg masks each bank by the ROM's size, so a 16 KB NROM / CNROM ROM's hi (2, 3) folds onto 0, 1 - the
+; mirror - and UxROM's v * 2 is the reference's v & (16 KB banks - 1), doubled. Clobbers t0-t3, a0-a3.
+; FRAME (32 B): 0 ra | 8 lo | 16 hi
+; THE PLAIN TWIN: MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, hi) : MapperPrg(3, hi + 1)
+dsc_prg:
+    la t0, global_mapprgreg
+    ld t0, 0(t0)                    ; v
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=2
+    ASM
+    andi a0, t0, 255
+    sll a0, a0, 1                   ; lo = v x 2: the 16 KB bank's first 8 KB bank
+    la t1, global_mapprgbytes
+    ld a1, 0(t1)
+    dsrl a1, a1, 13
+    addiu a1, a1, -2                ; hi = n - 2: the last 16 KB
+    EndASM
+  CompilerElse
+    CompilerIf #NES_SLOT_MODULE=7
+      ASM
+    andi a0, t0, 7                  ; AxROM: bits 0-2
+      EndASM
+    CompilerElseIf #NES_SLOT_MODULE=11
+      ASM
+    andi a0, t0, 3                  ; Color Dreams: bits 0-1
+      EndASM
+    CompilerElseIf #NES_SLOT_MODULE=66
+      ASM
+    srl a0, t0, 4
+    andi a0, a0, 3                  ; GxROM: bits 4-5
+      EndASM
+    CompilerElse
+      ASM
+    move a0, zero                   ; NROM / CNROM: the one 32 KB bank
+      EndASM
+    CompilerEndIf
+    ASM
+    sll a0, a0, 2                   ; lo = the 32 KB bank's first 8 KB bank
+    addiu a1, a0, 2                 ; hi = its third
+    EndASM
+  CompilerEndIf
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    move a1, a0
+    jal mapperprg                   ; MapperPrg(0, lo)
+    move a0, zero
+    ld a1, 8(sp)
+    addiu a0, zero, 1
+    jal mapperprg                   ; MapperPrg(1, lo + 1)
+    daddiu a1, a1, 1
+    ld a1, 16(sp)
+    jal mapperprg                   ; MapperPrg(2, hi)
+    addiu a0, zero, 2
+    ld a1, 16(sp)
+    addiu a0, zero, 3
+    jal mapperprg                   ; MapperPrg(3, hi + 1)
+    daddiu a1, a1, 1
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+
+; ---- dsc_chr: the eight 1 KB CHR slots from the latch's 8 KB bank c: slot i = c * 8 + i (MapperChr masks it by the
+; CHR size and changes only what differs, cutting the open band first). c: CNROM v & 3, Color Dreams v >> 4, GxROM
+; v & 3, else 0. Clobbers t0-t3, a0-a3. FRAME (32 B): 0 ra | 8 the slot | 16 c * 8
+; THE PLAIN TWIN: For i = 0 To 7 : MapperChr(i, c * 8 + i) : Next
+dsc_chr:
+    la t0, global_mapprgreg
+    ld t0, 0(t0)                    ; v
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=3 Or #NES_SLOT_MODULE=66
+    ASM
+    andi t0, t0, 3                  ; CNROM / GxROM: bits 0-1
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=11
+    ASM
+    srl t0, t0, 4
+    andi t0, t0, 15                 ; Color Dreams: bits 4-7
+    EndASM
+  CompilerElse
+    ASM
+    move t0, zero                   ; NROM / UxROM / AxROM: the one 8 KB bank
+    EndASM
+  CompilerEndIf
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sll t0, t0, 3                   ; the 8 KB bank's first 1 KB bank
+    sd t0, 16(sp)
+    sd zero, 8(sp)
+dsc_chr_slot:
+    ld a0, 8(sp)                    ; the slot
+    ld a1, 16(sp)
+    jal mapperchr                   ; MapperChr(slot, c * 8 + slot)
+    daddu a1, a1, a0
+    ld a0, 8(sp)
+    daddiu a0, a0, 1
+    sltiu t0, a0, 8
+    bnez t0, dsc_chr_slot
+    sd a0, 8(sp)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=7
+    ASM
+; ---- dsc_mirror (AxROM): the one-screen page from the latch's bit 4. MapperMirror's modes 2 (all four tables on
+; CIRAM page A) and 3 (page B); it changes only what differs and cuts the open band first. Clobbers t0-t3, a0-a3.
+; THE PLAIN TWIN: MapperMirror(2 + ((MapPrgReg >> 4) & 1))
+dsc_mirror:
+    la t0, global_mapprgreg
+    ld t0, 0(t0)
+    srl a0, t0, 4
+    andi a0, a0, 1
+    j mappermirror                  ; a tail call: it returns to dsc_mirror's caller
+    addiu a0, a0, 2
+    EndASM
+  CompilerEndIf

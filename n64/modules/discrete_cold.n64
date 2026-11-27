@@ -1,0 +1,33 @@
+; modules/discrete_cold.n64 - the discrete-latch modules' COLD part (NROM 0, UxROM 2, CNROM 3, AxROM 7, Color Dreams
+; 11, GxROM 66), assembled in the cold slot (unit/cold_slot.n64): its entry table (the layout every module's cold part
+; opens with, modules/mmc3_cold.n64) and the power-on. The hot part is modules/discrete.n64.
+;
+; nes_cold_init - WHAT: the board's own power-on, run by LoadGame (NesModuleInit) right after the shared MapperInit.
+; HOW: MapperInit (anvil/mappers.pi4, compiled, every mapper's in the unit build) has set the state every latch board
+; reads to its power-on value - MapPrgReg = MapChr0 = 0 (the latch), the PRG / CHR slots unmapped, the header's
+; mirroring, MapCiram cleared, MapManaged = 1 (the bus then calls the module) - and then published MMC3's banks (the
+; unit build's MapperUpdate is MMC3's); dsc_update (modules/discrete.n64) republishes every PRG slot, every CHR slot
+; and (AxROM) the one-screen page from the latch, so the guest starts from the board's mapping: the reference's
+; MapperUpdate with the latch at 0 (3 / 7 / 11), the old builds' first view and CHR bank (0 / 2 / 66).
+; First MapRamEnable = 0: these boards have no work RAM, so a read of $6000-$7FFF is the open bus (the last byte on
+; the data bus), as on the board and in the reference's builds (found by the register-exercise cart, whose
+; LDA $6000 read the open bus $60 on the reference and 0 from MapRam on the unit before this line).
+; In / out: nothing; clobbers t0 and what dsc_update may.
+; THE PLAIN TWIN: MapRamEnable = 0 : dsc_update()   ; after MapperInit()
+  ASM
+nes_cold_init:                      ; +0
+    b dsc_cold_init
+    nop
+nes_cold_reserved:                  ; +8
+    jr ra
+    nop
+nes_cold_maptable:                  ; +16: no register handler table (one latch, decoded in dsc_e_write)
+    .word 0, 0, 0, 0, 0, 0, 0, 0
+nes_cold_moddata:                   ; +48: no module data (256 zero bytes, copied into NesUnitData at load all the same)
+    .space 256
+dsc_cold_init:
+    la t0, global_mapramenable
+    sd zero, 0(t0)                  ; no work RAM: $6000-$7FFF reads give the open bus (MapperInit enabled it)
+    j dsc_update                    ; every mapping from the power-on latch (modules/discrete.n64), a tail jump
+    nop
+  EndASM

@@ -50,6 +50,9 @@ Procedure NesBatchStoreLoop(addr.i, value.i, stamp.i, writeOp.i)
   Budget+=cycles : CpuCycles+=cycles
 EndProcedure
 
+CompilerIf #NES_CPU_TRACE
+  Declare NesCpuTraceWriteAt(addr.i,value.i)
+CompilerEndIf
 Procedure NesWriteAbsolute(addr.i, value.i, writeOp.i)
   Protected stamp.i
   If (addr&$E007)<>$2007
@@ -58,6 +61,10 @@ Procedure NesWriteAbsolute(addr.i, value.i, writeOp.i)
   EndIf
   NesOpenBus=value
   CpuNow()
+  CompilerIf #NES_CPU_TRACE
+    ; checking build: the $2007 write folded as NesWrite folds every device write (build.py, trace_compiled_writes)
+    NesCpuTraceWriteAt(addr,value)
+  CompilerEndIf
   stamp=CpuCycles+AccessPhase
   NesWriteRegister(addr,value,stamp)
   NesBatchStoreLoop(addr,value,stamp,writeOp)

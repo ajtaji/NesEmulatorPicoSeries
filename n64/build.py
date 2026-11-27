@@ -97,17 +97,28 @@ def trace_bus_writes(code):
     return code
 
 
-def trace_compiled_writes(code):
+def trace_compiled_writes(code, mapper):
     """Checking build of a reference core outside the unit (the compiled bus, NesWrite in the shared bridge): fold the
     same writes the unit folds at nes_mmc3_bus_write_timed / _workram (cputrace.n64, kind 2) - every managed write at
     $6000-$FFFF, the OAM DMA and every device register write at $2000-$4017 but $4016 - at the same point, before
-    the bus moves the clock (CpuNow), so the two builds' guest digests compare instruction for instruction."""
+    the bus moves the clock (CpuNow), so the two builds' guest digests compare instruction for instruction.
+    The discrete-latch boards' bus (stage_simple_mapper: NesWriteBoard for every write at $6000-$FFFF) folds each of
+    them there, as the unit (MapManaged in every unit build) folds each at _workram or _timed - but NROM's
+    $8000-$FFFF writes, which the unit's NROM module returns from before the timed path (modules/discrete.n64)."""
     proc = "Procedure NesWrite(addr.i, value.i)\n"
     if code.count(proc) != 1:
         raise ValueError("compiled bus write procedure changed")
     code = code.replace(proc, "Declare NesCpuTraceWriteAt(addr.i,value.i)\n" + proc)
-    for branch in ("    If MapManaged\n      CpuNow()\n", "  ElseIf addr=$4014\n    CpuNow()\n",
+    managed = "    If MapManaged\n      CpuNow()\n"
+    board = "  ElseIf addr>=$6000\n    NesWriteBoard(addr,value)\n"
+    if code.count(managed) == 0 and code.count(board) == 1:
+        fold = "If addr<$8000 : NesCpuTraceWriteAt(addr,value) : EndIf" if mapper == 0 else "NesCpuTraceWriteAt(addr,value)"
+        code = code.replace(board, f"  ElseIf addr>=$6000\n    {fold}\n    NesWriteBoard(addr,value)\n")
+        managed = None
+    for branch in (managed, "  ElseIf addr=$4014\n    CpuNow()\n",
                    "  ElseIf addr<$4000 Or addr<=$4017\n    CpuNow()\n"):
+        if branch is None:
+            continue
         if code.count(branch) != 1:
             raise ValueError(f"compiled bus write branch changed: {branch.strip()!r}")
         head, tail = branch.split("\n", 1)
@@ -174,7 +185,9 @@ IMAGE_BASE = 0x80000400       # the RDRAM image's load address (nes.bin is the i
 # THE MAPPER MODULES (mapper-modules design note, sections 2-3): mapper -> the module's source name, modules/<name>.n64
 # (its hot part, the mapper slot's bytes) and modules/<name>_cold.n64 (its cold part, the cold slot's bytes). The
 # first is the default module: the one assembled in the slots of the shipped compile, so the checking builds see it.
-MODULES = {4: "mmc3", 1: "mmc1"}
+MODULES = {4: "mmc3", 1: "mmc1",
+           # the discrete-latch boards: one source, one compile each (modules/discrete.n64, its #NES_SLOT_MODULE)
+           0: "discrete", 2: "discrete", 3: "discrete", 7: "discrete", 11: "discrete", 66: "discrete"}
 # THE UNIT BUILD: the runtime cartridge whose CPU runs the hot unit is built once for every mapper. Nothing of it is
 # staged for the cartridge's mapper: #GAME_MAPPER is UNIT_MAPPER ("chosen at load") and the sources' unit branches
 # test #NES_UNIT; the mapper's own code is its module, installed into the two slots at load (modules/install.n64).
@@ -438,7 +451,9 @@ def build(args, *, controller_trace=()):
         "NES_BG_EXPANDED": int(stage_as in (0, 2) and chr_size == 8192),
         "NES_BANKED_WAITS": int(poll_bank_size(stage_as) == 8192),
         "NES_PREDICTABLE_IRQ": int(bool(poll_bank_size(stage_as))),
-        "NES_HAS_POLLS": int(runtime_waits or has_polls),
+        # --idle-off: the PPUSTATUS poll recogniser off as well (both cores: the reference's batch in its LDA / BIT abs,
+        # stage_poll; the unit's c65_poll, cpu6502.n64), so that the two cores step - and fold - every instruction
+        "NES_HAS_POLLS": int((runtime_waits or has_polls) and not idle_off),
         "NES_HAS_RAM_WAITS": int(runtime_waits or has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
         "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": UNIT_GAME_MAPPER if unit else cart.mapper, "GAME_SUB": cart.submapper,
@@ -513,7 +528,7 @@ def build(args, *, controller_trace=()):
             if cpu_trace and name == "bridge":
                 code = trace_bus_reads(code)
                 if not unit:
-                    code = trace_compiled_writes(code)
+                    code = trace_compiled_writes(code, cart.mapper)
             (guest / (name + ".pmi")).write_text(guest_names(code).replace('.pi4"', '.pmi"'), encoding="utf-8")
         expansion = expansion_source(stage_as)
         if save_bytes:

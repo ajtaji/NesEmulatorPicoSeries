@@ -75,7 +75,13 @@ def trace_reference(source: str) -> str:
 
     The calls preserve every register of the threaded span and add no state.
     """
-    for label in ("nes_thread_check:\n", "nes_thread_end:\n"):
+    # The fold must see NesInstructions (t3 in the threaded span) counting the instruction just completed, as the
+    # compiled opcodes' CpuNextOp does. The MMC1 / MMC3 threads count at the dispatch, so their check sees it; the
+    # generic thread (every other mapper's reference: NROM, UxROM, CNROM, AxROM, Color Dreams, GxROM...) counts at
+    # the check itself, in the branch's delay slot - there the fold goes after that count. Folded before it, a
+    # threaded instruction after a compiled one carried the compiled one's count and the fold-once rule dropped it.
+    generic = "nes_thread_check:\n    blez $a2, nes_thread_end\n    daddiu $t3, $t3, 1\n"
+    for label in (generic if source.count(generic) == 1 else "nes_thread_check:\n", "nes_thread_end:\n"):
         if source.count(label) != 1:
             raise ValueError(f"reference core label {label.strip()} changed")
         source = source.replace(label, label + "    jal nescputracestep\n    nop\n")

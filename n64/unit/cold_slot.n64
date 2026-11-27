@@ -21,6 +21,8 @@ nes_mapper_cold:
     XIncludeFile "../modules/mmc3_cold.n64"
   CompilerElseIf #NES_SLOT_MODULE=1
     XIncludeFile "../modules/mmc1_cold.n64"
+  CompilerElse
+    XIncludeFile "../modules/discrete_cold.n64"   ; the latch boards 0, 2, 3, 7, 11, 66
   CompilerEndIf
   ASM
 nes_mapper_cold_fill:

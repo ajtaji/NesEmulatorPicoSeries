@@ -356,7 +356,13 @@ Procedure.i LoadGame()
     NameDescDirty=0
   CompilerEndIf
   NesTiming(#GAME_PAL)
-  If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
+  CompilerIf #NES_UNIT
+    ; every mapper: the bus calls the module only once MapperInit has set MapManaged, and the module's power-on
+    ; starts from MapperInit's state (the slots, the name tables, the latch at 0) - NROM, UxROM and GxROM included
+    MapperInit()
+  CompilerElse
+    If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
+  CompilerEndIf
   CompilerIf #NES_UNIT
     ; then the installed module's own power-on (its cold slot's init, modules/install.n64): MapperInit (the shared
     ; core's) gave every mapper the state's power-on and MMC3's bank publication; a module publishes its own banks

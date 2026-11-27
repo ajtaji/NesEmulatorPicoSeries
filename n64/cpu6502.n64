@@ -2629,6 +2629,14 @@ c65_bad_fetch:               ; code fetched from device space: stop loudly
     ; --- the batching shapes (cold). Each is the reference's PureMetal condition, evaluated on the live
     ; registers; the call-outs are the same procedures. The poll first (it runs every frame), the others below.
 c65_poll:                    ; LDA / BIT abs whose device read ended the window
+  EndASM
+  CompilerIf #NES_IDLE_OFF
+    ASM
+    b c65_poll_done          ; checking build (--idle-off): no poll batch, as no other shortcut (build.py)
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
     addiu t1, a1, -0x7FFF    ; If Left=0 And PC>=$8003 And NesStatusHorizon>CpuCycles+8
     addiu t1, t1, -4
     bltz t1, c65_poll_done
