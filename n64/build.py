@@ -116,6 +116,19 @@ def trace_compiled_writes(code):
     return code
 
 
+def unit_reference_select(code):
+    """The unit's reference core for a mapper other than MMC3: its threaded STA abs to $8000-$FFFF takes the full
+    store (nes_absolute_store: the bus, the slot's write_fast, the module) instead of the native MMC3 bank-select
+    shortcut (nes_native_mmc3_select), which is MMC3's register semantics."""
+    branch = "beqz $t1, nes_native_mmc3_select"
+    label = "nes_native_mmc3_select:\n"
+    if code.count(branch) != 1 or code.count(label) != 1:
+        raise ValueError("the threaded core's MMC3 select branch changed")
+    # the full store takes the address in a0 (the select path's delay slot sets it): a two-word stop on the way
+    return code.replace(branch, "beqz $t1, nes_unit_reference_store").replace(
+        label, "nes_unit_reference_store:\nb nes_absolute_store\nor $a0, $t0, $zero\n" + label)
+
+
 def trace_native_serial(code):
     """Checking build of the MMC1 reference core: an STA abs to $8000-$FFFF takes the threaded core's full store
     (nes_absolute_store, the bus's NesWrite) instead of its native serial-bit path, so that every mapper write is
@@ -304,10 +317,15 @@ def build(args, *, controller_trace=()):
     save = save_profile(cart, header) if not runtime and (persist if persist is not None else not args.check_frame) else None
     # The 6502 core: "asm" (cpu6502.n64, the hot unit) for a runtime cartridge whose mapper has a module, else the
     # compiled reference interpreter. A unit build with the reference core is MMC3's checking build (mmc3_run.n64).
+    # "unit-reference": the compiled interpreter inside the unit (mmc3_run.n64's holder), with the unit's bus, PPU,
+    # scheduler and the mapper's module - the checking build that compares the cores alone, for any module's mapper.
     cpu_core = getattr(args, "cpu_core", None) or ("asm" if runtime and cart.mapper in MODULES else "reference")
-    if cpu_core == "asm" and not runtime:
-        raise ValueError("the assembly 6502 core is built for the runtime cartridge only")
-    unit = runtime and (cpu_core == "asm" or cart.mapper == 4)
+    unit_reference = cpu_core == "unit-reference"
+    if unit_reference:
+        cpu_core = "reference"
+    if (cpu_core == "asm" or unit_reference) and not runtime:
+        raise ValueError("the assembly 6502 core and the unit's reference core are built for the runtime cartridge only")
+    unit = runtime and (cpu_core == "asm" or cart.mapper == 4 or unit_reference)
     stage_as = UNIT_MAPPER if unit else cart.mapper   # what the shared sources are staged for
     if runtime and unit:
         # the battery RAM of every module: MapRam's 8 KB, marked dirty by the modules' own work-RAM writes
@@ -337,8 +355,8 @@ def build(args, *, controller_trace=()):
     runtime_waits = unit or (runtime and cart.mapper in (0, 1))
     mmc1_rows = stage_as == 1 and (getattr(args, "runtime_chr_ram", False) if runtime
                                    else not cart.chr and chr_size == 8192)
-    if unit and cpu_core == "reference" and cart.mapper != 4:
-        raise ValueError("the unit build's reference core is MMC3's checking build (mapper 4 only)")
+    if unit and cpu_core == "reference" and cart.mapper not in MODULES:
+        raise ValueError(f"the unit's reference core runs a module's mapper; mapper {cart.mapper} has no module")
     cpu_trace = getattr(args, "cpu_trace", False)
     # the checking builds that compare two cores' digests over different shortcut rules (the unit's against a reference
     # core outside it): every idle-loop and RAM-wait shortcut off (NesIdleEnabled = 0 from load), so that both step,
@@ -450,7 +468,11 @@ def build(args, *, controller_trace=()):
             elif name == "cpu2a03" and cpu_core == "asm":
                 code = stage_cpu_asm(code)
             elif name == "cpu2a03":
-                code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k, runtime)
+                # the unit's reference core is staged in MMC3's threaded shape (the 8 KB biases, the unit's bus)
+                code = stage_cpu(stage_poll(code), 4 if unit else cart.mapper, program, has_ram_waits, chain_nrom,
+                                 mmc1_20k, runtime)
+                if unit and cart.mapper != 4:
+                    code = unit_reference_select(code)
                 if cpu_trace:
                     code = trace_reference(code)
                     if not unit:
@@ -520,12 +542,14 @@ def build(args, *, controller_trace=()):
         def write_settings(module):
             (app / "game.pmi").write_text("".join(f"#{k} = {v}\n" for k, v in {**settings, "NES_SLOT_MODULE": module}.items()))
 
-        write_settings(4)
+        # the modules this cart carries: all of them, but in the A12 checking build (MMC3's own check, whose exact walk
+        # outside the unit reads the MMC3 module's labels) and the unit's reference core (a checking build of the
+        # cores, laid out by the compiler around the holder procedure, not pinned: it carries the ROM's module only)
+        carried = ([4] if a12_check else [cart.mapper] if unit and cpu_core == "reference" and cart.mapper in MODULES
+                   else list(MODULES))
+        write_settings(carried[0])
         (app / "game.bin").write_bytes(program + cart.chr)
         slot_bytes, cold_bytes = settings["NES_SLOT_BYTES"], settings["NES_COLD_SLOT_BYTES"]
-        # the modules this cart carries: all of them, but in the A12 checking build (MMC3's own check, whose exact walk
-        # outside the unit reads the MMC3 module's labels) and the reference core's build (MMC3's checking build)
-        carried = [4] if a12_check or cpu_core != "asm" else list(MODULES)
         blank = (bytes(slot_bytes), bytes(cold_bytes))
         (app / "modules.bin").write_bytes(module_store({m: blank for m in carried}, slot_bytes, cold_bytes))
 
@@ -548,14 +572,15 @@ def build(args, *, controller_trace=()):
             # bytes. The common code is the same for every module, so every compile's RDRAM image OUTSIDE the two
             # slots, and its symbols there, must be the first compile's (MMC3's, the default module) byte for byte.
             first = (app / "nes.bin").read_bytes(), (app / "nes.bin.sym").read_bytes()
-            built = {4: check_mapper_slot(app / "nes.bin.sym", first[0], slot_bytes, cold_bytes)}
+            built = {carried[0]: check_mapper_slot(app / "nes.bin.sym", first[0], slot_bytes, cold_bytes)}
             common, places = outside_slots(first[0], first[1], slot_bytes, cold_bytes)
             common_symbols = outside_symbols(first[1], places, slot_bytes, cold_bytes)
             for module in carried[1:]:
                 write_settings(module)
                 compile_cart()
                 image, symbols = (app / "nes.bin").read_bytes(), (app / "nes.bin.sym").read_bytes()
-                check_hot_unit(app / "nes.bin.sym")
+                if cpu_core == "asm":
+                    check_hot_unit(app / "nes.bin.sym")
                 built[module] = check_mapper_slot(app / "nes.bin.sym", image, slot_bytes, cold_bytes)
                 there, at = outside_slots(image, symbols, slot_bytes, cold_bytes)
                 if at != places or there != common:
@@ -567,7 +592,7 @@ def build(args, *, controller_trace=()):
                       "the default module's")
             # The store is a cartridge file, outside the RDRAM image: the last compile, with the real store and the
             # default module in place, must give the first compile's RDRAM image and symbols, byte for byte.
-            write_settings(4)
+            write_settings(carried[0])
             store = module_store(built, slot_bytes, cold_bytes)
             (app / "modules.bin").write_bytes(store)
             log = compile_cart()
@@ -597,7 +622,7 @@ if __name__ == "__main__":
                         help="persist NES battery RAM in cartridge SRAM (default on for playable builds, off for verification)")
     parser.add_argument("--telemetry", action="store_true", help="report live gameplay timing and AI starvation")
     parser.add_argument("--check-frame", type=int, default=0, help="stop on a guest frame for capture (0 keeps playing)")
-    parser.add_argument("--cpu-core", choices=("asm", "reference"), default=None,
+    parser.add_argument("--cpu-core", choices=("asm", "reference", "unit-reference"), default=None,
                         help="the 6502 core: asm (cpu6502.n64, the runtime MMC3 default) or the reference interpreter")
     parser.add_argument("--cpu-trace", action="store_true",
                         help="checking build: a per-frame digest of the state after every instruction (needs --check-frame)")

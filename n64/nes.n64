@@ -666,8 +666,8 @@ Procedure RunGame()
     If i : ProcedureReturn : EndIf
   CompilerElse
     While Stopped=0 And WorkerError=0
-      CompilerIf #NES_CHAIN_WINDOWS
-        NesChainLimit=NesCpuHorizon
+      CompilerIf #NES_CHAIN_WINDOWS And #NES_IDLE_OFF=0
+        NesChainLimit=NesCpuHorizon         ; (the checking build with the shortcuts off: no window is chained)
       CompilerEndIf
       CompilerIf #NES_HAS_RAM_WAITS
         NesRamCpuWindow(128,1)
