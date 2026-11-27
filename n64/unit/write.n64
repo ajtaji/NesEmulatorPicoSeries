@@ -519,6 +519,46 @@ nes_mmc3_ppu_ciram_write:
   CompilerEndIf
   ASM
     sb a1, 0(t2)
+  EndASM
+  CompilerIf #NES_RDP_SHOW Or #NES_RSP_CHECK
+    CompilerIf #NES_RDP_SHOW = 0
+      ASM
+      sll a0, t0, 10                  ; (the checking build: a0 was not kept across nesinvalidatetilerow)
+      addu a0, a0, t1                 ; the CIRAM offset again
+      EndASM
+    CompilerEndIf
+    ASM
+      ; ---- THE NAME-TABLE WRITE LOG (design note N.66; rspband.n64's NesNtLog) ----
+      ; WHAT: the CIRAM write just made, as one entry - CIRAM offset (12 bits) << 8 | value - stored into the 4 KB
+      ; ring the RSP applies to its own image of the name tables before a band reads them (rspband.n64rsp,
+      ; NesRspBandA). It replaces copying all 4 KB of Nt at every band's close. HOW: NesNtLog(0) is the room the band
+      ; close left (entries that may still be stored without reaching one not yet applied): one less, and below 0
+      ; nothing is stored (the room stays negative: the next band that reads the image copies it whole instead).
+      ; Else NesNtLog(1), the last entry's byte offset, moves on 4 (wrapping at 4096) and the entry is stored there
+      ; UNCACHED (NesNtLog(2) is the ring's KSEG1 address, its low word sign-extended): no D-cache line is taken,
+      ; and the store reaches RDRAM in program order, before the band's command words (uncached stores too).
+      ; In: a0 the CIRAM offset, a1 the value (a byte: u_neswrite masked it), t2 free. Clobbers t2, t3, a0 (each
+      ; set again below). THE PLAIN TWIN:
+      ;   NesNtLog(0) - 1 : If NesNtLog(0) >= 0
+      ;     NesNtLog(1) = (NesNtLog(1) + 4) & 4095 : PokeL(NesNtLog(2) + NesNtLog(1), offset << 8 | value) : EndIf
+      la t2, global_nesntlog
+      ld t3, 0(t2)                    ; the room
+      daddiu t3, t3, -1
+      bltz t3, nes_mmc3_ppu_ntlog_full ; none left: not stored
+      sd t3, 0(t2)                    ; (delay slot) the room less one, on both paths
+      sll a0, a0, 8
+      or a0, a0, a1                   ; the entry
+      ld t3, 8(t2)
+      daddiu t3, t3, 4
+      andi t3, t3, 0xFFF              ; the next slot's offset
+      sd t3, 8(t2)
+      lw t2, 20(t2)                   ; the ring (KSEG1), sign-extended
+      daddu t2, t2, t3
+      sw a0, 0(t2)                    ; uncached
+nes_mmc3_ppu_ntlog_full:
+    EndASM
+  CompilerEndIf
+  ASM
     la t2, global_mapntslots
     addiu t3, t2, 32
     la a0, global_nt

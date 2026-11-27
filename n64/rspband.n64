@@ -7,7 +7,9 @@
 ; the cache or not dirty is left as it is; a dirty one is written to RDRAM and stays valid, so the guest's next
 ; access to it still hits. Nt is written back whole rather than the band's rows: the rows a band reads follow from
 ; its v walk, which the CPU does not do (the RSP does), and computing them here would cost more than the 256
-; operations (measured: section N.18).
+; operations (measured: section N.18). SINCE N.66 the RSP reads its own image of the name tables, kept by the write
+; log (below), so Nt is written back here only in the measuring build (--wb-measure); --rsp-check writes back the
+; record and the snapshot.
 ; IN: t2 = the record (the band cut's register, unit/ppu_cold.n64, ppu_cut_close). CLOBBERS t3, t8, t9, v1 only;
 ; keeps t2 and every register the cut's callers hold.
 ; #NES_WB_MEASURE (the measuring build): the Count register before and after, summed in NesWbStat: [0] all ticks,
@@ -18,6 +20,280 @@ CompilerIf #NES_RDP_SHOW
   #NES_SEG_POOL = 42                    ; the show's: a 4 KB gap between two band-input slots (show.n64)
 CompilerElse
   #NES_SEG_POOL = 64                    ; the checking builds' (6 KB; ppu_cold.n64's line 0 says 6144)
+CompilerEndIf
+
+; ======================================================================
+; THE NAME-TABLE WRITE LOG (design note, section N.66). The shipped build (#NES_RDP_SHOW) and --rsp-check.
+; The RSP's band job reads the name and attribute tables (only its background layer: two rows and two attribute
+; rows a strip) when it RUNS, so it needs an image that is Nt as at the band's close and stays so until it has run.
+; Copying Nt (4 KB) into a band-input slot at every close did that for ~13,700 Count ticks a band. Instead the RSP
+; keeps ITS OWN image L (4 KB, the four logical tables as Nt lays them out) and brings it up to date itself:
+;   - the hot unit's CIRAM write (unit/write.n64, u_ppuwrite) stores one entry - CIRAM offset << 8 | value - into a
+;     4 KB ring, uncached (NesNtLog: [0] the room, [1] the last entry's byte offset, [2] the ring, KSEG1);
+;   - at a band's close that reads the image (NesNtLogBand) the record gets the ring's span of entries not yet
+;     applied (+32: from | to << 16, the entries after `from` up to `to`) and the band's map (+36: logical table
+;     t's CIRAM slot, MapNtSlots(t), in bits 2t and 2t + 1); the job (rspband.n64rsp, NesRspBandA) applies each
+;     entry to every table the map gives its slot, then reads L as it read the slot.
+; WHY CIRAM WRITES: Nt is alias(CIRAM, MapNtSlots) at every moment (every Nt write is u_ppuwrite's, and MapperMirror
+; rebuilds all of Nt from CIRAM after cutting the band). A CIRAM write does not depend on the map, so L stays
+; alias(CIRAM, M) under a fixed M whatever the map did in between; only a job whose map differs from the last
+; reading job's needs L rebuilt. THE RESYNC (L copied from Nt, every pending entry skipped): the first reading band,
+; a map change, or an entry the ring had no room for (the room below 0: a world entry's thousands of writes while
+; rendering is off and no job reads L). Before it, the last job that read L must have run (its fence; counted).
+; THE ROOM: 1,023 entries less those not yet applied by a reading job known done (NesNtLogQueued, after the job's
+; fence: the newest of the last two whose fence has passed) - so an entry is never stored over one a queued job
+; has still to apply. L is at NesNtImage (KSEG0, on Nt's D-cache sets: the resync's copy displaces only Nt lines),
+; the ring at NesNtImage + 8192 (the RSP program finds it there: nb_nt + 8192).
+; ======================================================================
+CompilerIf #NES_RDP_SHOW Or #NES_RSP_CHECK
+#NES_NT_CAP = 1023                      ; the ring's entries that may be pending (1,024 slots of 4 bytes, one kept)
+Global Dim NesNtLog.i(3)                ; [0] room [1] the last entry's offset [2] the ring (KSEG1) - u_ppuwrite's
+Global NesNtImage.i                     ; L (KSEG0)
+Global NesNtLast.i                      ; the last reading job's `to`: the next one's `from`
+Global NesNtMap.i                       ; the last reading job's map
+Global NesNtSync.i                      ; 1: the next reading band resyncs (the first)
+Global NesNtPd.i                        ; the ring offset applied by a job known done
+Global Dim NesNtF.i(2)                  ; the last two reading jobs' fences ([0] the newest; 0 none) ...
+Global Dim NesNtP.i(2)                  ; ... and their `to`
+; [0] reading jobs [1] entries given them [2] resyncs [3] of them for an entry not stored [4] for a map change
+; [5] waits for the last reading job before a resync [6] the most entries one job applied
+Global Dim NesNtStat.i(8)
+
+Procedure NesNtInit(image.i)            ; image: KSEG0, 16-byte aligned, 8 KB + 4 KB (L, then the ring at +8192)
+  NesNtImage = image
+  NesNtLog(0) = #NES_NT_CAP : NesNtLog(1) = 0 : NesNtLog(2) = ((image + 8192) & $1FFFFFFF) | $A0000000
+  NesNtLast = 0 : NesNtMap = -1 : NesNtSync = 1 : NesNtPd = 0 : NesNtF(0) = 0 : NesNtF(1) = 0
+  LpmCacheWritebackInvalidateData(image, 8192 + 4096)   ; no stale line of L or the ring may land on them later
+EndProcedure
+
+; NesNtCopy(dst) - the 4 KB name and attribute image Nt into L (dst, KSEG0, 16-byte aligned, on the same D-cache
+; sets as Nt). A line at a time: its 16 bytes read (cached hits), L's line created in the cache without a fill
+; (Create_Dirty_Exclusive_D), written, and written back and invalidated (Hit_Writeback_Invalidate_D) - one block
+; write to RDRAM a line where uncached stores make two bus writes and stall on each (measured: 13,247 Count ticks a
+; copy with uncached stores). The line created takes the set of the Nt line just read (a dirty one is written back
+; first), so the copy displaces only Nt, never guest RAM or the stack. L is in RDRAM and not in the cache when the
+; loop ends. (The band-input slots' copy of N5, moved here from show.n64 unchanged; now run only at a resync.)
+; CLOBBERS a0, t0-t3.
+ProcedureNaked NesNtCopy(dst.i)
+  ASM
+    sll a0, a0, 0                    ; the address, sign-extended as the VR4300's 32-bit addressing wants
+    la t0, global_nt
+    daddiu t1, t0, 4096
+nes_nt_copy:
+    ld t2, 0(t0)                     ; 16 bytes of Nt (cached: a hit)
+    ld t3, 8(t0)
+    daddiu t0, t0, 16
+    cache 0x0D, 0(a0)                ; Create_Dirty_Exclusive_D: L's line, not read from RDRAM
+    sd t2, 0(a0)
+    sd t3, 8(a0)
+    cache 0x15, 0(a0)                ; Hit_Writeback_Invalidate_D: to RDRAM in one block write, out of the cache
+    bne t0, t1, nes_nt_copy
+    daddiu a0, a0, 16
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
+; NesNtLogBand(rec, reads) - a band's close, before its job is queued: the record's +32 / +36 (above). reads = 0
+; (the background off, or a split line's record): from = to = 0, the job applies nothing. Else the map M, the
+; resync when it is due, the span. Calls compiled procedures (LpmRspqFenceDone, LpmRspqWait): keeps s0-s2 itself;
+; CLOBBERS what a compiled call may. THE PLAIN TWIN:
+;   If reads = 0 : PokeL(rec + 32, 0) : PokeL(rec + 36, 0) : ProcedureReturn : EndIf
+;   m = MapNtSlots(0) & 3 | (MapNtSlots(1) & 3) << 2 | (MapNtSlots(2) & 3) << 4 | (MapNtSlots(3) & 3) << 6
+;   If NesNtLog(0) < 0 Or m <> NesNtMap Or NesNtSync
+;     If NesNtF(0) And LpmRspqFenceDone(NesNtF(0)) = 0 : LpmRspqWait(NesNtF(0)) : NesNtStat(5) + 1 : EndIf
+;     NesNtCopy(NesNtImage) : NesNtLast = NesNtLog(1) : NesNtPd = NesNtLog(1) : NesNtF(0) = 0 : NesNtF(1) = 0
+;     NesNtSync = 0 : NesNtStat(2) + 1 (and (3) / (4) by the cause)
+;   EndIf
+;   PokeL(rec + 32, NesNtLast | NesNtLog(1) << 16) : PokeL(rec + 36, m) : NesNtLast = NesNtLog(1) : NesNtMap = m
+ProcedureNaked NesNtLogBand(rec.i, reads.i)
+  ASM
+    bnez a1, nntb_reads
+    nop
+    sw zero, 32(a0)                  ; a band that does not read the image: nothing to apply
+    jr ra
+    sw zero, 36(a0)                  ; (delay slot)
+nntb_reads:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    move s0, a0                      ; the record
+    la t0, global_mapntslots         ; the map: MapNtSlots(t) & 3 in bits 2t, 2t + 1
+    ld t1, 0(t0)
+    andi s1, t1, 3
+    ld t1, 8(t0)
+    andi t1, t1, 3
+    sll t1, t1, 2
+    or s1, s1, t1
+    ld t1, 16(t0)
+    andi t1, t1, 3
+    sll t1, t1, 4
+    or s1, s1, t1
+    ld t1, 24(t0)
+    andi t1, t1, 3
+    sll t1, t1, 6
+    or s1, s1, t1
+    la t0, global_nesntlog
+    ld t1, 0(t0)
+    bltz t1, nntb_resync             ; an entry was not stored: the ring cannot bring L up to date
+    addiu s2, zero, 3                ; (delay slot) the cause's statistic
+    la t0, global_nesntmap
+    ld t1, 0(t0)
+    bne t1, s1, nntb_resync          ; another map: L's aliases are not Nt's
+    addiu s2, zero, 4                ; (delay slot)
+    la t0, global_nesntsync
+    ld t1, 0(t0)
+    beqz t1, nntb_fields             ; the first reading band resyncs; every other takes the span
+    move s2, zero                    ; (delay slot)
+nntb_resync:
+    la t0, global_nesntf
+    ld a0, 0(t0)                     ; the newest job that read L
+    beqz a0, nntb_copy
+    nop
+    jal lpmrspqfencedone
+    nop
+    bnez v0, nntb_copy               ; it has run
+    nop
+    la t0, global_nesntf
+    jal lpmrspqwait                  ; it has not: L is not ours to write until it has (counted)
+    ld a0, 0(t0)                     ; (delay slot)
+    la t0, global_nesntstat
+    ld t1, 40(t0)
+    daddiu t1, t1, 1
+    sd t1, 40(t0)
+nntb_copy:
+    la t0, global_nesntimage
+    jal nesntcopy
+    ld a0, 0(t0)                     ; (delay slot)
+    la t0, global_nesntlog
+    ld t1, 8(t0)                     ; every entry up to the last one stored is in the copy
+    la t0, global_nesntlast
+    sd t1, 0(t0)
+    la t0, global_nesntpd
+    sd t1, 0(t0)
+    la t0, global_nesntf
+    sd zero, 0(t0)
+    sd zero, 8(t0)
+    la t0, global_nesntsync
+    sd zero, 0(t0)
+    la t0, global_nesntstat
+    ld t1, 16(t0)
+    daddiu t1, t1, 1
+    sd t1, 16(t0)                    ; resyncs
+    beqz s2, nntb_fields
+    dsll s2, s2, 3                   ; (delay slot) the cause's slot
+    daddu t0, t0, s2
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+nntb_fields:
+    la t0, global_nesntlog
+    ld t1, 8(t0)                     ; to: the last entry stored
+    la t0, global_nesntlast
+    ld t2, 0(t0)                     ; from: the last reading job's to
+    sd t1, 0(t0)
+    sll t3, t1, 16
+    or t3, t3, t2
+    sw t3, 32(s0)                    ; +32: from | to << 16
+    sw s1, 36(s0)                    ; +36: the map
+    la t0, global_nesntmap
+    sd s1, 0(t0)
+    dsubu t3, t1, t2
+    andi t3, t3, 4095
+    dsrl t3, t3, 2                   ; the entries given this job
+    la t0, global_nesntstat
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    ld t1, 8(t0)
+    daddu t1, t1, t3
+    sd t1, 8(t0)
+    ld t1, 48(t0)
+    sltu t2, t1, t3
+    beqz t2, nntb_out
+    nop
+    sd t3, 48(t0)
+nntb_out:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+EndProcedure
+
+; NesNtLogQueued(f) - after a reading band's job and its fence f are queued: the offset applied by a job known done
+; (the newest of the last two reading jobs whose fence has passed), the two kept, and the room the hot append may
+; use until the next reading band: #NES_NT_CAP less the entries after that offset. THE PLAIN TWIN:
+;   If NesNtF(0) And LpmRspqFenceDone(NesNtF(0)) : NesNtPd = NesNtP(0)
+;   ElseIf NesNtF(1) And LpmRspqFenceDone(NesNtF(1)) : NesNtPd = NesNtP(1) : EndIf
+;   NesNtF(1) = NesNtF(0) : NesNtP(1) = NesNtP(0) : NesNtF(0) = f : NesNtP(0) = NesNtLast
+;   NesNtLog(0) = #NES_NT_CAP - ((NesNtLog(1) - NesNtPd) & 4095) >> 2
+ProcedureNaked NesNtLogQueued(f.i)
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    move s0, a0
+    la t0, global_nesntf
+    ld a0, 0(t0)
+    beqz a0, nntq_shift              ; none: every job that read L before has run (a resync waited for it)
+    nop
+    jal lpmrspqfencedone
+    nop
+    beqz v0, nntq_older
+    nop
+    la t0, global_nesntp
+    b nntq_pd
+    ld t1, 0(t0)                     ; (delay slot) the newest's to
+nntq_older:
+    la t0, global_nesntf
+    ld a0, 8(t0)
+    beqz a0, nntq_shift
+    nop
+    jal lpmrspqfencedone
+    nop
+    beqz v0, nntq_shift              ; neither yet: the offset known applied stays
+    nop
+    la t0, global_nesntp
+    ld t1, 8(t0)
+nntq_pd:
+    la t0, global_nesntpd
+    sd t1, 0(t0)
+nntq_shift:
+    la t0, global_nesntf
+    ld t1, 0(t0)
+    sd t1, 8(t0)
+    sd s0, 0(t0)
+    la t0, global_nesntp
+    ld t1, 0(t0)
+    sd t1, 8(t0)
+    la t2, global_nesntlast
+    ld t1, 0(t2)
+    sd t1, 0(t0)
+    la t0, global_nesntlog
+    ld t1, 8(t0)                     ; the last entry stored
+    la t2, global_nesntpd
+    ld t2, 0(t2)
+    dsubu t1, t1, t2
+    andi t1, t1, 4095
+    dsrl t1, t1, 2                   ; entries not known applied
+    addiu t2, zero, #NES_NT_CAP
+    dsubu t2, t2, t1
+    sd t2, 0(t0)                     ; the room
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+
+Procedure NesNtReport()
+  LpmDebugPrint("NES NTLOG JOBS " + Str(NesNtStat(0)) + " ENTRIES " + Str(NesNtStat(1)) + " MOST A JOB " + Str(NesNtStat(6)) + " RESYNCS " + Str(NesNtStat(2)) + " DROPPED " + Str(NesNtStat(3)) + " MAP " + Str(NesNtStat(4)) + " WAITS " + Str(NesNtStat(5)))
+EndProcedure
 CompilerEndIf
 
 CompilerIf #NES_WB_MEASURE Or #NES_RSP_CHECK
@@ -33,6 +309,9 @@ ProcedureNaked NesBandWriteback()
       nop
     EndASM
   CompilerEndIf
+  ; (--rsp-check: the RSP reads its own image of the name tables, kept by the write log - section N.66 - so Nt is
+  ; written back only in the measuring build, which measures that)
+  CompilerIf #NES_WB_MEASURE
   ASM
     la t3, global_nt
     daddiu t8, t3, 4096              ; the end (exclusive)
@@ -45,6 +324,7 @@ nes_bwb_nt:
     bne t9, zero, nes_bwb_nt
     nop
   EndASM
+  CompilerEndIf
   CompilerIf #NES_WB_MEASURE
     ASM
       mfc0 t9, $9                    ; Count after Nt
@@ -119,6 +399,7 @@ EndASM
 #NES_RSP_TLUT_AT = $8100
 #NES_RSP_PROG_AT = $B000
 Global NesRspProg.i, NesRspTlut.i, NesRspFirst.s          ; (NesRspOut: twin.n64)
+Global Dim NesRspNtSpace.a(8192+8192+4096+16)        ; the RSP's name-table image and the log's ring (N.66)
 Global Dim NesRspStat.i(8)                          ; frames, words, TLUT blocks compared, differences, RSP clocks, bands
 
 Procedure NesRspInit()
@@ -140,17 +421,25 @@ Procedure NesRspInit()
   If NesRspProg = 0
     LpmDebugPrint("NES RSP CHECK REFUSED: LpmRspqProgram") : NesRspHalt = 1 : ProcedureReturn
   EndIf
-  LpmRspqCmd7(NesRspProg, #NES_RSP_SETUP, @Nt(0) & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesTwinTlut & $1FFFFFFF, NesRspTlut & $1FFFFFFF, NesRspOut & $1FFFFFFF)
+  ; the RSP's image of the name tables, kept by the write log (N.66): on Nt's D-cache sets, the ring 8 KB after it
+  NesNtInit(@NesRspNtSpace(0) + (((@Nt(0) & ~15) - @NesRspNtSpace(0)) & 8191))
+  LpmRspqCmd7(NesRspProg, #NES_RSP_SETUP, NesNtImage & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesTwinTlut & $1FFFFFFF, NesRspTlut & $1FFFFFFF, NesRspOut & $1FFFFFFF)
   LpmRspqSync()
   LpmDebugPrint("NES RSP PROGRAM " + Str(need - 128) + " bytes, on")
 EndProcedure
 
 Procedure NesRspBand(rec.i)
-  Protected idx.i, oam.i
+  Protected idx.i, oam.i, reads.i, f.i
   If NesRspProg = 0 : ProcedureReturn : EndIf
   idx = (rec - NesBandBase) / #NES_BAND_BYTES
   oam = NesOamBase + PeekI(rec + #NES_B_OAM) * 256
+  ; the job reads the image only in its background layer, and a split line's record not at all (N.66)
+  reads = Bool((PeekI(rec + #NES_B_STATE) >> 8) & 8 And PeekL(rec + #NES_B_BANKS + 8) = 0)
+  NesNtLogBand(rec, reads)
+  LpmCacheWritebackData(rec + 32, 16)   ; the record's +32 / +36, written after the cut's write-back
   LpmRspqCmd(NesRspProg, #NES_RSP_BAND, rec & $1FFFFFFF, oam & $1FFFFFFF, idx)
+  f = LpmRspqFence()
+  If reads : NesNtLogQueued(f) : EndIf
   LpmRspqFlush()
 EndProcedure
 
@@ -273,6 +562,7 @@ EndProcedure
 Procedure NesRspReport()
   LpmDebugPrint("NES RSP FRAMES " + Str(NesRspStat(0)) + " WORDS " + Str(NesRspStat(1)) + " TLUT BLOCKS " + Str(NesRspStat(2)) + " DIFFERENCES " + Str(NesRspStat(3)) + " RSP CLOCKS " + Str(NesRspStat(4)) + " MAX A FRAME " + Str(NesRspStat(5)))
   LpmDebugPrint("NES RSP FIRST DIFFERENCE " + NesRspFirst)
+  NesNtReport()
 EndProcedure
 CompilerEndIf
 

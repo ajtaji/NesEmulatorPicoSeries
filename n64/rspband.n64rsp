@@ -8,7 +8,9 @@
 ;  reference. Read twin.n64's header for what the words are; this file says only how the RSP gets them.
 ;
 ;  COMMANDS (rspband_ids.pmi):
-;    NES_RSP_SETUP (128), once: RspqArg 0-6 = the physical addresses of Nt (the 4 KB name and attribute tables),
+;    NES_RSP_SETUP (128), once a frame set: RspqArg 0-6 = the physical addresses of THIS MODULE'S IMAGE of the name
+;      and attribute tables (4 KB, kept by the CPU's write log, the log's 4 KB ring 8 KB after it - design note N.66;
+;      NesRspBandA applies the record's entries: record +32 their span, +36 the band's map),
 ;      NesChrMask (one byte a tile: bit r = row r has a pixel other than 0), Rgb64 (512 colours), the CI4 pairs
 ;      (NesChrPairBase), the TLUT blocks the words name (32 x 256 B), the TLUT blocks this program writes, the frame
 ;      command area (4,096 doublewords, then 16 bytes of status). All 8-byte aligned (the CPU checks).
@@ -162,6 +164,106 @@ nb_mk:
     sltiu t1, t0, 8
     bne t1, zero, nb_mk
     nop
+    ; ---- THE NAME-TABLE LOG (design note N.66): this module's image of the name tables (nb_nt, 4 KB: the four
+    ; logical tables as Nt lays them out) brought up to the band's close before its background reads it. The CPU's
+    ; CIRAM writes are entries in a 4 KB ring at nb_nt + 8192 (rspband.n64, NesNtLog): CIRAM offset << 8 | value,
+    ; offset = slot x 1024 + off. The record's +32 = from | to << 16: the entries after ring offset `from` up to and
+    ; including `to` are this job's (from = to: none - a band that does not read the image, or after the CPU's
+    ; resync copy); +36 = the map, logical table t's CIRAM slot in bits 2t, 2t + 1. An entry is applied to every
+    ; table the map gives its slot - so the image stays alias(CIRAM, map) as Nt is (rspband.n64's header says why
+    ; the map of the applying job is the right one).
+    ; HOW: the ring is read in runs of up to 1 KB (a run stops at the ring's end) by one DMA from its 8-aligned start
+    ; into scratch 1024 (free until the colour row); per entry, the 8-byte block holding its offset IN ALL FOUR TABLES
+    ; comes in by ONE strided DMA (4 rows of 8 bytes, 1,016 apart) to scratch 864 (free until the strips) unless it
+    ; is the block held; the value is stored at row t, byte off & 7, for each t whose slot is the entry's; the held
+    ; block goes back out (the same strided DMA) when another block is needed and after the last entry. Every DMA is
+    ; waited (nbdi / nbdo), so a block written out has landed before the next is read, and the strips' reads later
+    ; see every value. REGISTERS (free here; the record's fields are loaded after): a1 the position of the last
+    ; entry applied, a2 to, a3 the map, a4 the block held (its offset in a table, -1 none), a5 the run's end, a6 its
+    ; DMA start, a7 / t9 the entry in DMEM / the run's end in DMEM, t0-t3, t8, v1, a0 per entry.
+    lw a0, global_rspq_scratch+32(zero)      ; from | to << 16
+    andi a1, a0, 0xFFFF                      ; from
+    srl a2, a0, 16                           ; to
+    beq a1, a2, nbl_done                     ; none
+    lw a3, global_rspq_scratch+36(zero)      ; (delay slot) the map
+    addiu a4, zero, -1                       ; no block held
+nbl_run:
+    addiu a1, a1, 4
+    andi a1, a1, 0xFFC                       ; the run's first entry (the ring wraps at 4096)
+    slt t0, a2, a1                           ; to behind it: the run ends at the ring's end
+    beq t0, zero, nbl_r
+    addiu a5, a2, 4                          ; (delay slot) else just after to
+    addiu a5, zero, 4096
+nbl_r:
+    addiu t1, zero, -8
+    and a6, a1, t1                           ; the DMA's start, 8-aligned
+    addiu t1, a6, 1024
+    slt t0, t1, a5
+    beq t0, zero, nbl_len
+    nop
+    addu a5, t1, zero                        ; at most 1 KB a run
+nbl_len:
+    subu v0, a5, a6
+    addiu v0, v0, -1                         ; bytes - 1 (the DMA rounds up to 8: still inside the ring)
+    lw k1, global_nb_nt(zero)
+    addiu k1, k1, 8192                       ; the ring
+    addu k1, k1, a6
+    jal nbdi
+    addiu k0, zero, global_rspq_scratch+1024 ; (delay slot)
+    subu a7, a1, a6
+    addiu a7, a7, global_rspq_scratch+1024   ; the first entry in DMEM
+    subu t9, a5, a6
+    addiu t9, t9, global_rspq_scratch+1024   ; the run's end in DMEM
+nbl_entry:
+    lw t0, 0(a7)                             ; the entry
+    srl t1, t0, 8                            ; its CIRAM offset
+    andi t2, t1, 0x3F8                       ; its block's offset in a table
+    beq t2, a4, nbl_put                      ; the block held
+    andi t3, t1, 7                           ; (delay slot) the byte in the block
+    bltz a4, nbl_in                          ; none held
+    nop
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, a4
+    addiu k0, zero, global_rspq_scratch+864
+    lui v0, 0x3F80                           ; skip 1016, 4 rows, 8 bytes
+    jal nbdo                                 ; the held block back
+    ori v0, v0, 0x3007                       ; (delay slot)
+nbl_in:
+    addu a4, t2, zero
+    lw k1, global_nb_nt(zero)
+    addu k1, k1, a4
+    addiu k0, zero, global_rspq_scratch+864
+    lui v0, 0x3F80
+    jal nbdi                                 ; the entry's block of all four tables
+    ori v0, v0, 0x3007                       ; (delay slot)
+nbl_put:
+    srl t1, t1, 10
+    andi t1, t1, 3                           ; the entry's CIRAM slot
+    addu t8, a3, zero                        ; the map, table 0 first
+    addiu v1, t3, global_rspq_scratch+864    ; table 0's byte
+    addiu a0, zero, 4
+nbl_t:
+    andi t2, t8, 3
+    bne t2, t1, nbl_tn                       ; table t shows another slot
+    srl t8, t8, 2                            ; (delay slot) the next table's slot
+    sb t0, 0(v1)                             ; the value (the entry's low byte)
+nbl_tn:
+    addiu a0, a0, -1
+    bgtz a0, nbl_t
+    addiu v1, v1, 8                          ; (delay slot) the next table's row
+    addiu a7, a7, 4
+    bne a7, t9, nbl_entry
+    nop
+    addiu a1, a5, -4                         ; the last entry applied
+    bne a1, a2, nbl_run                      ; more after it
+    nop
+    lw k1, global_nb_nt(zero)                ; the held block back (one is held: the run had an entry)
+    addu k1, k1, a4
+    addiu k0, zero, global_rspq_scratch+864
+    lui v0, 0x3F80
+    jal nbdo
+    ori v0, v0, 0x3007                       ; (delay slot)
+nbl_done:
     ; ---- a frame's first band: the RDP's state unknown (the twin's idx = 0) ----
     lw t0, global_rspqarg+8(zero)            ; the band's index | its frame set << 8
     srl t1, t0, 8

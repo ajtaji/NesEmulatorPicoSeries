@@ -63,13 +63,15 @@ EndASM
 #NES_FB_ROWS = 240                      ; the fallback rows' ring: a frame needs at most one a line
 
 Global Dim NesShowArea1Space.a(#NES_SHOW_WORDS*8+16+16)
-Global Dim NesShowNtSpace.a(4*8192+8192)  ; four 4 KB slots, each on Nt's D-cache sets (8 KB apart)
+; the RSP's name-table image L (rspband.n64, N.66: on Nt's D-cache sets), the split lines' segment pool 0 in the 4 KB
+; after it, the write log's ring 8 KB after L, pool 1 after the ring (each pool written only uncached)
+Global Dim NesShowNtSpace.a(2*8192+8192)
 Global Dim NesFbPalSpace.u(#NES_FB_ROWS*32+8)  ; a row's palette, 64 bytes
 Global Dim NesFbLine.i(2*#NES_FB_ROWS)   ; each set's fallback lines, in order
 Global Dim NesShowOamKeep.a(256+8)
 
 Global NesShowSetupP.i                 ; the frame set the RSP program's areas were last set up for
-Global NesShowProg.i, NesShowCur.i, NesShowBusy.i, NesShowNtBase.i, NesShowNtNext.i
+Global NesShowProg.i, NesShowCur.i, NesShowBusy.i, NesShowNtBase.i
 Global Dim NesShowArea.i(2)             ; KSEG1: the frame areas
 Global Dim NesShowTlut.i(2)             ; KSEG1: the TLUT sets
 Global Dim NesShowBands.i(2)            ; band jobs queued (the RSP's band index of the next)
@@ -94,7 +96,6 @@ Global Dim NesShowPrevBands.i(2)
 Global Dim NesFbCountP.i(2)
 Global Dim NesFbOverP.i(2)
 Global Dim NesFbFirstP.i(2)              ; its first row in the ring
-Global Dim NesShowNtFence.i(4)          ; the band-input slots' last jobs
 Global Dim NesShowRecFence.i(#NES_U_BANDMAX)   ; each record's last job
 ; the current frame's fallback slots, as the unit's assembly reads them (NesFbSlot, NesFbPublish)
 Global NesFbFirst.i, NesFbGuard.i, NesFbHead.i
@@ -333,33 +334,6 @@ Procedure NesRecAdd(k.i, t0.i)
 EndProcedure
 CompilerEndIf
 
-; NesShowCopyNt(dst) - the 4 KB name and attribute image Nt into a band-input slot (dst, KSEG0, 16-byte aligned, on
-; the same D-cache sets as Nt: NesShowInit). A line at a time: its 16 bytes read (cached hits), the slot's line
-; created in the cache without a fill, written, and written back and invalidated - one block write to RDRAM a line
-; where uncached stores make two bus writes and stall on each (measured: 13,247 Count ticks a band with uncached
-; stores). The line created takes the set of the Nt line just read (a dirty one is written back first), so the copy
-; displaces only Nt - which the guest reaches through $2007 alone - never guest RAM or the stack. The slot is in
-; RDRAM and not in the cache when the loop ends. CLOBBERS a0, t0-t3.
-ProcedureNaked NesShowCopyNt(dst.i)
-  ASM
-    sll a0, a0, 0                    ; the address, sign-extended as the VR4300's 32-bit addressing wants
-    la t0, global_nt
-    daddiu t1, t0, 4096
-nes_show_nt_copy:
-    ld t2, 0(t0)                     ; 16 bytes of Nt (cached: a hit)
-    ld t3, 8(t0)
-    daddiu t0, t0, 16
-    cache 0x0D, 0(a0)                ; Create_Dirty_Exclusive_D: the slot's line, not read from RDRAM
-    sd t2, 0(a0)
-    sd t3, 8(a0)
-    cache 0x15, 0(a0)                ; Hit_Writeback_Invalidate_D: to RDRAM in one block write, out of the cache
-    bne t0, t1, nes_show_nt_copy
-    daddiu a0, a0, 16
-    jr ra
-    nop
-  EndASM
-EndProcedure
-
 ; NesShowRecWriteback(rec) - the band record's 96 bytes and its OAM snapshot's 256 to RDRAM (Hit_Writeback_D: a
 ; dirty line written, every line stays valid) - as rspband.n64's NesBandWriteback without the name tables.
 ; CLOBBERS t0, t1.
@@ -575,7 +549,8 @@ Procedure.i NesShowInit()
   ; no stale cached line of what the RSP and the RDP read uncached may land on it later
   LpmCacheWritebackInvalidateData(#NES_CART_LOW_END, #NES_SHOW_TLUT_AT + 2 * #NES_U_BANDMAX * 256)
   LpmCacheWritebackInvalidateData(a1, #NES_SHOW_WORDS * 8 + 16)
-  LpmCacheWritebackInvalidateData(@NesShowNtSpace(0), 4 * 8192 + 8192)
+  LpmCacheWritebackInvalidateData(@NesShowNtSpace(0), 2 * 8192 + 8192)
+  NesNtInit(NesShowNtBase)              ; the RSP's name-table image and the write log's ring (rspband.n64, N.66)
   LpmCacheWritebackData(@Rgb64(0), 1024)
   space = #NES_SHOW_PROG
   NesShowProg = LpmRspqProgram(LpmCartFile(1), space)
@@ -596,50 +571,203 @@ EndProcedure
 
 Declare NesShowAcquire()
 Declare NesShowPollE(wait.i, early.i)
-; ---- a band's close (the cold part, through NesShowBandCall) ----
-Procedure NesShowBand(rec.i)
-  Protected idx.i, s.i, f.i, p.i = NesShowCur, b.i, nt.i, t0.i, t0r.i
-  If NesShowProg = 0 : ProcedureReturn : EndIf
-  If NesShowFreeCur = 0 : NesShowAcquire() : EndIf   ; the set's first write: its last frame drawn (N.62; timed as
-  t0 = LpmCpuCount() : t0r = t0                      ; the hand-over's)
-  idx = (rec - NesBandBase) / #NES_BAND_BYTES
-  f = NesShowRecFence(idx)                ; the record's job of a frame ago has read it
-  If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
-  ; THE BACKGROUND OFF (design note N.27, fix 2): the RSP program reads a band's name-table slot only in its
-  ; background layer (nbbg, run only with PPUMASK bit 3 set), so a band whose background is off - every band of a
-  ; frame drawn with rendering off - needs no copy: no slot is taken (its fence does not move) and the job names
-  ; slot 0's address, which it does not read. The copy was ~14,000 of a band close's ~16,000 ticks.
-  ; A SPLIT LINE'S RECORD (design note N.60) carries its own name-table bytes in its segments: no copy either.
-  If (PeekI(rec + #NES_B_STATE) >> 8) & 8 And PeekL(rec + #NES_B_BANKS + 8) = 0
-    s = NesShowNtNext : NesShowNtNext = (s + 1) & 3
-    f = NesShowNtFence(s)                 ; the slot's last job has read it
-    If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
-    nt = NesShowNtBase + s * 8192
-    NesShowCopyNt(nt)
-  Else
-    s = -1 : nt = NesShowNtBase
-  EndIf
-  NesShowRecWriteback(rec)
-  t0 = (LpmCpuCount() - t0) & $FFFFFFFF
-  NesShowStat(9) + t0 : NesShowStat(10) + 1
-  If t0 > NesShowStat(11) : NesShowStat(11) = t0 : EndIf
-  b = NesShowBands(p)
-  ; NES_RSP_SETUP names the band's name-table slot and the frame set's areas: a split line's record reads no slot, so
-  ; it needs none when the set's areas are the ones the program has (NesShowSetupP)
-  If s >= 0 Or PeekL(rec + #NES_B_BANKS + 8) = 0 Or NesShowSetupP <> p
+; ---- a band's close (the cold part, through NesShowBandCall; NesSegPublish for a split line's record) ----
+; NES_RSP_SETUP names the RSP's name-table image (fixed since N.66) and the frame set's areas: sent when the set is not
+; the one the program has. Compiled: the library's 7-argument command (an inline macro of its own assembly) takes
+; nine arguments, more than a naked caller's eight registers; it runs once a frame set (once a frame).
+Procedure NesShowSetupCmd(p.i)
   NesShowSetupP = p
-  LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, nt & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
-  EndIf
-  LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + PeekI(rec + #NES_B_OAM) * 256) & $1FFFFFFF, b | (p << 8))
-  f = LpmRspqFence()
-  NesShowRecFence(idx) = f : NesShowFence(p) = f
-  If s >= 0 : NesShowNtFence(s) = f : EndIf
-  NesShowBands(p) = b + 1 : NesShowBusy = 1
-  LpmRspqFlush()
+  LpmRspqCmd7(NesShowProg, #NES_RSP_SETUP, NesNtImage & $1FFFFFFF, NesChrMaskBase & $1FFFFFFF, @Rgb64(0) & $1FFFFFFF, NesChrPairBase & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowTlut(p) & $1FFFFFFF, NesShowArea(p) & $1FFFFFFF)
+EndProcedure
+
+; NesShowBand(rec) - THE BAND'S CLOSE: its inputs made safe for the RSP's DMA and its job queued. Documented VR4300
+; assembly (the owner's order: the emulator's glue in assembly; design note N.66, which also removed its 4 KB copy).
+; WHAT, in order (the plain twin, the compiled procedure it replaces less the copy):
+;   p = NesShowCur : If NesShowProg = 0 : ProcedureReturn : EndIf
+;   If NesShowFreeCur = 0 : NesShowAcquire() : EndIf        ; the set's first write: its last frame drawn (N.62)
+;   t0 = Count : idx = (rec - NesBandBase) / 96
+;   f = NesShowRecFence(idx) : If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
+;   reads = PPUMASK bit 3 of the record And it is not a split line's (+56 = 0)   ; the job reads the image (N.66)
+;   NesNtLogBand(rec, reads) : NesShowRecWriteback(rec)
+;   t = (Count - t0) & $FFFFFFFF : NesShowStat(9) + t : NesShowStat(10) + 1 : NesShowStat(11) = max
+;   If NesShowSetupP <> p : NesShowSetupCmd(p) : EndIf
+;   b = NesShowBands(p)
+;   LpmRspqCmd(NesShowProg, #NES_RSP_BAND, rec & $1FFFFFFF, (NesOamBase + oam index x 256) & $1FFFFFFF, b | p << 8)
+;   f = LpmRspqFence() : NesShowRecFence(idx) = f : NesShowFence(p) = f : If reads : NesNtLogQueued(f) : EndIf
+;   NesShowBands(p) = b + 1 : NesShowBusy = 1 : LpmRspqFlush()
+;   (the console record: NesRecAdd(0, t0))
+;   If NesShowAtt(p) = 0 : NesShowPollE(0, 1) : EndIf       ; attached as early as it can be (N.62)
+; HOW: the values that live across the calls in s0-s5 (kept on the stack: s0 rec, s1 p, s2 Count at the start,
+; s3 idx x 8, s4 reads, s5 b); everything else is loaded where used. The library's command goes through its
+; naked LpmRspqCmdCall (a0-a4); the other calls are compiled procedures (they keep s0-s7). idx = (x x 683) >> 16
+; for x = rec - NesBandBase = 96 idx: exact for idx < 2048 (683 / 65536 = 1 / 96 + 1 / 196,608). The record is
+; 16-byte aligned (its 6 lines). CLOBBERS what a compiled call may (the caller, NesShowBandCall, keeps the rest).
+ProcedureNaked NesShowBand(rec.i)
+  ASM
+    la t0, global_nesshowprog
+    ld t0, 0(t0)
+    bnez t0, nsb_on
+    nop
+    jr ra                            ; the show is off (refused at its start)
+    nop
+nsb_on:
+    daddiu sp, sp, -64
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    sd s5, 48(sp)
+    move s0, a0                      ; the record
+    la t0, global_nesshowcur
+    ld s1, 0(t0)                     ; p: the frame set
+    la t0, global_nesshowfreecur
+    ld t0, 0(t0)
+    bnez t0, nsb_free
+    nop
+    jal nesshowacquire               ; the set's first write: the frame that used it last is drawn (N.62)
+    nop
+nsb_free:
+    mfc0 s2, $9                      ; Count: the close's own ticks from here (and the record's band closes)
+    nop
+    la t0, global_nesbandbase
+    ld t0, 0(t0)
+    dsubu t0, s0, t0                 ; 96 x idx
+    addiu t1, zero, 683
+    multu t0, t1
+    mflo t0
+    srl t0, t0, 16                   ; idx
+    dsll s3, t0, 3                   ; idx x 8: its element of the .i arrays
+    la t0, global_nesshowrecfence
+    daddu t0, t0, s3
+    ld a0, 0(t0)                     ; the record's job of a frame ago
+    beqz a0, nsb_rec_free
+    nop
+    jal lpmrspqfencedone
+    nop
+    bnez v0, nsb_rec_free            ; it has read the record
+    nop
+    la t0, global_nesshowrecfence
+    daddu t0, t0, s3
+    jal lpmrspqwait                  ; not yet: wait (correctness; a frame of margin, counted)
+    ld a0, 0(t0)                     ; (delay slot)
+    la t0, global_nesshowstat
+    ld t1, 24(t0)
+    daddiu t1, t1, 1
+    sd t1, 24(t0)                    ; NesShowStat(3): waits
+nsb_rec_free:
+    ld t0, 24(s0)                    ; +24: PPUCTRL | PPUMASK << 8 | ...
+    lw t1, 56(s0)                    ; +56: a split line's segment count (0 for a band)
+    andi t0, t0, 0x800               ; PPUMASK bit 3: the background layer, the only reader of the name tables
+    sltu s4, zero, t0
+    beqz t1, nsb_reads
+    nop
+    move s4, zero                    ; a split line's record carries its own name-table bytes
+nsb_reads:
+    move a0, s0
+    jal nesntlogband                 ; the record's +32 / +36: the log's span and the map (rspband.n64)
+    move a1, s4                      ; (delay slot)
+    jal nesshowrecwriteback          ; the record and its OAM snapshot to RDRAM (clobbers t0, t1)
+    move a0, s0                      ; (delay slot)
+    mfc0 t0, $9
+    nop
+    subu t0, t0, s2
+    dsll32 t0, t0, 0
+    dsrl32 t0, t0, 0                 ; the close's ticks, & $FFFFFFFF
+    la t1, global_nesshowstat
+    ld t2, 72(t1)
+    daddu t2, t2, t0
+    sd t2, 72(t1)                    ; (9) band-close ticks
+    ld t2, 80(t1)
+    daddiu t2, t2, 1
+    sd t2, 80(t1)                    ; (10) bands
+    ld t2, 88(t1)
+    sltu t3, t2, t0
+    beqz t3, nsb_setup
+    nop
+    sd t0, 88(t1)                    ; (11) the most
+nsb_setup:
+    la t0, global_nesshowsetupp
+    ld t0, 0(t0)
+    beq t0, s1, nsb_cmd              ; the program has this set's areas
+    nop
+    jal nesshowsetupcmd
+    move a0, s1                      ; (delay slot)
+nsb_cmd:
+    la t0, global_nesshowbands
+    dsll t1, s1, 3
+    daddu t0, t0, t1
+    ld s5, 0(t0)                     ; b: the band's index in its frame
+    lui t2, 0x1FFF
+    ori t2, t2, 0xFFFF               ; physical addresses
+    ld t1, 40(s0)                    ; +40: the OAM snapshot's index
+    dsll t1, t1, 8
+    la t0, global_nesoambase
+    ld t0, 0(t0)
+    daddu t1, t1, t0
+    and a3, t1, t2                   ; b: the snapshot
+    and a2, s0, t2                   ; a: the record
+    dsll t1, s1, 8
+    or a4, s5, t1                    ; c: b | p << 8
+    la t0, global_nesshowprog
+    ld a0, 0(t0)
+    jal lpmrspqcmdcall               ; NES_RSP_BAND
+    addiu a1, zero, #NES_RSP_BAND    ; (delay slot)
+    jal lpmrspqfence
+    nop
+    la t0, global_nesshowrecfence
+    daddu t0, t0, s3
+    sd v0, 0(t0)                     ; NesShowRecFence(idx)
+    la t0, global_nesshowfence
+    dsll t1, s1, 3
+    daddu t0, t0, t1
+    sd v0, 0(t0)                     ; NesShowFence(p)
+    beqz s4, nsb_bands
+    nop
+    jal nesntlogqueued               ; a reading job: the log's room again (rspband.n64)
+    move a0, v0                      ; (delay slot)
+nsb_bands:
+    la t0, global_nesshowbands
+    dsll t1, s1, 3
+    daddu t0, t0, t1
+    daddiu t1, s5, 1
+    sd t1, 0(t0)                     ; NesShowBands(p) = b + 1
+    la t0, global_nesshowbusy
+    addiu t1, zero, 1
+    sd t1, 0(t0)
+    jal lpmrspqflush
+    nop
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    NesRecAdd(0, t0r)
+    ASM
+      dsll32 a1, s2, 0
+      dsrl32 a1, a1, 0               ; the start's Count, as LpmCpuCount gives it
+      jal nesrecadd                  ; NesRecAdd(0, t0): the record's band closes
+      move a0, zero                  ; (delay slot)
+    EndASM
   CompilerEndIf
-  If NesShowAtt(p) = 0 : NesShowPollE(0, 1) : EndIf    ; (N.62) attached as early as it can be (a hand-over's part)
+  ASM
+    la t0, global_nesshowatt
+    dsll t1, s1, 3
+    daddu t0, t0, t1
+    ld t0, 0(t0)
+    bnez t0, nsb_out                 ; attached already
+    nop
+    move a0, zero
+    jal nesshowpolle                 ; NesShowPollE(0, 1): attached as early as it can be (a hand-over's part)
+    addiu a1, zero, 1                ; (delay slot)
+nsb_out:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    ld s5, 48(sp)
+    jr ra
+    daddiu sp, sp, 64
+  EndASM
 EndProcedure
 
 ; ---- a split line's first cut (through NesFbCatchUpCall): before the write is applied ----
@@ -1161,6 +1289,7 @@ Procedure NesShowReport()
   LpmDebugPrint("NES SHOW FRAMES SHOWN " + Str(NesShowStat(0)) + " NOT SHOWN " + Str(NesShowStat(1)) + " COALESCED " + Str(NesShowStat(14)) + " FALLBACK LINES " + Str(NesShowStat(5)) + " MOST A FRAME " + Str(NesShowStat(6)) + " SPLIT " + Str(NesShowStat(7)) + " LOST BANDS " + Str(NesShowStat(8)))
   LpmDebugPrint("NES SHOW BAND CLOSE TICKS " + Str(NesShowStat(9)) + " BANDS " + Str(NesShowStat(10)) + " MOST " + Str(NesShowStat(11)) + " WAITS " + Str(NesShowStat(3)) + " DRAINS " + Str(NesShowStat(4)) + " RSP CLOCKS " + Str(NesShowStat(12)) + " MOST A FRAME " + Str(NesShowStat(13)))
   NesSegReport()
+  NesNtReport()
   CompilerIf #NES_SHOW_CHECK
     LpmDebugPrint("NES SHOW CHR ROW WRITES " + Str(NesShowChr(2)) + " TICKS " + Str(NesShowChr(1)))
     LpmDebugPrint("NES SHOW BORDER FRAMES NOT BLACK " + Str(NesShowBorderBad) + " CROP " + Str(#NES_CROP_X) + " " + Str(#NES_CROP_Y))
