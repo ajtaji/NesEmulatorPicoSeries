@@ -210,8 +210,13 @@ mmc3_worker_render:
     nop
     jal u_ppuadvance              ; the PPU state machine (unit/ppu.n64), no compiled wrapper
     sd s0, global_nespputo-global_nesmmc3apuclock(s1)   ; (delay slot) NesPpuTo: the advance's stamp (the NMI edge, N.77)
-    jal u_nmidue                  ; NesNmiDue from the PPU's new place (unit/ppu_cold.n64, design note N.77)
-    sd s0, global_ppuclock-global_nesmmc3apuclock(s1)   ; (delay slot: before u_nmidue reads it)
+    sd s0, global_ppuclock-global_nesmmc3apuclock(s1)
+    ld t0, global_workerframes-global_nesmmc3apuclock(s1)
+    ld t1, global_nesnmidueframe-global_nesmmc3apuclock(s1)
+    daddiu t0, t0, 1
+    bne t0, t1, mmc3_worker_nmidue ; a frame not yet predicted: NesNmiDue once a frame (unit/ppu_cold.n64, N.77)
+    nop
+mmc3_worker_nmidue_back:
     daddiu t1, zero, -1
     sd t1, global_nesmmc3renderlimit-global_nesmmc3apuclock(s1)
 mmc3_worker_done:

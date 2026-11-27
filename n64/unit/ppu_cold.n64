@@ -636,7 +636,8 @@ nes_ppu_read_buffer:
 ; THE PLAIN TWIN:
 ;   If NesVblSuppress : NesVblSuppress = 0 : Else
 ;     PpuStatus = PpuStatus | 128
-;     If PpuCtrl & 128 : WorkerNmi + 1 : If CartPal : NesNmiAt = 0 : Else : NesNmiAt = stamp - (s0 + 1) / 3 : EndIf : EndIf
+;     If PpuCtrl & 128 : WorkerNmi + 1 : If CartPal : NesNmiAt = 0 : Else : NesNmiAt = stamp - (s0 + 1) / 3 : EndIf
+;       NesNmiDue = NesNmiAt + 2 : NesNmiCapAt = NesNmiDue - 514 : EndIf
 ;   EndIf
 ppu_adv_vblank_set:
     la t2, global_nesvblsuppress
@@ -667,6 +668,12 @@ ppu_adv_vblank_set:
 ppu_vbl_at:
     la t0, global_nesnmiat
     sd t1, 0(t0)
+    daddiu t1, t1, 2
+    la t0, global_nesnmidue
+    sd t1, 0(t0)                    ; NesNmiDue = NesNmiAt + 2 (R5): set here, the frame's prediction is not redone
+    daddiu t1, t1, -514
+    la t0, global_nesnmicapat
+    sd t1, 0(t0)                    ; and the window cap's quick test
 ppu_vbl_done:
     j ppu_adv_next
     nop
@@ -732,8 +739,20 @@ ppu_read_status_go:
     j ppu_read_status_back
     ld a0, 0(a2)                    ; (delay slot) PpuBus
 
+; mmc3_worker_nmidue: u_workeradvance after the first PPU advance of a frame (s1 = @NesMmc3ApuClock, its frame saved
+; ra): NesNmiDue predicted, and the frame marked (NesNmiDueFrame = WorkerFrames + 1). Back to u_workeradvance.
+mmc3_worker_nmidue:
+    jal u_nmidue
+    nop
+    ld t0, global_workerframes-global_nesmmc3apuclock(s1)
+    daddiu t0, t0, 1
+    j mmc3_worker_nmidue_back
+    sd t0, global_nesnmidueframe-global_nesmmc3apuclock(s1)
+
 ; u_nmidue: NesNmiDue, the first instruction boundary the next NMI may be taken at, from the state. A leaf; clobbers
-; t0-t3. Called after every PPU advance (u_workeradvance), a PPUCTRL bit 7 change and a suppressing $2002 read.
+; t0-t3. Called after a frame's first PPU advance (u_workeradvance, mmc3_worker_nmidue), a PPUCTRL bit 7 change and
+; a suppressing $2002 read (the set itself and the NMI taken store the due directly). WHY ONCE A FRAME: the prediction
+; is the same from any later point of the frame; measured, calling it after every advance cost ~18 K cycles a frame.
 ; WHAT: an edge counted and not taken: NesNmiAt + 2 (R5). Else, while NMI is on, NTSC, not suppressed and the set
 ; (line 241 dot 1) still ahead in this frame: the predicted detection cycle + 2. Else never (the largest cycle); the
 ; next frame's set is a frame away, and the PPU is caught up at line 224 and 240 (the render limit) before it.
