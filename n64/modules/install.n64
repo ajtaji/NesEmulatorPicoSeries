@@ -171,7 +171,7 @@ nmi_none:
 EndProcedure
 
 ; NesModuleInit() - the installed module's power-on, for the compiled LoadGame: a tail jump to the cold slot's first
-; entry (nes_cold_init, unit/cold_slot.n64), which the module fills (MMC3: the shared MapperInit; MMC1: its own).
+; entry (nes_cold_init, unit/cold_slot.n64), which the module fills (MMC3: MapperInit's work in assembly; MMC1: its banks over MapperInit's state).
 ; THE PLAIN TWIN: the module's init (each module's cold part gives its own).
 ProcedureNaked NesModuleInit()
   ASM

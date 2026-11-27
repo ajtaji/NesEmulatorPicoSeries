@@ -2,9 +2,9 @@
 ; assembled in the cold slot (unit/cold_slot.n64), the hot unit's cold end (the mapper-modules design note, section 2).
 ;
 ; WHAT: the cold slot's entry table (its first 48 bytes; every module's cold part opens with one in this layout):
-;   +0  nes_cold_init      the module's power-on, run by LoadGame (NesModuleInit) right after the shared core's
-;                          MapperInit (compiled, unchanged: every mapper's state power-on, then MMC3's MapperUpdate,
-;                          mapper_mmc3_update.n64); may clobber what a compiled call may. MMC3: nothing more (returns).
+;   +0  nes_cold_init      the module's power-on, run by LoadGame (NesModuleInit): MMC3's is the shared MapperInit's
+;                          work for mapper 4 IN ASSEMBLY (mmc3_cold_init, the end of this file; LoadGame calls the
+;                          compiled MapperInit for the other mappers only); may clobber what a compiled call may.
 ;   +8  nes_cold_reserved  (no entry yet: returns)
 ;   +16 nes_cold_maptable  the register write's 8-word handler table (data): NesUnitPlace copies it into NesUnitData at
 ;                          load (unitplace.n64), where mmc3_e_write's dispatch reads it (C7, design note N.49).
@@ -18,7 +18,7 @@
 ; THE PLAIN TWIN of each piece is beside it (the moved pieces' in their text); the table is the C7 table unchanged.
   ASM
 nes_cold_init:
-    jr ra                           ; nothing more: LoadGame's MapperInit (the shared core's) is MMC3's power-on
+    b mmc3_cold_init                ; MMC3's power-on in assembly (the end of this file)
     nop
 nes_cold_reserved:
     jr ra
@@ -77,4 +77,116 @@ mmc3_write_protect:                 ; $A001: bit 7 enables the work RAM, bit 6 p
     sd t1, 0(t0)
     jr ra
     sd t2, global_mapramprotect-global_mapramenable(t0)
+  EndASM
+
+; ---- nes_cold_init's body: MMC3's power-on IN ASSEMBLY (2026-11-28) - the shared compiled MapperInit's work for mapper 4,
+; run by LoadGame through NesModuleInit (LoadGame no longer calls MapperInit for mapper 4; it still does for the other
+; mappers, whose modules start from it - modules/mmc1_cold.n64, modules/discrete_cold.n64). WHAT: the mapper state's
+; power-on values, the eight MMC3 registers at their power-on banks, every slot unpublished (-1, so the first publication
+; writes every one), the work RAM and the name-table RAM cleared, the header's mirroring, the expansion state's power-on
+; (ExtraMapperInit, compiled: it clears the expansion RAM and the CHR-RAM areas and holds no MMC3 case but the common
+; stores), then MMC3's own bank publication (MapperUpdate, mapper_mmc3_update.n64). HOW: stores through one base
+; register (@MapIrq, the state block's) and the arrays' own labels; the two clears as doubleword stores (every array is
+; 8-aligned: the build's symbols); MapperMirror / ExtraMapperInit by jal, MapperUpdate as the tail jump. In / out:
+; nothing; clobbers t0-t3, a0 and what the three calls may. FRAME (16 B): 0 ra.
+; THE PLAIN TWIN (anvil/mappers.pi4 MapperInit, the CartMapper = 4 path, the compiled procedure the other mappers run):
+;   MapManaged=1
+;   MapIrq=0 : MapSelect=0 : MapRamEnable=1 : MapRamProtect=0
+;   MapShift=$10 : MapControl=$0C : MapChr0=0 : MapChr1=0 : MapPrgReg=0
+;   MapLastWrite=-10 : MapIrqLatch=0 : MapIrqCount=0 : MapReload=0 : MapIrqEnable=0
+;   MapDots=0 : MapLowSince=0 : MapA12=0 : MapSpriteBits=255
+;   MapIrqClocks=0 : MapIrqAssertions=0
+;   For i=0 To 7 : MapRegs(i)=0 : MapChrSlots(i)=-1 : Next
+;   MapRegs(1)=2 : MapRegs(2)=4 : MapRegs(3)=5 : MapRegs(4)=6 : MapRegs(5)=7 : MapRegs(7)=1
+;   For i=0 To 3 : MapPrgSlots(i)=-1 : Next
+;   For i=0 To 8191 : MapRam(i)=0 : Next
+;   For i=0 To 4095 : MapCiram(i)=0 : Next
+;   MapMirrorMode=-1 : MapperMirror(PpuMirroring)
+;   ExtraMapperInit() : MapperUpdate()
+; CHECKED BY: SMB3 and MM4's per-instruction guest digests every frame against the unit's compiled core run with the
+; compiled MapperInit (the unit-reference digests of the NMI-timing proof), and build.py's per-module byte-for-byte check.
+  ASM
+mmc3_cold_init:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t3, global_mapirq            ; the state block's base
+    addiu t0, zero, 1
+    sd t0, global_mapmanaged-global_mapirq(t3)      ; MapManaged = 1
+    sd zero, 0(t3)                                  ; MapIrq = 0
+    sd zero, global_mapselect-global_mapirq(t3)     ; MapSelect = 0
+    sd t0, global_mapramenable-global_mapirq(t3)    ; MapRamEnable = 1
+    sd zero, global_mapramprotect-global_mapirq(t3) ; MapRamProtect = 0
+    addiu t1, zero, 16
+    sd t1, global_mapshift-global_mapirq(t3)        ; MapShift = $10 (MMC1's shift register: the common power-on)
+    addiu t1, zero, 12
+    sd t1, global_mapcontrol-global_mapirq(t3)      ; MapControl = $0C
+    sd zero, global_mapchr0-global_mapirq(t3)
+    sd zero, global_mapchr1-global_mapirq(t3)
+    sd zero, global_mapprgreg-global_mapirq(t3)
+    daddiu t1, zero, -10
+    sd t1, global_maplastwrite-global_mapirq(t3)    ; MapLastWrite = -10
+    sd zero, global_mapirqlatch-global_mapirq(t3)
+    sd zero, global_mapirqcount-global_mapirq(t3)
+    sd zero, global_mapreload-global_mapirq(t3)
+    sd zero, global_mapirqenable-global_mapirq(t3)
+    sd zero, global_mapdots-global_mapirq(t3)
+    sd zero, global_maplowsince-global_mapirq(t3)
+    sd zero, global_mapa12-global_mapirq(t3)
+    addiu t1, zero, 255
+    sd t1, global_mapspritebits-global_mapirq(t3)   ; MapSpriteBits = 255
+    sd zero, global_mapirqclocks-global_mapirq(t3)
+    sd zero, global_mapirqassertions-global_mapirq(t3)
+    la t0, global_mapregs           ; MapRegs(0..7) = 0, 2, 4, 5, 6, 7, 0, 1 (the MMC3 registers' power-on banks)
+    sd zero, 0(t0)
+    addiu t1, zero, 2
+    sd t1, 8(t0)
+    addiu t1, zero, 4
+    sd t1, 16(t0)
+    addiu t1, zero, 5
+    sd t1, 24(t0)
+    addiu t1, zero, 6
+    sd t1, 32(t0)
+    addiu t1, zero, 7
+    sd t1, 40(t0)
+    sd zero, 48(t0)
+    addiu t1, zero, 1
+    sd t1, 56(t0)
+    daddiu t1, zero, -1
+    la t0, global_mapchrslots       ; MapChrSlots(0..7) = -1: unpublished
+    sd t1, 0(t0)
+    sd t1, 8(t0)
+    sd t1, 16(t0)
+    sd t1, 24(t0)
+    sd t1, 32(t0)
+    sd t1, 40(t0)
+    sd t1, 48(t0)
+    sd t1, 56(t0)
+    la t0, global_mapprgslots       ; MapPrgSlots(0..3) = -1
+    sd t1, 0(t0)
+    sd t1, 8(t0)
+    sd t1, 16(t0)
+    sd t1, 24(t0)
+    sd t1, global_mapmirrormode-global_mapirq(t3)   ; MapMirrorMode = -1: the first MapperMirror publishes
+    la t0, global_mapram            ; MapRam(0..8191) = 0, eight bytes a store
+    daddiu t2, t0, 8192
+mmc3_init_ram:
+    sd zero, 0(t0)
+    daddiu t0, t0, 8
+    bne t0, t2, mmc3_init_ram
+    nop
+    la t0, global_mapciram          ; MapCiram(0..4095) = 0
+    daddiu t2, t0, 4096
+mmc3_init_ciram:
+    sd zero, 0(t0)
+    daddiu t0, t0, 8
+    bne t0, t2, mmc3_init_ciram
+    nop
+    la t0, global_ppumirroring
+    jal mappermirror                ; MapperMirror(PpuMirroring): the header's (four-screen overrides inside it)
+    ld a0, 0(t0)
+    jal extramapperinit             ; ExtraMapperInit(): the expansion state's power-on (compiled)
+    nop
+    ld ra, 0(sp)
+    j mapperupdate                  ; MapperUpdate(): MMC3's banks and biases, a tail jump
+    daddiu sp, sp, 16
   EndASM
