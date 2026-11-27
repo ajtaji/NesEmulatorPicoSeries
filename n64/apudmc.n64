@@ -67,7 +67,7 @@ nes_fetch_return:
   EndASM
 EndProcedure
 
-CompilerIf #GAME_MAPPER=4
+CompilerIf #GAME_MAPPER=4 Or #NES_UNIT
 ProcedureNaked NesDmcEdge()
   ASM
     la t0, global_dmctimer

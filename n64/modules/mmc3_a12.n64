@@ -45,7 +45,7 @@
 ;                clock the counter runs - 1 times
 ;                if S & $7F: MapLowSince = MapDots + 8 + 8 k
 ;                A12 = S >> 7;  MapDots += 63; dot = 320
-;   (j0, k and runs - 1 are one byte of the table a12_sprite_form, in unit/a12_cold.n64.)
+;   (j0, k and runs - 1 are one byte of the table a12_sprite_form, in modules/mmc3_a12_cold.n64.)
 ;
 ; REGISTERS in the walk (those of the exact walk): a0 dots still to advance, a1 line, a2 dot, a3 odd,
 ;   a6 = global_mapdots, v0 the dot clock at a2, v1 MapLowSince, t8 the level, t9 PPUCTRL with bit 8
@@ -123,7 +123,7 @@ mmc3_fetch_full_sprite:
     bnez t0, mmc3_fetch_with_edges
     ld a3, global_nesmmc3line-global_mapdots(a2)
     sltiu t0, a3, 240
-    bnez t0, mmc3_fetch_sprite_width   ; (a12_cold.n64)
+    bnez t0, mmc3_fetch_sprite_width   ; (mmc3_a12_cold.n64)
     addiu a4, zero, 341
     addiu t0, zero, 261
     bne a3, t0, mmc3_fetch_with_edges
@@ -233,7 +233,7 @@ a12_bg_q1:
     bnez t2, a12_bg_after         ; no decision dot in the region's part
     srl t2, t9, 4
     andi t2, t2, 1
-    bnez t2, a12_bg_high          ; (a12_cold.n64)
+    bnez t2, a12_bg_high          ; (mmc3_a12_cold.n64)
     move a7, zero                 ; a7 = 1 when the region's first rise counts
     ; background at $0000: every decision dot is low; a high level falls at q0
     beqz t8, a12_bg_after
@@ -264,7 +264,7 @@ a12_fetch_tall:                   ; 8x16: the next line's candidates (261 -> 0),
     move t1, zero
 a12_fetch_row:
     sltiu t0, t1, 240
-    beqz t0, a12_fetch_call       ; past the lists' last row: the procedure scans OAM (a12_cold.n64)
+    beqz t0, a12_fetch_call       ; past the lists' last row: the procedure scans OAM (mmc3_a12_cold.n64)
     nop
     la t2, global_oamcachedirty
     ld t2, 0(t2)
@@ -336,7 +336,7 @@ a12_spr_walk:
     nop
     bnez t8, a12_spr_stepped
     nop
-    la t1, a12_sprite_form        ; (a12_cold.n64) byte S: j0 | k << 3 | (runs - 1) << 6
+    la t1, a12_sprite_form        ; (mmc3_a12_cold.n64) byte S: j0 | k << 3 | (runs - 1) << 6
     daddu t1, t1, t0
     lbu a4, 0(t1)
     move a5, t0                   ; S, kept over the clocks

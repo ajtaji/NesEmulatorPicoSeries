@@ -122,7 +122,11 @@ def read_direct(label: str, fallback: str, mapper: int, *, pair: bool = False) -
     return "\n".join(line if line.endswith(":") else "    " + line for line in instructions)
 
 
-def stage_bus(source: str, mapper: int) -> str:
+def stage_bus(source: str, mapper: int, unit: bool = False) -> str:
+    # the unit build (any mapper) reads PRG through the four 8 KB banks' biases (NesMmc3Pointer, global_nesmmc3bias),
+    # which every module keeps current through the common MapperPrg: read_direct's MMC3 shape
+    if unit:
+        mapper = 4
     if mapper in (1, 4):
         pointer = "NesMmc1Pointer" if mapper == 1 else "NesMmc3Pointer"
         source = source.replace("PeekA(PrgBase+addr-$8000)", f"PeekA({pointer}(addr))")

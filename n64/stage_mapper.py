@@ -70,7 +70,7 @@ def replace_once(source: str, old: str, new: str) -> str:
     return source.replace(old, new)
 
 
-def stage_mapper(name: str, source: str, mapper: int = 0, runtime: bool = False) -> str:
+def stage_mapper(name: str, source: str, mapper: int = 0, runtime: bool = False, unit: bool = False) -> str:
     for constant, (array, size) in WINDOWS.items():
         source = re.sub(rf"^#{constant}=\$[0-9A-F]+$",
                         f"Global Dim {array}.a({size})", source, flags=re.M)
@@ -171,7 +171,9 @@ CompilerEndIf""" + source[last:]
     if name == "mappers":
         source, count = re.subn(r"^Procedure MapCopy\([^\n]+\n.*?^EndProcedure",
                                 MAP_COPY, source, count=1, flags=re.M | re.S)
-        if runtime and mapper == 4:
+        if unit:
+            # the unit build (any mapper): the bank helpers, the register write's stub and the PPU clock's stubs in
+            # assembly (mmc3_registers.n64, mmc3_ticks.n64; the stubs enter the mapper slot), the update MMC3's
             for procedure, declaration in (
                 ("MapperPrg", "Declare MapperPrg(slot.i,bank.i)"),
                 ("MapperChr", "Declare MapperChr(slot.i,bank.i)"),

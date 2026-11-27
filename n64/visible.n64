@@ -93,7 +93,7 @@ ProcedureNaked NesRenderTo(endDot.i)
     andi t1, t1, 14
     or t0, t0, t1
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       or s5, t0, zero
     EndASM
@@ -108,7 +108,7 @@ ProcedureNaked NesRenderTo(endDot.i)
     or a4, s5, zero
     or t9, s7, zero
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       addiu a7, s6, -0x4000
       addiu s6, zero, -1
@@ -127,7 +127,7 @@ ProcedureNaked NesRenderTo(endDot.i)
     daddu t1, t1, t2
     sd t1, 0(t0)
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       subu t0, s0, s2
       sltiu t0, t0, 25
@@ -146,7 +146,7 @@ nes_batch_prime:
     sll t1, t1, 11
     or s4, s4, t1
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       jal nesmmc3batchtile
       or t0, s3, zero
@@ -174,7 +174,7 @@ nes_batch_step:
     or t0, s3, zero
 nes_batch_fetch:
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       jal nesmmc3batchtile
       nop
@@ -201,7 +201,7 @@ nes_batch_store:
 nes_batch_bg_ready:
     daddu t0, s1, s2
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       ; A span at the first half of a cache line can allocate that line
       ; without fetching pixels from the previous frame if both spans draw.
@@ -298,7 +298,7 @@ EndProcedure
 CompilerEndIf
 CompilerEndIf
 
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ProcedureNaked NesMmc3RenderSegments()
   ASM
     addiu sp, sp, -16

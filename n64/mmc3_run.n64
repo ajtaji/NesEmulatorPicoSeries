@@ -23,7 +23,7 @@ ProcedureNaked NesHotHolder()
   XIncludeFile "../n64/unit/slot.n64"
   XIncludeFile "../n64/unit/apu_cold.n64"
   XIncludeFile "../n64/unit/cold.n64"
-  XIncludeFile "../n64/unit/a12_cold.n64"
+  XIncludeFile "../n64/unit/cold_slot.n64"
 EndProcedure
 ProcedureNaked.i NesRunMapper4(start.i)
   ASM

@@ -498,6 +498,6 @@ nrwb_cpurun:
   EndASM
 EndProcedure
 
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
   XIncludeFile "mmc3_wait.n64"
 CompilerEndIf

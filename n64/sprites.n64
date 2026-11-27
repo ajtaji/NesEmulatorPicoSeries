@@ -193,7 +193,7 @@ nes_sprite_eval_count:
 
 nes_sprite_eval_enter:
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       j nesmmc3drawsprites
       nop
@@ -315,7 +315,7 @@ nes_sprite_eval_draw_args:
       addu t0, s5, s0
       ld t1, 0(t0)
     EndASM
-    CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+    CompilerIf #NES_UNIT
       ASM
         andi t0, t1, 0x1c00
         srl t0, t0, 7
@@ -355,7 +355,7 @@ nes_sprite_eval_done:
   CompilerEndIf
 EndProcedure
 
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ProcedureNaked NesMmc3DrawSprites(line.i, count.i, mask.i)
   ; Roster order is priority order. Draw back to front and keep the first
   ; sprite's index and X for the guest status deadline.

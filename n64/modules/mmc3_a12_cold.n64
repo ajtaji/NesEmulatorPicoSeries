@@ -1,13 +1,12 @@
-; unit/a12_cold.n64 - the A12 walk's cold paths and its sprite-region table (design note N.45).
-; Part of the hot unit's COLD part: included after c65_fetch_slow in cpu6502.n64's procedure (the
-; shipped build) and in the holder in mmc3_run.n64 (the reference build), never on its own.
+; modules/mmc3_a12_cold.n64 - the A12 walk's cold paths and its sprite-region table (design note N.45): part of the
+; MMC3 module's cold part (modules/mmc3_cold.n64), assembled in the cold slot (unit/cold_slot.n64) at the hot unit's
+; cold end; it was unit/a12_cold.n64, moved unchanged but for its slot labels (now the cold slot's).
 ; Moved here from unit/a12.n64 unchanged, by measured heat (0 cycles a guest frame in the SMB3
 ; replay profile): the 8x8 full-phase fast path of u_mapperpputicks, the background-at-$1000
 ; region of the walk, and the slot fetch's call of MapperSpriteFetch (OAM changed, or the rows
 ; past 239), which the walk now does in place for its two common paths; and the checking build's
 ; dual walk (a12_check, #NES_A12_CHECK only), which with N7's growth no longer fitted the hot span.
   ASM
-nes_mapper_cold:                    ; the mapper module's cold part (unit/slot.n64): here, MMC3's A12 cold paths and table
 mmc3_fetch_sprite_width:
     sltu t0, t2, a4
     bnez t0, mmc3_fetch_sprite_once
@@ -287,6 +286,3 @@ a12_check_restore:                ; leaf: a4 -> the twelve state words (t1, t2 s
     sd t1, 0(t2)
   EndASM
 CompilerEndIf
-  ASM
-nes_mapper_cold_end:
-  EndASM

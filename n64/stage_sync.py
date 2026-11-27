@@ -82,7 +82,8 @@ CompilerEndIf
 """
 
 
-def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dmc_deadline: bool = False, runtime: bool = False) -> str:
+def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dmc_deadline: bool = False, runtime: bool = False,
+               unit: bool = False) -> str:
     if name == "bridge":
         # All existing timestamp expressions here are straight-line arithmetic.
         source, count = re.subn(r"\bNesRpc\(0,0,0,([^()\n]+)\)", r"WorkerAdvance(\1)", source)
@@ -106,7 +107,7 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dm
         WorkerAdvance(CpuCycles+AccessPhase)
       CompilerEndIf
       MapperWrite(addr,value,CpuCycles+AccessPhase)""")
-        if runtime and mapper == 4:
+        if unit:
             managed = "    If MapManaged\n      CpuNow()"
             if source.count(managed) != 1:
                 raise ValueError("MMC3 managed bus write changed")
@@ -168,7 +169,7 @@ def stage_sync(name: str, source: str, mapper: int, chain_nrom: bool = False, dm
             window = "addr<$4000 And (addr&7)=7 And (PpuV&$3FFF)<$3F00 And ((PpuMask&24)=0 Or (PpuLine>=240 And PpuLine<PpuPreLine))"
             bound = "(PpuMask&24)<>0 And stamp>WorkerClock"
         read_notice = "" if mapper == 1 else "MapperRegNotice(addr&7)"
-        runtime_mmc3 = runtime and mapper == 4
+        runtime_mmc3 = unit
         if runtime_mmc3:
             start = source.index("Procedure WorkerAdvance(")
             end = source.index("EndProcedure", start) + len("EndProcedure")

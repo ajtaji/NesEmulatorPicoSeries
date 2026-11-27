@@ -303,6 +303,15 @@ EndProcedure
 ; folds 2, address, value, the guest cycle, AccessPhase. The guest cycle is the one the write path itself
 ; stamps the write with (unit/write.n64, nes_mmc3_bus_write_timed): NesRunStart + Budget - Left inside a
 ; CPU window, CpuCycles outside one.
+; NesCpuTraceWriteAt(addr, value): NesCpuTraceWrite for compiled callers - the bus of a reference core outside the
+; unit (build.py, trace_compiled_writes); a0 = the address, a1 = the value, as NesCpuTraceWrite takes them; a tail jump.
+ProcedureNaked NesCpuTraceWriteAt(addr.i,value.i)
+  ASM
+    j nescputracewrite
+    nop
+  EndASM
+EndProcedure
+
 ProcedureNaked NesCpuTraceWrite()
   ASM
     daddiu sp, sp, -48

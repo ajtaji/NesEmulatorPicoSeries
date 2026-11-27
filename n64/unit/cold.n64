@@ -33,38 +33,6 @@ nes_ppu_read_oam:                   ; PpuBus = Oam(OamAddr), no increment on a r
     sd a0, 0(a2)
   EndASM
 
-; ---- the MMC3 register paths that SMB3 never runs (C4, design note N.46b: 0 cycles a guest frame in the record
-; replay's profile), moved with u_mapperwrite's dispatch from mmc3_registers.n64 unchanged; reached through its
-; table (unit/write.n64). In: a0 address, a1 value. Each leaves by a tail jump or jr ra to u_mapperwrite's caller. ----
-  ASM
-mmc3_write_select:                  ; $8000: the bank select; a change of the PRG / CHR mode bits remaps
-    la t0, global_mapselect
-    ld t1, 0(t0)
-    sd a1, 0(t0)
-    xor t1, t1, a1
-    andi t1, t1, 0xC0
-    beqz t1, mmc3_write_done        ; only the register index changed
-    nop
-    j mapperupdate
-    nop
-mmc3_write_mirror:                  ; $A000: vertical (0) or horizontal (1), not with four-screen VRAM
-    la t0, global_mapfourscreen
-    ld t1, 0(t0)
-    bnez t1, mmc3_write_done
-    andi a0, a1, 1
-    j mappermirror
-    xori a0, a0, 1
-mmc3_write_protect:                 ; $A001: bit 7 enables the work RAM, bit 6 protects it
-    la t0, global_mapramenable
-    srl t1, a1, 7
-    srl t2, a1, 6
-    andi t1, t1, 1
-    andi t2, t2, 1
-    sd t1, 0(t0)
-    jr ra
-    sd t2, global_mapramprotect-global_mapramenable(t0)
-  EndASM
-
 ; ---- u_apuwrite: the staged ApuWrite's timing half, in assembly (N7, design note N.40 (4)) ----
 ; WHAT: an APU register write $4000-$4017 (not $4014 / $4016: u_neswrite routes those elsewhere), after
 ; u_nesmmc3syncapu brought the APU to the write. In: a0 the address, a1 the value (0-255). Exactly the staged
@@ -474,10 +442,4 @@ mmc3_masked_frame:                  ; the masked budget's distance past line 241
     subu t0, t0, t2
     b mmc3_masked_distance
     addiu t0, t0, -1
-  EndASM
-  ASM
-    .align 2
-mmc3_write_table:
-    .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect
-    .word mmc3_write_latch, mmc3_write_reload, mmc3_write_ack, mmc3_write_enable
   EndASM

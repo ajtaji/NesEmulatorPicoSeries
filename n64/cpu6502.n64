@@ -2516,7 +2516,7 @@ c65_peek_prg:
     ; cold half) are placed over the slot grid's coldest lines, the units at 0 cycles over the hot lines. Every
     ; unit ends in an unconditional transfer and is entered only by a branch or jal, so the order changes no
     ; path and no instruction; the cold part's size is unchanged, so nothing after the unit moves. c65_fetch_slow
-    ; stays first (the hot span's measure) and a12_cold.n64 last (its table and c65_lengths keep their addresses).
+    ; stays first (the hot span's measure) and the cold slot last (cold_slot.n64: a fixed size, so c65_lengths keeps its address for every module).
 
     ; --- moved here from the hot span by measured heat (N7, design note N.40: measured at 0 cycles a guest
     ; frame in SMB3, frames 0-3600); each is entered by a branch and leaves by one -----------------------
@@ -3241,7 +3241,7 @@ c65_jmp_go:
     b c65_next
     daddiu a2, a2, -3
   EndASM
-  XIncludeFile "../n64/unit/a12_cold.n64"
+  XIncludeFile "../n64/unit/cold_slot.n64"   ; the cold slot: the mapper module's cold part (mapper modules)
   ASM
 
     ; --- data (read through the D-cache only) -------------------------------------

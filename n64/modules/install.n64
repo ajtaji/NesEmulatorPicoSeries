@@ -1,14 +1,17 @@
 ; modules/install.n64 - the mapper-module store and its installer (the mapper-modules design note, sections 3 and 5)
 ;
 ; THE STORE: the cartridge file "modules.bin" (written by build.py, check_mapper_slot / module_store): every mapper
-; module of this cart, each as the bytes it runs as in the mapper slot (unit/slot.n64), assembled AT the slot's
-; address - position-dependent code, never relocated. Layout (big-endian words):
+; module of this cart, each as the bytes it runs as in the two slots - its hot part in the mapper slot
+; (unit/slot.n64), its cold part in the cold slot (unit/cold_slot.n64) - assembled AT the slots' addresses by a
+; compile of its own: position-dependent code, never relocated. Layout (big-endian words):
 ;   +0  "NESM" "ODST"         the store's mark (the installer finds the file by it, whatever its file number)
-;   +8  count, slot bytes      the modules, and #NES_SLOT_BYTES of the build that made it (checked)
-;   +16 count x 16 B           mapper, offset of its bytes in the file (16-aligned), its bytes, 0
+;   +8  count, slot bytes, cold slot bytes   the modules, #NES_SLOT_BYTES and #NES_COLD_SLOT_BYTES of the build
+;                              that made it (both checked); +20 12 zero bytes
+;   +32 count x 16 B           mapper, offset of its hot bytes in the file (16-aligned), their count, offset of its
+;                              cold bytes (16-aligned; #NES_COLD_SLOT_BYTES of them)
 ;   ...                        the modules' bytes
-; MMC3 is assembled in place in the slot of every build, so its store bytes are the slot's own bytes: build.py
-; refuses the cart unless the store's MMC3 bytes equal the image's slot word for word.
+; MMC3 is assembled in place in the slots of the shipped compile; every other module by its own compile, whose image
+; outside the two slots build.py requires byte for byte equal to the shipped one's.
 ;
 ; NesModuleInstall(mapper) - WHAT: finds mapper's module in the store and puts it into the slot so that the CPU
 ; runs it: out a0 = 1 installed, 0 when this cart has no module for that mapper (the loader refuses the ROM).
@@ -19,16 +22,18 @@
 ;   2. its header and table (544 bytes, up to 32 modules) by PI DMA into the slot itself (no buffer of its own: no
 ;      variable moves; the slot's bytes are replaced in step 5 or the load is refused), after a write-back and
 ;      invalidate of the slot's D lines (step 4's reason), so that the loads below read what the DMA wrote;
-;   3. the mapper's row; its byte count must be #NES_SLOT_BYTES (a store made for another slot size is refused);
+;   3. the mapper's row; its byte count must be #NES_SLOT_BYTES (a store made for other slot sizes is refused); its
+;      cold part's offset kept in the frame before step 5 overwrites the table;
 ;   4. Hit_Writeback_Invalidate_D over the slot (LpmCacheWritebackInvalidateData): the PI DMA writes RDRAM behind
 ;      the D-cache, so no D line of the slot may be left to be written back over the new bytes later, or read stale;
 ;   5. the module's bytes by PI DMA from the cartridge straight into the slot (NesCartRead; the slot is 16-aligned);
 ;   6. Hit_Invalidate_I over the slot (LpmCacheInvalidateCode): the I-cache is not coherent with RDRAM writes, so
 ;      a line of the old module still in it would run instead of the new bytes. Instruction fetch then reads RDRAM.
+;   7. steps 4-6 again for the module's cold part and the cold slot (#NES_COLD_SLOT_BYTES).
 ;   Once at load, before the CPU first enters the unit (LoadGame -> NesRuntimeLoad). ~180 D and ~90 I cache ops and
-;   one 2.9 KB DMA (R: well under 0.1 ms).
+;   two DMAs, 2.9 KB and 1.5 KB (R: well under 0.1 ms).
 ; FRAME (64 B): 0 ra | 8 mapper | 16 the store's PI address | 24 file number | 32 file count | 40 table pointer |
-;   48 the module's offset in the file
+;   48 the module's hot offset in the file | 56 its cold offset
 ; THE PLAIN TWIN:
 ;   For n = 0 To LpmCartFiles() - 1
 ;     file = LpmCartFile(n)
@@ -36,13 +41,17 @@
 ;   Next : If n = LpmCartFiles() : ProcedureReturn 0 : EndIf
 ;   table = ?nes_mapper_slot : LpmCacheWritebackInvalidateData(table, #NES_SLOT_BYTES)
 ;   If NesCartRead(file, table, 544) = 0 : ProcedureReturn 0 : EndIf
-;   If PeekL(table + 12) <> #NES_SLOT_BYTES : ProcedureReturn 0 : EndIf
+;   If PeekL(table + 12) <> #NES_SLOT_BYTES Or PeekL(table + 16) <> #NES_COLD_SLOT_BYTES : ProcedureReturn 0 : EndIf
 ;   For i = 0 To Min(PeekL(table + 8), 32) - 1
-;     row = table + 16 + i * 16
+;     row = table + 32 + i * 16
 ;     If PeekL(row) = mapper And PeekL(row + 8) = #NES_SLOT_BYTES
+;       cold = PeekL(row + 12)
 ;       LpmCacheWritebackInvalidateData(?nes_mapper_slot, #NES_SLOT_BYTES)
 ;       If NesCartRead(file + PeekL(row + 4), ?nes_mapper_slot, #NES_SLOT_BYTES) = 0 : ProcedureReturn 0 : EndIf
-;       LpmCacheInvalidateCode(?nes_mapper_slot, #NES_SLOT_BYTES) : ProcedureReturn 1
+;       LpmCacheInvalidateCode(?nes_mapper_slot, #NES_SLOT_BYTES)
+;       LpmCacheWritebackInvalidateData(?nes_mapper_cold, #NES_COLD_SLOT_BYTES)
+;       If NesCartRead(file + cold, ?nes_mapper_cold, #NES_COLD_SLOT_BYTES) = 0 : ProcedureReturn 0 : EndIf
+;       LpmCacheInvalidateCode(?nes_mapper_cold, #NES_COLD_SLOT_BYTES) : ProcedureReturn 1
 ;     EndIf
 ;   Next : ProcedureReturn 0
 ASM
@@ -97,13 +106,16 @@ nmi_found:
     lw t1, 12(t0)
     addiu t2, zero, #NES_SLOT_BYTES
     bne t1, t2, nmi_none            ; a store made for another slot size
+    lw t1, 16(t0)                   ; (delay slot) the store's cold slot size
+    addiu t3, zero, #NES_COLD_SLOT_BYTES
+    bne t1, t3, nmi_none            ; ... or another cold slot size
     lw t3, 8(t0)                    ; the count
     sltiu t1, t3, 33
     bnez t1, nmi_rows
     nop
     addiu t3, zero, 32
 nmi_rows:
-    daddiu t0, t0, 16               ; the first row
+    daddiu t0, t0, 32               ; the first row
     ld t8, 8(sp)                    ; the mapper
 nmi_row:
     beqz t3, nmi_none
@@ -114,8 +126,10 @@ nmi_row:
     lw t1, -8(t0)                   ; the row's bytes
     bne t1, t2, nmi_row
     nop
-    lw t1, -12(t0)                  ; the row's offset in the file
+    lw t1, -12(t0)                  ; the row's hot offset in the file
     sd t1, 48(sp)
+    lw t1, -4(t0)                   ; its cold offset (kept: the hot bytes' DMA replaces the table)
+    sd t1, 56(sp)
     la a0, nes_mapper_slot
     jal lpmcachewritebackinvalidatedata
     addiu a1, zero, #NES_SLOT_BYTES
@@ -130,6 +144,20 @@ nmi_row:
     la a0, nes_mapper_slot
     jal lpmcacheinvalidatecode
     addiu a1, zero, #NES_SLOT_BYTES
+    la a0, nes_mapper_cold          ; the cold part: the same three steps over the cold slot
+    jal lpmcachewritebackinvalidatedata
+    addiu a1, zero, #NES_COLD_SLOT_BYTES
+    ld a0, 16(sp)
+    ld t1, 56(sp)
+    daddu a0, a0, t1
+    la a1, nes_mapper_cold
+    jal nescartread                 ; the module's cold bytes into the cold slot
+    addiu a2, zero, #NES_COLD_SLOT_BYTES
+    beqz a0, nmi_none
+    nop
+    la a0, nes_mapper_cold
+    jal lpmcacheinvalidatecode
+    addiu a1, zero, #NES_COLD_SLOT_BYTES
     ld ra, 0(sp)
     addiu a0, zero, 1
     jr ra
@@ -139,5 +167,15 @@ nmi_none:
     move a0, zero
     jr ra
     daddiu sp, sp, 64
+  EndASM
+EndProcedure
+
+; NesModuleInit() - the installed module's power-on, for the compiled LoadGame: a tail jump to the cold slot's first
+; entry (nes_cold_init, unit/cold_slot.n64), which the module fills (MMC3: the shared MapperInit; MMC1: its own).
+; THE PLAIN TWIN: the module's init (each module's cold part gives its own).
+ProcedureNaked NesModuleInit()
+  ASM
+    j nes_cold_init
+    nop
   EndASM
 EndProcedure

@@ -36,7 +36,7 @@
 ;   For mask=3 To 1 (3, then 1) : For start=0 To 511
 ;     If no NesUnitSets((start+run)&511) & mask for run=0..#NES_UNIT_SETS-1
 ;       space=(@NesUnitSpace(0)+15)&~15 : NesUnitBase=space+(((start<<4)-space)&8191)
-;       copy the 8 words of nes_ppu_write_table / mmc3_write_table to NesUnitBase+#NES_U_PPUTABLE / +#NES_U_MAPTABLE
+;       copy the 8 words of nes_ppu_write_table / nes_cold_maptable (the module's, in the cold slot) to NesUnitBase+#NES_U_PPUTABLE / +#NES_U_MAPTABLE
 ;       ProcedureReturn
 ;   Next : Next : WorkerError=22
 ;
@@ -116,10 +116,10 @@ nes_place_run_body:
     daddu t0, t0, t2                ; space + (((start << 4) - space) & 8191): the address in it of set t9
     sd t0, global_nesunitbase-global_nesbandbase(a4) ; NesUnitBase
     la t2, nes_ppu_write_table      ; the source: the PPU table; the mapper table lies a fixed distance on
-    daddiu a0, t2, 32               ; (unit/cold.n64's order) - a0 = the PPU table's end, 8 words
+    daddiu a0, t2, 32               ; (the cold slot's place: fixed) - a0 = the PPU table's end, 8 words
 nes_place_table:
     lw a1, 0(t2)                    ; the PPU register's handler ...
-    lw a3, mmc3_write_table-nes_ppu_write_table(t2) ; ... and the mapper register's, the same index
+    lw a3, nes_cold_maptable-nes_ppu_write_table(t2) ; ... and the mapper module's register's (the cold slot), the same index
     daddiu t2, t2, 4
     sw a1, #NES_U_PPUTABLE(t0)      ; both into the window
     sw a3, #NES_U_MAPTABLE(t0)

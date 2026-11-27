@@ -1,0 +1,29 @@
+; unit/cold_slot.n64 - THE COLD SLOT: the last #NES_COLD_SLOT_BYTES of the hot unit's cold part, where the cold part of
+; the cartridge's mapper module lies (the mapper-modules design note, sections 2-3; its hot part is in unit/slot.n64).
+; Part of the hot unit: included inside cpu6502.n64's procedure at the cold part's end, or in the reference build's
+; holder (mmc3_run.n64), never on its own.
+;
+; WHAT: the module's cold entry table at the slot's start (48 bytes: nes_cold_init +0, nes_cold_reserved +8, the
+; register handler table nes_cold_maptable +16, 8 words; modules/mmc3_cold.n64 describes them), then its cold code
+; (power-on, the rare register paths, tables), then zero fill to the slot's fixed size. Common code reaches it only
+; by those labels, whose addresses do not depend on the module; build.py (check_mapper_slot) checks each place, the
+; size, and that no relative branch of either part leaves the two slots.
+; WHY A SLOT AT THE COLD END: a fixed size keeps every byte after it (the core's data) at the same address for every
+; module, so the compiles of the modules agree outside the slots byte for byte (build.py).
+; THE FILL: as the hot slot's (".space" to the fixed size; the build refuses a module larger than the slot).
+; INSTALL: the loader copies the module's cold bytes from the store over this slot at load, with its hot bytes
+; (modules/install.n64), D written back and I invalidated over it.
+  ASM
+    .align 16                       ; on a D-cache line (the loader's PI DMA and cache ops)
+nes_mapper_cold:
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=4
+    XIncludeFile "../modules/mmc3_cold.n64"
+  CompilerElseIf #NES_SLOT_MODULE=1
+    XIncludeFile "../modules/mmc1_cold.n64"
+  CompilerEndIf
+  ASM
+nes_mapper_cold_fill:
+    .space nes_mapper_cold+#NES_COLD_SLOT_BYTES-nes_mapper_cold_fill
+nes_mapper_cold_end:
+  EndASM

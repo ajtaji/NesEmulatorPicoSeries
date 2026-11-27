@@ -1,0 +1,61 @@
+; modules/mmc3_cold.n64 - the MMC3 (mapper 4) module's COLD part: what of the MMC3 runs once at load or (almost) never,
+; assembled in the cold slot (unit/cold_slot.n64), the hot unit's cold end (the mapper-modules design note, section 2).
+;
+; WHAT: the cold slot's entry table (its first 48 bytes; every module's cold part opens with one in this layout):
+;   +0  nes_cold_init      the module's power-on (LoadGame, through NesModuleInit): out a0 unused; may clobber what a
+;                          compiled call may. MMC3: the shared core's MapperInit (compiled, unchanged: the mapper
+;                          state's power-on and MMC3's MapperUpdate, mapper_mmc3_update.n64), by a tail jump.
+;   +8  nes_cold_reserved  (no entry yet: returns)
+;   +16 nes_cold_maptable  the register write's 8-word handler table (data): NesUnitPlace copies it into NesUnitData at
+;                          load (unitplace.n64), where mmc3_e_write's dispatch reads it (C7, design note N.49).
+; then the A12 walk's cold paths and its sprite-form table (mmc3_a12_cold.n64, unit/a12_cold.n64 as it was), and the
+; register paths SMB3 never runs (moved unchanged from unit/cold.n64: select, mirroring, RAM protect).
+;
+; THE CONTRACT (as the hot part's, modules/mmc3.n64): entered only through the table; any transfer inside the two
+; slots; out of them only j / jal (build.py, check_mapper_slot, decodes every word of both parts).
+; THE PLAIN TWIN of each piece is beside it (the moved pieces' in their text); the table is the C7 table unchanged.
+  ASM
+nes_cold_init:
+    j mapperinit                    ; MapperInit() (the shared core's, compiled; its MapperUpdate is MMC3's)
+    nop
+nes_cold_reserved:
+    jr ra
+    nop
+nes_cold_maptable:                  ; $8000 select, $8001 data, $A000 mirroring, $A001 protect, $C000 latch,
+                                    ; $C001 reload, $E000 disable / acknowledge, $E001 enable
+    .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect
+    .word mmc3_write_latch, mmc3_write_reload, mmc3_write_ack, mmc3_write_enable
+  EndASM
+  XIncludeFile "mmc3_a12_cold.n64"
+
+; ---- the MMC3 register paths that SMB3 never runs (C4, design note N.46b: 0 cycles a guest frame in the record
+; replay's profile), moved with u_mapperwrite's dispatch from mmc3_registers.n64 unchanged; reached through its
+; table (the cold slot's nes_cold_maptable). In: a0 address, a1 value. Each leaves by a tail jump or jr ra to u_mapperwrite's caller. ----
+  ASM
+mmc3_write_select:                  ; $8000: the bank select; a change of the PRG / CHR mode bits remaps
+    la t0, global_mapselect
+    ld t1, 0(t0)
+    sd a1, 0(t0)
+    xor t1, t1, a1
+    andi t1, t1, 0xC0
+    beqz t1, mmc3_write_done        ; only the register index changed
+    nop
+    j mapperupdate
+    nop
+mmc3_write_mirror:                  ; $A000: vertical (0) or horizontal (1), not with four-screen VRAM
+    la t0, global_mapfourscreen
+    ld t1, 0(t0)
+    bnez t1, mmc3_write_done
+    andi a0, a1, 1
+    j mappermirror
+    xori a0, a0, 1
+mmc3_write_protect:                 ; $A001: bit 7 enables the work RAM, bit 6 protects it
+    la t0, global_mapramenable
+    srl t1, a1, 7
+    srl t2, a1, 6
+    andi t1, t1, 1
+    andi t2, t2, 1
+    sd t1, 0(t0)
+    jr ra
+    sd t2, global_mapramprotect-global_mapramenable(t0)
+  EndASM

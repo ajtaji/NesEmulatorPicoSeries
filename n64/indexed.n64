@@ -2,7 +2,7 @@ CompilerIf #NES_RDP_SHOW
 ; N5 (design note N.22): the RSP band emitter's picture is shown (show.n64); the old renderer draws only the
 ; fallback lines, into their slots, and show.n64's NesFbPublish publishes them. No frame-sized CI8 image, no blit.
 XIncludeFile "ppu_palette.n64"
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
   Global NesReusedIndexRow.i            ; (NesReuseLine's, mappedrows.n64; that routine is not called in N5)
 CompilerEndIf
 ProcedureNaked PpuRgbLineRaw()          ; (declared by ppu.n64; nothing calls it in N5)
@@ -21,11 +21,11 @@ Global Dim NesIndexPalette.i(1920)
 Global Dim NesPaletteChange.a(240)
 XIncludeFile "ppu_palette.n64"
 
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
   Global NesReusedIndexRow.i
 CompilerEndIf
 ProcedureNaked PpuRgbLineRaw()
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       ; Retained pixels were already published to RDRAM on the prior frame.
       ; Palette capture still runs for every completed scanline.

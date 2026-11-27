@@ -65,7 +65,7 @@ nes_span_fetch:
     andi t1, t1, 14
     or t0, t0, t1
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       or a4, t0, zero
     EndASM
@@ -134,7 +134,7 @@ ProcedureNaked NesPackedBgTile()
     sll t2, t2, 4
     daddu t2, a4, t2
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       andi t1, t2, 0x1c00
       srl t1, t1, 7
@@ -163,7 +163,7 @@ ProcedureNaked NesPackedBgTile()
     srlv v0, v0, t3
     andi v0, v0, 3
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       sll v0, v0, 10
       addu v0, t9, v0
@@ -209,7 +209,7 @@ nes_blank_bg_row:
     nop
   EndASM
 EndProcedure
-CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ProcedureNaked NesMmc3BatchTile()
   ; s6 holds the last attribute group of four tiles and s5 its palette pair.
   ; a7 is based 16 KiB below the nametables (signed displacements reach all of
@@ -418,7 +418,7 @@ nes_overlay_at:
     ld a2, 0(t0)
     ld a3, 0(a1)
   EndASM
-  CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       ; Sprite colors are either zero or CI8 indices 16-31. Bit 4
       ; therefore gives an opacity selector without a general zero test.

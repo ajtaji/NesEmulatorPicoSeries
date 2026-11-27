@@ -11,8 +11,8 @@
 ; THE MODULE'S CONTRACT (every module keeps it; the slot's entry table is in unit/slot.n64):
 ;   - the common code enters only through the slot's entry labels; the module leaves by j / jal to common labels;
 ;   - inside the module, any transfer (MMC3 keeps its own la a7 + j link convention, its own tables by la);
-;   - no relative branch from the module to a label outside it and its cold part (unit/a12_cold.n64, between
-;     nes_mapper_cold and nes_mapper_cold_end: MMC3's A12 cold paths and table): a module's bytes are assembled at
+;   - no relative branch from the module to a label outside it and its cold part (modules/mmc3_cold.n64, in the
+;     cold slot between nes_mapper_cold and nes_mapper_cold_end: MMC3's A12 cold paths and table, its rare registers): a module's bytes are assembled at
 ;     the slot's address, and a branch out of them would say nothing the next module keeps. The build checks the
 ;     module's words (build.py, check_mapper_slot).
 ;   MMC3 is the default module: it is assembled in place in the slot, so the bytes copied in at load (the module
@@ -20,6 +20,39 @@
 ;
 ; THE PLAIN TWIN of each piece is in its file, unchanged; the check is the guest's (digests every frame, the oracles,
 ; the pictures) and --a12-check for the walk.
+; ---- THE ENTRY TABLE (the slot's first 80 bytes, unit/slot.n64; moved here from the slot unchanged) ----
+  ASM
+u_mappercpubudget:
+    b mmc3_e_budget
+    nop
+u_nesmmc3fetchdeadline:
+    b mmc3_e_fetchdeadline
+    nop
+u_mapperpputicks:
+    b mmc3_e_pputicks
+    nop
+u_mappera12:
+    b mmc3_e_a12
+    nop
+u_mapperwrite:
+    b mmc3_e_write
+    nop
+nes_slot_write_sync:
+    b mmc3_e_write_sync
+    nop
+nes_slot_write_fast:
+    b mmc3_e_write_fast
+    nop
+u_mapperclockirq:
+    b mmc3_e_clockirq
+    nop
+nes_slot_cpu_ticks:
+    jr ra
+    nop
+nes_slot_read:
+    jr ra
+    move v0, zero
+  EndASM
   XIncludeFile "mmc3_window.n64"
   XIncludeFile "mmc3_irq.n64"
   XIncludeFile "mmc3_a12.n64"

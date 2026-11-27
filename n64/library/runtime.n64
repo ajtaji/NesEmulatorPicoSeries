@@ -88,7 +88,7 @@ ProcedureNaked.i NesRuntimeLoad()
     sd a0, 0(t0)
     sd a0, 96(sp)
   EndASM
-  CompilerIf #GAME_MAPPER=4
+  CompilerIf #NES_UNIT
     ASM
       jal nesmoduleinstall          ; the mapper's module into the slot; 0: no module for it in this cart
       ld a0, 80(sp)

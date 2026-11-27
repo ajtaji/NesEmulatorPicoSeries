@@ -2,7 +2,7 @@
 ; level. Period, envelope, and duty stay fixed until the block is rendered.
 ; MMC1 synchronizes often at mapper commits and PPU ports. Accumulate
 ; stable oscillator spans between those writes before entering the mixer.
-CompilerIf #GAME_MAPPER=1 Or (#NES_RUNTIME_ROM And #GAME_MAPPER=4)
+CompilerIf #GAME_MAPPER=1 Or (#NES_UNIT)
   #NES_APU_BLOCK=64
 CompilerElse
   #NES_APU_BLOCK=16

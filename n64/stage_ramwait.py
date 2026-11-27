@@ -180,12 +180,12 @@ def ram_wait_source(program, mapper, chain_nrom=False):
     return "\n".join(lines) + "\n", True
 
 
-def runtime_wait_source(mapper):
+def runtime_wait_source(mapper, unit=False):
     """Publish the generic decoder table and existing CPU window periods."""
     table = [0] * 256
     for opcode, (action, mode) in READS.items():
         table[opcode] = (action << 3) | mode
-    lines = [f"#NES_NATIVE_RAM_WAIT = {int(mapper in (0, 4))}", 'XIncludeFile "library/wait.n64"',
+    lines = [f"#NES_NATIVE_RAM_WAIT = {int(mapper == 0 or unit)}", 'XIncludeFile "library/wait.n64"',
              "DataSection", "NesRuntimeWaitOpcodes:"]
     lines.extend("  Data.a " + ",".join(map(str, table[i:i + 16]))
                  for i in range(0, 256, 16))
