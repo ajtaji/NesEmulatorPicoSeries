@@ -18,11 +18,36 @@
 ;   MapperChr 1 KB slots, the band cut and the CHR biases or the CHR-RAM copy, MapperMirror the name-table slots),
 ;   so the core's PRG fetch, the old renderer and the band record see MMC1 exactly as they see MMC3.
 ;
-; THE ENTRIES (unit/slot.n64): no IRQ, no PPU clocking, no CPU timer, no expansion reads:
-;   budget          the full window (128), and the common DMC bound while a sample plays (MMC3's budget with its
-;                   IRQ disabled, which is the state MMC1 is always in)
-;   irq_deadline    never ($7FFF_FFFF_FFFF_FFFF, as mmc3_fetch_deadline_never)
-;   ppu_ticks, ppu_addr, clock_irq, cpu_ticks   nothing (return)
+; SUROM (512 KB PRG, Dragon Warrior III / IV): the MMC1 has no PRG A18, so the board wires it to the CHR A16 output, which
+;   is bit 4 of the CHR register the PPU's A12 line selects - register 0 while A12 is low (the $0000 pattern table),
+;   register 1 while it is high (the $1000 table) in 4 KB CHR mode; in 8 KB CHR mode register 0 alone drives CHR A13-A16,
+;   so register 0 alone. A12 is the PPU's address bus bit 12: during a rendered line (rendering on, a visible line or the
+;   pre-render line) it is the fetch sequence's - a name-table / attribute fetch starts at every dot p with p mod 8 = 1
+;   (low), a pattern fetch at p mod 8 = 5 (the background's table, PPUCTRL bit 4, for p < 257 and 321 <= p < 337; sprite
+;   slot (p - 261) / 8's table for 257 < p < 321: PPUCTRL bit 3 with 8x8 sprites, the slot's tile bit 0 with 8x16), dot
+;   337 the line's last decision; when the PPU is not fetching (rendering off, or lines 240-260) the bus shows v, so A12
+;   is v's bit 12. This is the model the MMC3 module's A12 walk (modules/mmc3_a12.n64) and the PPU's own v keep; the
+;   level here is computed from them, with no history (the MMC1 has no low-time filter).
+;   THE SPLIT STATE: PRG > 256 KB, 4 KB CHR mode, and the two registers' bit 4 UNEQUAL - only then does the level matter
+;   to the PRG. Every known SUROM game writes the same bit 4 to both registers, so the state is never entered by them,
+;   and its machinery costs nothing outside it: mmc1_update stores the state in MapIrqEnable, the scheduler's "the
+;   mapper has a fetch deadline" gate (unit/advance.n64: the fetch clock is advanced at the deadline, the budget
+;   bounded by it, a $2002 read fully synced, the RAM-wait coalesce bounded - the MMC3 IRQ's own scaffolding, which
+;   MMC1 has no other use for), and each entry below tests that word first. Inside the state the four PRG slots are
+;   published again (mmc1_prg) whenever the level changes, at the PPU dot it changes: the deadline entry names the
+;   next dot at which the level can change (one line ahead at most), the budget ends the window there, and ppu_ticks
+;   recomputes the level at the fetch clock's new position (the PPU's position plus the fetch clock's lead, 3 dots a
+;   cycle); the a12 notice recomputes it at a $2006 / $2007 access (the PPU synced to the access). The exactness is
+;   the unit's: a CPU cycle is 3 dots, and the slot change applies from the cycle after the dot's.
+;
+; THE ENTRIES (unit/slot.n64): no IRQ, no CPU timer, no expansion reads:
+;   budget          the full window (128), bounded by the fetch deadline in SUROM's split state, and the common DMC
+;                   bound while a sample plays (MMC3's budget with its IRQ disabled, which is the state MMC1 is always in)
+;   irq_deadline    never ($7FFF_FFFF_FFFF_FFFF, as mmc3_fetch_deadline_never); in the split state the cycle of the next
+;                   PPU dot at which A12 can change (mmc1_e_deadline)
+;   ppu_ticks       nothing; in the split state A12's level at the fetch clock's new position, the PRG half with it
+;   ppu_addr (a12)  nothing; in the split state A12's level after a $2006 / $2007 access (v's bit 12 when not fetching)
+;   clock_irq, cpu_ticks, read   nothing (return)
 ;   write           the work RAM and the serial port (below)
 ;   write_sync      the timed register write's sync decision (below), then write, then the common close
 ;   write_fast      every $8000-$FFFF write goes on to the common timed path (nes_mmc3_bus_write_timed)
@@ -36,14 +61,14 @@
 u_mappercpubudget:                  ; +0
     b mmc1_e_budget
     nop
-u_nesmmc3fetchdeadline:             ; +8 never: the largest positive cycle
-    b mmc1_e_never
+u_nesmmc3fetchdeadline:             ; +8 never, or SUROM's next A12 decision (the split state)
+    b mmc1_e_deadline
     nop
-u_mapperpputicks:                   ; +16 no PPU clocking
-    jr ra
+u_mapperpputicks:                   ; +16 A12's level at the fetch clock's new position (the split state only)
+    b mmc1_e_pputicks
     nop
-u_mappera12:                        ; +24 no A12 watch
-    jr ra
+u_mappera12:                        ; +24 A12's level after a $2006 / $2007 access (the split state only)
+    b mmc1_e_a12
     nop
 u_mapperwrite:                      ; +32
     b mmc1_e_write
@@ -64,25 +89,350 @@ nes_slot_read:                      ; +72 open bus
     jr ra
     move v0, zero
 
-; ---- budget: the window's length. MMC1 raises no IRQ, so the full 128 cycles, bounded by the next DMC fetch while a
-; sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 = @MapIrq). Out a0.
-; THE PLAIN TWIN: n = 128 : If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf (F the next fetch's cycle)
+; ---- budget: the window's length. MMC1 raises no IRQ, so the full 128 cycles - in SUROM's split state (MapIrqEnable,
+; the gate: the header) ended at the fetch deadline, the cycle of the next A12 decision (mmc1_e_deadline, cached in
+; NesMmc3FetchLimit as the scheduler caches it: unit/advance.n64 resets the cache at every worker advance) - and bounded
+; by the next DMC fetch while a sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 =
+; @MapIrq). Out a0 (at least 1). Clobbers t0-t3, t8, t9, a0-a3 (the deadline's) in the split state, else t0, t1, a1.
+; THE PLAIN TWIN:
+;   n = 128
+;   If MapIrqEnable : If FetchLimit < 0 : FetchLimit = MapperFetchDeadline() : EndIf
+;                     n = Max(1, Min(n, FetchLimit - CpuCycles)) : EndIf
+;   If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf          ; (F the next fetch's cycle)
 mmc1_e_budget:
     la a1, global_mapirq            ; the DMC bound's base register
+    ld t1, global_mapirqenable-global_mapirq(a1)
+    bnez t1, mmc1_budget_split      ; SUROM's split state: the window ends at the next A12 decision
+    addiu a0, zero, 128             ; (delay slot) the full window
     ld t0, global_dmcbytes-global_mapirq(a1)
     bgtz t0, mmc1_budget_dmc        ; a sample plays: the common bound
-    addiu a0, zero, 128             ; (delay slot) the full window
+    nop
+    jr ra
+    nop
+mmc1_budget_split:
+    ld t0, global_nesmmc3fetchlimit-global_mapirq(a1)
+    bgez t0, mmc1_budget_bound      ; the deadline is known
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal mmc1_e_deadline             ; the next A12 decision's cycle, from the fetch clock's position
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la a1, global_mapirq
+    sd a0, global_nesmmc3fetchlimit-global_mapirq(a1)   ; cached for the scheduler (unit/advance.n64 reads it)
+    move t0, a0
+mmc1_budget_bound:
+    ld t1, global_cpucycles-global_mapirq(a1)
+    dsubu t0, t0, t1                ; cycles to the deadline (the window ends there)
+    addiu a0, zero, 128
+    slt t1, t0, a0
+    beqz t1, mmc1_budget_dmc_test   ; farther than the full window
+    nop
+    bgtz t0, mmc1_budget_dmc_test   ; ... else the cycles to it ...
+    move a0, t0
+    addiu a0, zero, 1               ; ... or one cycle when it is due (the window's end syncs the fetch clock)
+mmc1_budget_dmc_test:
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, mmc1_budget_dmc
+    nop
     jr ra
     nop
 mmc1_budget_dmc:
     j mmc3_budget_dmc               ; the common DMC bound (an absolute jump: no relative branch leaves the slots)
     nop
 
-; ---- irq_deadline: never. Out a0 = $7FFF_FFFF_FFFF_FFFF (all ones shifted right once).
+; ---- irq_deadline: never, or SUROM's next A12 decision. Out a0 = $7FFF_FFFF_FFFF_FFFF (all ones shifted right once)
+; outside the split state; inside it the CPU cycle at which the fetch clock's position reaches the next dot where A12
+; can change, so the window ends there and ppu_ticks recomputes the level (the header). Clobbers t0-t3, t8, t9, a0-a3.
+; THE RULE (position = the fetch clock's, from mmc1_pos; the level = MapA12): rendering off: never (v changes only at
+; accesses, which sync). Lines 240-260 with rendering on: the pre-render line's dot 1 (the first fetch; a re-evaluation
+; point - the level there is low, a change only if v's bit was 1). A rendered line at dot D: the level high falls at the
+; next decision dot q' = ((D - 1) & ~3) + 5 (1 at D = 0; at most 337, the line's last - a high at 337 cannot happen);
+; the level low rises at the first pattern-fetch dot p > D (p mod 8 = 5, p <= 333) whose table is $1000 - the
+; background's (PPUCTRL bit 4) for p < 257 or p >= 321, sprite slot (p - 261) / 8's for the rest (PPUCTRL bit 3 with
+; 8x8 sprites, else MapSpriteBits from MapperSpriteFetch(line), the compiled service) - or, none on this line, the next
+; line's dot 1 (re-evaluated there: one line ahead at most, so the walk is bounded). The cycle: fetch clock +
+; ceil(dots / 3) - the first cycle whose 3 dots reach the decision dot; the level there is that decision's (it holds
+; 4 dots). THE PLAIN TWIN is this paragraph; the check is the SUROM cart's rules S5-S8 (bench, carts/mmc1surom.s).
+mmc1_e_deadline:
+    la t0, global_mapirqenable
+    ld t0, 0(t0)
+    bnez t0, mmc1_deadline_split
+    nop
 mmc1_e_never:
     daddiu a0, zero, -1
     jr ra
     dsrl a0, a0, 1
+mmc1_deadline_split:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    jal mmc1_pos                    ; a1 line, a2 dot, a3 odd at the fetch clock; t3 = @PpuLine, t8 preline, t9 rendering
+    move a0, zero
+    beqz t9, mmc1_deadline_never    ; rendering off: v on the bus, moved only by accesses
+    sltiu t0, a1, 240
+    bnez t0, mmc1_deadline_line     ; a visible line
+    nop
+    beq a1, t8, mmc1_deadline_line  ; the pre-render line
+    nop
+    ; lines 240-260: to the pre-render line's dot 1
+    subu t0, t8, a1
+    addiu t1, zero, 341
+    multu t0, t1
+    mflo t0
+    subu t0, t0, a2
+    b mmc1_deadline_cycle
+    addiu t0, t0, 1                 ; dots to (preline, 1)
+mmc1_deadline_line:
+    la t0, global_mapa12
+    ld t0, 0(t0)
+    beqz t0, mmc1_deadline_rise     ; the level low: the next rise
+    addiu t0, a2, -1
+    ; the level high: the next decision dot, a fall (or dot 1 from dot 0)
+    bltz t0, mmc1_deadline_one
+    srl t0, t0, 2
+    sll t0, t0, 2
+    addiu t0, t0, 5                 ; q' = ((D - 1) & ~3) + 5
+    sltiu t1, t0, 338
+    bnez t1, mmc1_deadline_at
+    nop
+    b mmc1_deadline_next_line       ; past 337: the next line's dot 1
+    nop
+mmc1_deadline_one:
+    b mmc1_deadline_at
+    addiu t0, zero, 1
+mmc1_deadline_rise:
+    ; p = the first pattern-fetch dot after D: ((D + 3) & ~7) + 5
+    addiu t0, a2, 3
+    srl t0, t0, 3
+    sll t0, t0, 3
+    addiu t0, t0, 5
+    ld t1, global_ppuctrl-global_ppuline(t3)
+    andi t2, t1, 32
+    beqz t2, mmc1_deadline_s8       ; 8x8 sprites: every slot at PPUCTRL bit 3's table
+    andi t2, t1, 8
+    sd t0, 8(sp)
+    sd t1, 16(sp)
+    sd a1, 24(sp)
+    jal mapperspritefetch           ; MapSpriteBits for this line's slots (the compiled service: clobbers t0-t3, a0, a1)
+    move a0, a1
+    la t2, global_mapspritebits
+    ld t2, 0(t2)
+    ld t0, 8(sp)
+    ld t1, 16(sp)
+    ld a1, 24(sp)
+    b mmc1_deadline_scan
+    andi t2, t2, 255                ; t2 = S: bit j = slot j fetches at $1000
+mmc1_deadline_s8:
+    sltu t2, zero, t2
+    subu t2, zero, t2
+    andi t2, t2, 255                ; S = 255 or 0
+mmc1_deadline_scan:                 ; t0 = p, t1 = PPUCTRL, t2 = S
+    sltiu t3, t0, 334
+    beqz t3, mmc1_deadline_next_line   ; past 333: no rise on this line
+    addiu t3, t0, -257
+    sltiu t3, t3, 64                ; 257 < p < 321: a sprite slot
+    bnez t3, mmc1_deadline_slot
+    andi t3, t1, 16                 ; (delay slot) the background's table
+    bnez t3, mmc1_deadline_at       ; at $1000: the rise
+    nop
+    b mmc1_deadline_scan
+    addiu t0, t0, 8
+mmc1_deadline_slot:
+    addiu t3, t0, -261
+    srl t3, t3, 3                   ; the slot
+    srlv t3, t2, t3
+    andi t3, t3, 1
+    bnez t3, mmc1_deadline_at
+    nop
+    b mmc1_deadline_scan
+    addiu t0, t0, 8
+mmc1_deadline_next_line:            ; the line's length from mmc1_pos's rule: 341, one less on the odd frame's pre-render line
+    addiu t0, zero, 341
+    bne a1, t8, mmc1_deadline_len
+    nop
+    subu t0, t0, a3
+mmc1_deadline_len:
+    subu t0, t0, a2
+    b mmc1_deadline_cycle
+    addiu t0, t0, 1                 ; dots to the next line's dot 1
+mmc1_deadline_at:
+    subu t0, t0, a2                 ; dots to the decision dot on this line
+mmc1_deadline_cycle:
+    addiu t0, t0, 2
+    addiu t1, zero, 3
+    divu t0, t1
+    la t1, global_nesmmc3fetchclock
+    ld a0, 0(t1)
+    mflo t0
+    ld ra, 0(sp)
+    daddiu sp, sp, 32
+    jr ra
+    daddu a0, a0, t0                ; the fetch clock + ceil(dots / 3)
+mmc1_deadline_never:
+    ld ra, 0(sp)
+    daddiu sp, sp, 32
+    daddiu a0, zero, -1
+    jr ra
+    dsrl a0, a0, 1
+
+; ---- ppu_ticks / a12: A12's level, and the PRG half with it (the header). ppu_ticks: a0 = the CPU cycles the fetch
+; clock advances by (the scheduler then stores the new clock); the level is computed at the fetch clock's new position.
+; a12: a0 the PPU address, a1 the dot clock - both unused: the PPU is synced to the $2006 / $2007 access, so the position
+; is the PPU's and v is read from it (the common caller's a0 is v & $3FFF anyway). Outside the split state: return.
+; Clobbers t0-t3, t8, t9, a0-a3 (and what mmc1_prg may, when the half changes).
+; THE PLAIN TWIN:
+;   If MapIrqEnable
+;     level = MapperA12Level(position at FetchClock + cycles)             ; (mmc1_pos, mmc1_level; -1 = unchanged)
+;     If level >= 0 And level <> MapA12 : MapA12 = level : MapperPrgOnly() : EndIf
+;   EndIf
+mmc1_e_pputicks:
+    la t0, global_mapirqenable
+    ld t0, 0(t0)
+    bnez t0, mmc1_a12_track
+    nop
+    jr ra
+    nop
+mmc1_e_a12:
+    la t0, global_mapirqenable
+    ld t0, 0(t0)
+    bnez t0, mmc1_a12_track
+    move a0, zero                   ; (delay slot) the fetch clock's own position: it is synced to the access
+    jr ra
+    nop
+mmc1_a12_track:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal mmc1_pos
+    nop
+    jal mmc1_level
+    nop
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    la t0, global_mapa12
+    bltz a0, mmc1_a12_same          ; the idle dot: the level stays
+    ld t1, 0(t0)
+    beq t1, a0, mmc1_a12_same
+    nop
+    sd a0, 0(t0)
+    b mmc1_prg                      ; the half changed: the four PRG slots again (mmc1_prg returns to our caller)
+    nop
+mmc1_a12_same:
+    jr ra
+    nop
+
+; ---- mmc1_pos: the PPU position the fetch clock reaches a0 cycles from now - the PPU's own position (PpuLine, PpuDot,
+; PpuOdd) advanced by 3 dots a cycle (NTSC, as the A12 walk's) for the fetch clock's lead over the PPU clock plus a0.
+; The line's length is 341, one less on the odd frame's pre-render line with rendering on (unit/ppu.n64's rule, as the
+; walk reads it: the mask at the call); the frame wraps at the pre-render line, the odd flag flipping. Out a1 line,
+; a2 dot, a3 odd; t3 = @PpuLine, t8 = the pre-render line (PpuPreLine), t9 = rendering on (PPUMASK & 24). Clobbers t0-t2.
+; THE PLAIN TWIN (the compiled walk's own start, anvil/mappers.pi4 MapperPpuTicks: line = PpuLine : dot = PpuDot ...):
+;   left = (FetchClock + cycles - PpuClock) * 3 : line = PpuLine : dot = PpuDot : odd = PpuOdd
+;   While left >= width - dot : left - (width - dot) : dot = 0 : line + 1 : If line = 262 : line = 0 : odd ! 1 : EndIf
+;   dot + left          ; (width = 341, 340 on the odd frame's line 261 with rendering on)
+mmc1_pos:
+    la t3, global_ppuline
+    ld t0, global_nesmmc3fetchclock-global_ppuline(t3)
+    ld t1, global_ppuclock-global_ppuline(t3)
+    daddu t0, t0, a0
+    dsubu t0, t0, t1                ; the cycles past the PPU's clock (never negative: the PPU trails the fetch clock)
+    sll a0, t0, 1
+    addu a0, a0, t0                 ; their dots
+    ld a1, 0(t3)
+    ld a2, global_ppudot-global_ppuline(t3)
+    ld a3, global_ppuodd-global_ppuline(t3)
+    ld t8, global_ppupreline-global_ppuline(t3)
+    ld t9, global_ppumask-global_ppuline(t3)
+    andi t9, t9, 24
+mmc1_pos_next:
+    addiu t1, zero, 341
+    bne a1, t8, mmc1_pos_len
+    nop
+    beqz t9, mmc1_pos_len
+    nop
+    subu t1, t1, a3                 ; the odd frame's pre-render line is one dot short with rendering on
+mmc1_pos_len:
+    subu t2, t1, a2                 ; dots left on this line
+    sltu t0, a0, t2
+    bnez t0, mmc1_pos_done          ; the dots run out on it
+    nop
+    subu a0, a0, t2
+    addiu a1, a1, 1                 ; the next line, from dot 0
+    addiu t0, t8, 1
+    bne a1, t0, mmc1_pos_next
+    move a2, zero
+    move a1, zero                   ; a new frame: the odd flag flips
+    b mmc1_pos_next
+    xori a3, a3, 1
+mmc1_pos_done:
+    jr ra
+    addu a2, a2, a0
+
+; ---- mmc1_level: A12's level at the position (a1 line, a2 dot), with t3 / t8 / t9 as mmc1_pos leaves them (the header's
+; model). Out a0 = 0 / 1, or -1 at dot 0 of a rendered line (the idle dot: the line before ended low at 337, or the
+; vblank's v - the level stays). Clobbers t0-t3 (t3 through MapperSpriteFetch), a0, a1, and MapSpriteBits.
+; THE PLAIN TWIN:
+;   If PpuMask & 24 = 0 Or (line >= 240 And line <> 261) : ProcedureReturn PpuV >> 12 & 1 : EndIf
+;   If dot = 0 : ProcedureReturn -1 : EndIf
+;   q = ((dot - 1) & ~3) + 1 : If q & 4 = 0 : ProcedureReturn 0 : EndIf        ; a name-table / attribute fetch
+;   If q < 261 Or q > 317 : ProcedureReturn PpuCtrl >> 4 & 1 : EndIf            ; the background's pattern fetch
+;   If PpuCtrl & 32 = 0 : ProcedureReturn PpuCtrl >> 3 & 1 : EndIf              ; 8x8: every slot at bit 3's table
+;   MapperSpriteFetch(line) : ProcedureReturn MapSpriteBits >> ((q - 261) >> 3) & 1
+mmc1_level:
+    beqz t9, mmc1_level_v           ; rendering off: v on the bus
+    sltiu t0, a1, 240
+    bnez t0, mmc1_level_fetch       ; a visible line
+    nop
+    bne a1, t8, mmc1_level_v        ; lines 240-260: v on the bus
+    nop
+mmc1_level_fetch:                   ; a rendered line: the last decision dot q <= dot decides
+    beqz a2, mmc1_level_hold
+    addiu t0, a2, -1
+    srl t0, t0, 2
+    sll t0, t0, 2
+    addiu t0, t0, 1                 ; q = ((dot - 1) & ~3) + 1
+    andi t1, t0, 4
+    beqz t1, mmc1_level_low         ; q mod 8 = 1: a name-table or attribute fetch
+    ld t2, global_ppuctrl-global_ppuline(t3)
+    addiu t1, t0, -257
+    sltiu t1, t1, 64                ; 257 < q < 321: a sprite slot's pattern fetch
+    bnez t1, mmc1_level_sprite
+    andi a0, t2, 16                 ; (delay slot) the background's table
+    jr ra
+    sltu a0, zero, a0
+mmc1_level_sprite:
+    andi t1, t2, 32
+    bnez t1, mmc1_level_tall        ; 8x16 sprites: the slot's tile bit 0
+    andi a0, t2, 8                  ; (delay slot) 8x8: every slot at PPUCTRL bit 3's table
+    jr ra
+    sltu a0, zero, a0
+mmc1_level_tall:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd t0, 8(sp)
+    jal mapperspritefetch           ; MapSpriteBits for line a0's slots (the compiled service: clobbers t0-t3, a0, a1)
+    move a0, a1
+    ld t0, 8(sp)
+    ld ra, 0(sp)
+    daddiu sp, sp, 32
+    la t1, global_mapspritebits
+    ld t1, 0(t1)
+    addiu t0, t0, -261
+    srl t0, t0, 3                   ; the slot
+    srlv t1, t1, t0
+    jr ra
+    andi a0, t1, 1
+mmc1_level_low:
+    jr ra
+    move a0, zero
+mmc1_level_v:
+    ld a0, global_ppuv-global_ppuline(t3)
+    srl a0, a0, 12
+    jr ra
+    andi a0, a0, 1
+mmc1_level_hold:
+    jr ra
+    daddiu a0, zero, -1
 
 ; ---- write_sync: a timed $8000-$FFFF write's sync decision. Entered by branch from the common timed path with its
 ; 32-byte frame on the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. A write that can change a mapping (a
@@ -249,11 +599,13 @@ mmc1_write_done:
     jr ra
     nop
 
-; ---- mmc1_update: every mapping from the registers - the PRG banks and the RAM enable (mmc1_prg), the eight 1 KB CHR
-; slots, the mirroring. Each helper changes only what differs (and cuts the open band first when CHR or mirroring
-; changes). In: nothing. Clobbers t0-t3, a0-a3 and what the helpers may (MapperChr's CHR-RAM copy calls MapCopy).
-; FRAME (48 B): 0 ra | 8 the slot | 16 the low half's first bank | 24 the high half's first bank
+; ---- mmc1_update: every mapping from the registers - SUROM's split state (the header), the PRG banks and the RAM enable
+; (mmc1_prg), the eight 1 KB CHR slots, the mirroring. Each helper changes only what differs (and cuts the open band
+; first when CHR or mirroring changes). In: nothing. Clobbers t0-t3, t8, t9, a0-a3 and what the helpers may (MapperChr's
+; CHR-RAM copy calls MapCopy). FRAME (48 B): 0 ra | 8 the slot | 16 the low half's first bank | 24 the high half's first bank
 ; THE PLAIN TWIN (mmc1.n64's MapperUpdate, published through the common helpers):
+;   MapIrqEnable = Bool(MapPrgBytes > 262144 And MapControl & 16 And (MapChr0 ! MapChr1) & 16)   ; the split state
+;   If MapIrqEnable : level = MapperA12Level(the PPU's position) : If level >= 0 : MapA12 = level : EndIf : EndIf
 ;   mmc1_prg()
 ;   If MapControl & 16 : lo = MapChr0 * 4 : hi = MapChr1 * 4 : Else : lo = (MapChr0 & 30) * 4 : hi = lo + 4 : EndIf
 ;   For i = 0 To 7 : If i < 4 : MapperChr(i, lo + i) : Else : MapperChr(i, hi + i - 4) : EndIf : Next
@@ -263,6 +615,34 @@ mmc1_write_done:
 mmc1_update:
     daddiu sp, sp, -48
     sd ra, 0(sp)
+    la t3, global_mapcontrol
+    ld t0, global_mapprgbytes-global_mapcontrol(t3)
+    dsrl t0, t0, 13                 ; n, the ROM's 8 KB banks (mmc1_prg's test)
+    sltiu t0, t0, 33
+    bnez t0, mmc1_gate_off          ; 256 KB or less: no split state
+    ld t1, global_mapchr0-global_mapcontrol(t3)
+    ld t2, global_mapchr1-global_mapcontrol(t3)
+    xor t1, t1, t2                  ; the registers' differing bits ...
+    ld t2, 0(t3)
+    and t1, t1, t2                  ; ... in 4 KB CHR mode (control bit 4) ...
+    andi t0, t1, 16                 ; ... bit 4
+    b mmc1_gate_store
+    sltu t0, zero, t0
+mmc1_gate_off:
+    move t0, zero
+mmc1_gate_store:
+    sd t0, global_mapirqenable-global_mapcontrol(t3)   ; the scheduler's fetch-deadline gate = the split state
+    beqz t0, mmc1_gate_done
+    nop
+    jal mmc1_pos                    ; entering or inside the state: the level afresh at the PPU's position (the write
+    move a0, zero                   ; synced every device to itself; the fetch clock is at the PPU clock)
+    jal mmc1_level
+    nop
+    la t0, global_mapa12
+    bltz a0, mmc1_gate_done         ; the idle dot: the level stays
+    nop
+    sd a0, 0(t0)
+mmc1_gate_done:
     jal mmc1_prg                    ; the PRG banks and the RAM enable first, as mmc1.n64
     nop
     la t3, global_mapcontrol
@@ -315,11 +695,15 @@ mmc1_mirror:
 ; enable from the PRG bank's bit 4. Clobbers t0-t3, t8, a0-a3. FRAME (32 B): 0 ra | 8 the $8000 bank | 16 the $C000 bank
 ; THE PLAIN TWIN (mmc1.n64's NesMapMmc1Prg; n = the 8 KB banks of the ROM):
 ;   b = (MapPrgReg & 15) * 2 : mode = MapControl >> 2 & 3
-;   outer = 0 : If n > 32 : outer = (MapChr0 & 16) * 2 : n = 32 : EndIf   ; SUROM (512 KB): CHR bank 0 bit 4 = PRG A18
+;   outer = 0
+;   If n > 32                                            ; SUROM (512 KB): PRG A18 = the CHR A16 output (the header)
+;     reg = MapChr0 : If MapControl & 16 And MapA12 : reg = MapChr1 : EndIf   ; 4 KB CHR mode: the register A12 selects
+;     outer = (reg & 16) * 2 : n = 32
+;   EndIf
 ;   If mode < 2 : lo = b & ~3 : hi = lo + 2 : ElseIf mode = 2 : lo = 0 : hi = b : Else : lo = b : hi = n - 2 : EndIf
 ;   lo + outer : hi + outer
-;   (SUROM's games write the same bit 4 to both CHR registers; the board's A12-dependent choice in 4 KB CHR mode
-;   is not modelled: CHR bank 0's bit is used in both modes.)
+;   (MapA12 is current whenever it matters: mmc1_update recomputes it on entering the split state, and ppu_ticks /
+;   the a12 notice keep it inside the state; outside it either register gives the same bit, or register 0 is the one.)
 ;   MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, hi) : MapperPrg(3, hi + 1)
 ;   MapRamEnable = Bool(MapPrgReg & 16 = 0) : MapRamProtect = 0
 ;   (MapperPrg masks each bank by the ROM's size; mmc1.n64 masks lo and hi before adding 1: the same, lo and hi
@@ -337,8 +721,17 @@ mmc1_prg:
     sltiu t3, t2, 33
     bnez t3, mmc1_prg_half          ; 256 KB or less: no outer bank
     move t8, zero                   ; (delay slot) the outer bank's first 8 KB bank: 0
-    ld t3, global_mapchr0-global_mapcontrol(a3)
-    andi t3, t3, 16                 ; SUROM: CHR bank 0's bit 4 picks the 256 KB half (PRG A18)
+    ld t3, global_mapchr0-global_mapcontrol(a3)   ; SUROM: the CHR register PPU A12 selects picks the 256 KB half (PRG A18)
+    ld t8, 0(a3)
+    andi t8, t8, 16                 ; control bit 4: 4 KB CHR mode, where A12 selects the register ...
+    la a1, global_mapa12
+    beqz t8, mmc1_prg_outer         ; (8 KB mode: register 0 alone)
+    ld a1, 0(a1)
+    beqz a1, mmc1_prg_outer         ; ... A12 low: register 0 ...
+    nop
+    ld t3, global_mapchr1-global_mapcontrol(a3)   ; ... high: register 1
+mmc1_prg_outer:
+    andi t3, t3, 16                 ; its bit 4
     sll t8, t3, 1                   ; 16 -> 32: the half's first 8 KB bank
     addiu t2, zero, 32              ; n: the half's 8 KB banks (the "last bank" of mode 3 is the half's)
 mmc1_prg_half:
