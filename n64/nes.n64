@@ -44,6 +44,12 @@ Declare.i NesCurrentPoll(acc.i)
 Global NesDeliveredFrame.i, NesLoopRule.i, NesLoopCost.i
 XIncludeFile "poll.pmi"
 Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
+; THE NMI'S TIMING (design note N.77, the probe cart's rules R3-R5): NesNmiAt = the CPU cycle the pending NMI edge is
+; detected in (the vblank set's dot <= that cycle's read point + 1, or the PPUCTRL write that enabled it during vblank);
+; NesNmiDue = the first instruction boundary the NMI may be taken at (NesNmiAt + 2, the edge detected by the end of an
+; instruction's penultimate cycle), predicted before the edge while NMI is on, else the largest cycle; NesVblSuppress =
+; a $2002 read one dot before the set: this frame's flag and NMI are not made.
+Global NesNmiAt.i, NesNmiDue.i = $7FFFFFFFFFFFFFFF, NesVblSuppress.i
 CompilerIf #NES_DMC_RASTER_DEADLINE
   Global NesPpuLimit.i=-1
 CompilerEndIf
@@ -676,12 +682,12 @@ Procedure RunGame()
         NesChainLimit=NesCpuHorizon         ; (the checking build with the shortcuts off: no window is chained)
       CompilerEndIf
       CompilerIf #NES_HAS_RAM_WAITS
-        NesRamCpuWindow(128,1)
+        NesRamCpuWindow(NesNmiCap(128),1)   ; each window ends where the NMI is due (design note N.77)
       CompilerElse
         CompilerIf #NES_PREDICTABLE_IRQ
-          CpuRun(128)
+          CpuRun(NesNmiCap(128))
         CompilerElse
-          CpuRun(MapperCpuBudget())
+          CpuRun(NesNmiCap(MapperCpuBudget()))
         CompilerEndIf
       CompilerEndIf
       CompilerIf #NES_CHAIN_WINDOWS
@@ -698,8 +704,8 @@ Procedure RunGame()
         NesSeenDmc=WorkerDmcCycles : CpuCycles=CpuCycles+stalls
         NesAdvanceCpuTime(CpuCycles) : stalls=WorkerDmcCycles-NesSeenDmc
       Wend
-      If WorkerNmi<>NesSeenNmi
-        NesSeenNmi=WorkerNmi : CpuInterrupt($FFFA)
+      If WorkerNmi<>NesSeenNmi And CpuCycles>=NesNmiDue   ; at the first boundary >= the due (R5, design note N.77)
+        NesSeenNmi=WorkerNmi : NesNmiDue=$7FFFFFFFFFFFFFFF : CpuInterrupt($FFFA)
       ElseIf (WorkerIrq|MapIrq)<>0 And FI=0
         CpuInterrupt($FFFE)
       EndIf

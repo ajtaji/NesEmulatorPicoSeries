@@ -91,6 +91,10 @@ ppu_adv_save:
     sd s5, 48(sp)
     sd s6, 56(sp)
     sd s7, 64(sp)
+    la t0, global_ppuclock
+    ld t0, 0(t0)
+    daddu t0, t0, a0
+    sd t0, 72(sp)                   ; the stamp advanced to (PpuClock + cycles): the NMI edge's cycle is from it
     la t0, global_cartpal
     ld t0, 0(t0)
     bnez t0, ppu_adv_fraction       ; PAL: 3.2 dots a cycle (cold part)
@@ -459,16 +463,8 @@ ppu_adv_blank_edge:
     ld t1, global_ppustatus-global_ppuline(s4)
     bne s1, t0, ppu_adv_pre_clear
     ld t0, global_ppuctrl-global_ppuline(s4)
-    ori t1, t1, 128                 ; line 241 dot 1: vblank
-    sd t1, global_ppustatus-global_ppuline(s4)
-    andi t0, t0, 128
-    beqz t0, ppu_adv_next
+    j ppu_adv_vblank_set            ; line 241 dot 1: vblank, its NMI edge, the suppression (cold part, N.77)
     nop
-    la t0, global_workernmi
-    ld t1, 0(t0)
-    daddiu t1, t1, 1                ; NMI enabled: one more NMI edge
-    b ppu_adv_next
-    sd t1, 0(t0)
 ppu_adv_pre_clear:
     andi t1, t1, 31                 ; pre-render dot 1: vblank, sprite 0, overflow cleared
     b ppu_adv_next
@@ -732,18 +728,12 @@ nes_ppu_ctrl_store:
     addiu t3, zero, 1
     sd t3, global_oamcachedirty-global_ppubus(a2)
 nes_ppu_ctrl_nmi:
-    andi t0, t0, 128
-    bnez t0, nes_ppu_port_done
-    andi a1, a1, 128
-    beqz a1, nes_ppu_port_done
-    ld t1, global_ppustatus-global_ppubus(a2)
+    xor t1, t0, a1
     andi t1, t1, 128
-    beqz t1, nes_ppu_port_done
+    bnez t1, ppu_ctrl_nmi_changed   ; NMI on or off: the edge if enabled during vblank, NesNmiDue (cold part, N.77)
     nop
-    ld t0, global_workernmi-global_ppubus(a2)
-    daddiu t0, t0, 1                ; NMI enabled during vblank: an NMI edge now
     jr ra
-    sd t0, global_workernmi-global_ppubus(a2)
+    nop
 nes_ppu_write_mask:
     ld t0, global_ppumask-global_ppubus(a2)
     beq t0, a1, nes_ppu_mask_store
@@ -880,8 +870,13 @@ u_ppuregread:
     jr ra
     ld a0, 0(a2)
 nes_ppu_read_status:
+    la t1, global_ppuline
+    ld t1, 0(t1)
+    addiu t1, t1, -241
+    beqz t1, ppu_read_status_vbl    ; line 241: a read around the set (R4, cold part, N.77)
     ld t0, global_ppustatus-global_ppubus(a2)
     ld a0, 0(a2)
+ppu_read_status_back:
     andi t1, t0, 0x7F               ; reading clears vblank and the write toggle
     sd t1, global_ppustatus-global_ppubus(a2)
     sd zero, global_ppuw-global_ppubus(a2)

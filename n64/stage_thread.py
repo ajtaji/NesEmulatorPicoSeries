@@ -595,6 +595,9 @@ nop
     # NROM and MMC1 have no mapper IRQ. Recheck the APU IRQ against the I flag,
     # which an instruction may have changed since the scheduler armed us.
     # A possible wait PC returns to the full physical-bank lookup.
+    # The NMI (design note N.77): a chained window (128 cycles and the instruction that ends it, at most 7) must end
+    # before NesNmiDue, where the run loop takes the NMI; so no chain from a window end after NesNmiDue - 136. Read live:
+    # a PPUCTRL write in the window (it ends the window, then this test) may have just made the edge.
     return """la $t0, global_budget
 ld $t1, 0($t0)
 la $t0, global_nesrunstart
@@ -603,6 +606,12 @@ daddu $t1, $t1, $t0
 dsubu $a0, $t1, $a2
 la $t0, global_neschainlimit
 ld $t1, 0($t0)
+slt $t0, $t1, $a0
+bne $t0, $zero, nes_chain_exit
+nop
+la $t0, global_nesnmidue
+ld $t1, 0($t0)
+daddiu $t1, $t1, -136
 slt $t0, $t1, $a0
 bne $t0, $zero, nes_chain_exit
 nop

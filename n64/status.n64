@@ -220,7 +220,8 @@ nes_sh_lim:
     addiu t0, zero, 240
     bne a6, t0, nes_sh_cycles
     nop
-    daddiu a1, a1, 342              ; limit 240: on to the vblank's start
+    daddiu a1, a1, 341              ; limit 240: on to line 241 dot 0, one dot before the set (a read there is R4's
+                                    ; suppressing read: it must sync, design note N.77)
 nes_sh_cycles:
     daddiu t0, a1, -1               ; dots - 1
     slti t1, t0, 3
@@ -310,7 +311,7 @@ Procedure NesSetStatusHorizon(stamp.i)
       EndIf
       If (PpuMask&24)<>0 And (PpuStatus&32)=0 : limit=NesNextOverflow(PpuLine+1,limit) : EndIf
       dots=(limit-PpuLine)*341-PpuDot
-      If limit=240 : dots=dots+342 : EndIf
+      If limit=240 : dots=dots+341 : EndIf   ; to line 241 dot 0 (a read there syncs: N.77)
     EndIf
   ElseIf PpuLine>241 And PpuLine<PpuPreLine
     dots=(PpuPreLine-PpuLine)*341-PpuDot+1

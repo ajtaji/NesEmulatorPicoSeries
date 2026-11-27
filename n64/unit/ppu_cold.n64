@@ -610,4 +610,198 @@ nes_ppu_read_buffer:
     daddiu sp, sp, 32
     b nes_ppu_port_increment
     nop
+
+; ---- THE NMI'S TIMING (design note N.77) ----------------------------------------------------------------------------
+; The rules are the probe cart's (the bench's carts/nmiprobe.s, its header R1-R5, from the documented 2C02 / 2A03
+; timing): the vblank flag is set at line 241 dot 1 (R2); NMI = flag AND PPUCTRL bit 7, enabling it during vblank
+; makes the edge at once (R3); a $2002 read one dot before the set reads 0 and makes no flag or NMI that frame, a read
+; on the set dot or one after reads 1 and makes no NMI (R4); the edge is detected in the first cycle whose read point
+; + 1 dot is at or after it, and the NMI follows an instruction whose PENULTIMATE cycle is at or after the detection,
+; i.e. the first instruction boundary >= the detection cycle + 2 (R5). Before this the NMI was taken at the first
+; window end after the PPU had passed the set (up to a window, 128 cycles, late; right after the access when a
+; $2002 read or the enabling write ended the window: one instruction early) - measured by the probe on this unit, its
+; compiled core and the old MMC1 scheduler alike (N.77's table).
+; CHECKED BY: the probe cart (every test's expected value derived by hand in its source) on the unit, its compiled
+; core and the reference scheduler; the guest digests (an NMI at another instruction changes them).
+
+; ppu_adv_vblank_set: line 241 dot 1 reached in u_ppuadvance (t1 = PpuStatus, t0 = PpuCtrl, s4 = @PpuLine, s0 = the
+; dots still to advance past the set, 72(sp) = the stamp the advance ends at; t2, t3 free). Back to ppu_adv_next.
+; WHAT: unless a $2002 read one dot before suppressed it (NesVblSuppress, cleared here: used once), the flag is set
+; and, with NMI on, the edge counted (WorkerNmi + 1) with NesNmiAt, the cycle it is detected in.
+; HOW: the set dot S is reached with s0 dots of the advance left, so the stamp's read point is S + s0 and cycle c's is
+; S + s0 - 3 (stamp - c) (NTSC: 3 dots a cycle). Detected in the first c with S + s0 - 3 (stamp - c) + 1 >= S, i.e.
+; stamp - c <= (s0 + 1) / 3: NesNmiAt = stamp - floor((s0 + 1) / 3). The divide: x / 3 = (x * $AAAAAAAB) >> 33 for
+; x < 2^32 (Hacker's Delight 10-3; s0 is below one frame's dots). PAL (3.2 dots a cycle, pputakedots' fraction): not
+; derived here - NesNmiAt = 0, so the NMI is taken at the window's end as before.
+; THE PLAIN TWIN:
+;   If NesVblSuppress : NesVblSuppress = 0 : Else
+;     PpuStatus = PpuStatus | 128
+;     If PpuCtrl & 128 : WorkerNmi + 1 : If CartPal : NesNmiAt = 0 : Else : NesNmiAt = stamp - (s0 + 1) / 3 : EndIf : EndIf
+;   EndIf
+ppu_adv_vblank_set:
+    la t2, global_nesvblsuppress
+    ld t3, 0(t2)
+    bnez t3, ppu_vbl_suppressed     ; a read one dot before: no flag, no NMI this frame
+    ori t1, t1, 128                 ; (delay slot) the flag
+    sd t1, global_ppustatus-global_ppuline(s4)
+    andi t0, t0, 128
+    beqz t0, ppu_vbl_done           ; NMI off: the flag only
+    nop
+    la t0, global_workernmi
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)                    ; one more NMI edge
+    la t0, global_cartpal
+    ld t0, 0(t0)
+    bnez t0, ppu_vbl_at             ; PAL: NesNmiAt = 0
+    move t1, zero                   ; (delay slot)
+    daddiu t1, s0, 1                ; s0 + 1
+    lui t2, 0xAAAA
+    ori t2, t2, 0xAAAB              ; the magic number (multu reads its low 32 bits)
+    multu t1, t2
+    mfhi t1
+    srl t1, t1, 1                   ; (s0 + 1) / 3
+    ld t0, 72(sp)                   ; the stamp
+    dsubu t1, t0, t1                ; the cycle the edge is detected in
+ppu_vbl_at:
+    la t0, global_nesnmiat
+    sd t1, 0(t0)
+ppu_vbl_done:
+    j ppu_adv_next
+    nop
+ppu_vbl_suppressed:
+    j ppu_adv_next
+    sd zero, 0(t2)                  ; (delay slot) NesVblSuppress used
+
+; ppu_ctrl_nmi_changed: a PPUCTRL write changed bit 7 (a1 = the value, a2 = @PpuBus, ra = the port's caller). The PPU
+; was synced to the write (u_workeradvance before PpuRegWrite), so PpuClock is the write's cycle. Enabled while the
+; flag is set (R3): the edge now, NesNmiAt = the write's cycle (the STA's last; the next instruction runs first, R5).
+; Then NesNmiDue from the new PPUCTRL (u_nmidue, a tail call: it returns to the port's caller).
+; THE PLAIN TWIN: If value & 128 And PpuStatus & 128 : WorkerNmi + 1 : NesNmiAt = PpuClock : EndIf : NesNmiDueSet()
+ppu_ctrl_nmi_changed:
+    andi t1, a1, 128
+    beqz t1, ppu_ctrl_nmi_due       ; disabled: only the due changes
+    ld t1, global_ppustatus-global_ppubus(a2)
+    andi t1, t1, 128
+    beqz t1, ppu_ctrl_nmi_due       ; enabled outside vblank: the edge comes at the set
+    nop
+    ld t0, global_workernmi-global_ppubus(a2)
+    daddiu t0, t0, 1
+    sd t0, global_workernmi-global_ppubus(a2)   ; the edge now
+    la t0, global_ppuclock
+    ld t0, 0(t0)
+    la t1, global_nesnmiat
+    sd t0, 0(t1)                    ; detected in the write's cycle
+ppu_ctrl_nmi_due:
+    j u_nmidue
+    nop
+
+; ppu_read_status_vbl: a $2002 read on line 241, the PPU at the read (t0 = PpuStatus, a2 = @PpuBus, ra = the caller;
+; a3 free). R4 by the dot: 0 (one before the set) reads 0 and suppresses this frame's flag and NMI (NesVblSuppress,
+; used by ppu_adv_vblank_set); 1 or 2 (on the set, one after) reads 1 and the frame's NMI is not taken
+; (NesSeenNmi = WorkerNmi: the edge is at most a cycle old here and is taken two cycles after its detection at the
+; earliest, so it cannot have been taken yet); 3 or later is a normal read. Then NesNmiDue again; back to the read.
+; THE PLAIN TWIN:
+;   If PpuDot = 0 : NesVblSuppress = 1 : NesNmiDueSet()
+;   ElseIf PpuDot < 3 : NesSeenNmi = WorkerNmi : NesNmiDueSet() : EndIf
+ppu_read_status_vbl:
+    la t1, global_ppudot
+    ld t1, 0(t1)
+    sltiu t2, t1, 3
+    beqz t2, ppu_read_status_go     ; dot 3 or later: a normal read
+    addiu t2, zero, 1               ; (delay slot)
+    bnez t1, ppu_read_status_on
+    nop
+    la t3, global_nesvblsuppress
+    b ppu_read_status_due
+    sd t2, 0(t3)                    ; (delay slot) dot 0: suppressed
+ppu_read_status_on:
+    la t2, global_workernmi
+    ld t2, 0(t2)
+    la t3, global_nesseennmi
+    sd t2, 0(t3)                    ; dot 1-2: this frame's NMI is not taken
+ppu_read_status_due:
+    move a3, ra
+    jal u_nmidue                    ; (clobbers t0-t3)
+    nop
+    move ra, a3
+    la a2, global_ppubus
+    ld t0, global_ppustatus-global_ppubus(a2)
+ppu_read_status_go:
+    j ppu_read_status_back
+    ld a0, 0(a2)                    ; (delay slot) PpuBus
+
+; u_nmidue: NesNmiDue, the first instruction boundary the next NMI may be taken at, from the state. A leaf; clobbers
+; t0-t3. Called after every PPU advance (u_workeradvance), a PPUCTRL bit 7 change and a suppressing $2002 read.
+; WHAT: an edge counted and not taken: NesNmiAt + 2 (R5). Else, while NMI is on, NTSC, not suppressed and the set
+; (line 241 dot 1) still ahead in this frame: the predicted detection cycle + 2. Else never (the largest cycle); the
+; next frame's set is a frame away, and the PPU is caught up at line 224 and 240 (the render limit) before it.
+; HOW: the PPU stands at (PpuLine, PpuDot) at PpuClock; the set is dots = (241 - line) x 341 + 1 - dot ahead; the
+; detection is the first cycle c with 3 (c - PpuClock) + 1 >= dots, c = PpuClock + ceil((dots - 1) / 3) =
+; PpuClock + (x + 2) / 3 with x = (241 - line) x 341 - dot >= 0; the divide by the magic multiply (as above).
+; THE PLAIN TWIN (NesNmiDueSet):
+;   If WorkerNmi <> NesSeenNmi : NesNmiDue = NesNmiAt + 2
+;   ElseIf PpuCtrl & 128 And NesVblSuppress = 0 And CartPal = 0 And (PpuLine < 241 Or (PpuLine = 241 And PpuDot = 0))
+;     NesNmiDue = PpuClock + ((241 - PpuLine) * 341 - PpuDot + 2) / 3 + 2
+;   Else : NesNmiDue = $7FFFFFFFFFFFFFFF : EndIf
+u_nmidue:
+    la t0, global_workernmi
+    ld t1, 0(t0)
+    la t0, global_nesseennmi
+    ld t2, 0(t0)
+    beq t1, t2, nmidue_ahead
+    nop
+    la t0, global_nesnmiat
+    ld t1, 0(t0)
+    b nmidue_store
+    daddiu t1, t1, 2                ; (delay slot) the edge counted: NesNmiAt + 2
+nmidue_ahead:
+    la t0, global_ppuctrl
+    ld t1, 0(t0)
+    andi t1, t1, 128
+    beqz t1, nmidue_never           ; NMI off
+    nop
+    la t0, global_nesvblsuppress
+    ld t1, 0(t0)
+    bnez t1, nmidue_never           ; this frame's set suppressed
+    nop
+    la t0, global_cartpal
+    ld t1, 0(t0)
+    bnez t1, nmidue_never           ; PAL: not predicted
+    nop
+    la t0, global_ppuline
+    ld t1, 0(t0)                    ; line
+    ld t2, global_ppudot-global_ppuline(t0)   ; dot
+    addiu t3, zero, 241
+    slt t0, t3, t1
+    bnez t0, nmidue_never           ; past line 241
+    nop
+    bne t1, t3, nmidue_dist
+    nop
+    bnez t2, nmidue_never           ; line 241 at dot 1 or later: the set is behind
+    nop
+nmidue_dist:
+    subu t1, t3, t1                 ; 241 - line
+    addiu t3, zero, 341
+    multu t1, t3
+    mflo t1
+    subu t1, t1, t2                 ; x = (241 - line) x 341 - dot
+    addiu t1, t1, 2
+    lui t3, 0xAAAA                  ; (two instructions after mflo before the next multu: the HI / LO rule)
+    ori t3, t3, 0xAAAB
+    multu t1, t3
+    mfhi t1
+    srl t1, t1, 1                   ; ceil(x / 3)
+    la t0, global_ppuclock
+    ld t0, 0(t0)
+    daddu t1, t1, t0                ; the predicted detection cycle
+    b nmidue_store
+    daddiu t1, t1, 2                ; (delay slot) + 2
+nmidue_never:
+    daddiu t1, zero, -1
+    dsrl t1, t1, 1                  ; the largest cycle
+nmidue_store:
+    la t0, global_nesnmidue
+    jr ra
+    sd t1, 0(t0)
   EndASM

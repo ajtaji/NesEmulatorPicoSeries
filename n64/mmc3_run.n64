@@ -41,6 +41,8 @@ nes_mmc3_run_window:
     nop
     jal u_mappercpubudget
     nop
+    jal u_nmicap             ; the window ends where the NMI is due (unit/window.n64, design note N.77)
+    nop
     jal u_nesramcpuwindow
     move a1, zero
 
@@ -71,6 +73,14 @@ nes_mmc3_run_interrupts:
     ld t1, global_nesseennmi-global_cpucycles(s0)
     beq t0, t1, nes_mmc3_run_irq
     ori a0, zero, 0xFFFA
+    ld t2, 0(s0)             ; an NMI edge counted: taken at the first boundary >= NesNmiDue (R5, design note N.77)
+    la t3, global_nesnmidue
+    ld t1, 0(t3)
+    slt t1, t2, t1
+    bnez t1, nes_mmc3_run_irq ; not yet: the window to it (u_nmicap) runs first
+    daddiu t1, zero, -1
+    dsrl t1, t1, 1
+    sd t1, 0(t3)             ; taken: none due until the next frame's prediction
     sd t0, global_nesseennmi-global_cpucycles(s0)
     b nes_mmc3_run_interrupt
     nop

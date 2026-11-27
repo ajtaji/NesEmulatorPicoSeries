@@ -184,6 +184,8 @@ c65_rw_window:
     nop
     jal u_mappercpubudget
     nop
+    jal u_nmicap             ; the window ends where the NMI is due (unit/window.n64, design note N.77)
+    nop
     jal u_nesramcpuwindow
     move a1, zero
 
@@ -214,8 +216,7 @@ c65_rw_interrupts:
     ld t1, global_nesseennmi-global_cpucycles(s0)
     beq t0, t1, c65_rw_irq
     ori a0, zero, 0xFFFA
-    sd t0, global_nesseennmi-global_cpucycles(s0)
-    b c65_rw_interrupt
+    b c65_rw_nmi             ; an NMI edge counted: taken once due (cold, design note N.77)
     nop
 c65_rw_irq:
     ld t0, global_workerirq-global_cpucycles(s0)
@@ -2357,8 +2358,9 @@ c65_wend_stalls:
 c65_wend_pending:
     ld t1, global_workernmi-global_cpucycles(t0)
     ld t2, global_nesseennmi-global_cpucycles(t0)
-    bne t1, t2, c65_leave    ; an NMI to take
+    bne t1, t2, c65_wend_nmi ; an NMI edge counted: leave when it is due (cold, design note N.77)
     ld t1, global_workerirq-global_cpucycles(t0)
+c65_wend_irq:
     ld t2, global_mapirq-global_cpucycles(t0)
     or t1, t1, t2
     beqz t1, c65_wend_frame
@@ -2375,6 +2377,8 @@ c65_wend_frame:
     bnez t1, c65_leave
     nop
     jal u_mappercpubudget    ; a0 = the next window's budget
+    nop
+    jal u_nmicap             ; ending where the NMI is due (unit/window.n64, design note N.77)
     nop
     jal u_nesramwaitrule     ; a2 = the RAM-wait rule at PC (keeps a0)
     move a1, zero
@@ -2624,6 +2628,27 @@ c65_bad_fetch:               ; code fetched from device space: stop loudly
     daddiu t1, zero, 1
     sd t1, global_stopped-global_nesmmc3bias(a3)
     b c65_end
+    nop
+c65_wend_nmi:                ; the in-place window end, an NMI edge counted (t0 = @CpuCycles, t1 = WorkerIrq):
+    ld t2, 0(t0)             ; leave for the run loop (which takes it) once CpuCycles >= NesNmiDue, the first
+    la t3, global_nesnmidue  ; boundary after the edge's detection cycle + 1 (R5, design note N.77); before that
+    ld t3, 0(t3)             ; the window end goes on as without it, its next budget capped to the due (u_nmicap)
+    slt t3, t2, t3
+    beqz t3, c65_leave
+    nop
+    b c65_wend_irq
+    nop
+c65_rw_nmi:                  ; the run loop, an NMI edge counted (t0 = WorkerNmi, a0 = $FFFA, s0 = @CpuCycles): taken at
+    ld t2, 0(s0)             ; the first boundary >= NesNmiDue (R5, design note N.77); before it, on to the IRQ test
+    la t3, global_nesnmidue  ; and the window to the due (u_nmicap)
+    ld t1, 0(t3)
+    slt t1, t2, t1
+    bnez t1, c65_rw_irq      ; not yet
+    daddiu t1, zero, -1
+    dsrl t1, t1, 1
+    sd t1, 0(t3)             ; taken: none due until the next frame's prediction
+    sd t0, global_nesseennmi-global_cpucycles(s0)
+    b c65_rw_interrupt
     nop
 
     ; --- the batching shapes (cold). Each is the reference's PureMetal condition, evaluated on the live

@@ -142,6 +142,7 @@ CompilerEndIf
 ;     If NesRamBranchTaken(condition,nn,zz,cc,vv)=0 : ProcedureReturn CpuRun(n) : EndIf
 ;     If coalesce And n=128
 ;       horizon=NesCpuHorizon : If NesStatusHorizon>horizon : horizon=NesStatusHorizon : EndIf
+;       If NesNmiDue-135<horizon : horizon=NesNmiDue-135 : EndIf
 ;       If horizon-CpuCycles>=128 And WorkerNmi=NesSeenNmi And WorkerDmcCycles=NesSeenDmc
 ;         If FI Or (WorkerIrq|MapIrq)=0
 ;           repeatRow=((readCycles-3)*4+(branchCycles-3)*2+((rule>>26)&1))*4
@@ -329,6 +330,14 @@ nrwb_test:
     nop
     move t1, t0                      ; NesStatusHorizon > horizon: horizon = NesStatusHorizon
 nrwb_horizon:
+    la t0, global_nesnmidue          ; and before the NMI's due less a window and an instruction (design note N.77):
+    ld t0, 0(t0)                     ; the window batched after the skip (n = 128 from a start <= horizon) then
+    daddiu t0, t0, -135              ; ends before the due, where the NMI is taken
+    slt t2, t0, t1
+    beqz t2, nrwb_horizon_due
+    nop
+    move t1, t0
+nrwb_horizon_due:
     la t0, global_cpucycles
     ld t0, 0(t0)
     dsubu t1, t1, t0                 ; horizon - CpuCycles

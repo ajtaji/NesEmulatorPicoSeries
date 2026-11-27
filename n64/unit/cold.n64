@@ -250,6 +250,7 @@ nes_mmc3_wait_miss:
 ;   If NesStatusHorizon<CpuCycles And NesCpuHorizon<CpuCycles And MapIrq=0 And WorkerIrq=0 And DmcBytes=0 And
 ;      RenderLimit>=0 And ApuLimit>=0 And (MapIrqEnable=0 Or FetchLimit>=0)
 ;     h=Min(RenderLimit+1,ApuLimit) : If MapIrqEnable : h=Min(h,FetchLimit) : EndIf
+;     h=Min(h,NesNmiDue-135)                       ; (design note N.77)
 ;     row=((branchCycles-3)*2+atBranch)*4 : loops=(h-1-CpuCycles)/PeekU(?NesRamWaitPeriods+row)
 ;     If loops>0
 ;       CpuCycles+loops*PeekU(?NesRamWaitPeriods+row) : WorkerClock=CpuCycles
@@ -296,6 +297,14 @@ mmc3_coalesce_fetch:
     nop
     move t3, a3
 mmc3_coalesce_count:
+    la a3, global_nesnmidue         ; and before the NMI's due less a whole window and an instruction (N.77): the
+    ld a3, 0(a3)                    ; window batched after the skip, 128 cycles from a start < H, then ends before it
+    daddiu a3, a3, -135
+    slt a4, a3, t3
+    beqz a4, mmc3_coalesce_h
+    nop
+    move t3, a3
+mmc3_coalesce_h:
     dsubu t3, t3, t2
     daddiu t3, t3, -1               ; the cycles the skipped ends may cover: every end < H
     blez t3, mmc3_sign_window

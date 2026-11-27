@@ -24,6 +24,7 @@ from stage_audio import stage_audio, stage_oscillators
 from stage_mapper import stage_mapper
 from stage_fastppu import stage_fastppu
 from stage_sync import stage_sync
+from stage_nmi import stage_nmi
 from stage_input import stage_input
 from stage_poll import poll_bank_size, poll_source, stage_poll
 from stage_ramwait import ram_wait_source, runtime_wait_source
@@ -517,6 +518,7 @@ def build(args, *, controller_trace=()):
             code = stage_audio(name, stage_fastppu(name, stage_region(name, code), unit),
                                stage_as, audio_rate, split=unit)
             code = stage_sync(name, code, stage_as, chain_nrom, raster_deadline, runtime, unit)
+            code = stage_nmi(name, code, unit, raster_deadline)   # the NMI's timing (design note N.77)
             code = stage_simple_mapper(name, code, stage_as)
             if name == "bridge" and unit:
                 code = stage_runtime_mmc3_bus(code)
