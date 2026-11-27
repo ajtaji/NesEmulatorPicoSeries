@@ -2,9 +2,9 @@
 ; assembled in the cold slot (unit/cold_slot.n64), the hot unit's cold end (the mapper-modules design note, section 2).
 ;
 ; WHAT: the cold slot's entry table (its first 48 bytes; every module's cold part opens with one in this layout):
-;   +0  nes_cold_init      the module's power-on (LoadGame, through NesModuleInit): out a0 unused; may clobber what a
-;                          compiled call may. MMC3: the shared core's MapperInit (compiled, unchanged: the mapper
-;                          state's power-on and MMC3's MapperUpdate, mapper_mmc3_update.n64), by a tail jump.
+;   +0  nes_cold_init      the module's power-on, run by LoadGame (NesModuleInit) right after the shared core's
+;                          MapperInit (compiled, unchanged: every mapper's state power-on, then MMC3's MapperUpdate,
+;                          mapper_mmc3_update.n64); may clobber what a compiled call may. MMC3: nothing more (returns).
 ;   +8  nes_cold_reserved  (no entry yet: returns)
 ;   +16 nes_cold_maptable  the register write's 8-word handler table (data): NesUnitPlace copies it into NesUnitData at
 ;                          load (unitplace.n64), where mmc3_e_write's dispatch reads it (C7, design note N.49).
@@ -18,7 +18,7 @@
 ; THE PLAIN TWIN of each piece is beside it (the moved pieces' in their text); the table is the C7 table unchanged.
   ASM
 nes_cold_init:
-    j mapperinit                    ; MapperInit() (the shared core's, compiled; its MapperUpdate is MMC3's)
+    jr ra                           ; nothing more: LoadGame's MapperInit (the shared core's) is MMC3's power-on
     nop
 nes_cold_reserved:
     jr ra

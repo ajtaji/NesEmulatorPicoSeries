@@ -443,3 +443,17 @@ mmc3_masked_frame:                  ; the masked budget's distance past line 241
     b mmc3_masked_distance
     addiu t0, t0, -1
   EndASM
+
+; ---- THE MODULE SERVICES (mapper modules, step 2): the compiled procedures a mapper module calls (by j / jal from either
+; slot) that no common code calls. The compiler leaves out a procedure nothing references and lays a procedure out
+; after its first referrer; so a procedure called only by one module would be in that module's compile and not in
+; another's, or placed elsewhere, and the images outside the slots would differ (build.py refuses that). This table,
+; never read, references each from the common code, inside the unit as the modules' own references are, so every
+; compile keeps them, in the place the shipped one gives them: MapperSpriteFetch (MMC3's A12 walk, its OAM scan).
+; Procedures that common code calls need no entry (an entry would move them: measured, MapperPrg / MapperChr onto the
+; core's opcode lines when the table, listing MapperInit, lay in NesModuleInit).
+  ASM
+    .align 2
+nes_module_services:
+    .word mapperspritefetch
+  EndASM

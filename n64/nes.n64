@@ -356,10 +356,11 @@ Procedure.i LoadGame()
     NameDescDirty=0
   CompilerEndIf
   NesTiming(#GAME_PAL)
+  If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
   CompilerIf #NES_UNIT
-    NesModuleInit()                     ; the installed module's power-on (its cold slot's init, modules/install.n64)
-  CompilerElse
-    If CartMapper<>0 And CartMapper<>2 And CartMapper<>66 : MapperInit() : EndIf
+    ; then the installed module's own power-on (its cold slot's init, modules/install.n64): MapperInit (the shared
+    ; core's) gave every mapper the state's power-on and MMC3's bank publication; a module publishes its own banks
+    NesModuleInit()
   CompilerEndIf
   If WorkerError : ProcedureReturn 0 : EndIf
   CompilerIf #GAME_SAVE_BYTES>0
