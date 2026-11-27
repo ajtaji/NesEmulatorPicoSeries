@@ -188,11 +188,36 @@ IMAGE_BASE = 0x80000400       # the RDRAM image's load address (nes.bin is the i
 # first is the default module: the one assembled in the slots of the shipped compile, so the checking builds see it.
 MODULES = {4: "mmc3", 1: "mmc1",
            # the discrete-latch boards: one source, one compile each (modules/discrete.n64, its #NES_SLOT_MODULE)
-           0: "discrete", 2: "discrete", 3: "discrete", 7: "discrete", 11: "discrete", 66: "discrete"}
+           0: "discrete", 2: "discrete", 3: "discrete", 7: "discrete", 11: "discrete", 66: "discrete",
+           # the simple-register boards (step 4): one source, one compile each (modules/board.n64)
+           8: "board", 13: "board", 34: "board", 41: "board", 71: "board", 79: "board", 113: "board", 144: "board",
+           232: "board",
+           # the MMC3-family variants (step 4): the multicart 47 and RAMBO-1 (modules/mmc3x.n64)
+           47: "mmc3x", 64: "mmc3x"}
 # THE UNIT BUILD: the runtime cartridge whose CPU runs the hot unit is built once for every mapper. Nothing of it is
 # staged for the cartridge's mapper: #GAME_MAPPER is UNIT_MAPPER ("chosen at load") and the sources' unit branches
 # test #NES_UNIT; the mapper's own code is its module, installed into the two slots at load (modules/install.n64).
 UNIT_MAPPER = -1
+
+
+def header_fix_store(csv_path):
+    """The cartridge file romfix.bin (library/romfix.n64): the header-override table the loader applies by the ROM's
+    CRC-32 - a 16-byte header (the mark, the row count) and 8-byte rows (crc32, mapper, submapper, NES 2.0 PRG-RAM
+    shift). The list is not in the repository: csv_path names a CSV (crc32,mapper,submapper[,ramshift]; a header line
+    and lines starting with # are skipped); None gives the empty table (no header is changed)."""
+    import csv, struct
+    rows = []
+    if csv_path:
+        with open(csv_path, newline="") as f:
+            for r in csv.reader(f):
+                if not r or r[0].strip().startswith("#") or not r[0].strip() or r[0].strip().lower() == "crc32":
+                    continue
+                crc, mapper, sub = int(r[0], 16), int(r[1]), int(r[2]) if len(r) > 2 and r[2].strip() else 0
+                ram = int(r[3]) if len(r) > 3 and r[3].strip() else 0
+                rows.append(struct.pack(">IHBB", crc, mapper, sub, ram))
+    if len(rows) > 256:
+        raise RuntimeError("the header-override table holds at most 256 rows")
+    return b"NESROMFX" + struct.pack(">I", len(rows)) + bytes(4) + b"".join(rows)
 
 
 def module_store(modules, slot_bytes, cold_bytes):
@@ -567,6 +592,7 @@ def build(args, *, controller_trace=()):
         slot_bytes, cold_bytes = settings["NES_SLOT_BYTES"], settings["NES_COLD_SLOT_BYTES"]
         blank = (bytes(slot_bytes), bytes(cold_bytes))
         (app / "modules.bin").write_bytes(module_store({m: blank for m in carried}, slot_bytes, cold_bytes))
+        (app / "romfix.bin").write_bytes(header_fix_store(getattr(args, "header_fixes", None)))
 
         def compile_cart():
             result = subprocess.run([str(compiler), "--compile", "nes.n64", "-o", "nes.bin"],
@@ -636,6 +662,8 @@ if __name__ == "__main__":
     parser.add_argument("--persist-save", action=argparse.BooleanOptionalAction, default=None,
                         help="persist NES battery RAM in cartridge SRAM (default on for playable builds, off for verification)")
     parser.add_argument("--telemetry", action="store_true", help="report live gameplay timing and AI starvation")
+    parser.add_argument("--header-fixes", type=Path, default=None,
+                        help="runtime builds: a CSV (crc32,mapper,submapper[,ramshift]) of dumps whose iNES header names the wrong board; the loader applies it by the ROM's CRC-32 (library/romfix.n64)")
     parser.add_argument("--check-frame", type=int, default=0, help="stop on a guest frame for capture (0 keeps playing)")
     parser.add_argument("--cpu-core", choices=("asm", "reference", "unit-reference"), default=None,
                         help="the 6502 core: asm (cpu6502.n64, the runtime MMC3 default) or the reference interpreter")

@@ -1,16 +1,18 @@
 """Generate cartridge hardware metadata shared by the N64 library components."""
-from anvil_cartridge import BOARD_LIMITS, BOARD_SUBMAPPERS, LEGACY_RAM_BOARDS, SUPPORTED
+from anvil_cartridge import BOARD_LIMITS, BOARD_SUBMAPPERS, LEGACY_RAM_BOARDS, MODULE_BOARDS, SUPPORTED
 from stage_expansion import EXPANSION_MAPPERS
 
 
 RUNTIME_MAPPERS = SUPPORTED | EXPANSION_MAPPERS
 PROFILES = [(mapper, False) for mapper in sorted(RUNTIME_MAPPERS)] + [(1, True)]
+# the loader's board table (NesRomSize) also knows the boards that exist as mapper modules only (step 4)
+BOARD_MAPPERS = RUNTIME_MAPPERS | MODULE_BOARDS
 
 
 def board_table_source():
     lines = ["DataSection", "NesRomBoards:"]
     for mapper in range(256):
-        if mapper not in RUNTIME_MAPPERS:
+        if mapper not in BOARD_MAPPERS:
             lines.append("  Data.l 0,0,0,0")
             continue
         prg, chr_ = BOARD_LIMITS.get(mapper, (524288, 262144))

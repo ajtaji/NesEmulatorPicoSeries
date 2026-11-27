@@ -2,6 +2,7 @@ XIncludeFile "romheader.n64"
 XIncludeFile "boot.n64"
 ; The launcher copies the original iNES file into this cartridge window.
 #NES_RUNTIME_BASE=$10800000
+XIncludeFile "romfix.n64"         ; the header-override rule (step 4): reads the ROM at #NES_RUNTIME_BASE
 Global Dim NesRuntimeHeader.a[32]
 Global NesRuntimeSaveBytes.i
 
@@ -21,6 +22,7 @@ Global NesRuntimeSaveBytes.i
 ;   header = (@NesRuntimeHeader[0] + 15) & ~15
 ;   If NesCartRead(#NES_RUNTIME_BASE, header, 16) = 0 : ProcedureReturn 0 : EndIf
 ;   NesRomClean(header)                        ; the archaic-iNES rule (romheader.n64)
+;   NesRomFix(header)                          ; the header-override rule by the ROM's CRC-32 (romfix.n64)
 ;   If NesRomSize(header) = 0 : ProcedureReturn 0 : EndIf
 ;   flags = PeekA(header + 6) : CartMapper = NesRomMapper(header) : CartSubmapper = NesRomSubmapper(header)
 ;   If NesModuleInstall(CartMapper) = 0 : ProcedureReturn 0 : EndIf
@@ -55,7 +57,7 @@ Global NesRuntimeSaveBytes.i
 ;   CartPrgBanks = size / 32768 : CartChrBanks = chrStorage / 8192
 ;   CartChrRam = Bool(chrBytes = 0) : ChrWritable = CartChrRam : MapChrRam = CartChrRam : MapChrBytes = chrStorage
 ;   MapPrgBytes = prg : MapRamBytes = NesRomRam(header, CartMapper)
-;   CartConflicts = Bool(((m = 2 Or m = 3 Or m = 66) And sub <> 1) Or ((m = 7 Or m = 11) And sub = 2) Or (m = 34 And chrBytes = 0))
+;   CartConflicts = Bool(((m = 2 Or m = 3 Or m = 66) And sub <> 1) Or ((m = 7 Or m = 11) And sub = 2) Or (m = 34 And chrBytes = 0) Or m = 13)
 ;   PpuMirroring = flags & 1 : MapFourScreen = Bool(flags & 8)
 ;   NesRuntimeSaveBytes = NesRomSaveBytes(header, CartMapper) : MapBattery = Bool(NesRuntimeSaveBytes)
 ;   ProcedureReturn 1
@@ -83,6 +85,8 @@ ProcedureNaked.i NesRuntimeLoad()
     beqz a0, nrl_fail
     nop
     jal nesromclean                 ; the archaic-iNES rule: bytes 7-15 of an old dumper's header read as zero
+    ld a0, 8(sp)
+    jal nesromfix                   ; the header-override rule: a known wrong header rewritten by the ROM's CRC-32
     ld a0, 8(sp)
     jal nesromsize                  ; 0: not a header this cart can run
     ld a0, 8(sp)
@@ -332,7 +336,9 @@ nrl_prg_done:
     beq t0, t2, nrl_conf_ax
     addiu t2, zero, 34
     beq t0, t2, nrl_conf_bn
-    nop
+    addiu t2, zero, 13
+    beq t0, t2, nrl_conf_write      ; CPROM: always (t3 = 1 below)
+    addiu t3, zero, 1
     b nrl_conf_write
     move t3, zero                   ; every other board: none
 nrl_conf_ux:                        ; UxROM / CNROM / GxROM: unless submapper 1

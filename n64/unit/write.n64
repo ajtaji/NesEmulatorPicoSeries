@@ -39,7 +39,7 @@ nes_mmc3_bus_write_io:
     addiu t1, a0, -0x4016
     beqz t1, nes_mmc3_bus_write_pad
     sltiu t1, a0, 0x4018
-    beqz t1, nes_mmc3_bus_write_done
+    beqz t1, nes_bus_write_low      ; $4018-$5FFF: a board's registers there, if any (unit/cold.n64; step 4)
     nop
 nes_mmc3_bus_write_timed:
     la t0, global_cpucycles
@@ -57,8 +57,9 @@ nes_mmc3_bus_write_stamp:
     daddu a2, a2, t1
     daddiu sp, sp, -32
     sd ra, 0(sp)
-    andi t1, a0, 0x8000
-    bnez t1, nes_slot_write_sync    ; $8000-$FFFF: the mapper module's sync decision and write (the slot)
+    sltiu t1, a0, 0x4020
+    beqz t1, nes_slot_write_sync    ; $4020-$FFFF: the mapper module's sync decision and write (the slot; a write
+                                    ; below $8000 is here only for a board with registers there: step 4)
     addiu t1, a0, -0x4014
     beqz t1, nes_mmc3_bus_write_dma
     sd a0, 8(sp)                    ; (the DMA path does not read 8(sp))

@@ -1,0 +1,657 @@
+; modules/board.n64 - the SIMPLE-REGISTER boards' module, hot part, as it runs in the mapper slot (unit/slot.n64; the
+; mapper-modules design note, sections 2-3 and step 4): FFE F3xxx (8), CPROM (13), BNROM / NINA-001 (34), Caltron
+; 6-in-1 (41), Camerica BF909x (71), NINA-03 / NINA-06 (79), HES / Sachen NINA-306 (113), Death Race (144) and the
+; Camerica Quattro BF9096 (232). One source, nine modules: each compile assembles the board named by #NES_SLOT_MODULE
+; (build.py compiles once per module). The cold part (the table and the power-on) is modules/board_cold.n64.
+; The pattern is modules/discrete.n64's (the latch boards); these boards differ from those in WHERE the register is
+; ($4100, $6000, $7FFD, $C000 ...), in having two or three register fields, and in a mirroring bit or two.
+;
+; THE BOARDS - each rule from the documented board; the project's compiled core (anvil/mapper_extra.pi4,
+; ExtraMapperWrite / ExtraMapperUpdate) is the reference where it has the board (13, 34, 41, 71, 79, 144, 232; it has
+; no 8 or 113). v = the value written, after the bus conflict where the board has one (below). The state globals each
+; board keeps are MapPrgReg / MapChr0 / MapChr1 (the shared core's fields; their meaning per board is given here):
+;   8   FFE F3xxx     $8000-$FFFF: bits 3-5 the 16 KB PRG bank at $8000 (the last 16 KB fixed at $C000), bits 0-2 the
+;                     8 KB CHR bank. MapPrgReg = v. No conflicts (a copier board).
+;   13  CPROM         $8000-$FFFF: bits 0-1 the 4 KB CHR-RAM bank at $1000-$1FFF (16 KB of CHR-RAM; $0000-$0FFF is bank
+;                     0); 32 KB PRG fixed. MapChr0 = v & 3. Bus conflicts (CartConflicts: the loader sets it for 13).
+;   34  BNROM         CHR-RAM: $8000-$FFFF: v the 32 KB PRG bank. MapPrgReg = v. Bus conflicts (CartConflicts: the
+;                     loader's rule, 34 with CHR-RAM).
+;       NINA-001      CHR-ROM: 8 KB work RAM at $6000-$7FFF (every $6000-$7FFF write is a RAM write), and three of its
+;                     bytes are the registers too: $7FFD bit 0 the 32 KB PRG bank, $7FFE bits 0-3 the 4 KB CHR bank at
+;                     $0000, $7FFF bits 0-3 the one at $1000. MapPrgReg = prg, MapChr0 / MapChr1 = the CHR banks.
+;   41  Caltron 6-in-1  $6000-$67FF, decoded from the ADDRESS: bits 0-2 the 32 KB PRG bank, bits 3-4 the 8 KB CHR
+;                     bank's bits 2-3, bit 5 the mirroring (0 vertical, 1 horizontal). $8000-$FFFF, the VALUE: bits
+;                     0-1 the CHR bank's bits 0-1, honoured only while the PRG bank's bit 2 is set. MapPrgReg = prg
+;                     (0-7), MapChr0 = chr (0-15). No work RAM: $6800-$7FFF writes do nothing.
+;   71  Camerica BF909x  $C000-$FFFF: bits 0-3 the 16 KB PRG bank at $8000, the last 16 KB fixed at $C000; CHR-RAM.
+;                     $8000-$9FFF on the BF9097 (Fire Hawk; submapper 1): bit 4 the one-screen page (0: CIRAM page B,
+;                     1: page A - the reference's rule, MapperMirror(3 - bit)); on submapper 0 those writes do nothing,
+;                     as do $A000-$BFFF writes. MapPrgReg = the bank. No bus conflicts.
+;   79  NINA-03 / 06  $4100-$5FFF with A8 clear ((addr & $E100) = $4100): bit 3 the 32 KB PRG bank, bits 0-2 the 8 KB
+;                     CHR bank. MapPrgReg = v. $8000-$FFFF writes do nothing (ROM). Mirroring from the header.
+;   113 NINA-306      the same register: bits 3-5 the 32 KB PRG bank, bits 0-2 and bit 6 the 8 KB CHR bank (bit 6 its
+;                     bit 3), bit 7 the mirroring (0 horizontal, 1 vertical). MapPrgReg = v.
+;   144 Death Race    Color Dreams' register ($8000-$FFFF: bits 0-1 the 32 KB PRG bank, bits 4-7 the 8 KB CHR bank) on
+;                     a board whose conflict is different: the latch sees (value AND the ROM's byte) OR (that byte's
+;                     bit 0) - bit 0 comes from the ROM alone (the reference: MapPrgReg = (value & old) | (old & 1)).
+;   232 Camerica BF9096 (Quattro)  $8000-$BFFF: bits 3-4 the 64 KB outer bank (submapper 1, the Aladdin Deck
+;                     Enhancer cartridge: bit 4 is the outer bank's bit 0 and bit 3 its bit 1); $C000-$FFFF: bits 0-1
+;                     the 16 KB bank inside it at $8000; the outer bank's last 16 KB fixed at $C000; CHR-RAM.
+;                     MapPrgReg = the inner bank, MapChr0 = the outer bank. No conflicts.
+; Every bank is published through the common helpers (mmc3_registers.n64): MapperPrg (8 KB slots, masked by the ROM's
+; size: a 16 KB bank b is the two slots 2b, 2b + 1, a 32 KB bank b the four from 4b), MapperChr (1 KB slots, the band
+; cut, the CHR-RAM copy), MapperMirror (the name-table slots: 0 horizontal, 1 vertical, 2 one-screen A, 3 B).
+;
+; HOW A WRITE REACHES THIS MODULE (unit/write.n64): $8000-$FFFF through write_fast (+48), which sends every write on
+; to the common timed path (these boards' registers are all guest-timed) - 79 / 113 return at once (ROM there);
+; $4020-$5FFF through the bus's low-register route (NesExtraBoard set: unit/cold.n64, nes_bus_write_low) to the same
+; timed path; $6000-$7FFF through the untimed work-RAM entry (+32, u_mapperwrite), where a board whose register lies
+; there (34 NINA-001's $7FFD-$7FFF, 41's $6000-$67FF) goes to the timed path itself (j nes_mmc3_bus_write_timed), and
+; NINA-001's plain RAM write is stored. The timed path stamps the write, then branches to write_sync (+40) with its
+; 32-byte frame on the stack (0(sp) = ra): every device is brought to the write (u_workeradvance: a CHR bank, a
+; mirroring or a PRG bank the DMC may read can change on any of these boards), the register applied with the stamp
+; read again, then the common close (it ends the CPU window, pops the frame and returns), as the latch boards do.
+; THE BUS CONFLICT (13, 34 BNROM, 144): CartConflicts set by the loader (library/runtime.n64); the ROM byte under the
+; mapping before the write is read as the core reads PRG, NesMmc3Bias((addr >> 13) & 3) + addr.
+; THE ENTRIES (unit/slot.n64): budget the full window and the common DMC bound (as the latch boards'); irq_deadline
+; never; ppu_ticks, ppu_addr, clock_irq, cpu_ticks nothing; read the open bus (nothing readable at $4020-$5FFF).
+; THE CONTRACT (modules/mmc3.n64's): in through the table; out by j / jal to common labels only; a relative branch
+; never leaves the two slots (build.py, check_mapper_slot).
+; CHECKED BY: each board's conformance cart (bench: rdp-tools conform_cart.py, carts/conform.s: every bank, page and
+; mirroring by value, the conflicts, the open bus; a pass byte a rule) and one smoke run per game of the board in the
+; ROM folder (smoke_walk.py); the step's SMB3 / MM4 proofs and the record for the common code.
+  ASM
+u_mappercpubudget:                  ; +0
+    b bd_e_budget
+    nop
+u_nesmmc3fetchdeadline:             ; +8 never: the largest positive cycle
+    b bd_e_never
+    nop
+u_mapperpputicks:                   ; +16 no PPU clocking
+    jr ra
+    nop
+u_mappera12:                        ; +24 no A12 watch
+    jr ra
+    nop
+u_mapperwrite:                      ; +32 the untimed entry: $6000-$7FFF from the bus's work-RAM path
+    b bd_e_write
+    nop
+nes_slot_write_sync:                ; +40 the timed write: sync, apply, close
+    b bd_e_write_sync
+    nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=79 Or #NES_SLOT_MODULE=113
+    ASM
+nes_slot_write_fast:                ; +48 $8000-$FFFF is ROM on NINA-03 / 06 / 306: nothing to write
+    jr ra
+    nop
+    EndASM
+  CompilerElse
+    ASM
+nes_slot_write_fast:                ; +48 every $8000-$FFFF write is a timed register write
+    j nes_mmc3_bus_write_timed
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+u_mapperclockirq:                   ; +56 no IRQ counter
+    jr ra
+    nop
+nes_slot_cpu_ticks:                 ; +64 no CPU timer
+    jr ra
+    nop
+nes_slot_read:                      ; +72 open bus
+    jr ra
+    move v0, zero
+
+; ---- budget: the window's length (as the latch boards': no IRQ). The full 128 cycles, bounded by the next DMC
+; fetch while a sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 = @MapIrq).
+; Out a0. THE PLAIN TWIN: n = 128 : If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf (F the next fetch's cycle)
+bd_e_budget:
+    la a1, global_mapirq
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, bd_budget_dmc
+    addiu a0, zero, 128             ; (delay slot) the full window
+    jr ra
+    nop
+bd_budget_dmc:
+    j mmc3_budget_dmc               ; the common DMC bound (an absolute jump: no relative branch leaves the slots)
+    nop
+
+; ---- irq_deadline: never. Out a0 = $7FFF_FFFF_FFFF_FFFF, as the latch boards'.
+bd_e_never:
+    daddiu a0, zero, -1
+    jr ra
+    dsrl a0, a0, 1
+
+; ---- write (the untimed entry): a $6000-$7FFF write from the bus's work-RAM path. In: a0 address, a1 value,
+; a2 = 0 (no stamp: the bus did not time it). A board whose register is there sends it on to the common timed path
+; (which stamps it and branches to write_sync below); NINA-001's work RAM is stored here; every other board ignores
+; it (no work RAM). Clobbers t0-t3 (and what the timed path may).
+; THE PLAIN TWIN:
+;   34, CHR-ROM (NINA-001): If addr >= $7FFD : (the timed path) : ElseIf MapRamEnable And MapRamProtect = 0
+;                             : MapRam(addr & 8191) = value : NesSaveChanged(addr & 8191) : EndIf
+;   41: If addr < $6800 : (the timed path) : EndIf
+;   others: nothing
+bd_e_write:
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=34
+    ASM
+    la t0, global_cartchrram
+    ld t0, 0(t0)
+    bnez t0, bd_write_done          ; BNROM (CHR-RAM): no work RAM
+    ori t1, zero, 0x7FFD
+    sltu t1, a0, t1
+    beqz t1, bd_write_timed         ; $7FFD-$7FFF: a register (and a RAM byte: stored by bd_apply after the sync)
+    nop
+    la t0, global_mapramenable
+    ld t1, 0(t0)
+    beqz t1, bd_write_done
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, bd_write_done
+    nop
+    b bd_ram_store                  ; the work RAM, with the save mark (below); it returns to the caller
+    nop
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=41
+    ASM
+    ori t1, zero, 0x6800
+    sltu t1, a0, t1
+    bnez t1, bd_write_timed         ; $6000-$67FF: the register
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+bd_write_done:
+    jr ra
+    nop
+bd_write_timed:
+    j nes_mmc3_bus_write_timed      ; the common timed path: the stamp, then write_sync below
+    nop
+
+; ---- write_sync: a timed register write ($4020-$FFFF). Entered by branch from the common timed path with its
+; 32-byte frame on the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. Every device is brought to the write
+; (u_workeradvance: what the register changes, the PPU or the DMC may read), then the register applied with the
+; stamp read again (after they moved, as MMC1's and MMC3's), then the common close (unit/write.n64).
+; THE PLAIN TWIN: WorkerAdvance(stamp) : bd_apply(addr, value)
+bd_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    jal u_workeradvance             ; every device to the write
+    move a0, a2
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal bd_apply                    ; the register
+    nop
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64)
+    nop
+
+; ---- bd_apply: the register write, devices synced. In: a0 address ($4020-$FFFF), a1 value (0-255). Clobbers
+; t0-t3, a0-a3 and what the bank helpers clobber. FRAME (16 B): 0 ra. Each board's rule is in the header above;
+; the plain twin of each is the compiled core's case (anvil/mapper_extra.pi4, ExtraMapperWrite) where it has the
+; board. A write that reaches a board's rule publishes through bd_update (every mapping from the state), the
+; reference's MapperUpdate shape, so the power-on and the writes share one publication.
+bd_apply:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=79 Or #NES_SLOT_MODULE=113
+    ASM
+    andi t0, a0, 0xE100
+    ori t1, zero, 0x4100
+    bne t0, t1, bd_apply_done       ; not the register ($4100-$5FFF with A8 clear)
+    nop
+    la t0, global_mapprgreg
+    sd a1, 0(t0)                    ; MapPrgReg = v
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=71
+    ASM
+    andi t0, a0, 0x8000
+    beqz t0, bd_apply_done          ; below $8000: nothing on this board
+    andi t0, a0, 0x4000
+    bnez t0, bd_apply_71_prg        ; $C000-$FFFF: the PRG bank
+    andi t0, a0, 0x2000
+    bnez t0, bd_apply_done          ; $A000-$BFFF: nothing
+    nop
+    la t0, global_cartsubmapper
+    ld t0, 0(t0)
+    xori t0, t0, 1
+    bnez t0, bd_apply_done          ; $8000-$9FFF: the one-screen page on the BF9097 (submapper 1) only
+    srl a0, a1, 4
+    andi a0, a0, 1
+    xori a0, a0, 1
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j mappermirror                  ; MapperMirror(3 - bit 4): a tail jump, it returns to bd_apply's caller
+    addiu a0, a0, 2
+bd_apply_71_prg:
+    la t0, global_mapprgreg
+    andi a1, a1, 15
+    sd a1, 0(t0)                    ; MapPrgReg = v & 15
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=232
+    ASM
+    andi t0, a0, 0x8000
+    beqz t0, bd_apply_done          ; below $8000: nothing on this board
+    andi t0, a0, 0x4000
+    bnez t0, bd_apply_232_inner     ; $C000-$FFFF: the inner bank
+    nop
+    la t0, global_mapchr0
+    la t1, global_cartsubmapper
+    ld t1, 0(t1)
+    xori t1, t1, 1
+    beqz t1, bd_apply_232_aladdin
+    srl t2, a1, 3
+    b bd_apply_232_outer
+    andi t2, t2, 3                  ; the BF9096: bits 3-4
+bd_apply_232_aladdin:
+    srl t2, a1, 4
+    andi t2, t2, 1                  ; the Aladdin cartridge: bit 4 is the outer bank's bit 0 ...
+    srl t3, a1, 2
+    andi t3, t3, 2                  ; ... and bit 3 its bit 1
+    or t2, t2, t3
+bd_apply_232_outer:
+    b bd_apply_update
+    sd t2, 0(t0)                    ; MapChr0 = the outer bank
+bd_apply_232_inner:
+    la t0, global_mapprgreg
+    andi a1, a1, 3
+    sd a1, 0(t0)                    ; MapPrgReg = the inner bank
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=41
+    ASM
+    andi t0, a0, 0x8000
+    bnez t0, bd_apply_41_chr        ; $8000-$FFFF: the CHR bank's low bits
+    nop
+    la t0, global_mapprgreg
+    andi t1, a0, 7
+    sd t1, 0(t0)                    ; MapPrgReg = the address's bits 0-2
+    ld t1, global_mapchr0-global_mapprgreg(t0)
+    srl t2, a0, 1
+    andi t2, t2, 12                 ; the address's bits 3-4 as the CHR bank's bits 2-3
+    andi t1, t1, 3
+    or t1, t1, t2
+    sd t1, global_mapchr0-global_mapprgreg(t0)
+    srl a0, a0, 5
+    andi a0, a0, 1
+    jal mappermirror                ; MapperMirror(bit 5 ! 1): 0 vertical, 1 horizontal
+    xori a0, a0, 1
+    b bd_apply_update
+    nop
+bd_apply_41_chr:
+    la t0, global_mapprgreg
+    ld t1, 0(t0)
+    andi t1, t1, 4
+    beqz t1, bd_apply_done          ; only while the PRG bank's bit 2 is set
+    ld t1, global_mapchr0-global_mapprgreg(t0)
+    andi t1, t1, 12
+    andi a1, a1, 3
+    or t1, t1, a1
+    sd t1, global_mapchr0-global_mapprgreg(t0)
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=34
+    ASM
+    andi t0, a0, 0x8000
+    bnez t0, bd_apply_34_bnrom      ; $8000-$FFFF: BNROM's register
+    nop
+    la t0, global_cartchrram
+    ld t0, 0(t0)
+    bnez t0, bd_apply_done          ; (BNROM below $8000: nothing)
+    nop
+    la t0, global_mapramenable      ; NINA-001: $7FFD-$7FFF are RAM bytes and registers; the RAM byte first
+    ld t1, 0(t0)
+    beqz t1, bd_apply_34_reg
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, bd_apply_34_reg
+    nop
+    daddiu sp, sp, -32
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    jal bd_ram_store                ; MapRam(addr & 8191) = value, the save mark
+    nop
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    daddiu sp, sp, 32
+bd_apply_34_reg:
+    andi t0, a0, 3
+    la t1, global_mapprgreg
+    xori t2, t0, 1
+    beqz t2, bd_apply_34_prg        ; $7FFD
+    xori t2, t0, 2
+    beqz t2, bd_apply_34_chr0       ; $7FFE
+    xori t2, t0, 3
+    bnez t2, bd_apply_done          ; $7FFC: a RAM byte only
+    andi a1, a1, 15
+    b bd_apply_update
+    sd a1, global_mapchr1-global_mapprgreg(t1)   ; $7FFF: MapChr1 = v & 15
+bd_apply_34_chr0:
+    andi a1, a1, 15
+    b bd_apply_update
+    sd a1, global_mapchr0-global_mapprgreg(t1)   ; MapChr0 = v & 15
+bd_apply_34_prg:
+    andi a1, a1, 1
+    b bd_apply_update
+    sd a1, 0(t1)                    ; MapPrgReg = v & 1
+bd_apply_34_bnrom:
+    la t0, global_cartchrram
+    ld t0, 0(t0)
+    beqz t0, bd_apply_done          ; NINA-001: $8000-$FFFF is ROM
+    nop
+    jal bd_conflict                 ; v = value AND the ROM's byte when CartConflicts
+    nop
+    la t0, global_mapprgreg
+    sd a1, 0(t0)                    ; MapPrgReg = v
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=13
+    ASM
+    andi t0, a0, 0x8000
+    beqz t0, bd_apply_done
+    nop
+    jal bd_conflict
+    nop
+    la t0, global_mapchr0
+    andi a1, a1, 3
+    sd a1, 0(t0)                    ; MapChr0 = v & 3
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=144
+    ASM
+    andi t0, a0, 0x8000
+    beqz t0, bd_apply_done
+    srl t1, a0, 13                  ; the ROM's byte under the mapping before this write (as bd_conflict reads it)
+    andi t1, t1, 3
+    sll t1, t1, 3
+    la t2, global_nesmmc3bias
+    daddu t2, t2, t1
+    ld t2, 0(t2)
+    daddu t2, t2, a0
+    lbu t2, 0(t2)
+    and a1, a1, t2                  ; value AND the ROM's byte ...
+    andi t2, t2, 1
+    or a1, a1, t2                   ; ... OR the ROM byte's bit 0 (Death Race's conflict)
+    la t0, global_mapprgreg
+    sd a1, 0(t0)                    ; MapPrgReg = v
+    EndASM
+  CompilerElse
+    ASM
+    andi t0, a0, 0x8000             ; 8 (FFE F3xxx)
+    beqz t0, bd_apply_done
+    nop
+    la t0, global_mapprgreg
+    sd a1, 0(t0)                    ; MapPrgReg = v
+    EndASM
+  CompilerEndIf
+  ASM
+bd_apply_update:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j bd_update                     ; every mapping from the state: a tail jump, it returns to bd_apply's caller
+    nop
+bd_apply_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=13 Or #NES_SLOT_MODULE=34
+    ASM
+; ---- bd_conflict: the bus conflict on a $8000-$FFFF write. In: a0 address, a1 value; out a1 = value AND the ROM's
+; byte at the address under the mapping in force before the write (read as the core reads PRG: NesMmc3Bias((addr >>
+; 13) & 3) + addr) when CartConflicts, else a1 unchanged. Clobbers t1, t2, t3. A leaf.
+; THE PLAIN TWIN: If CartConflicts : value = value & PeekA(NesMmc3Bias((addr >> 13) & 3) + addr) : EndIf
+bd_conflict:
+    la t3, global_cartconflicts
+    ld t3, 0(t3)
+    beqz t3, bd_conflict_done
+    srl t1, a0, 13
+    andi t1, t1, 3
+    sll t1, t1, 3
+    la t2, global_nesmmc3bias
+    daddu t2, t2, t1
+    ld t2, 0(t2)
+    daddu t2, t2, a0
+    lbu t2, 0(t2)
+    and a1, a1, t2
+bd_conflict_done:
+    jr ra
+    nop
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_SLOT_MODULE=34
+    ASM
+; ---- bd_ram_store (NINA-001): the work-RAM write with the save mark, as the MMC3 module's mmc3_write_ram (modules/
+; mmc3_write.n64; the mapper-modules design note, section 8c): MapRam(addr & 8191) = value; when the save is online
+; and the offset is inside it, its 256-byte page is marked dirty and a write pending. In: a0 address, a1 value.
+; Clobbers t0-t3, a0. A leaf.
+; THE PLAIN TWIN: MapRam(addr & 8191) = value
+;   If NesSaveOnline And (addr & 8191) < NesRuntimeSaveBytes : NesSaveDirty((addr & 8191) >> 8) = 1 : NesSavePending = 1
+bd_ram_store:
+    andi a0, a0, 8191
+    la t0, global_mapram
+    daddu t0, t0, a0
+    sb a1, 0(t0)                    ; the store
+    la t0, global_nessaveonline
+    ld t1, 0(t0)
+    ld t2, global_nesruntimesavebytes-global_nessaveonline(t0)
+    beqz t1, bd_ram_store_done
+    slt t2, a0, t2
+    beqz t2, bd_ram_store_done
+    srl t1, a0, 8
+    la t3, global_nessavedirty
+    daddu t3, t3, t1
+    addiu t1, zero, 1
+    sb t1, 0(t3)                    ; NesSaveDirty(page) = 1
+    jr ra
+    sd t1, global_nessavepending-global_nessaveonline(t0)
+bd_ram_store_done:
+    jr ra
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+
+; ---- bd_update: every mapping from the state, for a register write (above) and the power-on (modules/
+; board_cold.n64). In: nothing. Clobbers t0-t3, a0-a3 and what the helpers may. FRAME (32 B): 0 ra | 8 scratch
+; THE PLAIN TWIN (the reference's ExtraMapperUpdate case where it has the board):
+;   8:   lo = ((v >> 3) & 7) * 2 : MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, n - 2) : MapperPrg(3, n - 1)
+;        For i = 0 To 7 : MapperChr(i, (v & 7) * 8 + i) : Next                        (n = the ROM's 8 KB banks)
+;   13:  For i = 0 To 3 : MapperPrg(i, i) : MapperChr(i, i) : MapperChr(i + 4, (MapChr0 & 3) * 4 + i) : Next
+;   34:  For i = 0 To 3 : MapperPrg(i, MapPrgReg * 4 + i) : Next
+;        CHR-ROM: For i = 0 To 3 : MapperChr(i, MapChr0 * 4 + i) : MapperChr(i + 4, MapChr1 * 4 + i) : Next
+;   41:  For i = 0 To 3 : MapperPrg(i, MapPrgReg * 4 + i) : Next : For i = 0 To 7 : MapperChr(i, MapChr0 * 8 + i) : Next
+;   71:  lo = MapPrgReg * 2 : MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, n - 2) : MapperPrg(3, n - 1)
+;   79:  For i = 0 To 3 : MapperPrg(i, ((v >> 3) & 1) * 4 + i) : Next : For i = 0 To 7 : MapperChr(i, (v & 7) * 8 + i) : Next
+;   113: p = (v >> 3) & 7 : c = (v & 7) | ((v >> 3) & 8) : MapperMirror(v >> 7) : (as 79 with p, c)
+;   144: For i = 0 To 3 : MapperPrg(i, (v & 15) * 4 + i) : Next : For i = 0 To 7 : MapperChr(i, ((v >> 4) & 15) * 8 + i) : Next
+;   232: lo = (MapChr0 * 4 + MapPrgReg) * 2 : hi = (MapChr0 * 4 + 3) * 2 : MapperPrg(0, lo) : MapperPrg(1, lo + 1)
+;        MapperPrg(2, hi) : MapperPrg(3, hi + 1)
+;   (CHR-RAM boards 71 / 232: the 8 KB of CHR-RAM in slots 0-7, MapperChr(i, i), once at power-on - MapperInit's
+;    MMC3 publication leaves them elsewhere; 13 publishes its own slots each time)
+bd_update:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    la t0, global_mapprgreg
+    ld t0, 0(t0)                    ; v / MapPrgReg
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=8
+    ASM
+    srl a0, t0, 3
+    andi a0, a0, 7                  ; the 16 KB bank at $8000
+    jal bd_prg16_last               ; it, and the last 16 KB at $C000
+    sll a0, a0, 1
+    la t0, global_mapprgreg
+    ld a0, 0(t0)
+    jal bd_chr8                     ; the 8 KB CHR bank v & 7
+    andi a0, a0, 7
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=13
+    ASM
+    jal bd_prg32                    ; the one 32 KB bank
+    move a0, zero
+    move a1, zero
+    jal bd_chr4                     ; CHR-RAM bank 0 at $0000-$0FFF
+    move a0, zero
+    la t0, global_mapchr0
+    ld a1, 0(t0)
+    andi a1, a1, 3
+    jal bd_chr4                     ; bank MapChr0 at $1000-$1FFF
+    addiu a0, zero, 1
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=34
+    ASM
+    jal bd_prg32                    ; the 32 KB bank MapPrgReg (MapperPrg masks it by the ROM's size)
+    move a0, t0
+    la t0, global_cartchrram
+    ld t0, 0(t0)
+    bnez t0, bd_update_done         ; BNROM: 8 KB of CHR-RAM, as the power-on left it
+    nop
+    la t0, global_mapchr0
+    ld a1, 0(t0)
+    jal bd_chr4                     ; NINA-001: the 4 KB bank MapChr0 at $0000 ...
+    move a0, zero
+    la t0, global_mapchr1
+    ld a1, 0(t0)
+    jal bd_chr4                     ; ... MapChr1 at $1000
+    addiu a0, zero, 1
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=41
+    ASM
+    jal bd_prg32                    ; the 32 KB bank MapPrgReg
+    move a0, t0
+    la t0, global_mapchr0
+    jal bd_chr8                     ; the 8 KB CHR bank MapChr0
+    ld a0, 0(t0)
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=71
+    ASM
+    jal bd_prg16_last               ; the 16 KB bank at $8000, the last at $C000
+    sll a0, t0, 1
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=79
+    ASM
+    srl a0, t0, 3
+    jal bd_prg32                    ; bit 3: the 32 KB PRG bank
+    andi a0, a0, 1
+    la t0, global_mapprgreg
+    ld a0, 0(t0)
+    jal bd_chr8                     ; bits 0-2: the 8 KB CHR bank
+    andi a0, a0, 7
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=113
+    ASM
+    jal mappermirror                ; bit 7: 0 horizontal, 1 vertical
+    srl a0, t0, 7
+    la t0, global_mapprgreg
+    ld t0, 0(t0)
+    srl a0, t0, 3
+    jal bd_prg32                    ; bits 3-5: the 32 KB PRG bank
+    andi a0, a0, 7
+    la t0, global_mapprgreg
+    ld t0, 0(t0)
+    andi a0, t0, 7
+    srl t1, t0, 3
+    andi t1, t1, 8                  ; bit 6 as the CHR bank's bit 3
+    jal bd_chr8
+    or a0, a0, t1
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=144
+    ASM
+    jal bd_prg32                    ; bits 0-1 (masked by the ROM's size): the 32 KB PRG bank
+    andi a0, t0, 15
+    la t0, global_mapprgreg
+    ld a0, 0(t0)
+    srl a0, a0, 4
+    jal bd_chr8                     ; bits 4-7: the 8 KB CHR bank
+    andi a0, a0, 15
+    EndASM
+  CompilerElse
+    ASM
+    la t1, global_mapchr0           ; 232: the outer bank
+    ld t1, 0(t1)
+    sll t1, t1, 2
+    addu a0, t1, t0                 ; outer x 4 + inner: the 16 KB bank at $8000
+    sll a0, a0, 1
+    addiu a1, t1, 3
+    jal bd_prg_pair                 ; and the outer bank's last 16 KB at $C000
+    sll a1, a1, 1
+    EndASM
+  CompilerEndIf
+  ASM
+bd_update_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+
+; ---- the publication helpers (the latch boards' dsc_prg / dsc_chr, generalised) ----
+; bd_prg32: the four 8 KB slots from a 32 KB bank. In: a0 = the bank. lo = 4 x a0, hi = lo + 2.
+bd_prg32:
+    sll a0, a0, 2
+    b bd_prg_pair
+    addiu a1, a0, 2
+; bd_prg16_last: a 16 KB bank at $8000, the ROM's last 16 KB at $C000. In: a0 = the bank's first 8 KB slot (2 x bank).
+bd_prg16_last:
+    la t1, global_mapprgbytes
+    ld a1, 0(t1)
+    dsrl a1, a1, 13
+    addiu a1, a1, -2                ; hi = n - 2
+; bd_prg_pair: In: a0 = lo (the first 8 KB bank at $8000), a1 = hi (the first at $C000). Clobbers t0-t3, a0-a3.
+; FRAME (32 B): 0 ra | 8 lo | 16 hi
+; THE PLAIN TWIN: MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, hi) : MapperPrg(3, hi + 1)
+bd_prg_pair:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    move a1, a0
+    jal mapperprg                   ; MapperPrg(0, lo)
+    move a0, zero
+    ld a1, 8(sp)
+    addiu a0, zero, 1
+    jal mapperprg                   ; MapperPrg(1, lo + 1)
+    daddiu a1, a1, 1
+    ld a1, 16(sp)
+    jal mapperprg                   ; MapperPrg(2, hi)
+    addiu a0, zero, 2
+    ld a1, 16(sp)
+    addiu a0, zero, 3
+    jal mapperprg                   ; MapperPrg(3, hi + 1)
+    daddiu a1, a1, 1
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+
+; bd_chr8: the eight 1 KB CHR slots from an 8 KB bank c: slot i = c x 8 + i (MapperChr masks by the CHR size and
+; changes only what differs). In: a0 = c. Clobbers t0-t3, a0-a3. FRAME (32 B): 0 ra | 8 the slot | 16 c x 8 | 24 end
+; THE PLAIN TWIN: For i = 0 To 7 : MapperChr(i, c * 8 + i) : Next
+bd_chr8:
+    sll a1, a0, 3
+    move a0, zero
+    b bd_chr_slots
+    addiu a2, zero, 8
+; bd_chr4: the four 1 KB slots of one half from a 4 KB bank: slot half x 4 + i = c x 4 + i. In: a0 = half (0 / 1),
+; a1 = c.  THE PLAIN TWIN: For i = 0 To 3 : MapperChr(half * 4 + i, c * 4 + i) : Next
+bd_chr4:
+    sll a1, a1, 2
+    sll a0, a0, 2
+    addiu a2, a0, 4
+; bd_chr_slots: slots a0 .. a2 - 1 get the 1 KB banks a1 + (slot - a0). FRAME: 0 ra | 8 slot | 16 bank - slot | 24 end
+bd_chr_slots:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    subu a1, a1, a0                 ; bank - slot: the same for every slot of the run
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+bd_chr_slot:
+    ld a0, 8(sp)                    ; the slot
+    ld a1, 16(sp)
+    jal mapperchr                   ; MapperChr(slot, slot + (bank - slot))
+    addu a1, a1, a0
+    ld a0, 8(sp)
+    ld a2, 24(sp)
+    daddiu a0, a0, 1
+    slt t0, a0, a2
+    bnez t0, bd_chr_slot
+    sd a0, 8(sp)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM

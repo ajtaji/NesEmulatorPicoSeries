@@ -1,0 +1,69 @@
+; modules/board_cold.n64 - the simple-register boards' COLD part (8, 13, 34, 41, 71, 79, 113, 144, 232), assembled in
+; the cold slot (unit/cold_slot.n64): its entry table (the layout every module's cold part opens with, modules/
+; mmc3_cold.n64) and the power-on. The hot part is modules/board.n64.
+;
+; nes_cold_init - WHAT: the board's own power-on, run by LoadGame (NesModuleInit) after the shared MapperInit (which
+; LoadGame calls for every one of these mappers: nes.n64 skips it only for 0, 2 and 66). MapperInit set every field a
+; board reads to its power-on value - MapPrgReg = MapChr0 = MapChr1 = 0, the header's mirroring, MapCiram cleared,
+; MapManaged = 1, the shared core's ExtraMapperInit (MapRamEnable 0 for its boards, 1 for 34; the forced vertical
+; mirroring of 13 and 41) - then published MMC3's banks (the unit build's MapperUpdate is MMC3's).
+; HOW, in three steps:
+;   1 MapRamEnable: 1 on NINA-001 (34 with CHR-ROM: 8 KB of work RAM at $6000, no protection), else 0 - no work RAM
+;     on the others, so a $6000-$7FFF read is the open bus (as the latch boards'). MapRamProtect = 0.
+;   2 (113) NesExtraBoard = 1: the bus's $4020-$5FFF write route reaches the module (unit/cold.n64); LoadGame sets
+;     it from the shared core's board list, which has no 113.
+;   3 bd_update (modules/board.n64) republishes every PRG and CHR slot from the state (every register 0), so the
+;     guest starts from the board's mapping: the reference's ExtraMapperUpdate with the registers at 0. The CHR-RAM
+;     boards whose update publishes no CHR (71, 232) get their 8 KB of CHR-RAM in slots 0-7 here (MapperChr(i, i)),
+;     since MMC3's publication left them in MMC3's power-on order.
+; In / out: nothing; clobbers what bd_update may. FRAME (16 B): 0 ra
+; THE PLAIN TWIN: MapRamEnable = Bool(mapper = 34 And CartChrRam = 0) : MapRamProtect = 0
+;   If 71 Or 232 : For i = 0 To 7 : MapperChr(i, i) : Next : EndIf : bd_update()
+  ASM
+nes_cold_init:                      ; +0
+    b bd_cold_init
+    nop
+nes_cold_reserved:                  ; +8
+    jr ra
+    nop
+nes_cold_maptable:                  ; +16: no register handler table (the registers are decoded in bd_apply)
+    .word 0, 0, 0, 0, 0, 0, 0, 0
+nes_cold_moddata:                   ; +48: no module data (256 zero bytes, copied into NesUnitData at load all the same)
+    .space 256
+bd_cold_init:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t0, global_mapramenable
+    sd zero, global_mapramprotect-global_mapramenable(t0)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=34
+    ASM
+    la t1, global_cartchrram
+    ld t1, 0(t1)
+    sltiu t1, t1, 1                 ; NINA-001 (CHR-ROM): work RAM; BNROM (CHR-RAM): none
+    sd t1, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+    sd zero, 0(t0)                  ; no work RAM: $6000-$7FFF reads give the open bus
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_SLOT_MODULE=71 Or #NES_SLOT_MODULE=232
+    ASM
+    jal bd_chr8                     ; the 8 KB of CHR-RAM in slots 0-7
+    move a0, zero
+    EndASM
+  CompilerEndIf
+  CompilerIf #NES_SLOT_MODULE=113
+    ASM
+    la t0, global_nesextraboard     ; NINA-306's register is at $4100: the bus routes $4020-$5FFF writes to the module
+    addiu t1, zero, 1               ; only for a board with NesExtraBoard set (unit/cold.n64), which LoadGame sets from
+    sd t1, 0(t0)                    ; the shared core's list - 113 is not on it (the shared core has no 113)
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j bd_update                     ; every mapping from the power-on state (modules/board.n64), a tail jump
+    nop
+  EndASM

@@ -1,0 +1,239 @@
+; library/romfix.n64 - the HEADER OVERRIDE rule of the runtime loader (step 4 of the mapper modules): a dump whose iNES
+; header names the wrong board is run as the board it really is, chosen by the ROM's CRC-32 from a table the cart
+; carries. The RULE is here; the LIST is not in the repository (build.py --header-fixes PATH writes the cartridge file
+; romfix.bin from a bench-side CSV: crc32,mapper,submapper[,ramshift]; without the option the file is empty).
+; WHY: Micro Machines' header says UxROM (2) and the game is Camerica's BF9093 (71); Death Race's says Color Dreams (11)
+; and the board is the 74LS02 variant (144); an alternate dump of a game carries a garbage byte 7 (mapper 65 for an
+; MMC1 game). Neither the archaic-iNES rule (NesRomClean: bytes 12-15 all zero here) nor any field of the header can
+; tell; the dump's bytes can (its CRC-32, the identity every ROM database keys on).
+;
+; THE FILE romfix.bin (big-endian): +0 "NESR" "OMFX" (the mark: found among the cartridge's files as the module store
+; is), +8 count (32 bits), +12 4 zero bytes; then count rows of 8 bytes: crc32 (32 bits), mapper (16 bits), submapper
+; (8 bits), ramshift (8 bits: NES 2.0's PRG-RAM shift, 0 none, 7 = 8 KB). Count is at most 256.
+;
+; NesRomFix(header) - WHAT: when a row's CRC-32 is the ROM's, the 16-byte header (already cleaned by NesRomClean) is
+; REWRITTEN AS THE NES 2.0 HEADER THE DUMP SHOULD HAVE HAD, so that every later reader (NesRomSize, NesRomMapper,
+; NesRomSubmapper, NesRomRam, NesRomSaveBytes) sees the board without a rule of its own: byte 6 = (byte 6 & $0F) |
+; (mapper & 15) << 4, byte 7 = (mapper & $F0) | $08, byte 8 = submapper << 4 | (mapper >> 8) & 15, byte 10 = ramshift,
+; bytes 9, 11-15 = 0 (NTSC, no CHR-RAM size: the board's default, NesRomChrRam). Nothing else changes; no row, no
+; file or an empty one: the header is left as it is.
+; HOW: (1) the file by its mark (LpmCartFiles / LpmCartFile / LpmCartLong, as NesModuleInstall); (2) its 16-byte
+; header and rows by PI DMA (NesCartRead) into the low cartridge arena #NES_CART_LOW - scratch here: the loader fills
+; the arena with the PRG / CHR afterwards, so no variable of its own; (3) the CRC-32 table (256 words, the reflected
+; polynomial $EDB88320: for each i, 8 times c = c >> 1 ! (poly if the bit shifted out was 1)) built at #NES_CART_LOW
+; + 4096; (4) the CRC-32 of the ROM's bytes after the header (PRG x 16 KB + CHR x 8 KB from the header's counts, the
+; same span every database hashes) read from the cartridge in 16 KB pieces into #NES_CART_LOW + 8192 and folded byte
+; by byte: crc = table[(crc ! byte) & 255] ! (crc >> 8), from all ones, complemented at the end; (5) the rows compared
+; with it; (6) the match rewrites the header. The CRC is kept zero-extended in 32 bits (lwu loads, dsrl shifts), so
+; 64-bit registers hold it as the 32-bit value a database prints. ~1.5 MB at most, ~7 instructions a byte: well under
+; 0.2 s at load, once, and only when the file carries rows.
+; In: a0 = the header (16 bytes, aligned). Out: nothing (the header may be rewritten). Clobbers what a compiled call
+; may (the library's cartridge readers are compiled).
+; FRAME (80 B): 0 ra | 8 header | 16 the file's PI address | 24 n (the file index) | 32 the file count | 40 the row
+;   count | 48 the ROM offset read so far | 56 the ROM's byte count | 64 crc
+; THE PLAIN TWIN:
+;   For n = 0 To LpmCartFiles() - 1 : file = LpmCartFile(n)
+;     If LpmCartLong(file) = $4E455352 And LpmCartLong(file + 4) = $4F4D4658 : Break : EndIf
+;   Next : If n = LpmCartFiles() : ProcedureReturn : EndIf
+;   If NesCartRead(file, #NES_CART_LOW, 16) = 0 : ProcedureReturn : EndIf
+;   count = Min(PeekL(#NES_CART_LOW + 8), 256) : If count = 0 : ProcedureReturn : EndIf
+;   If NesCartRead(file + 16, #NES_CART_LOW + 16, count * 8) = 0 : ProcedureReturn : EndIf
+;   For i = 0 To 255 : c = i : For k = 1 To 8 : c = (c >> 1) ! ($EDB88320 * (c & 1)) : Next : PokeL(table + i * 4, c) : Next
+;   bytes = PeekA(header + 4) * 16384 + PeekA(header + 5) * 8192 : crc = $FFFFFFFF : offset = 0
+;   While offset < bytes
+;     n = Min(16384, bytes - offset) : If NesCartRead(#NES_RUNTIME_BASE + 16 + offset, buffer, n) = 0 : ProcedureReturn : EndIf
+;     For i = 0 To n - 1 : crc = PeekL(table + ((crc ! PeekA(buffer + i)) & 255) * 4) ! (crc >> 8) : Next : offset + n
+;   Wend : crc = crc ! $FFFFFFFF
+;   For i = 0 To count - 1 : row = #NES_CART_LOW + 16 + i * 8
+;     If PeekL(row) = crc : mapper = PeekU(row + 4) : sub = PeekA(row + 6) : ram = PeekA(row + 7)
+;       PokeA(header + 6, (PeekA(header + 6) & $0F) | ((mapper & 15) << 4)) : PokeA(header + 7, (mapper & $F0) | 8)
+;       PokeA(header + 8, (sub << 4) | ((mapper >> 8) & 15)) : PokeA(header + 9, 0) : PokeA(header + 10, ram)
+;       PokeA(header + 11, 0) : PokeL(header + 12, 0) : ProcedureReturn
+;     EndIf
+;   Next
+; CHECKED BY: the smoke runs of Micro Machines (71) and Death Race (144), whose header mappers would not run them (the
+; step's smoke table), and the SMB3 / MM4 proofs (no row matches them: the header is untouched).
+; THE FILE'S PLACE: its .cartfile directive is in modules/install.n64, after the module store's - the cartridge's files
+; are numbered in the order the directives are met, and the RSP program is file 1 (show.n64 / rspband.n64 open it by
+; that number), so a file directive before theirs would move it. This rule finds its file by the mark, not the number.
+ProcedureNaked NesRomFix(header.i)
+  ASM
+    daddiu sp, sp, -80
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    jal lpmcartfiles
+    nop
+    sd a0, 32(sp)
+    sd zero, 24(sp)
+nrf_find:
+    ld t0, 24(sp)
+    ld t1, 32(sp)
+    slt t1, t0, t1
+    beqz t1, nrf_done               ; no file carries the mark
+    nop
+    jal lpmcartfile
+    move a0, t0
+    sd a0, 16(sp)
+    jal lpmcartlong
+    nop
+    li t0, 0x4E455352               ; "NESR"
+    bne a0, t0, nrf_next
+    nop
+    ld a0, 16(sp)
+    jal lpmcartlong
+    daddiu a0, a0, 4
+    li t0, 0x4F4D4658               ; "OMFX"
+    beq a0, t0, nrf_found
+    nop
+nrf_next:
+    ld t0, 24(sp)
+    daddiu t0, t0, 1
+    b nrf_find
+    sd t0, 24(sp)
+nrf_found:
+    ld a0, 16(sp)
+    li a1, #NES_CART_LOW
+    jal nescartread                 ; the file's 16-byte header into the scratch arena
+    addiu a2, zero, 16
+    beqz a0, nrf_done
+    nop
+    li t0, #NES_CART_LOW
+    lw t1, 8(t0)                    ; count
+    beqz t1, nrf_done               ; no rows: nothing to do
+    sltiu t2, t1, 257
+    bnez t2, nrf_count
+    nop
+    addiu t1, zero, 256             ; at most 256 rows
+nrf_count:
+    sd t1, 40(sp)
+    ld a0, 16(sp)
+    daddiu a0, a0, 16
+    li a1, #NES_CART_LOW+16
+    jal nescartread                 ; the rows
+    sll a2, t1, 3
+    beqz a0, nrf_done
+    nop
+    ; the CRC-32 table at #NES_CART_LOW + 4096: 256 words
+    li t0, #NES_CART_LOW+4096
+    li t3, 0xEDB88320
+    dsll32 t3, t3, 0
+    dsrl32 t3, t3, 0                ; the polynomial, zero-extended (li sign-extends a value with bit 31 set)
+    move t1, zero                   ; i
+nrf_table_i:
+    move t2, t1                     ; c = i
+    addiu a4, zero, 8               ; k
+nrf_table_k:
+    andi a5, t2, 1                  ; the bit shifted out
+    dsrl t2, t2, 1
+    beqz a5, nrf_table_bit
+    addiu a4, a4, -1
+    xor t2, t2, t3                  ; ... was 1: the polynomial in
+nrf_table_bit:
+    bnez a4, nrf_table_k
+    nop
+    sw t2, 0(t0)
+    daddiu t0, t0, 4
+    addiu t1, t1, 1
+    sltiu a5, t1, 256
+    bnez a5, nrf_table_i
+    nop
+    ; the ROM's byte count from the header, and the running CRC
+    ld t0, 8(sp)
+    lbu t1, 4(t0)
+    sll t1, t1, 14                  ; PRG x 16 KB
+    lbu t2, 5(t0)
+    sll t2, t2, 13                  ; CHR x 8 KB
+    addu t1, t1, t2
+    sd t1, 56(sp)                   ; bytes
+    sd zero, 48(sp)                 ; offset = 0
+    daddiu t3, zero, -1
+    dsrl32 t3, t3, 0                ; crc = $FFFFFFFF, zero-extended
+    sd t3, 64(sp)
+nrf_piece:
+    ld t0, 48(sp)
+    ld t1, 56(sp)
+    dsubu t1, t1, t0                ; the bytes left
+    blez t1, nrf_search
+    ori t2, zero, 16384
+    slt t3, t1, t2
+    bnez t3, nrf_piece_size
+    nop
+    move t1, t2                     ; a 16 KB piece
+nrf_piece_size:
+    sd t1, 72(sp)
+    li a0, #NES_RUNTIME_BASE+16
+    daddu a0, a0, t0
+    li a1, #NES_CART_LOW+8192
+    jal nescartread                 ; the piece from the cartridge
+    move a2, t1
+    beqz a0, nrf_done               ; a read failure: the header is left as it is
+    nop
+    li t0, #NES_CART_LOW+8192       ; the piece
+    ld t1, 72(sp)                   ; its byte count
+    li t2, #NES_CART_LOW+4096       ; the table
+    ld t3, 64(sp)                   ; crc
+nrf_byte:
+    lbu a4, 0(t0)
+    xor a4, a4, t3
+    andi a4, a4, 255
+    sll a4, a4, 2
+    daddu a4, a4, t2
+    lwu a4, 0(a4)                   ; table[(crc ! byte) & 255], zero-extended
+    dsrl t3, t3, 8                  ; crc >> 8 (crc is zero-extended: no sign enters)
+    xor t3, t3, a4
+    daddiu t0, t0, 1
+    addiu t1, t1, -1
+    bnez t1, nrf_byte
+    nop
+    sd t3, 64(sp)
+    ld t0, 48(sp)
+    ld t1, 72(sp)
+    daddu t0, t0, t1
+    b nrf_piece
+    sd t0, 48(sp)                   ; offset + the piece
+nrf_search:
+    ld t3, 64(sp)
+    daddiu a4, zero, -1
+    dsrl32 a4, a4, 0
+    xor t3, t3, a4                  ; crc = crc ! $FFFFFFFF
+    li t0, #NES_CART_LOW+16         ; the first row
+    ld t1, 40(sp)                   ; count
+nrf_row:
+    lwu t2, 0(t0)                   ; the row's crc32, zero-extended
+    beq t2, t3, nrf_match
+    nop
+    daddiu t0, t0, 8
+    addiu t1, t1, -1
+    bnez t1, nrf_row
+    nop
+    b nrf_done                      ; no row: the header is left as it is
+    nop
+nrf_match:
+    lhu t1, 4(t0)                   ; mapper
+    lbu t2, 6(t0)                   ; submapper
+    lbu a4, 7(t0)                   ; ramshift
+    ld t0, 8(sp)                    ; the header
+    lbu a5, 6(t0)
+    andi a5, a5, 0x0F
+    andi a6, t1, 15
+    sll a6, a6, 4
+    or a5, a5, a6
+    sb a5, 6(t0)                    ; byte 6: the mapper's low nibble, the flags kept
+    andi a5, t1, 0xF0
+    ori a5, a5, 8
+    sb a5, 7(t0)                    ; byte 7: the mapper's middle nibble, NES 2.0
+    sll t2, t2, 4
+    srl a5, t1, 8
+    andi a5, a5, 15
+    or t2, t2, a5
+    sb t2, 8(t0)                    ; byte 8: submapper << 4 | the mapper's high nibble
+    sb zero, 9(t0)                  ; no size extension
+    sb a4, 10(t0)                   ; PRG-RAM shift
+    sb zero, 11(t0)                 ; no CHR-RAM size (the board's default)
+    sw zero, 12(t0)                 ; NTSC, nothing else
+nrf_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 80
+  EndASM
+EndProcedure

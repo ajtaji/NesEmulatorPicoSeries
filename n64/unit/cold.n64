@@ -9,6 +9,28 @@
 ; then the APU write, the wait cache, the coalescing and the DMC bound, so the warm ones lie over the hot span's
 ; coldest lines (the opcode slot grid); each block is entered by a branch or jal and leaves by one.
 
+; ---- nes_bus_write_low: a CPU write at $4018-$5FFF (u_neswrite's I/O path, unit/write.n64; step 4 of the mapper
+; modules). $4018-$401F are the CPU's test registers: nothing. $4020-$5FFF: on a board with registers there (the
+; NINA-03 / 06 / 306's $4100, Action 52's $4020-$5FFF nibbles) the write is a timed register write - the common timed
+; path, which stamps it and hands it to the module's write_sync entry. Which boards: NesExtraBoard (LoadGame:
+; ExtraManaged(CartMapper), the shared core's set of boards with their own bus decode), so a board without them (MMC1,
+; MMC3, the latch boards) never sends such a write to its module, as before this route existed. Cold: these writes are
+; rare (0 a frame on the boards without the registers; a few at a scene change with them). In: a0 addr (< $6000),
+; a1 value. Clobbers t1, t2. Leaves by a branch to the common paths.
+; THE PLAIN TWIN: If addr >= $4020 And NesExtraBoard : (the timed path) : EndIf
+  ASM
+nes_bus_write_low:
+    sltiu t1, a0, 0x4020
+    bnez t1, nes_mmc3_bus_write_done   ; $4018-$401F
+    nop
+    la t2, global_nesextraboard
+    ld t2, 0(t2)
+    bnez t2, nes_mmc3_bus_write_timed  ; a board with registers at $4020-$5FFF
+    nop
+    b nes_mmc3_bus_write_done
+    nop
+  EndASM
+
 ; ---- the $2004 port (OAMDATA), from unit/ppu.n64 (C4, N.46b: 0 cycles a guest frame - SMB3 and MM4 fill OAM by
 ; the $4014 DMA), reached through u_ppuregwrite's / u_ppuregread's tables unchanged. In: a1 the value (write),
 ; a2 = @PpuBus. ----
