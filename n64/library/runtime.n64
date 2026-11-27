@@ -365,53 +365,227 @@ nrl_fail:
 EndProcedure
 
 
-Procedure NesRuntimeCheckExit()
-  Static held.i
-  If (LpmPadButtons(0)&(#LPM_PAD_L|#LPM_PAD_R))<>(#LPM_PAD_L|#LPM_PAD_R)
-    held=0 : ProcedureReturn
-  EndIf
-  held+1
-  If held<>30 : ProcedureReturn : EndIf
-  If (PeekL($B0000020)&$FFFFFFFF)<>$4E455320 Or (PeekL($B0000024)&$FFFFFFFF)<>$4C494252 : ProcedureReturn : EndIf
-  NesLibBoot($B0000000+(PeekL($B000001C)&$FFFFFFFF))
+; NesRuntimeCheckExit - the runtime cart's way back to the SD library's menu, checked once a guest frame
+; (NesHostGuestFrame), in assembly (the owner's order: everything emulator related is assembly).
+; WHAT: when L and R have been held together for exactly 30 consecutive frames and the cartridge carries the library's
+; mark ("NES " "LIBR" at cart offsets $20 / $24), it boots the library (NesLibBoot at $B0000000 + the word at $1C).
+; Any frame without both buttons starts the count again.
+; HOW: the compiled procedure's Static count is the global NesRuntimeExitHeld. LpmPadButtons(0) (the library's pad
+; state) gives the buttons; L ($20) and R ($10) both set is (buttons & $30) = $30. The mark is read by uncached 32-bit
+; loads from the PI's cartridge window at $B0000000 (KSEG1: lui sign-extends it, which is that segment's address);
+; each word is compared zero-extended (lwu), as the compiled "& $FFFFFFFF". The boot address is built as the compiled
+; code built it: the 64-bit value $00000000B0000000 (lui, then the upper 32 bits cleared) + the word at $1C.
+; In: nothing. Out: nothing (it returns, or boots the library and does not return). Clobbers what a compiled call
+; may (LpmPadButtons, NesLibBoot are compiled). FRAME (16 B): 0 ra.
+; THE PLAIN TWIN (the compiled procedure it replaces):
+;   Static held.i
+;   If (LpmPadButtons(0) & (#LPM_PAD_L | #LPM_PAD_R)) <> (#LPM_PAD_L | #LPM_PAD_R) : held = 0 : ProcedureReturn : EndIf
+;   held + 1 : If held <> 30 : ProcedureReturn : EndIf
+;   If (PeekL($B0000020) & $FFFFFFFF) <> $4E455320 Or (PeekL($B0000024) & $FFFFFFFF) <> $4C494252 : ProcedureReturn : EndIf
+;   NesLibBoot($B0000000 + (PeekL($B000001C) & $FFFFFFFF))
+; CHECKED BY: every runtime build calls it once a frame; the guest digests, oracles and the record replay (which holds
+; no L+R) run through it; the boot path is the menu's (not reached by those runs - said plainly).
+Global NesRuntimeExitHeld.i
+ProcedureNaked NesRuntimeCheckExit()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal lpmpadbuttons               ; a0 = the buttons of pad 0
+    move a0, zero
+    andi a0, a0, 0x30               ; #LPM_PAD_L ($20) | #LPM_PAD_R ($10)
+    xori a0, a0, 0x30               ; 0 when both are held
+    la t0, global_nesruntimeexitheld
+    bnez a0, nrce_release           ; not both: the count starts again
+    ld t1, 0(t0)
+    daddiu t1, t1, 1                ; held + 1
+    sd t1, 0(t0)
+    xori t1, t1, 30
+    bnez t1, nrce_done              ; not the 30th frame
+    lui t0, 0xB000                  ; the cartridge window (KSEG1, uncached)
+    lwu t1, 0x20(t0)
+    li t2, 0x4E455320               ; "NES "
+    bne t1, t2, nrce_done
+    lwu t1, 0x24(t0)
+    li t2, 0x4C494252               ; "LIBR"
+    bne t1, t2, nrce_done
+    lwu t1, 0x1C(t0)                ; the library's entry, an offset in the cartridge
+    dsll32 a0, t0, 0
+    dsrl32 a0, a0, 0                ; $00000000B0000000, as the compiled constant
+    jal neslibboot                  ; NesLibBoot($B0000000 + offset): does not return
+    daddu a0, a0, t1
+    b nrce_done
+    nop
+nrce_release:
+    sd zero, 0(t0)                  ; held = 0
+nrce_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
 EndProcedure
 
 
-; Recognize the ordinary five-byte BIT/LDA PPUSTATUS and BPL/BMI loop
-; in the currently mapped bytes. The caller supplies the stable horizon
-; and checks interrupts. Crossing a CPU page adds the 6502 branch cycle.
-Procedure.i NesRuntimePoll(pc.i, value.i)
-  Protected pointer.i, opcode.i, branch.i, cycles.i, origin.i, masked.i
-  If pc<$8003 Or pc>$FFFD : ProcedureReturn 0 : EndIf
-  If ((pc-3)! (pc+1))&#NES_PRG_PROBE_MASK : ProcedureReturn 0 : EndIf
-  pointer=NesRuntimePrgPointer(pc)
-  opcode=PeekA(pointer-3) : branch=PeekA(pointer)
-  If opcode<>$2C And opcode<>$AD : ProcedureReturn 0 : EndIf
-  If (PeekA(pointer-2)&7)<>2 Or (PeekA(pointer-1)&$E0)<>$20 : ProcedureReturn 0 : EndIf
-  ; LDA PPUSTATUS / AND #mask / BNE or BEQ back to LDA.
-  ; The read and branch stay inside the currently mapped CPU bank.
-  If opcode=$AD And branch=$29
-    If pc>$FFFB Or (((pc-3)!(pc+3))&#NES_PRG_PROBE_MASK) : ProcedureReturn 0 : EndIf
-    If PeekA(pointer+3)<>$F9 : ProcedureReturn 0 : EndIf
-    branch=PeekA(pointer+2) : masked=value&PeekA(pointer+1)
-    If branch=$F0
-      If masked : ProcedureReturn 0 : EndIf
-    ElseIf branch=$D0
-      If masked=0 : ProcedureReturn 0 : EndIf
-    Else
-      ProcedureReturn 0
-    EndIf
-    origin=pc+4 : cycles=9+Bool((origin&$FF00)<>((pc-3)&$FF00))
-    ProcedureReturn cycles|(3<<8)
-  EndIf
-  If PeekA(pointer+1)<>$FB : ProcedureReturn 0 : EndIf
-  If branch=$10
-    If value&128 : ProcedureReturn 0 : EndIf
-  ElseIf branch=$30
-    If (value&128)=0 : ProcedureReturn 0 : EndIf
-  Else
-    ProcedureReturn 0
-  EndIf
-  cycles=7+Bool(((pc+2)&$FF00)<>((pc-3)&$FF00))
-  ProcedureReturn cycles|(2<<8)
+; NesRuntimePoll(pc, value) - recognize the ordinary PPUSTATUS polling loop at the guest PC, in the currently mapped
+; PRG bytes, so the caller (NesCurrentPoll) may skip the loop's iterations exactly; in assembly (the owner's order).
+; WHAT: pc is the guest PC just after a PPUSTATUS read, value the byte the read returned. Two loop shapes:
+;   BIT / LDA $2002 (any mirror $2xx2) ; BPL / BMI back to it      ($2C|$AD, lo & 7 = 2, hi & $E0 = $20, $10|$30, $FB)
+;   LDA $2002 ; AND #mask ; BEQ / BNE back to the LDA                ($AD, ..., $29 mask, $F0|$D0, $F9)
+; and the loop would go round again with this value (BPL with bit 7 clear, BMI with it set; BEQ with value & mask = 0,
+; BNE with it not 0). Out a0: 0 when not such a loop, else the iteration's cycles | (instructions << 8): 7 | 2 << 8
+; or 9 | 3 << 8, one cycle more when the branch back crosses a CPU page (the 6502's taken-branch page cycle).
+; HOW: the PC must leave room for the bytes read ($8003-$FFFD; $FFFB for the three-instruction shape), and the loop's
+; first and last bytes must lie in the same mapped PRG window (the probe mask: 8 KB windows in the unit build, 16 KB
+; otherwise; the same bits of both addresses), so one pointer reaches all of them: the pointer is the window's bias +
+; pc (the unit: the four 8 KB biases, global_nesmmc3bias; the MMC1 reference build: its two 16 KB biases; else
+; PrgBias). The bytes are then compared as above. Immediates of $8000 and more are built with ori (andi / ori zero-
+; extend; sltiu would sign-extend them). In: a0 pc, a1 value. Clobbers t0-t3, a2. A leaf.
+; THE PLAIN TWIN (the compiled procedure it replaces):
+;   If pc < $8003 Or pc > $FFFD : ProcedureReturn 0 : EndIf
+;   If ((pc - 3) ! (pc + 1)) & #NES_PRG_PROBE_MASK : ProcedureReturn 0 : EndIf
+;   pointer = NesRuntimePrgPointer(pc) : opcode = PeekA(pointer - 3) : branch = PeekA(pointer)
+;   If opcode <> $2C And opcode <> $AD : ProcedureReturn 0 : EndIf
+;   If (PeekA(pointer - 2) & 7) <> 2 Or (PeekA(pointer - 1) & $E0) <> $20 : ProcedureReturn 0 : EndIf
+;   If opcode = $AD And branch = $29
+;     If pc > $FFFB Or (((pc - 3) ! (pc + 3)) & #NES_PRG_PROBE_MASK) : ProcedureReturn 0 : EndIf
+;     If PeekA(pointer + 3) <> $F9 : ProcedureReturn 0 : EndIf
+;     branch = PeekA(pointer + 2) : masked = value & PeekA(pointer + 1)
+;     If branch = $F0 : If masked : ProcedureReturn 0 : EndIf
+;     ElseIf branch = $D0 : If masked = 0 : ProcedureReturn 0 : EndIf
+;     Else : ProcedureReturn 0 : EndIf
+;     ProcedureReturn (9 + Bool(((pc + 4) & $FF00) <> ((pc - 3) & $FF00))) | (3 << 8)
+;   EndIf
+;   If PeekA(pointer + 1) <> $FB : ProcedureReturn 0 : EndIf
+;   If branch = $10 : If value & 128 : ProcedureReturn 0 : EndIf
+;   ElseIf branch = $30 : If (value & 128) = 0 : ProcedureReturn 0 : EndIf
+;   Else : ProcedureReturn 0 : EndIf
+;   ProcedureReturn (7 + Bool(((pc + 2) & $FF00) <> ((pc - 3) & $FF00))) | (2 << 8)
+; CHECKED BY: the guest digests (every instruction; a skipped loop folds as its instructions would not, so a wrong
+; recognition shows), the oracles' checkpoints and WAVs, on SMB3 / MM4 and the folder walk.
+ProcedureNaked.i NesRuntimePoll(pc.i, value.i)
+  ASM
+    ori t0, zero, 0x8003
+    sltu t0, a0, t0
+    bnez t0, nrp_none               ; pc < $8003
+    ori t0, zero, 0xFFFD
+    sltu t0, t0, a0
+    bnez t0, nrp_none               ; pc > $FFFD
+    daddiu t1, a0, -3
+    daddiu t2, a0, 1
+    xor t1, t1, t2
+    andi t1, t1, #NES_PRG_PROBE_MASK
+    bnez t1, nrp_none               ; the loop's first and last bytes in two windows
+    nop
+  EndASM
+  CompilerIf #NES_UNIT
+    ASM
+      srl t0, a0, 13
+      andi t0, t0, 3
+      sll t0, t0, 3
+      la t1, global_nesmmc3bias     ; the 8 KB window's bias (NesMmc3Pointer)
+      daddu t1, t1, t0
+      ld t1, 0(t1)
+      daddu a2, t1, a0              ; pointer
+    EndASM
+  CompilerElseIf #GAME_MAPPER=1
+    ASM
+      srl t0, a0, 14
+      andi t0, t0, 1
+      sll t0, t0, 3
+      la t1, global_nesmmc1bias     ; the 16 KB window's bias (NesMmc1Pointer)
+      daddu t1, t1, t0
+      ld t1, 0(t1)
+      daddu a2, t1, a0
+    EndASM
+  CompilerElse
+    ASM
+      la t1, global_prgbias         ; one 32 KB view (PrgBias)
+      ld t1, 0(t1)
+      daddu a2, t1, a0
+    EndASM
+  CompilerEndIf
+  ASM
+    lbu t0, -3(a2)                  ; the read's opcode
+    lbu t1, 0(a2)                   ; the opcode after it
+    ori t2, zero, 0x2C
+    beq t0, t2, nrp_read            ; BIT abs
+    ori t2, zero, 0xAD
+    bne t0, t2, nrp_none            ; neither BIT abs nor LDA abs
+    nop
+nrp_read:
+    lbu t2, -2(a2)
+    andi t2, t2, 7
+    ori t3, zero, 2
+    bne t2, t3, nrp_none            ; not register 2
+    lbu t2, -1(a2)
+    andi t2, t2, 0xE0
+    ori t3, zero, 0x20
+    bne t2, t3, nrp_none            ; not $2000-$3FFF
+    ori t3, zero, 0xAD
+    bne t0, t3, nrp_bit             ; BIT: the two-instruction shape
+    ori t3, zero, 0x29
+    bne t1, t3, nrp_bit             ; LDA not followed by AND #: the two-instruction shape
+    nop
+    ori t3, zero, 0xFFFB            ; LDA / AND # / branch
+    sltu t3, t3, a0
+    bnez t3, nrp_none               ; pc > $FFFB
+    daddiu t2, a0, -3
+    daddiu t3, a0, 3
+    xor t2, t2, t3
+    andi t2, t2, #NES_PRG_PROBE_MASK
+    bnez t2, nrp_none               ; the branch's operand in another window
+    lbu t2, 3(a2)
+    ori t3, zero, 0xF9
+    bne t2, t3, nrp_none            ; not back by 7 bytes to the LDA
+    lbu t1, 2(a2)                   ; the branch
+    lbu t2, 1(a2)
+    and t2, t2, a1                  ; masked = value & mask
+    ori t3, zero, 0xF0
+    beq t1, t3, nrp_beq
+    ori t3, zero, 0xD0
+    bne t1, t3, nrp_none            ; neither BEQ nor BNE
+    nop
+    beqz t2, nrp_none               ; BNE falls through on 0
+    nop
+    b nrp_three
+    nop
+nrp_beq:
+    bnez t2, nrp_none               ; BEQ falls through on not 0
+    nop
+nrp_three:
+    daddiu t0, a0, 4
+    daddiu t1, a0, -3
+    xor t0, t0, t1
+    andi t0, t0, 0xFF00
+    sltu t0, zero, t0               ; the branch back crosses a page
+    jr ra
+    addiu a0, t0, 0x309             ; 9 (+1) cycles | 3 instructions << 8
+nrp_bit:
+    lbu t2, 1(a2)
+    ori t3, zero, 0xFB
+    bne t2, t3, nrp_none            ; not back by 5 bytes to the read
+    andi t2, a1, 128
+    ori t3, zero, 0x10
+    beq t1, t3, nrp_bpl
+    ori t3, zero, 0x30
+    bne t1, t3, nrp_none            ; neither BPL nor BMI
+    nop
+    beqz t2, nrp_none               ; BMI falls through with bit 7 clear
+    nop
+    b nrp_two
+    nop
+nrp_bpl:
+    bnez t2, nrp_none               ; BPL falls through with bit 7 set
+    nop
+nrp_two:
+    daddiu t0, a0, 2
+    daddiu t1, a0, -3
+    xor t0, t0, t1
+    andi t0, t0, 0xFF00
+    sltu t0, zero, t0
+    jr ra
+    addiu a0, t0, 0x207             ; 7 (+1) cycles | 2 instructions << 8
+nrp_none:
+    jr ra
+    move a0, zero
+  EndASM
 EndProcedure
