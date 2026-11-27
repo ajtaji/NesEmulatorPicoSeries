@@ -1,0 +1,165 @@
+; unitplace.n64 - NesUnitPlace: where NesUnitData goes in the D-cache, and its register tables copied in, at load.
+; (Design note, sections N.4 and N.49 / C7. Included by nes.n64 for the runtime-MMC3 build only.)
+;
+; WHAT. NesUnitData (the hot unit's own state, nes.n64) is a window of #NES_UNIT_BYTES into NesUnitSpace (8 KB + the
+; window). Which 8 KB-periodic place of it is used decides the window's D-cache sets (8 KB, 16-byte lines, 512 sets,
+; set = (address >> 4) & 511). This procedure marks the sets of the data the hot code reads beside it, picks the
+; first run of #NES_UNIT_SETS sets that the rule allows, writes NesUnitBase, and copies the two register jump tables
+; (unit/cold.n64: the $2000-$2007 and $8000-$E001 handlers, 8 words each) into the window at #NES_U_PPUTABLE /
+; #NES_U_MAPTABLE, where nes_ppu_write_dispatch and u_mapperwrite read them. It also sets the band log's and the OAM
+; snapshots' 16-byte aligned bases, and refuses the load (WorkerError 23) if OAM or the palette is not 8-byte aligned
+; (the band cut reads both 8 bytes at a time).
+;
+; THE MARKS (a byte a set in NesUnitSets, ORed): 1 = hard: guest RAM (M, 2 KB), the host stack's working top (the
+; 1 KB line-aligned window around the stack pointer at load: sp - 512 down to a line, 1,008 bytes on), OAM (256 B)
+; and the sprite counts (CachedCount, 257 B) - every one read on the hot paths beside NesUnitData; 2 = soft: the
+; scalar globals, which the compiler places in one block, alphabetically from A to Y (the 6502's registers), hot as a
+; block (N.49: the measured D list). Pass 0 takes the first run with no mark (mask 3); if there is none, pass 1 the
+; first run with no hard mark (mask 1); if none, WorkerError 22 (the load refused). If the compiler's order of the
+; scalars ever changes, only the soft preference degrades; the hard rule still holds.
+;
+; WHY ASSEMBLY. Not for speed: it runs once. The procedure it replaces (PureBasic, and NesStackPointer beside it)
+; compiled to 464 bytes, and every byte added before the hot unit in the image moves the unit, and with it every
+; I-cache set the unit shares with the code before it (the hot / other pairs, ~1,100 I-misses a guest frame on the
+; C6 tree, N.48b) - a placement step must not move what it does not mean to. The PureBasic form of the C7 rule
+; compiled to 968 bytes (+512 moved the unit 16 I-sets). This form is 428 bytes and its plain caller NesUnitPlace
+; (below) 36: together the old 464, so nothing after them moves - the build's symbols show NesTiming and CpuRun at
+; their C6 addresses (checked in every proof build).
+;
+; THE PLAIN TWIN (what this computes, line for line):
+;   NesBandBase=(@NesBandSpace(0)+15)&~15 : NesOamBase=(@NesOamSpace(0)+15)&~15
+;   If (@Oam(0)|@Pal(0))&7 : WorkerError=23 : ProcedureReturn : EndIf
+;   For i=0 To 511 : NesUnitSets(i)=0 : Next
+;   Mark(@M(0), @M(0)+2047, 1) : a=(sp-512)&~15 : Mark(a, a+1008, 1)
+;   Mark(@Oam(0), @Oam(0)+255, 1) : Mark(@CachedCount(0), @CachedCount(0)+256, 1) : Mark(@A, @Y+7, 2)
+;     where Mark(lo, hi, m): For a=lo&~15 To hi Step 16 : NesUnitSets((a>>4)&511) | m : Next
+;   For mask=3 To 1 (3, then 1) : For start=0 To 511
+;     If no NesUnitSets((start+run)&511) & mask for run=0..#NES_UNIT_SETS-1
+;       space=(@NesUnitSpace(0)+15)&~15 : NesUnitBase=space+(((start<<4)-space)&8191)
+;       copy the 8 words of nes_ppu_write_table / mmc3_write_table to NesUnitBase+#NES_U_PPUTABLE / +#NES_U_MAPTABLE
+;       ProcedureReturn
+;   Next : Next : WorkerError=22
+;
+; REGISTERS. In: nothing. Out: nothing (the globals above). Clobbers t0-t3, t8, t9, a0-a5, v1 (a leaf of LoadGame;
+; all caller-saved). v1 keeps the return address across the internal mark calls; t1 = ~15 throughout; a4 = the
+; address of NesBandBase, the base of the scalar stores (NesOamBase, NesUnitBase, WorkerError lie within 32 KB of it:
+; the scalars' block); a5 = NesUnitSets. Addresses are KSEG0, sign-extended in 64-bit registers: the unsigned compares
+; keep their order.
+; CHECKED BY: C7's proof (design note N.49 / its as-built entry): every guest digest, oracle and picture the same,
+; which needs the tables' words exact (a wrong handler changes the guest at once); the placement read from the
+; measuring run's D list.
+ProcedureNaked NesUnitPlaceAsm()
+  ASM
+    move v1, ra                     ; the return address, kept across the jal's below
+    daddiu t1, zero, -16            ; t1 = ~15: rounds an address down to its 16-byte line
+    la a4, global_nesbandbase       ; a4: the base of the scalar stores
+    la t0, global_nesbandspace
+    daddiu t0, t0, 15
+    and t0, t0, t1
+    sd t0, 0(a4)                    ; NesBandBase = (@NesBandSpace(0) + 15) & ~15
+    la t0, global_nesoamspace
+    daddiu t0, t0, 15
+    and t0, t0, t1
+    sd t0, global_nesoambase-global_nesbandbase(a4) ; NesOamBase, the same rounding
+    la t8, global_oam               ; t8 = @Oam(0), kept for its mark below
+    la t2, global_pal
+    or t2, t2, t8
+    andi t2, t2, 7                  ; OAM or the palette not 8-byte aligned?
+    bnez t2, nes_place_fail         ; refused: WorkerError = 23
+    addiu t3, zero, 23              ; (delay slot) the error's number, used only if taken
+    la a5, global_nesunitsets       ; a5: the marks, a byte a set
+    addiu t0, zero, 512
+    move t2, a5
+nes_place_zero:
+    sb zero, 0(t2)                  ; every set unmarked
+    addiu t0, t0, -1
+    bnez t0, nes_place_zero
+    daddiu t2, t2, 1
+    addiu a2, zero, 1               ; the hard marks
+    la a0, global_m
+    jal nes_place_mark
+    daddiu a1, a0, 2047             ; guest RAM, 2 KB
+    daddiu a0, sp, -512             ; the mark rounds it down to its line; 1,008 is whole lines, so the last
+    jal nes_place_mark              ; line is the same as from the rounded address
+    daddiu a1, a0, 1008             ; the stack's working top: 64 lines from (sp - 512) & ~15
+    move a0, t8
+    jal nes_place_mark
+    daddiu a1, a0, 255              ; OAM
+    la a0, global_cachedcount
+    jal nes_place_mark
+    daddiu a1, a0, 256              ; the sprite counts, CachedCount(0..256)
+    addiu a2, zero, 2               ; the soft mark
+    la a0, global_a
+    la a1, global_y
+    jal nes_place_mark
+    daddiu a1, a1, 7                ; the scalar globals, @A to @Y + 7
+    addiu t8, zero, 3               ; pass 0: a run with no mark at all (mask 3)
+    move t9, zero                   ; t9 = the run's first set; t3 = the sets of the run found free so far (0:
+nes_place_run:                      ; nes_place_mark's return clears it, and so does every way back to here)
+    daddu t0, t9, t3
+nes_place_run_body:
+    andi t0, t0, 511                ; the set (start + run), the cache wrapping at 512
+    daddu t0, t0, a5
+    lbu t0, 0(t0)
+    and t0, t0, t8                  ; a mark this pass counts?
+    bnez t0, nes_place_next         ; yes: no run from this start
+    addiu t3, t3, 1                 ; (delay slot) one more free set (reset by the next start if taken)
+    sltiu t2, t3, #NES_UNIT_SETS
+    bnez t2, nes_place_run_body     ; the run is not yet long enough
+    daddu t0, t9, t3                ; (delay slot) the next set's index, as at nes_place_run
+    la t0, global_nesunitspace      ; found: the window's address
+    daddiu t0, t0, 15
+    and t0, t0, t1                  ; space = (@NesUnitSpace(0) + 15) & ~15
+    dsll t2, t9, 4
+    dsubu t2, t2, t0
+    andi t2, t2, 8191
+    daddu t0, t0, t2                ; space + (((start << 4) - space) & 8191): the address in it of set t9
+    sd t0, global_nesunitbase-global_nesbandbase(a4) ; NesUnitBase
+    la t2, nes_ppu_write_table      ; the source: the PPU table; the mapper table lies a fixed distance on
+    daddiu a0, t2, 32               ; (unit/cold.n64's order) - a0 = the PPU table's end, 8 words
+nes_place_table:
+    lw a1, 0(t2)                    ; the PPU register's handler ...
+    lw a3, mmc3_write_table-nes_ppu_write_table(t2) ; ... and the mapper register's, the same index
+    daddiu t2, t2, 4
+    sw a1, #NES_U_PPUTABLE(t0)      ; both into the window
+    sw a3, #NES_U_MAPTABLE(t0)
+    bne t2, a0, nes_place_table
+    daddiu t0, t0, 4                ; (delay slot) the window's next word
+    jr v1
+    nop
+nes_place_next:
+    addiu t9, t9, 1                 ; the next start
+    sltiu t2, t9, 512
+    bnez t2, nes_place_run
+    move t3, zero                   ; (delay slot) its run starts empty
+    srl t8, t8, 1                   ; pass 1: mask 3 -> 1 (hard marks only); after pass 1: 0, the end
+    bnez t8, nes_place_run          ; (t3 is 0: the delay slot above ran)
+    move t9, zero                   ; (delay slot) from set 0 again
+    addiu t3, zero, 22              ; no run in either pass: WorkerError = 22, the load refused
+nes_place_fail:
+    jr v1                           ; WorkerError = t3 (22, or 23 from the alignment check)
+    sd t3, global_workererror-global_nesbandbase(a4)
+; nes_place_mark: OR the mark a2 into the set of every 16-byte line from a0's line to the line holding a1.
+; In: a0 the first byte, a1 the last byte, a2 the mark, a5 the marks, t1 = ~15. Out: t3 = 0. Clobbers a0, a3, t0, t2.
+nes_place_mark:
+    and a0, a0, t1                  ; the first byte's line
+nes_place_mark_line:
+    dsrl t0, a0, 4
+    andi t0, t0, 511                ; the line's set
+    daddu t0, t0, a5
+    lbu t2, 0(t0)
+    daddiu a0, a0, 16               ; the next line
+    or t2, t2, a2                   ; the mark added to what the set holds
+    sltu a3, a1, a0                 ; the next line starts past the last byte?
+    beqz a3, nes_place_mark_line
+    sb t2, 0(t0)                    ; (delay slot) the set's marks stored, on both paths
+    jr ra
+    move t3, zero                   ; (delay slot) the run count's start for the search
+  EndASM
+EndProcedure
+
+; The procedure LoadGame calls. A plain procedure, so that the compiler emits it (and NesUnitPlaceAsm, its only
+; callee, just before it) where the PureBasic NesUnitPlace stood: see WHY ASSEMBLY above.
+Procedure NesUnitPlace()
+  NesUnitPlaceAsm()
+EndProcedure

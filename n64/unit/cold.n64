@@ -369,6 +369,18 @@ mmc3_coalesce_count:
     sd t3, global_nesidlebatched-global_cpucycles(t8)
   EndASM
 
+; ---- the PPU register jump table (C6, design note N.48a: out of the hot span; data, never fetched as instructions).
+; C7 (design note N.49): it is the SOURCE of the copy in NesUnitData (nes.n64, NesUnitTables, at load), which the
+; dispatch reads; this one is read only at load. It stands here, before the DMC bound, so that the bound lies one
+; I-cache line further on (its third line was on the BNE slot c65_op_d0: N.48b). The code before ends in b with
+; its delay slot; the DMC bound after is entered by a branch from window.n64 only. ----
+  ASM
+    .align 2
+nes_ppu_write_table:
+    .word nes_ppu_write_ctrl, nes_ppu_write_mask, nes_ppu_port_done, nes_ppu_write_oamaddr
+    .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
+  EndASM
+
 ; ---- mmc3_budget_dmc: the window bounded by the next DMC fetch (C3b, the owner's ruling, design note N.46) ----
 ; WHAT: u_mappercpubudget's exit with a sample playing: the budget becomes min(budget, F - CpuCycles), F the next
 ; byte fetch's cycle = NesMmc3ApuClock + DmcTimer + (DmcBits - 1) x period (the APU limit's own formula,
@@ -415,10 +427,10 @@ mmc3_budget_dmc_one:
     addiu a0, zero, 1
   EndASM
 
-; ---- moved out of the hot span to shrink it (C6, design note N.48a): the two register jump tables (data, read by
-; la + lw only, never fetched as instructions - in the hot span they only took I-cache room) and the OAM DMA's
-; stall outside a window (0 cycles a guest frame in SMB3 and MM4). Each is entered by its table load or a branch
-; and the code before it in its old place ended in jr / b with its delay slot, so the move changes no path. ----
+; ---- moved out of the hot span to shrink it (C6, design note N.48a): the OAM DMA's stall outside a window (0 cycles
+; a guest frame in SMB3 and MM4) and the mapper register jump table (data, never fetched as instructions; since C7,
+; design note N.49, only the SOURCE of NesUnitData's copy, read at load). The stall is entered by a branch from
+; write.n64; the code before it (the DMC bound) ends in jr with its delay slot, so the order changes no path. ----
   ASM
 nes_mmc3_bus_write_stall:
     ld t2, global_nesstall-global_cpucycles(t0)
@@ -426,9 +438,6 @@ nes_mmc3_bus_write_stall:
     b nes_mmc3_bus_write_close_done
     sd t1, global_nesstall-global_cpucycles(t0)
     .align 2
-nes_ppu_write_table:
-    .word nes_ppu_write_ctrl, nes_ppu_write_mask, nes_ppu_port_done, nes_ppu_write_oamaddr
-    .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
 mmc3_write_table:
     .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect
     .word mmc3_write_latch, mmc3_write_reload, mmc3_write_ack, mmc3_write_enable

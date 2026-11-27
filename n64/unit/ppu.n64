@@ -702,10 +702,10 @@ u_ppuregwrite:
     bnez t0, nes_ppu_port_done
     nop
 nes_ppu_write_dispatch:
-    la t0, nes_ppu_write_table
-    sll a0, a0, 2
+    ld t0, global_nesunitbase-global_ppubus(a2) ; NesUnitData (C7, design note N.49): the handler table is its
+    sll a0, a0, 2                   ; #NES_U_PPUTABLE words, on the window's own D-cache sets (copied at load)
     daddu t0, t0, a0
-    lw t0, 0(t0)
+    lw t0, #NES_U_PPUTABLE(t0)      ; the register's handler (nes_ppu_write_table's word)
     jr t0
     nop
 nes_ppu_write_ctrl:

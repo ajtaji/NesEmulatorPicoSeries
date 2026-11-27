@@ -341,10 +341,11 @@ u_mapperwrite:
     srl t1, a0, 12
     andi t1, t1, 6
     or t1, t1, t0                   ; the register: A14-A13 and A0
-    la t2, mmc3_write_table
-    sll t1, t1, 2
+    la t2, global_nesunitbase
+    ld t2, 0(t2)                    ; NesUnitData (C7, design note N.49): the handler table is its
+    sll t1, t1, 2                   ; #NES_U_MAPTABLE words, on the window's own D-cache sets (copied at load)
     daddu t2, t2, t1
-    lw t2, 0(t2)
+    lw t2, #NES_U_MAPTABLE(t2)      ; the register's handler (mmc3_write_table's word)
     jr t2
     nop
 mmc3_write_data:                    ; $8001: the bank register MapSelect & 7 gets the value

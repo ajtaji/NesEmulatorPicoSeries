@@ -78,11 +78,16 @@ CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
   ; at load (NesUnitPlace) so that its D-cache sets (8 KB, 16-byte lines, 512 sets) are clear of
   ; guest RAM's and of the host stack's working top. Where the compiler places arrays is not the
   ; program's to choose; which bytes of these 8 KB it uses is. NesUnitBase holds the address.
+  ; C7 (design note N.49): the two register jump tables (8 words each, unit/cold.n64 holds the copy's source)
+  ; follow the fields, copied in at load (unitplace.n64), so that their D-cache sets are the window's own.
   CompilerIf #NES_RDP_SHOW
-    #NES_UNIT_BYTES = 144
+    #NES_U_PPUTABLE = 144
   CompilerElse
-    #NES_UNIT_BYTES = 112
+    #NES_U_PPUTABLE = 112
   CompilerEndIf
+  #NES_U_MAPTABLE = #NES_U_PPUTABLE + 32
+  #NES_UNIT_BYTES = #NES_U_PPUTABLE + 64
+  #NES_UNIT_SETS = #NES_UNIT_BYTES / 16  ; its D-cache sets (unitplace.n64)
   Global Dim NesUnitSpace.a(8192+#NES_UNIT_BYTES+16)
   Global Dim NesUnitSets.a(512)
   Global NesUnitBase.i
@@ -237,44 +242,7 @@ XIncludeFile "save.n64"
 CompilerEndIf
 
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4
-ProcedureNaked.i NesStackPointer()
-  ; The host stack pointer here, at load, a few frames above the run loop's calls.
-  ASM
-    jr ra
-    move a0, sp
-  EndASM
-EndProcedure
-
-; Place NesUnitData (design note, section N.4): mark the D-cache sets of guest RAM (M, 2 KB) and of
-; the stack's working top (512 bytes either side of the stack pointer at load), then take the first
-; set from which #NES_UNIT_BYTES / 16 sets in a row (the cache wraps at 512) are free, and the
-; address in NesUnitSpace (8 KB + the window) whose set that is. Fails loudly (WorkerError 22, the
-; load refused) if there is no such run.
-Procedure NesUnitPlace()
-  Protected i.i, a.i, start.i, run.i, space.i, sets.i=#NES_UNIT_BYTES/16
-  ; The band log and its OAM snapshots (cold; the band cut reads OAM and the palette 8 bytes at a
-  ; time, so both must be 8-byte aligned: refused loudly otherwise, WorkerError 23).
-  NesBandBase=(@NesBandSpace(0)+15)&~15
-  NesOamBase=(@NesOamSpace(0)+15)&~15
-  If (@Oam(0)|@Pal(0))&7 : WorkerError=23 : ProcedureReturn : EndIf
-  For i=0 To 511 : NesUnitSets(i)=0 : Next
-  For a=@M(0) To @M(0)+2047 Step 16 : NesUnitSets((a>>4)&511)=1 : Next
-  a=(NesStackPointer()-512)&~15
-  For i=0 To 1023 Step 16 : NesUnitSets(((a+i)>>4)&511)=1 : Next
-  For start=0 To 511
-    run=0
-    While run<sets
-      If NesUnitSets((start+run)&511) : Break : EndIf
-      run=run+1
-    Wend
-    If run=sets
-      space=(@NesUnitSpace(0)+15)&~15
-      NesUnitBase=space+(((start<<4)-space)&8191)
-      ProcedureReturn
-    EndIf
-  Next
-  WorkerError=22
-EndProcedure
+  XIncludeFile "unitplace.n64"    ; NesUnitPlace: NesUnitData's D-cache sets and its tables, at load (C7, N.49)
 CompilerEndIf
 
 Procedure.i LoadGame()
