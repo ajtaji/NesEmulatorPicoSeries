@@ -28,7 +28,8 @@
 ;  WHY TWO PASSES SPLIT THIS WAY (as built, design note N.53): the code does not fit one 1,792-byte segment, and the
 ;  first split - the events in A, the DMC replica in B - left B 352 bytes over its window. The DMC replica belongs with
 ;  the events: both are what the guest's log says, neither needs the oscillators.
-;  Splitting the samples into jobs at any sample changes nothing (the twin's rule: "splitting a run changes nothing").
+;  Splitting the samples into jobs at any sample changes nothing (the twin's rule: "splitting a run changes nothing") -
+;  the event limit's split included since design note N.65 (below, at "20 events a job at most").
 ;
 ;  WITHOUT A MULTIPLY OR A DIVIDE (the RSP's scalar unit has neither): the quotients of the oscillator tick and of the
 ;  DMC's silent closed form come from a shift-and-subtract routine (nsa_div / nsb_div, one iteration a quotient bit);
@@ -73,7 +74,10 @@
 ;  duty bytes, 26 the ultrasonic triangle, 27 the triangle's gate (its length and linear counters both running), 28 the
 ;  noise tap (1 or 6), 29 the noise volume, 30 flags (1 pulse 0's step to 0, 2 pulse 1's, 8 the end). Record 0 is the
 ;  parameters before the job's first event; the last is the end (its start the cycle after the job's last sample).
-;  20 events a job at most: at the 21st the job ends before the sample that needs it.
+;  20 events a job at most: at the 21st the job ends before the sample that needs it. The events pass A recorded at
+;  that sample before the 21st are consumed from the log but due at no sample of the job: the DMC pass and pass B take
+;  them at the job's end, in order, as the next sample would have (nsc_tail, nsb_done; design note N.65 - until then
+;  they were lost, a $4010 among them desynchronised the DMC replica: the console's error 25 of 2026-11-26).
 ;
 ;  REGISTERS: the caller's s0-s7, fp, gp, ra are kept (2512-2552); sp is never touched. The resident subroutines used:
 ;  nbdi / nbdo (rspband.n64rsp's NesRspCommon: one DMA waited until every DMA has landed; k0 DMEM, k1 RDRAM, v0 the
@@ -591,7 +595,7 @@ Procedure NesRspSynDmc()
     nop
     addu a6, v0, zero
 nsc_sample:
-    beq fp, gp, nsc_end
+    beq fp, gp, nsc_tail                     ; the job's samples done: the records left, then the end
     nop
 nsc_ev:
     lbu t1, 30(s0)
@@ -646,6 +650,44 @@ nsc_level:
 nsc_cad:
     j nsc_sample
     addiu fp, fp, 1                          ; (delay slot)
+
+    ; ---- nsc_tail: THE RECORDS PASS A LEFT BEHIND THE JOB'S LAST SAMPLE (design note N.65) ----
+    ; WHAT: pass A ends a job BEFORE a sample when an event due at that sample finds no room for its record (the
+    ; 21st: nsa_full). The events it recorded at that same sample before it are consumed from the log already (the
+    ; main log's tail is past them), but no sample of this job reaches their start, so the walk above never meets
+    ; them - and the next job never sees them either. Before this, a $4010 among them was LOST: the replica kept the
+    ; old rate, its edges left the timing's, and at a later byte boundary the DMC log's entry was older than the edge
+    ; (error 25: the console's stop, 2026-11-26; a $4011 lost was a wrong level, without a stop).
+    ; HOW: every record left before the end record, in order, as the walk would have taken it at the next sample:
+    ; a $4010 / $4011 write - the replica's edges to the write's cycle first (nsc_dmc), then the rate or the level.
+    ; That is the same replica state the next sample's walk would have left: the replica is lazy (its edges depend
+    ; only on the rate and the DMC log), these writes are before every event of the next job, and the next job's
+    ; first sample walks its own records after them. The due cycle (a6) is not needed past the job's last sample.
+    ; At an ordinary end (the 512-sample limit, or n reached) the next record is the end record: nothing is done.
+    ; Registers: s0 the next record (kept by nsc_dmc); t0-t2 scratch; nsc_dmc clobbers its list (above).
+nsc_tail:
+    lbu t1, 30(s0)                           ; the record's flags
+    andi t0, t1, 8
+    bne t0, zero, nsc_end                    ; the end record: no record left
+    andi t0, t1, 20                          ; (delay slot) a $4010 or $4011 write?
+    beq t0, zero, nsc_tail_next              ; another event: nothing for the DMC
+    nop
+    jal nsc_dmc                              ; the edges to the write's cycle first
+    lw a0, 0(s0)                             ; (delay slot) its cycle
+    lbu t1, 30(s0)
+    lbu t2, 31(s0)                           ; the value written
+    andi t0, t1, 16
+    beq t0, zero, nsc_tail_lvl
+    nop
+    sw t2, global_rspq_scratch+92(zero)      ; $4010: the rate
+nsc_tail_lvl:
+    andi t0, t1, 4
+    beq t0, zero, nsc_tail_next
+    nop
+    sw t2, global_rspq_scratch+52(zero)      ; $4011: the level
+nsc_tail_next:
+    j nsc_tail
+    addiu s0, s0, 32                         ; (delay slot) the next record
 nsc_end:
     lw s0, global_rspq_scratch+2512(zero)
     lw s1, global_rspq_scratch+2516(zero)
@@ -1021,7 +1063,7 @@ nsb_cad1:
 nsb_event:
     lbu t0, 30(fp)
     andi t1, t0, 8
-    bne t1, zero, nsb_done                   ; the end (pass A ended the job before this sample)
+    bne t1, zero, nsb_d_out                  ; the end (pass A ended the job before this sample)
     lw t0, 0(fp)                             ; (delay slot)
     subu a0, t0, s2                          ; the old flush: the cycles since the last tick ...
     beq a0, zero, nsb_ev_in                  ; ... nothing when 0
@@ -1046,7 +1088,19 @@ nsb_ev_f2:
     sw zero, global_rspq_scratch+20(zero)    ; (delay slot) $4007: pulse 1's
 
     ; ---- the job's end ----
+    ; FIRST THE RECORDS PASS A LEFT BEHIND THE JOB'S LAST SAMPLE (design note N.65; the DMC pass's nsc_tail says
+    ; when there are any and why they were lost before): each is taken exactly as at a sample, by nsb_event - the
+    ; oscillators flushed to its cycle with the parameters before it, then its parameters and its flags (a pulse's
+    ; step to 0) in force - which comes back through nsb_loop to here, until the end record. The next job's record 0
+    ; is the parameters after them (pass A's state), and its first sample's span runs from the last one's cycle (the
+    ; tick point, +64): what the unsplit run does. A record's cycle is never before the tick point: it was due after
+    ; the job's last sample (a write's start is its cycle + 1, a step's its cycle). At an ordinary end: the end record.
 nsb_done:
+    lbu t0, 30(fp)
+    andi t1, t0, 8
+    beq t1, zero, nsb_event                  ; a record left: taken, then back here
+    nop
+nsb_d_out:
     beq gp, s3, nsb_d_sent                   ; the open half out, if it holds a sample
     nop
     jal nsb_flush
