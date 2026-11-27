@@ -440,7 +440,7 @@ nes_mmc3_bus_write_stall:
   EndASM
 
 ; ---- moved out of the hot span to make room for the mapper slot (mapper-modules design note, section 8), each 0
-; cycles a guest frame in the step-1 measuring run (rdp-m1-cart's profile), unchanged but for the one branch noted:
+; cycles a guest frame measured in the step-1 profile, unchanged but for the one branch noted:
 ; nes_mmc3_bus_write_ram, the internal-RAM write of u_neswrite (the core stores RAM inline; only outside callers of
 ; NesWrite reach it), entered by branch from write.n64 and leaving by jr; mmc3_sign_div_seven, the RAM-wait sign's
 ; divide for a seven-cycle loop (window.n64), entered by branch, which used to fall into mmc3_sign_charge and now
