@@ -119,8 +119,22 @@ CompilerEndIf
 ; ======================================================================================================================
 
 ; (DisplayWaitLine and DisplayFrame come FIRST in this file's assembly on purpose - design note N.69, THE PLACEMENT: the
-; compiler lays these naked procedures out in source order, and this order puts DisplayWaitLine, run 17 times a frame,
-; on I-cache sets where the hot unit's lines are cold instead of on the per-line draw path ppu_draw_*.)
+; compiler lays these naked procedures out in source order, so the per-frame host glue - DisplayWaitLine with its
+; display_wait_queue, DisplayFrame, HostAudioPoll, HostPad, HostHarvestPads, HostRequestPads - is one run of code.)
+; THE PLACEMENT, PINNED (design note N.70): the hot unit's `cpurun` is fixed at 2048 modulo 16 KB (cpu6502.n64's
+; CpuRunPin), so the unit's sets are the same in every build. HostGluePin pads with zero words to the next address that
+; is 2048 + 22 x 32 = 2752 modulo 16384: the run above starts on the I-set 22 lines after cpurun's, the 14 lines
+; (rel. sets 22-35) the unit's measured heat makes the least shared with it (the slot grid's unused opcodes $0E, $12,
+; $16, $1A, $1E, $22 lie there: a model of min(glue, unit) entries a frame, 547 against 1,298 where the run lay before).
+; It runs on (no jr / j / b), so the compiler keeps it with DisplayWaitLine as one unit and the pad lands right before
+; that label; nothing enters it. Cost: RDRAM only, 0-16,380 bytes by build (the note).
+CompilerIf #NES_RDP_SHOW
+ProcedureNaked HostGluePin()
+  ASM
+    .alignabs 16384, 2752
+  EndASM
+EndProcedure
+CompilerEndIf
 CompilerIf #NES_RDP_SHOW
 ; ---- DisplayWaitLine(line): every 16 lines (the hot unit's u_ppubeginline). At line 224 the pads' read started (before
 ; the guest's usual vblank strobe; not with the replayed input); the samples counted and the AI fed (as HostAudioPoll),

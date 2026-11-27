@@ -400,6 +400,19 @@ nes_syn_wanted_ret:
   EndASM
 EndProcedure
 
+; ---- NesSynJobPollPin: THE PLACEMENT, PINNED (design note N.70). The hot unit's `cpurun` is fixed at 2048 modulo 16 KB
+; (cpu6502.n64's CpuRunPin); this pads with zero words to the next address that is 2048 + 54 x 32 = 3776 modulo 16384,
+; so NesSynJobPoll (5 calls a frame, 13 lines) starts on the I-set 54 lines after cpurun's: rel. sets 54-66, the run of
+; the unit's slot grid its measured heat makes the least shared with the poll (unused opcodes $52, $62, $6A among them;
+; a model of min(poll, unit) entries a frame, 779 against 1,995 where it lay before), clear of the host glue's 22-35.
+; It runs on (no jr / j / b), so the compiler keeps it with NesSynJobPoll as one unit and the pad lands right before
+; that label; nothing enters it. Cost: RDRAM only, 0-16,380 bytes by build (the note).
+ProcedureNaked NesSynJobPollPin()
+  ASM
+    .alignabs 16384, 3776
+  EndASM
+EndProcedure
+
 ; ---- NesSynJobPoll: from HostAudioPoll after NesApuCount (at every display line). With a job outstanding: if it is
 ; not done, hurry the priority ring when a block waits (and stop); if done, take its end (NesSynSeen). Then a new job
 ; when ApuProduced (capped at HostPcmRead + #NES_SYN_CAP) is #NES_SYN_BATCH past the done count, or a block waits.

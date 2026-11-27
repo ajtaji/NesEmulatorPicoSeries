@@ -102,6 +102,26 @@ Global C65SaveS0.i, C65SaveS1.i, C65SaveS2.i, C65SaveS3.i, C65SaveS4.i, C65SaveS
 Global C65SaveS6.i, C65SaveS7.i, C65SaveFp.i, C65SaveRa.i
 Global C65Link.i, C65Ea.i, C65Value.i, C65Count.i, C65Fetch.i
 
+; THE HOT UNIT'S PIN (diagnosis note N.70). The VR4300's I-cache is 16 KB, direct-mapped, 32-byte lines: an
+; instruction's set is its address bits 5-13. The unit's hot span fills almost every set, so where any OTHER hot code
+; can sit without evicting it depends on the unit's address modulo 16 KB - and before this pin every compile moved it
+; (the compiler orders procedures by its call graph; a change anywhere before the unit moved `cpurun` by hundreds of
+; bytes, and the record, shipped and trace builds each had their own alias). `.alignabs 16384, 2048` pads with zero
+; words to the next address that is 2048 modulo 16384, so `cpurun` is $xxxx0800 / $xxxx4800 / ... in EVERY build: the
+; unit's sets are fixed (cpurun's line on set 64), and per-frame glue can be put on the unit's coldest sets with its
+; own `.alignabs` (host.n64, rspsyn.n64, show.n64).
+; HOW: the pad is this naked procedure's whole body. It ends in no jr / j / b, so the compiler lays it out as one unit
+; with the procedure written after it (EmitCore_Mips.pbi's layout rule for a ProcedureNaked that runs on), and the pad
+; therefore lands immediately before `cpurun`'s label. Nothing ever calls or enters CpuRunPin (its label is the pad's
+; first byte); the pad is never executed. Its cost is RDRAM only: 0 to 16,380 bytes, by build (the note gives each).
+; 2048 was chosen so the shipped / oracle / checking builds pad least (their natural cpurun lay at $254-$6B4 mod 16 KB
+; on the tree before the pin; the record build pays ~11 KB instead).
+ProcedureNaked CpuRunPin()
+  ASM
+    .alignabs 16384, 2048
+  EndASM
+EndProcedure
+
 ProcedureNaked.i CpuRun(n.i)
   ASM
     ; --- window entry: If n <= 0 Or Stopped : ProcedureReturn 0 ------------
