@@ -258,11 +258,6 @@ nes_mmc3_bus_write_dma:
     dsubu t2, t2, t1
     b nes_mmc3_bus_write_subtract
     ld t1, global_budget-global_cpucycles(t0)
-nes_mmc3_bus_write_stall:
-    ld t2, global_nesstall-global_cpucycles(t0)
-    daddu t1, t1, t2
-    b nes_mmc3_bus_write_close_done
-    sd t1, global_nesstall-global_cpucycles(t0)
 
 nes_mmc3_bus_write_close:
     la t0, global_cpucycles
@@ -352,9 +347,6 @@ u_mapperwrite:
     lw t2, 0(t2)
     jr t2
     nop
-mmc3_write_table:
-    .word mmc3_write_select, mmc3_write_data, mmc3_write_mirror, mmc3_write_protect
-    .word mmc3_write_latch, mmc3_write_reload, mmc3_write_ack, mmc3_write_enable
 mmc3_write_data:                    ; $8001: the bank register MapSelect & 7 gets the value
     la t0, global_mapselect
     ld t0, 0(t0)

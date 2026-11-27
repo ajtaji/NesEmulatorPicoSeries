@@ -708,9 +708,6 @@ nes_ppu_write_dispatch:
     lw t0, 0(t0)
     jr t0
     nop
-nes_ppu_write_table:
-    .word nes_ppu_write_ctrl, nes_ppu_write_mask, nes_ppu_port_done, nes_ppu_write_oamaddr
-    .word nes_ppu_write_oam, nes_ppu_write_scroll, nes_ppu_write_addr, nes_ppu_write_data
 nes_ppu_write_ctrl:
     ld t0, global_ppuctrl-global_ppubus(a2)
     ld t2, global_pput-global_ppubus(a2)

@@ -2502,6 +2502,77 @@ c65_peek_prg:
     jr ra
     lbu t1, 0(t1)
 
+    ; --- C6 (design note N.48): the cold part's ORDER is chosen by measured heat. A cold byte at cold position p
+    ; shares its I-cache set with the hot span's byte at p - (16384 - span) (the record cart: p - 72), so the cold
+    ; part lies over the hot span's first ~8 KB: the dispatch, the opcode slot grid (many of its lines are opcodes
+    ; a game never runs) and the rests / modes / call-outs after it. The units that run every frame (the poll, the
+    ; APU timing's cold half, the status byte, the APU write and its log, the coalescing, the DMC bound, the PPU's
+    ; cold half) are placed over the slot grid's coldest lines, the units at 0 cycles over the hot lines. Every
+    ; unit ends in an unconditional transfer and is entered only by a branch or jal, so the order changes no
+    ; path and no instruction; the cold part's size is unchanged, so nothing after the unit moves. c65_fetch_slow
+    ; stays first (the hot span's measure) and a12_cold.n64 last (its table and c65_lengths keep their addresses).
+
+    ; --- moved here from the hot span by measured heat (N7, design note N.40: measured at 0 cycles a guest
+    ; frame in SMB3, frames 0-3600); each is entered by a branch and leaves by one -----------------------
+c65_op_00_rest:
+    srl t0, a1, 8
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    addu t1, s1, t2
+    sb a1, 0x100(t1)
+    addiu t2, t2, -1
+    jal c65_status           ; t0 = P (t2 survives)
+    andi t2, t2, 0xFF
+    ori t0, t0, 0x10         ; B set in the pushed copy
+    sd t0, global_tmp-global_nesmmc3bias(a3)
+    addu t1, s1, t2
+    sb t0, 0x100(t1)
+    addiu t2, t2, -1
+    andi t2, t2, 0xFF
+    sd t2, global_s-global_nesmmc3bias(a3)
+    daddiu t1, zero, 1
+    sd t1, global_fi-global_nesmmc3bias(a3)
+    ld t1, 24(a3)            ; the vector at $FFFE in the top 8 KB slot
+    ori t2, zero, 0xFFFE
+    addu t1, t1, t2
+    lbu t0, 0(t1)
+    lbu v1, 1(t1)
+    sll t1, v1, 8
+    or a1, t0, t1
+    b c65_next
+    daddiu a2, a2, -7
+c65_m_indx:                  ; (zp,X)
+    lbu t1, 1(t0)
+    addu t1, t1, s6
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_rd_ea
+    or t2, t2, t1
+c65_s_indx:
+    addiu v0, zero, 5
+    lbu t1, 1(t0)
+    addu t1, t1, s6
+    andi t1, t1, 0xFF
+    addu t2, t1, s1
+    lbu t2, 0(t2)
+    addiu t1, t1, 1
+    andi t1, t1, 0xFF
+    addu t1, t1, s1
+    lbu v1, 0(t1)
+    addiu a1, a1, 2
+    sll t1, v1, 8
+    b c65_wr_ea
+    or t2, t2, t1
+
     ; --- moved out of the hot span by measured heat (C4, design note N.46b: 0 cycles a guest frame) ----------
     ; c65_end: the window's end by a stop (an illegal opcode, code fetched from device space) - since C3 every other
     ; end is c65_wend's. It publishes the state, sets CpuCycles = NesRunStart + Budget - Left and CpuInWindow = 0,
@@ -2549,74 +2620,66 @@ c65_bad_fetch:               ; code fetched from device space: stop loudly
     b c65_end
     nop
 
-
-    ; --- read-modify-write of a device-reachable address -----------------------
-c65_rmw_write:               ; t9 = shifted value (C in bit 8), v1 = the value read,
-    andi fp, t9, 0xFF        ; t2 = ea, v0 = phase, t0 = cycles
-c65_rmw_write_res:           ; fp here = the result byte (Z from it)
-    or t8, fp, zero          ; N and Z from the result, before the writes
-    sd t0, global_c65count-global_nesmmc3bias(a3)
-    addiu v0, v0, -1
-    jal c65_wr_ea            ; the unchanged value first, at phase - 1
-    or a0, v1, zero
-    addiu v0, v0, 1
-    jal c65_wr_ea            ; then the result, at phase
-    or a0, fp, zero
-    ld t0, global_c65count-global_nesmmc3bias(a3)
-    b c65_next
-    dsubu a2, a2, t0
-
-    ; --- status byte ------------------------------------------------------------
-c65_status:                  ; leaf: t0 = NV1BDIZC with B clear (t1 scratch)
-    andi t0, t8, 0x80
-    ld t1, global_fv-global_nesmmc3bias(a3)
-    andi t1, t1, 0x80
-    srl t1, t1, 1
-    or t0, t0, t1
-    ld t1, global_fd-global_nesmmc3bias(a3)
-    sll t1, t1, 3
-    or t0, t0, t1
-    ld t1, global_fi-global_nesmmc3bias(a3)
-    sll t1, t1, 2
-    or t0, t0, t1
-    srl t1, t9, 8
-    andi t1, t1, 1
-    or t0, t0, t1
-    andi t1, fp, 0xFF
-    sltiu t1, t1, 1
-    sll t1, t1, 1
-    or t0, t0, t1
-    jr ra
-    ori t0, t0, 0x20
-c65_setstatus:               ; leaf: the flags from P in t0 (t1 scratch)
-    or t8, t0, zero
-    sll t1, t0, 1
-    sd t1, global_fv-global_nesmmc3bias(a3)
-    andi t9, t0, 1
-    sll t9, t9, 8
-    andi fp, t0, 2
-    xori fp, fp, 2
-    srl t1, t0, 3
-    andi t1, t1, 1
-    sd t1, global_fd-global_nesmmc3bias(a3)
-    srl t1, t0, 2
-    andi t1, t1, 1
-    jr ra
-    sd t1, global_fi-global_nesmmc3bias(a3)
-c65_irq_check:               ; after PLP / RTI / CLI: a pending mapper IRQ with I clear
-    ld t1, global_fi-global_nesmmc3bias(a3)   ; ends the window (CpuEndWindow); a0 = cycles
-    bnez t1, c65_irq_none
+    ; --- the batching shapes (cold). Each is the reference's PureMetal condition, evaluated on the live
+    ; registers; the call-outs are the same procedures. The poll first (it runs every frame), the others below.
+c65_poll:                    ; LDA / BIT abs whose device read ended the window
+    addiu t1, a1, -0x7FFF    ; If Left=0 And PC>=$8003 And NesStatusHorizon>CpuCycles+8
+    addiu t1, t1, -4
+    bltz t1, c65_poll_done
     nop
-    ld t1, global_mapirq-global_nesmmc3bias(a3)
-    beqz t1, c65_irq_none
+    la t0, global_cpucycles
+    ld t0, 0(t0)
+    la t1, global_nesstatushorizon
+    ld t1, 0(t1)
+    daddiu t0, t0, 8
+    slt t0, t0, t1
+    beqz t0, c65_poll_done
     nop
-    ld t1, global_budget-global_nesmmc3bias(a3)
-    dsubu t1, t1, a2
-    sd t1, global_budget-global_nesmmc3bias(a3)
-    or a2, zero, zero
-c65_irq_none:
+    jal c65_out
+    nop
+    jal nescurrentpoll       ; NesLoopRule = NesCurrentPoll(acc in a0)
+    nop
+    jal c65_in
+    nop
+    la t1, global_neslooprule
+    sd a0, 0(t1)
+c65_poll_rule:
+    beqz a0, c65_poll_done
+    andi t0, a0, 0xFF        ; NesLoopCost = rule & 255
+    la t1, global_nesloopcost
+    sd t0, 0(t1)
+    la t1, global_nesstatushorizon
+    ld t1, 0(t1)
+    la t2, global_cpucycles
+    ld t2, 0(t2)
+    dsubu t1, t1, t2
+    daddiu t1, t1, -4
+    ddiv t1, t0        ; NesIdleExtra = (NesStatusHorizon-CpuCycles-4)/NesLoopCost
+    mflo t1
+    nop
+    nop
+    la t2, global_nesidleextra
+    sd t1, 0(t2)
+    blez t1, c65_poll_done
+    nop
+    dmult t1, t0
+    mflo t2
+    dsubu a2, a2, t2         ; Left = Left - NesIdleExtra*NesLoopCost
+    srl t2, a0, 8
+    andi t2, t2, 0xFF
+    dmult t1, t2
+    mflo t2
+    daddu t3, t3, t2         ; NesInstructions + NesIdleExtra*((rule>>8)&255)
+    lui t1, 0x200
+    and t1, a0, t1
+    beqz t1, c65_poll_done
+    srl t1, a0, 16           ; If rule&$2000000 : FC = ~(((rule>>16)&511)-256)
+    andi t1, t1, 511
+    addiu t1, t1, -256
+    nor t9, t1, zero
+c65_poll_done:
     b c65_next
-    dsubu a2, a2, a0
+    daddiu a2, a2, -4
 
     ; the handler rests and addressing modes that run 0 cycles a guest frame in SMB3 (the C2 record replay's profile), out of
     ; the hot span by measured heat for C3 (design note N.46); each is entered by a branch or jal and leaves
@@ -2705,105 +2768,82 @@ c65_illegal:                 ; an undocumented opcode stops the CPU
     b c65_end
     nop
   EndASM
-  ; -------------------------------------------------------------------------
-  ; The batching shapes (cold). Each is the reference's PureMetal condition,
-  ; evaluated on the live registers; the call-outs are the same procedures.
-  ; -------------------------------------------------------------------------
+  XIncludeFile "../n64/unit/apu_cold.n64"
   ASM
-c65_poll:                    ; LDA / BIT abs whose device read ended the window
-    addiu t1, a1, -0x7FFF    ; If Left=0 And PC>=$8003 And NesStatusHorizon>CpuCycles+8
-    addiu t1, t1, -4
-    bltz t1, c65_poll_done
-    nop
-    la t0, global_cpucycles
-    ld t0, 0(t0)
-    la t1, global_nesstatushorizon
-    ld t1, 0(t1)
-    daddiu t0, t0, 8
-    slt t0, t0, t1
-    beqz t0, c65_poll_done
-    nop
-    jal c65_out
-    nop
-    jal nescurrentpoll       ; NesLoopRule = NesCurrentPoll(acc in a0)
-    nop
-    jal c65_in
-    nop
-    la t1, global_neslooprule
-    sd a0, 0(t1)
-c65_poll_rule:
-    beqz a0, c65_poll_done
-    andi t0, a0, 0xFF        ; NesLoopCost = rule & 255
-    la t1, global_nesloopcost
-    sd t0, 0(t1)
-    la t1, global_nesstatushorizon
-    ld t1, 0(t1)
-    la t2, global_cpucycles
-    ld t2, 0(t2)
-    dsubu t1, t1, t2
-    daddiu t1, t1, -4
-    ddiv t1, t0        ; NesIdleExtra = (NesStatusHorizon-CpuCycles-4)/NesLoopCost
-    mflo t1
-    nop
-    nop
-    la t2, global_nesidleextra
-    sd t1, 0(t2)
-    blez t1, c65_poll_done
-    nop
-    dmult t1, t0
-    mflo t2
-    dsubu a2, a2, t2         ; Left = Left - NesIdleExtra*NesLoopCost
-    srl t2, a0, 8
-    andi t2, t2, 0xFF
-    dmult t1, t2
-    mflo t2
-    daddu t3, t3, t2         ; NesInstructions + NesIdleExtra*((rule>>8)&255)
-    lui t1, 0x200
-    and t1, a0, t1
-    beqz t1, c65_poll_done
-    srl t1, a0, 16           ; If rule&$2000000 : FC = ~(((rule>>16)&511)-256)
-    andi t1, t1, 511
-    addiu t1, t1, -256
-    nor t9, t1, zero
-c65_poll_done:
+    ; --- read-modify-write of a device-reachable address -----------------------
+c65_rmw_write:               ; t9 = shifted value (C in bit 8), v1 = the value read,
+    andi fp, t9, 0xFF        ; t2 = ea, v0 = phase, t0 = cycles
+c65_rmw_write_res:           ; fp here = the result byte (Z from it)
+    or t8, fp, zero          ; N and Z from the result, before the writes
+    sd t0, global_c65count-global_nesmmc3bias(a3)
+    addiu v0, v0, -1
+    jal c65_wr_ea            ; the unchanged value first, at phase - 1
+    or a0, v1, zero
+    addiu v0, v0, 1
+    jal c65_wr_ea            ; then the result, at phase
+    or a0, fp, zero
+    ld t0, global_c65count-global_nesmmc3bias(a3)
     b c65_next
-    daddiu a2, a2, -4
+    dsubu a2, a2, t0
 
-c65_jmp_self:                ; JMP to itself; t2 = a1 = Ea
-    la t0, global_nesidleenabled
-    ld t0, 0(t0)
-    beqz t0, c65_jmp_go
-    slti t1, a2, 4
-    bnez t1, c65_jmp_go      ; Left > 3
+    ; --- status byte ------------------------------------------------------------
+c65_status:                  ; leaf: t0 = NV1BDIZC with B clear (t1 scratch)
+    andi t0, t8, 0x80
+    ld t1, global_fv-global_nesmmc3bias(a3)
+    andi t1, t1, 0x80
+    srl t1, t1, 1
+    or t0, t0, t1
+    ld t1, global_fd-global_nesmmc3bias(a3)
+    sll t1, t1, 3
+    or t0, t0, t1
+    ld t1, global_fi-global_nesmmc3bias(a3)
+    sll t1, t1, 2
+    or t0, t0, t1
+    srl t1, t9, 8
+    andi t1, t1, 1
+    or t0, t0, t1
+    andi t1, fp, 0xFF
+    sltiu t1, t1, 1
+    sll t1, t1, 1
+    or t0, t0, t1
+    jr ra
+    ori t0, t0, 0x20
+c65_setstatus:               ; leaf: the flags from P in t0 (t1 scratch)
+    or t8, t0, zero
+    sll t1, t0, 1
+    sd t1, global_fv-global_nesmmc3bias(a3)
+    andi t9, t0, 1
+    sll t9, t9, 8
+    andi fp, t0, 2
+    xori fp, fp, 2
+    srl t1, t0, 3
+    andi t1, t1, 1
+    sd t1, global_fd-global_nesmmc3bias(a3)
+    srl t1, t0, 2
+    andi t1, t1, 1
+    jr ra
+    sd t1, global_fi-global_nesmmc3bias(a3)
+c65_irq_check:               ; after PLP / RTI / CLI: a pending mapper IRQ with I clear
+    ld t1, global_fi-global_nesmmc3bias(a3)   ; ends the window (CpuEndWindow); a0 = cycles
+    bnez t1, c65_irq_none
     nop
-    la t0, global_nesstall
-    ld t0, 0(t0)
-    bnez t0, c65_jmp_go      ; NesStall = 0
-    sltiu t1, t2, 0x1FFE
-    bnez t1, c65_jmp_idle    ; Ea < $1FFE Or Ea >= $8000
-    andi t1, t2, 0x8000
-    beqz t1, c65_jmp_go
+    ld t1, global_mapirq-global_nesmmc3bias(a3)
+    beqz t1, c65_irq_none
     nop
-c65_jmp_idle:
-    daddiu t0, a2, -1
-    daddiu t1, zero, 3
-    ddiv t0, t1        ; NesIdleExtra = NesDiv(Left-1, 3)
-    mflo t0
-    la t1, global_nesidleextra
-    sd t0, 0(t1)
-    dsll t1, t0, 1
-    daddu t1, t1, t0
-    dsubu a2, a2, t1         ; Left - NesIdleExtra*3
-    daddu t3, t3, t0         ; NesInstructions + NesIdleExtra
-    la t1, global_nesidlebatched
-    ld a0, 0(t1)
-    daddu a0, a0, t0
-    sd a0, 0(t1)
-c65_jmp_go:
-    or a1, t2, zero
+    ld t1, global_budget-global_nesmmc3bias(a3)
+    dsubu t1, t1, a2
+    sd t1, global_budget-global_nesmmc3bias(a3)
+    or a2, zero, zero
+c65_irq_none:
     b c65_next
-    daddiu a2, a2, -3
-
+    dsubu a2, a2, a0
+  EndASM
+  XIncludeFile "../n64/unit/cold.n64"
+  ; the PPU's cold half; the PPU state machine's checking build (empty in every other build) after it
+  XIncludeFile "../n64/unit/ppu_cold.n64"
+  XIncludeFile "../n64/unit/ppu_check.n64"
+  ASM
+    ; --- the batching shapes, continued (0-500 cycles a guest frame) ---
 c65_bne_shape:               ; BNE -6: the LDA $2002 / INX / BNE wait (t1 = Base)
     la t0, global_nesidleenabled
     ld t0, 0(t0)
@@ -3143,72 +3183,41 @@ c65_shape_status:            ; a0 = NesPollStatusDone(), the state published and
     jr ra
     nop
 
-    ; --- moved here from the hot span by measured heat (N7, design note N.40: measured at 0 cycles a guest
-    ; frame in SMB3, frames 0-3600); each is entered by a branch and leaves by one -----------------------
-c65_op_00_rest:
-    srl t0, a1, 8
-    addu t1, s1, t2
-    sb t0, 0x100(t1)
-    addiu t2, t2, -1
-    andi t2, t2, 0xFF
-    addu t1, s1, t2
-    sb a1, 0x100(t1)
-    addiu t2, t2, -1
-    jal c65_status           ; t0 = P (t2 survives)
-    andi t2, t2, 0xFF
-    ori t0, t0, 0x10         ; B set in the pushed copy
-    sd t0, global_tmp-global_nesmmc3bias(a3)
-    addu t1, s1, t2
-    sb t0, 0x100(t1)
-    addiu t2, t2, -1
-    andi t2, t2, 0xFF
-    sd t2, global_s-global_nesmmc3bias(a3)
-    daddiu t1, zero, 1
-    sd t1, global_fi-global_nesmmc3bias(a3)
-    ld t1, 24(a3)            ; the vector at $FFFE in the top 8 KB slot
-    ori t2, zero, 0xFFFE
-    addu t1, t1, t2
-    lbu t0, 0(t1)
-    lbu v1, 1(t1)
-    sll t1, v1, 8
-    or a1, t0, t1
+c65_jmp_self:                ; JMP to itself; t2 = a1 = Ea
+    la t0, global_nesidleenabled
+    ld t0, 0(t0)
+    beqz t0, c65_jmp_go
+    slti t1, a2, 4
+    bnez t1, c65_jmp_go      ; Left > 3
+    nop
+    la t0, global_nesstall
+    ld t0, 0(t0)
+    bnez t0, c65_jmp_go      ; NesStall = 0
+    sltiu t1, t2, 0x1FFE
+    bnez t1, c65_jmp_idle    ; Ea < $1FFE Or Ea >= $8000
+    andi t1, t2, 0x8000
+    beqz t1, c65_jmp_go
+    nop
+c65_jmp_idle:
+    daddiu t0, a2, -1
+    daddiu t1, zero, 3
+    ddiv t0, t1        ; NesIdleExtra = NesDiv(Left-1, 3)
+    mflo t0
+    la t1, global_nesidleextra
+    sd t0, 0(t1)
+    dsll t1, t0, 1
+    daddu t1, t1, t0
+    dsubu a2, a2, t1         ; Left - NesIdleExtra*3
+    daddu t3, t3, t0         ; NesInstructions + NesIdleExtra
+    la t1, global_nesidlebatched
+    ld a0, 0(t1)
+    daddu a0, a0, t0
+    sd a0, 0(t1)
+c65_jmp_go:
+    or a1, t2, zero
     b c65_next
-    daddiu a2, a2, -7
-c65_m_indx:                  ; (zp,X)
-    lbu t1, 1(t0)
-    addu t1, t1, s6
-    andi t1, t1, 0xFF
-    addu t2, t1, s1
-    lbu t2, 0(t2)
-    addiu t1, t1, 1
-    andi t1, t1, 0xFF
-    addu t1, t1, s1
-    lbu v1, 0(t1)
-    addiu a1, a1, 2
-    sll t1, v1, 8
-    b c65_rd_ea
-    or t2, t2, t1
-c65_s_indx:
-    addiu v0, zero, 5
-    lbu t1, 1(t0)
-    addu t1, t1, s6
-    andi t1, t1, 0xFF
-    addu t2, t1, s1
-    lbu t2, 0(t2)
-    addiu t1, t1, 1
-    andi t1, t1, 0xFF
-    addu t1, t1, s1
-    lbu v1, 0(t1)
-    addiu a1, a1, 2
-    sll t1, v1, 8
-    b c65_wr_ea
-    or t2, t2, t1
+    daddiu a2, a2, -3
   EndASM
-  ; the PPU state machine's checking build (empty in every other build), in the cold part
-  XIncludeFile "../n64/unit/ppu_cold.n64"
-  XIncludeFile "../n64/unit/ppu_check.n64"
-  XIncludeFile "../n64/unit/apu_cold.n64"
-  XIncludeFile "../n64/unit/cold.n64"
   XIncludeFile "../n64/unit/a12_cold.n64"
   ASM
 
