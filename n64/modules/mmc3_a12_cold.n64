@@ -135,23 +135,7 @@ a12_fetch_call:                   ; MapperSpriteFetch(a1) with the walk's regist
     j a12_fetch_done
     nop
 
-    ; --- data (read through the D-cache only) -------------------------------------
-    ; a12_sprite_form: one byte per S = MapSpriteBits (bit j = slot j fetches at $1000):
-    ; bits 0-2 j0 = the lowest set bit; bits 3-5 k = the highest set bit of S & $7F (0 when none);
-    ; bits 6-7 runs - 1 = the maximal runs of set bits less one. Byte 0 (S = 0) is not read.
-    ; Written by:  for S: j0 = ctz(S); k = msb(S & 127); runs = rises of S read from bit 0 up.
-    .align 2
-mmc3_form_data:                     ; (data, not code: build.py's slot check skips it, to mmc3_form_data_end)
-a12_sprite_form:
-    .word 0x00000908, 0x12501110, 0x1B585958, 0x1A581918, 0x24606160, 0x62A06160, 0x23606160, 0x22602120
-    .word 0x2D686968, 0x6AA86968, 0x6BA8A9A8, 0x6AA86968, 0x2C686968, 0x6AA86968, 0x2B686968, 0x2A682928
-    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
-    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
-    .word 0x07404948, 0x52905150, 0x5B989998, 0x5A985958, 0x64A0A1A0, 0xA2E0A1A0, 0x63A0A1A0, 0x62A06160
-    .word 0x6DA8A9A8, 0xAAE8A9A8, 0xABE8E9E8, 0xAAE8A9A8, 0x6CA8A9A8, 0xAAE8A9A8, 0x6BA8A9A8, 0x6AA86968
-    .word 0x36707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x74B0B1B0, 0xB2F0B1B0, 0x73B0B1B0, 0x72B07170
-    .word 0x35707170, 0x72B07170, 0x73B0B1B0, 0x72B07170, 0x34707170, 0x72B07170, 0x33707170, 0x32703130
-mmc3_form_data_end:
+    ; (the sprite-form table a12_sprite_form: in the cold slot's module data, modules/mmc3_cold.n64)
   EndASM
 CompilerIf #NES_A12_CHECK
   ASM

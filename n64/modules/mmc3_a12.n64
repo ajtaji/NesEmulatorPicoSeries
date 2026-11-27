@@ -45,7 +45,8 @@
 ;                clock the counter runs - 1 times
 ;                if S & $7F: MapLowSince = MapDots + 8 + 8 k
 ;                A12 = S >> 7;  MapDots += 63; dot = 320
-;   (j0, k and runs - 1 are one byte of the table a12_sprite_form, in modules/mmc3_a12_cold.n64.)
+;   (j0, k and runs - 1 are one byte of the table a12_sprite_form, in the cold slot (modules/mmc3_cold.n64),
+;   read from its copy in NesUnitData at +#NES_U_MODDATA.)
 ;
 ; REGISTERS in the walk (those of the exact walk): a0 dots still to advance, a1 line, a2 dot, a3 odd,
 ;   a6 = global_mapdots, v0 the dot clock at a2, v1 MapLowSince, t8 the level, t9 PPUCTRL with bit 8
@@ -336,9 +337,10 @@ a12_spr_walk:
     nop
     bnez t8, a12_spr_stepped
     nop
-    la t1, a12_sprite_form        ; (mmc3_a12_cold.n64) byte S: j0 | k << 3 | (runs - 1) << 6
+    la t1, global_nesunitbase     ; the sprite-form table's copy in NesUnitData (+#NES_U_MODDATA; its source in the
+    ld t1, 0(t1)                  ; cold slot, modules/mmc3_cold.n64): byte S: j0 | k << 3 | (runs - 1) << 6
     daddu t1, t1, t0
-    lbu a4, 0(t1)
+    lbu a4, #NES_U_MODDATA(t1)
     move a5, t0                   ; S, kept over the clocks
     andi t2, a4, 7
     sll t2, t2, 3

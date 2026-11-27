@@ -181,10 +181,12 @@ ProcedureNaked NesModuleInit()
     ; leaves out a procedure nothing references, so a procedure called only by one module would be in that module's
     ; compile and not in another's, and the images outside the slots would differ (build.py refuses that). This
     ; table, never read, references each from the common code, so every compile keeps all of them in place.
-    ;   MapperInit (MMC3's power-on), MapperUpdate (MMC3's), MapperPrg / MapperChr / MapperMirror (the bank helpers),
-    ;   ExtraMapperInit (the extra boards' state), MapCopy, MapperSpriteFetch (MMC3's A12 walk, its OAM scan).
+    ;   MapperInit (MMC3's power-on), MapperUpdate (MMC3's), MapperSpriteFetch (MMC3's A12 walk, its OAM scan). The
+    ;   bank helpers (MapperPrg / Chr / Mirror), ExtraMapperInit and MapCopy need no entry: common compiled code calls
+    ;   them (MapperUpdate, MapperInit), and an entry here would make this table their first referrer, which moves
+    ;   them in the compiler's layout (measured: MapperPrg onto the core's opcode lines, +60 K I-misses a run).
     .align 2
 nes_module_services:
-    .word mapperinit, mapperupdate, mapperprg, mapperchr, mappermirror, extramapperinit, mapcopy, mapperspritefetch
+    .word mapperinit, mapperupdate, mapperspritefetch
   EndASM
 EndProcedure

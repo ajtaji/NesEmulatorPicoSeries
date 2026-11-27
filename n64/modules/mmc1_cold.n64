@@ -26,6 +26,8 @@ nes_cold_reserved:                  ; +8
     nop
 nes_cold_maptable:                  ; +16: no register handler table (MMC1 decodes its port in mmc1_e_write)
     .word 0, 0, 0, 0, 0, 0, 0, 0
+nes_cold_moddata:                   ; +48: no module data (256 zero bytes, copied into NesUnitData at load all the same)
+    .space 256
 mmc1_cold_init:
     daddiu sp, sp, -16
     sd ra, 0(sp)

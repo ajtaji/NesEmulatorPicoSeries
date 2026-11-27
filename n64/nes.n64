@@ -86,7 +86,12 @@ CompilerIf #NES_UNIT
     #NES_U_PPUTABLE = 112
   CompilerEndIf
   #NES_U_MAPTABLE = #NES_U_PPUTABLE + 32
-  #NES_UNIT_BYTES = #NES_U_PPUTABLE + 64
+  ; the mapper module's data (mapper modules, step 2): the 256 bytes at the cold slot's nes_cold_moddata, copied in at
+  ; load as the register table is, so that a table the module's hot code reads lies on the window's chosen D-cache
+  ; sets wherever the layout puts the cold slot (MMC3: the A12 walk's sprite-form table; measured in the cold slot
+  ; itself: ~640 D-misses a guest frame against global_noiseshift's line)
+  #NES_U_MODDATA = #NES_U_PPUTABLE + 64
+  #NES_UNIT_BYTES = #NES_U_PPUTABLE + 320
   #NES_UNIT_SETS = #NES_UNIT_BYTES / 16  ; its D-cache sets (unitplace.n64)
   Global Dim NesUnitSpace.a(8192+#NES_UNIT_BYTES+16)
   Global Dim NesUnitSets.a(512)

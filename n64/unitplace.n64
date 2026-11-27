@@ -125,6 +125,15 @@ nes_place_table:
     sw a3, #NES_U_MAPTABLE(t0)
     bne t2, a0, nes_place_table
     daddiu t0, t0, 4                ; (delay slot) the window's next word
+    daddiu t0, t0, 32               ; to base + #NES_U_MODDATA - #NES_U_PPUTABLE (= base + 64; t0 was base + 32)
+    la t2, nes_cold_moddata         ; the module's data in the cold slot: 256 bytes, 64 words
+    daddiu a0, t2, 256
+nes_place_moddata:
+    lw a1, 0(t2)
+    daddiu t2, t2, 4
+    sw a1, #NES_U_PPUTABLE(t0)      ; (t0 - #NES_U_PPUTABLE + offset: the window's own addressing above)
+    bne t2, a0, nes_place_moddata
+    daddiu t0, t0, 4
     jr v1
     nop
 nes_place_next:

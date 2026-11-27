@@ -231,11 +231,13 @@ def check_mapper_slot(symbols, image, slot_bytes, cold_bytes):
     for offset, label in enumerate(COLD_ENTRIES):
         if sym.get(label) != cold + 8 * offset:
             raise RuntimeError(f"the cold slot's entry {label} is not at cold slot + {8 * offset}")
+    if sym.get("nes_cold_moddata") != cold + 48:
+        raise RuntimeError("the cold slot's module data (nes_cold_moddata) is not at cold slot + 48")
     # a module's data in its parts (tables) is not decoded: the span from a label <name>_data to <name>_data_end, and
     # the cold slot's register table (nes_cold_maptable, 8 words)
     data = [(sym[k], sym[k + "_end"]) for k in sym if k.endswith("_data") and k + "_end" in sym
             and (slot <= sym[k] < end or cold <= sym[k] < cold_end)]
-    data.append((sym["nes_cold_maptable"], sym["nes_cold_maptable"] + 32))
+    data.append((sym["nes_cold_maptable"], sym["nes_cold_maptable"] + 32 + 256))   # the table and the module data
     for pc in [*range(slot, fill, 4), *range(cold, cold_fill, 4)]:
         if any(lo <= pc < hi for lo, hi in data):
             continue
