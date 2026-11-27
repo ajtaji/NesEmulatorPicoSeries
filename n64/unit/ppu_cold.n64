@@ -625,7 +625,7 @@ nes_ppu_read_buffer:
 ; core and the reference scheduler; the guest digests (an NMI at another instruction changes them).
 
 ; ppu_adv_vblank_set: line 241 dot 1 reached in u_ppuadvance (t1 = PpuStatus, t0 = PpuCtrl, s4 = @PpuLine, s0 = the
-; dots still to advance past the set, 72(sp) = the stamp the advance ends at; t2, t3 free). Back to ppu_adv_next.
+; dots still to advance past the set, NesPpuTo = the stamp the advance ends at; t2, t3 free). Back to ppu_adv_next.
 ; WHAT: unless a $2002 read one dot before suppressed it (NesVblSuppress, cleared here: used once), the flag is set
 ; and, with NMI on, the edge counted (WorkerNmi + 1) with NesNmiAt, the cycle it is detected in.
 ; HOW: the set dot S is reached with s0 dots of the advance left, so the stamp's read point is S + s0 and cycle c's is
@@ -661,7 +661,8 @@ ppu_adv_vblank_set:
     multu t1, t2
     mfhi t1
     srl t1, t1, 1                   ; (s0 + 1) / 3
-    ld t0, 72(sp)                   ; the stamp
+    la t0, global_nespputo
+    ld t0, 0(t0)                    ; the stamp (NesPpuTo, set by u_workeradvance)
     dsubu t1, t0, t1                ; the cycle the edge is detected in
 ppu_vbl_at:
     la t0, global_nesnmiat
@@ -802,6 +803,9 @@ nmidue_never:
     dsrl t1, t1, 1                  ; the largest cycle
 nmidue_store:
     la t0, global_nesnmidue
+    sd t1, 0(t0)
+    daddiu t1, t1, -514             ; NesNmiCapAt: the window cap's quick test (unit/window.n64)
+    la t0, global_nesnmicapat
     jr ra
     sd t1, 0(t0)
   EndASM

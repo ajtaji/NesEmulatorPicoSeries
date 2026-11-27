@@ -50,6 +50,10 @@ Global NesStatusHorizon.i = -1, NesCpuHorizon.i = -1
 ; instruction's penultimate cycle), predicted before the edge while NMI is on, else the largest cycle; NesVblSuppress =
 ; a $2002 read one dot before the set: this frame's flag and NMI are not made.
 Global NesNmiAt.i, NesNmiDue.i = $7FFFFFFFFFFFFFFF, NesVblSuppress.i
+; NesNmiCapAt = NesNmiDue - 514 (the largest stall, 513 + 1): the unit's window cap reads it to decide in four
+; instructions that no window can reach the due (unit/window.n64). NesPpuTo = the CPU cycle the unit's PPU advance
+; runs to (set by u_workeradvance, its only caller in the unit; read at the vblank set for NesNmiAt).
+Global NesNmiCapAt.i = $7FFFFFFFFFFFFDFD, NesPpuTo.i
 CompilerIf #NES_DMC_RASTER_DEADLINE
   Global NesPpuLimit.i=-1
 CompilerEndIf

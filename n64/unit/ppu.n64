@@ -91,10 +91,6 @@ ppu_adv_save:
     sd s5, 48(sp)
     sd s6, 56(sp)
     sd s7, 64(sp)
-    la t0, global_ppuclock
-    ld t0, 0(t0)
-    daddu t0, t0, a0
-    sd t0, 72(sp)                   ; the stamp advanced to (PpuClock + cycles): the NMI edge's cycle is from it
     la t0, global_cartpal
     ld t0, 0(t0)
     bnez t0, ppu_adv_fraction       ; PAL: 3.2 dots a cycle (cold part)
@@ -461,10 +457,8 @@ ppu_adv_blank_edge:
     bne s5, t0, ppu_adv_blank_scroll
     addiu t0, zero, 241
     ld t1, global_ppustatus-global_ppuline(s4)
-    bne s1, t0, ppu_adv_pre_clear
+    beq s1, t0, ppu_adv_vblank_set  ; line 241 dot 1: vblank, its NMI edge, the suppression (cold part, N.77)
     ld t0, global_ppuctrl-global_ppuline(s4)
-    j ppu_adv_vblank_set            ; line 241 dot 1: vblank, its NMI edge, the suppression (cold part, N.77)
-    nop
 ppu_adv_pre_clear:
     andi t1, t1, 31                 ; pre-render dot 1: vblank, sprite 0, overflow cleared
     b ppu_adv_next
@@ -870,8 +864,7 @@ u_ppuregread:
     jr ra
     ld a0, 0(a2)
 nes_ppu_read_status:
-    la t1, global_ppuline
-    ld t1, 0(t1)
+    ld t1, global_ppuline-global_ppubus(a2)
     addiu t1, t1, -241
     beqz t1, ppu_read_status_vbl    ; line 241: a read around the set (R4, cold part, N.77)
     ld t0, global_ppustatus-global_ppubus(a2)

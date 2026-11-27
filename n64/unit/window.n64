@@ -85,28 +85,21 @@ nes_mmc3_wait_none:
   ; WHAT: a0 = Min(a0, NesNmiDue - (CpuCycles + NesStall)), at least 1: the window (which opens after the stall) ends
   ; at the first instruction boundary at or after NesNmiDue, where the NMI is taken (the edge detected by the end of
   ; that instruction's penultimate cycle, R5). WHY HERE: every module's budget goes through it (the run loop and the
-  ; in-place window end), so no module carries the NMI rule. A leaf; clobbers t0, t1, a7 (both callers reload the core's registers after the budget: c65_in);
-  ; keeps a1-a6. NesNmiDue is read at its offset from CpuCycles (both nes.n64 globals).
+  ; in-place window end), so no module carries the NMI rule. HOW: the hot test reads NesNmiCapAt = NesNmiDue - 514
+  ; (514 > any stall, 513 + 1): while NesNmiCapAt - CpuCycles >= a0 no window of a0 cycles after any stall reaches the
+  ; due, and the budget is kept; else the exact cap (nmicap_near, unit/cold.n64) with NesStall. A leaf; clobbers t0, t1,
+  ; a7 (both callers reload the core's registers after the budget: c65_in); keeps a1-a6. The two globals are read at
+  ; their offsets from CpuCycles (nes.n64's, a few KB apart).
   ; THE PLAIN TWIN: d = NesNmiDue - CpuCycles - NesStall : If d < n : n = d : If n < 1 : n = 1 : EndIf : EndIf
   ASM
 u_nmicap:
     la t0, global_cpucycles
     ld t1, 0(t0)
-    ld a7, global_nesstall-global_cpucycles(t0)
-    ld t0, global_nesnmidue-global_cpucycles(t0)
-    daddu t1, t1, a7                ; the window's start
-    dsubu t0, t0, t1                ; the cycles to the due (the largest cycle: never below a0)
+    ld t0, global_nesnmicapat-global_cpucycles(t0)
+    dsubu t0, t0, t1                ; the cycles to the due, less 514 (never below a0 when no NMI is near)
     slt t1, t0, a0
-    beqz t1, nmicap_done
+    bnez t1, nmicap_near            ; near the due: the exact cap (cold)
     nop
-    blez t0, nmicap_one
-    nop
-    jr ra
-    move a0, t0
-nmicap_one:
-    jr ra
-    addiu a0, zero, 1
-nmicap_done:
     jr ra
     nop
   EndASM

@@ -232,6 +232,31 @@ nes_mmc3_wait_miss:
     daddiu sp, sp, 48
   EndASM
 
+; ---- nmicap_near: u_nmicap's exact cap, the due within a window and a stall (design note N.77) ----
+; a0 = Min(a0, NesNmiDue - CpuCycles - NesStall), at least 1. Clobbers t0, t1, a7; returns to u_nmicap's caller.
+  ASM
+nmicap_near:
+    la t0, global_cpucycles
+    ld t1, 0(t0)
+    ld a7, global_nesstall-global_cpucycles(t0)
+    ld t0, global_nesnmidue-global_cpucycles(t0)
+    daddu t1, t1, a7                ; the window's start (after the stall)
+    dsubu t0, t0, t1                ; the cycles to the due
+    slt t1, t0, a0
+    beqz t1, nmicap_keep
+    nop
+    blez t0, nmicap_one
+    nop
+    jr ra
+    move a0, t0
+nmicap_one:
+    jr ra
+    addiu a0, zero, 1
+nmicap_keep:
+    jr ra
+    nop
+  EndASM
+
 ; ---- mmc3_sign_coalesce: whole periods of like idle windows skipped (C3, design note N.46) ----
 ; WHAT: u_nesmmc3signwait, about to commit a full (128-cycle) window of an `LDA zp / Bxx` wait, first skips every
 ; whole period of the window pattern that would follow it unchanged: NesRamWaitPeriods' row for the loop's
