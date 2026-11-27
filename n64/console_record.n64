@@ -287,184 +287,1198 @@ Procedure NesRecOpen()
   LpmDebugPrint("NES RECORD: flash cart SDRAM $0" + Hex(#NES_REC - $B0000000) + ", power-on " + Str(boots) + ", slot " + Str(slot))
 EndProcedure
 
-; The summary out: every word that changed since it last went out, a PI write each.
-Procedure NesRecPutAll()
-  Protected k.i, v.i
-  For k = 1 To #NES_REC_WORDS - 1
-    v = NesRecW(k) & $FFFFFFFF
-    If v <> NesRecShadow(k) : LpmDebugIoWrite(NesRecBase + k * 4, v) : NesRecShadow(k) = v : EndIf
-  Next
+; ======================================================================================================================
+; THE PER-FRAME RECORD IN ASSEMBLY (design note N.67, 2026-11-27). Every routine below that runs while the game runs -
+; NesRecFrame, NesRecEventCheck, NesRecChanges, NesRecEvent, NesRecFlush, NesRecPutAll, NesRecPicture, NesRecStop - is
+; hand-written VR4300 assembly; each one's PLAIN TWIN, the compiled procedure it replaces, is kept word for word in its
+; header, and the twin is what it was checked against: a record cart run decoded the same figures with this code as
+; with the twin (the proof in the note). Only the start-up (NesRecScCmd, NesRecScEnable, NesRecOpen) and the refusal at
+; start (NesRecRefused) stay compiled: they run once, before the guest's first instruction or instead of it.
+;
+; WHY ASSEMBLY (the owner's order: everything of the emulator in assembly but the menu and the settings) AND WHAT IT
+; SAVED (measured, the record cart's SMB3 replay, 5,220 guest frames, cycles a guest frame): the compiled NesRecChanges
+; spent 23,490 on 64 x 8 doubleword folds through a loop that re-loaded the array addresses and the counters every
+; step; the fold here is 5 instructions a doubleword, unrolled per 64-byte block, its loads issued two instructions
+; ahead of their use (the VR4300 stalls a cycle on a load's result used by the next instruction): 19,509 - of which
+; ~2,800 are instructions and the rest the name tables' D-misses (the band close's copy writes Nt back and
+; invalidates it every band, so almost none of its 256 lines is cached when the fold reads them: the cost is the
+; memory's, and goes when Nt stays cached). NesRecFrame / NesRecEventCheck / NesRecPicture / NesRecPutAll + Flush:
+; 3,081 / 2,453 / 525 / 312 -> 2,836 / 2,315 / 335 / 271, also mostly misses (the summary's and the parts' lines).
+; All the record's routines: 37,835 -> 33,182 (-4,653, -0.05 ms a frame).
+;
+; THE CONVENTION (Help/VR4300.txt): arguments in a0-a7, the result in a0; s0-s7, fp, sp, gp kept by the callee; all
+; else may change. Every routine here keeps that convention, so compiled callers (nes.n64's NesHostGuestFrame, show.n64's
+; NesShowFrameEnd, RunGame's stop) call them unchanged. Globals are 64-bit (.i: ld / sd); the summary words W(k) at
+; global_nesrecw + 8k. A 32-bit value handed to the flash cart is the low word of a 64-bit one: `lwu r, 4(p)` (the
+; VR4300 is big-endian: a doubleword's low word is its second) - the same value as the twin's `v & $FFFFFFFF`.
+; LpmDebugIoWrite(address, value) is the library's one PI write (it waits for the PI); it may change every register a
+; compiled call may, so whatever lives across one is in s0-s7.
+; ======================================================================================================================
+
+; Byte offsets of the summary's words (#R_), the event's (#E_) and the parts (#T_) in their 64-bit arrays, for the
+; assembly's displacements (the assembler adds a constant to a displacement, it does not multiply one): #X_B = #X x 8.
+#E_BANKS_B = #E_BANKS * 8
+#E_FLAGS_B = #E_FLAGS * 8
+#E_FRAME_B = #E_FRAME * 8
+#E_MORE_B = #E_MORE * 8
+#E_NAPU_B = #E_NAPU * 8
+#E_NBUS_B = #E_NBUS * 8
+#E_NSPLIT_B = #E_NSPLIT * 8
+#E_NT_B = #E_NT * 8
+#E_PERIOD_B = #E_PERIOD * 8
+#E_SOUND_B = #E_SOUND * 8
+#E_TAPU_B = #E_TAPU * 8
+#E_TBAND_B = #E_TBAND * 8
+#E_TFB_B = #E_TFB * 8
+#E_TLIST_B = #E_TLIST * 8
+#E_TREST_B = #E_TREST * 8
+#E_TSHOW_B = #E_TSHOW * 8
+#E_TSYN_B = #E_TSYN * 8
+#E_WORK_B = #E_WORK * 8
+#NES_REC_EVENT_WORDS_B = #NES_REC_EVENT_WORDS * 8
+#R_BANDMAX_B = #R_BANDMAX * 8
+#R_BANDS_B = #R_BANDS * 8
+#R_CODE_B = #R_CODE * 8
+#R_DPC_B = #R_DPC * 8
+#R_DRAINS_B = #R_DRAINS * 8
+#R_DROPPED_B = #R_DROPPED * 8
+#R_ENTRIES_B = #R_ENTRIES * 8
+#R_EVENTS_B = #R_EVENTS * 8
+#R_FBLINES_B = #R_FBLINES * 8
+#R_FBMOST_B = #R_FBMOST * 8
+#R_FRAMES_B = #R_FRAMES * 8
+#R_HASHES_B = #R_HASHES * 8
+#R_HASHSTOP_B = #R_HASHSTOP * 8
+#R_HELD_B = #R_HELD * 8
+#R_LOST_B = #R_LOST * 8
+#R_MEASURED_B = #R_MEASURED * 8
+#R_NOTSOUND_B = #R_NOTSOUND * 8
+#R_NOTWORDS_B = #R_NOTWORDS * 8
+#R_OVER_B = #R_OVER * 8
+#R_PADS_B = #R_PADS * 8
+#R_PC_B = #R_PC * 8
+#R_PHIST_B = #R_PHIST * 8
+#R_PIPEMAX_B = #R_PIPEMAX * 8
+#R_PMAX_B = #R_PMAX * 8
+#R_PMAXF_B = #R_PMAXF * 8
+#R_PSUM_B = #R_PSUM * 8
+#R_RSPMAX_B = #R_RSPMAX * 8
+#R_RSPSUM_B = #R_RSPSUM * 8
+#R_SHOWN_B = #R_SHOWN * 8
+#R_SLEEP_B = #R_SLEEP * 8
+#R_SPLIT_B = #R_SPLIT * 8
+#R_STARVE_B = #R_STARVE * 8
+#R_STARVELAST_B = #R_STARVELAST * 8
+#R_STATE_B = #R_STATE * 8
+#R_SYNCLK_B = #R_SYNCLK * 8
+#R_SYNDONE_B = #R_SYNDONE * 8
+#R_SYNJOBS_B = #R_SYNJOBS * 8
+#R_SYNROOMS_B = #R_SYNROOMS * 8
+#R_T_B = #R_T * 8
+#R_UPDATES_B = #R_UPDATES * 8
+#R_WAITS_B = #R_WAITS * 8
+#R_WHIST_B = #R_WHIST * 8
+#R_WMAX_B = #R_WMAX * 8
+#R_WMAXF_B = #R_WMAXF * 8
+#R_WORKER_B = #R_WORKER * 8
+#R_WSUM_B = #R_WSUM * 8
+#T_APU_B = #T_APU * 8
+#T_BAND_B = #T_BAND * 8
+#T_FB_B = #T_FB * 8
+#T_LIST_B = #T_LIST * 8
+#T_N2007_B = #T_N2007 * 8
+#T_NAPU_B = #T_NAPU * 8
+#T_NAPUSEG_B = #T_NAPUSEG * 8
+#T_NDMC_B = #T_NDMC * 8
+#T_SHOW_B = #T_SHOW * 8
+#T_SYN_B = #T_SYN * 8
+
+; The numbers the assembly writes as immediates (lui / ori pairs: the assembler takes a constant, not an expression of
+; one, in those): a change here must be made there too, so the build refuses until it is.
+CompilerIf #NES_REC_EVENTS <> $11000 Or #NES_REC_HASHES <> $1A000 Or #NES_REC_SLOW <> 779970 Or #NES_REC_MS <> 46875
+  CompilerError "console_record.n64: the assembly writes #NES_REC_EVENTS, #NES_REC_HASHES, #NES_REC_SLOW and #NES_REC_MS as numbers"
+CompilerEndIf
+
+; ---- NesRecPutAll: the summary out - every word k (1 .. #NES_REC_WORDS - 1) whose low 32 bits differ from the copy
+; last written goes to the flash cart (a PI write) and into the copy. Every 60 guest frames (NesRecFlush) and at a
+; refusal. IN: nothing. OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   For k = 1 To #NES_REC_WORDS - 1
+;     v = NesRecW(k) & $FFFFFFFF
+;     If v <> NesRecShadow(k) : LpmDebugIoWrite(NesRecBase + k * 4, v) : NesRecShadow(k) = v : EndIf
+;   Next
+ProcedureNaked NesRecPutAll()
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    la s0, global_nesrecw           ; s0 -> W(k) (k = 0 here; stepped first)
+    la s1, global_nesrecshadow      ; s1 -> the copy last written
+    la t0, global_nesrecbase
+    ld s2, 0(t0)                    ; s2 = the flash cart address of word k (NesRecBase + 4k)
+    addiu s3, zero, #NES_REC_WORDS-1  ; s3 = words left
+nes_rec_put_next:
+    daddiu s0, s0, 8
+    daddiu s1, s1, 8
+    lwu a1, 4(s0)                   ; v = W(k)'s low 32 bits, zero-extended
+    ld t0, 0(s1)
+    beq a1, t0, nes_rec_put_same    ; unchanged since it last went out: no write
+    daddiu s2, s2, 4                ; (delay slot) word k's address
+    sd a1, 0(s1)                    ; the copy is v (before the call clobbers a1)
+    jal lpmdebugiowrite             ; LpmDebugIoWrite(NesRecBase + 4k, v)
+    move a0, s2
+nes_rec_put_same:
+    addiu s3, s3, -1
+    bnez s3, nes_rec_put_next
+    nop
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
 EndProcedure
 
-Procedure NesRecSplit(k.i, v.i)          ; a 64-bit count into words k (low) and k + 1 (high)
-  NesRecW(k) = v & $FFFFFFFF : NesRecW(k + 1) = (v >> 32) & $FFFFFFFF
-EndProcedure
-
-; The counts the game keeps itself, copied into the summary; the window's series entry; the summary out.
-Procedure NesRecFlush(frame.i, entry.i)
-  Protected a.i, k.i, n.i, x.i
-  NesRecW(#R_FRAMES) = frame
-  NesRecW(#R_SHOWN) = NesShowStat(0) : NesRecW(#R_NOTWORDS) = NesShowStat(1) : NesRecW(#R_NOTSOUND) = NesShowStat(14)
-  NesRecW(#R_OVER) = NesShowStat(2)
-  NesRecW(#R_STARVE) = HostAiStarvations : NesRecW(#R_STARVELAST) = HostAiLastStarvation : NesRecW(#R_DROPPED) = HostAudioDropped
-  NesRecSplit(#R_PSUM, NesRecPSum) : NesRecSplit(#R_WSUM, NesRecWSum)
-  NesRecSplit(#R_RSPSUM, NesShowStat(12)) : NesRecW(#R_RSPMAX) = NesShowStat(13)
-  For k = 0 To 3 : NesRecSplit(#R_DPC + 2 * k, NesRecDpcSum(k)) : Next
-  NesRecW(#R_WAITS) = NesShowStat(3) : NesRecW(#R_DRAINS) = NesShowStat(4) : NesRecW(#R_FBLINES) = NesShowStat(5)
-  NesRecW(#R_FBMOST) = NesShowStat(6) : NesRecW(#R_SPLIT) = NesShowStat(7) : NesRecW(#R_LOST) = NesShowStat(8)
-  NesRecW(#R_BANDS) = NesShowStat(10) : NesRecW(#R_BANDMAX) = NesShowStat(11)
-  NesRecSplit(#R_SLEEP, NesRecWait)
-  For k = 0 To #NES_REC_T - 1 : NesRecSplit(#R_T + 2 * k, NesRecT(k)) : Next
+; ---- NesRecFlush(frame, entry): the counts the game keeps itself copied into the summary, the window's series entry
+; (entry <> 0: the 60-frame window's 4 words, then the window's baselines moved on), the summary out (NesRecPutAll).
+; Every 60 guest frames (NesRecFrame) and at a stop (NesRecStop, entry 0). A 64-bit count goes into two words k, k + 1
+; as its low and high 32 bits (the twin's NesRecSplit: v & $FFFFFFFF, (v >> 32) & $FFFFFFFF - here dsll32 / dsrl32
+; for the low half, dsrl32 for the high: a logical shift right by 32 is the arithmetic one masked to 32 bits).
+; IN: a0 = frame, a1 = entry. OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   NesRecW(#R_FRAMES) = frame
+;   NesRecW(#R_SHOWN) = NesShowStat(0) : NesRecW(#R_NOTWORDS) = NesShowStat(1) : NesRecW(#R_NOTSOUND) = NesShowStat(14)
+;   NesRecW(#R_OVER) = NesShowStat(2)
+;   NesRecW(#R_STARVE) = HostAiStarvations : NesRecW(#R_STARVELAST) = HostAiLastStarvation : NesRecW(#R_DROPPED) = HostAudioDropped
+;   NesRecSplit(#R_PSUM, NesRecPSum) : NesRecSplit(#R_WSUM, NesRecWSum)
+;   NesRecSplit(#R_RSPSUM, NesShowStat(12)) : NesRecW(#R_RSPMAX) = NesShowStat(13)
+;   For k = 0 To 3 : NesRecSplit(#R_DPC + 2 * k, NesRecDpcSum(k)) : Next
+;   NesRecW(#R_WAITS) = NesShowStat(3) : NesRecW(#R_DRAINS) = NesShowStat(4) : NesRecW(#R_FBLINES) = NesShowStat(5)
+;   NesRecW(#R_FBMOST) = NesShowStat(6) : NesRecW(#R_SPLIT) = NesShowStat(7) : NesRecW(#R_LOST) = NesShowStat(8)
+;   NesRecW(#R_BANDS) = NesShowStat(10) : NesRecW(#R_BANDMAX) = NesShowStat(11)
+;   NesRecSplit(#R_SLEEP, NesRecWait)
+;   For k = 0 To #NES_REC_T - 1 : NesRecSplit(#R_T + 2 * k, NesRecT(k)) : Next
+;   CompilerIf #NES_RSP_SYN
+;     NesRecSplit(#R_SYNCLK, NesSynClocks) : NesRecW(#R_SYNJOBS) = NesSynJobs : NesRecW(#R_SYNROOMS) = NesSynRooms
+;     NesRecW(#R_SYNDONE) = NesSynDone
+;   CompilerEndIf
+;   If entry And NesRecW(#R_ENTRIES) < #NES_REC_SERIES_MAX
+;     a = NesRecBase + #NES_REC_SERIES + NesRecW(#R_ENTRIES) * 16
+;     n = NesShowStat(0) - NesRecShownSeen : If n > 255 : n = 255 : EndIf
+;     x = n
+;     n = NesShowStat(1) + NesShowStat(14) - NesRecNotSeen : If n > 255 : n = 255 : EndIf
+;     x = x | (n << 8)
+;     n = HostAiStarvations - NesRecStarveSeen : If n > 255 : n = 255 : EndIf
+;     x = x | (n << 16) | ((NesRecWinHeld & 255) << 24)
+;     LpmDebugIoWrite(a, x)
+;     LpmDebugIoWrite(a + 4, NesRecWinP)
+;     LpmDebugIoWrite(a + 8, NesRecWinW)
+;     LpmDebugIoWrite(a + 12, (NesShowStat(12) - NesRecRspSeen) & $FFFFFFFF)
+;     NesRecW(#R_ENTRIES) + 1
+;   EndIf
+;   If entry
+;     NesRecShownSeen = NesShowStat(0) : NesRecNotSeen = NesShowStat(1) + NesShowStat(14)
+;     NesRecStarveSeen = HostAiStarvations : NesRecRspSeen = NesShowStat(12)
+;     NesRecWinP = 0 : NesRecWinW = 0 : NesRecWinHeld = 0
+;   EndIf
+;   NesRecW(#R_UPDATES) + 1
+;   NesRecPutAll()
+ProcedureNaked NesRecFlush(frame.i, entry.i)
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    move s3, a1                     ; s3 = entry
+    la s0, global_nesrecw           ; s0 = W(0)
+    la s1, global_nesshowstat       ; s1 = NesShowStat(0)
+    sd a0, #R_FRAMES_B(s0)
+    ld t0, 0(s1)                    ; the show's counts, as they stand
+    ld t1, 8(s1)
+    ld t2, 112(s1)
+    ld t3, 16(s1)
+    sd t0, #R_SHOWN_B(s0)
+    sd t1, #R_NOTWORDS_B(s0)
+    sd t2, #R_NOTSOUND_B(s0)
+    sd t3, #R_OVER_B(s0)
+    la t0, global_hostaistarvations
+    ld t0, 0(t0)
+    la t1, global_hostailaststarvation
+    ld t1, 0(t1)
+    la t2, global_hostaudiodropped
+    ld t2, 0(t2)
+    sd t0, #R_STARVE_B(s0)
+    sd t1, #R_STARVELAST_B(s0)
+    sd t2, #R_DROPPED_B(s0)
+    la t0, global_nesrecpsum
+    ld t0, 0(t0)
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0                ; the period's sum: low 32 bits ...
+    dsrl32 t0, t0, 0                ; ... and high
+    sd t1, #R_PSUM_B(s0)
+    sd t0, #R_PSUM_B+8(s0)
+    la t0, global_nesrecwsum
+    ld t0, 0(t0)
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, #R_WSUM_B(s0)
+    sd t0, #R_WSUM_B+8(s0)
+    ld t0, 96(s1)                   ; NesShowStat(12): the RSP's clocks
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, #R_RSPSUM_B(s0)
+    sd t0, #R_RSPSUM_B+8(s0)
+    ld t0, 104(s1)                  ; NesShowStat(13): their most in a frame
+    sd t0, #R_RSPMAX_B(s0)
+    la t2, global_nesrecdpcsum      ; the RDP's four sums, two words each
+    daddiu t3, s0, #R_DPC_B
+    addiu a2, zero, 4
+nes_rec_flush_dpc:
+    ld t0, 0(t2)
+    daddiu t2, t2, 8
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, 0(t3)
+    sd t0, 8(t3)
+    addiu a2, a2, -1
+    bnez a2, nes_rec_flush_dpc
+    daddiu t3, t3, 16
+    ld t0, 24(s1)                   ; the show's waits .. the most a band's close took
+    ld t1, 32(s1)
+    ld t2, 40(s1)
+    ld t3, 48(s1)
+    sd t0, #R_WAITS_B(s0)
+    sd t1, #R_DRAINS_B(s0)
+    sd t2, #R_FBLINES_B(s0)
+    sd t3, #R_FBMOST_B(s0)
+    ld t0, 56(s1)
+    ld t1, 64(s1)
+    ld t2, 80(s1)
+    ld t3, 88(s1)
+    sd t0, #R_SPLIT_B(s0)
+    sd t1, #R_LOST_B(s0)
+    sd t2, #R_BANDS_B(s0)
+    sd t3, #R_BANDMAX_B(s0)
+    la t0, global_nesrecwait
+    ld t0, 0(t0)
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, #R_SLEEP_B(s0)
+    sd t0, #R_SLEEP_B+8(s0)
+    la t2, global_nesrect           ; the work split's parts, two words each
+    daddiu t3, s0, #R_T_B
+    addiu a2, zero, #NES_REC_T
+nes_rec_flush_t:
+    ld t0, 0(t2)
+    daddiu t2, t2, 8
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, 0(t3)
+    sd t0, 8(t3)
+    addiu a2, a2, -1
+    bnez a2, nes_rec_flush_t
+    daddiu t3, t3, 16
+  EndASM
   CompilerIf #NES_RSP_SYN
-    NesRecSplit(#R_SYNCLK, NesSynClocks) : NesRecW(#R_SYNJOBS) = NesSynJobs : NesRecW(#R_SYNROOMS) = NesSynRooms
-    NesRecW(#R_SYNDONE) = NesSynDone
+    ASM
+    la t0, global_nessynclocks
+    ld t0, 0(t0)
+    dsll32 t1, t0, 0
+    dsrl32 t1, t1, 0
+    dsrl32 t0, t0, 0
+    sd t1, #R_SYNCLK_B(s0)
+    sd t0, #R_SYNCLK_B+8(s0)
+    la t0, global_nessynjobs
+    ld t0, 0(t0)
+    la t1, global_nessynrooms
+    ld t1, 0(t1)
+    la t2, global_nessyndone
+    ld t2, 0(t2)
+    sd t0, #R_SYNJOBS_B(s0)
+    sd t1, #R_SYNROOMS_B(s0)
+    sd t2, #R_SYNDONE_B(s0)
+    EndASM
   CompilerEndIf
-  If entry And NesRecW(#R_ENTRIES) < #NES_REC_SERIES_MAX
-    a = NesRecBase + #NES_REC_SERIES + NesRecW(#R_ENTRIES) * 16
-    n = NesShowStat(0) - NesRecShownSeen : If n > 255 : n = 255 : EndIf
-    x = n
-    n = NesShowStat(1) + NesShowStat(14) - NesRecNotSeen : If n > 255 : n = 255 : EndIf
-    x = x | (n << 8)
-    n = HostAiStarvations - NesRecStarveSeen : If n > 255 : n = 255 : EndIf
-    x = x | (n << 16) | ((NesRecWinHeld & 255) << 24)
-    LpmDebugIoWrite(a, x)
-    LpmDebugIoWrite(a + 4, NesRecWinP)
-    LpmDebugIoWrite(a + 8, NesRecWinW)
-    LpmDebugIoWrite(a + 12, (NesShowStat(12) - NesRecRspSeen) & $FFFFFFFF)
-    NesRecW(#R_ENTRIES) + 1
-  EndIf
-  If entry
-    NesRecShownSeen = NesShowStat(0) : NesRecNotSeen = NesShowStat(1) + NesShowStat(14)
-    NesRecStarveSeen = HostAiStarvations : NesRecRspSeen = NesShowStat(12)
-    NesRecWinP = 0 : NesRecWinW = 0 : NesRecWinHeld = 0
-  EndIf
-  NesRecW(#R_UPDATES) + 1
-  NesRecPutAll()
+  ASM
+    beqz s3, nes_rec_flush_put      ; a stop's flush: no series entry, the window left as it is
+    nop
+    ld t0, #R_ENTRIES_B(s0)
+    slti t1, t0, #NES_REC_SERIES_MAX
+    beqz t1, nes_rec_flush_seen     ; the series is full (68 minutes): only the baselines move
+    nop
+    la t1, global_nesrecbase        ; s2 = a = NesRecBase + #NES_REC_SERIES + entries x 16
+    ld s2, 0(t1)
+    dsll t0, t0, 4
+    daddu s2, s2, t0
+    daddiu s2, s2, #NES_REC_SERIES
+    ld t0, 0(s1)                    ; n0 = pictures shown in the window, at most 255
+    la t1, global_nesrecshownseen
+    ld t1, 0(t1)
+    dsubu t0, t0, t1
+    slti t1, t0, 256
+    bnez t1, nes_rec_flush_n1
+    nop
+    addiu t0, zero, 255
+nes_rec_flush_n1:
+    ld t1, 8(s1)                    ; n1 = not shown (words + sound) in the window, at most 255
+    ld t2, 112(s1)
+    daddu t1, t1, t2
+    la t2, global_nesrecnotseen
+    ld t2, 0(t2)
+    dsubu t1, t1, t2
+    slti t2, t1, 256
+    bnez t2, nes_rec_flush_n2
+    nop
+    addiu t1, zero, 255
+nes_rec_flush_n2:
+    dsll t1, t1, 8
+    or t0, t0, t1                   ; x = n0 | n1 << 8
+    la t1, global_hostaistarvations ; n2 = underruns in the window, at most 255
+    ld t1, 0(t1)
+    la t2, global_nesrecstarveseen
+    ld t2, 0(t2)
+    dsubu t1, t1, t2
+    slti t2, t1, 256
+    bnez t2, nes_rec_flush_n3
+    nop
+    addiu t1, zero, 255
+nes_rec_flush_n3:
+    dsll t1, t1, 16
+    or t0, t0, t1                   ; | n2 << 16
+    la t1, global_nesrecwinheld
+    ld t1, 0(t1)
+    andi t1, t1, 255
+    dsll t1, t1, 24
+    or a1, t0, t1                   ; | (held & 255) << 24
+    jal lpmdebugiowrite             ; the entry's word 0
+    move a0, s2
+    la t0, global_nesrecwinp
+    ld a1, 0(t0)
+    jal lpmdebugiowrite             ; word 1: the window's worst period
+    daddiu a0, s2, 4
+    la t0, global_nesrecwinw
+    ld a1, 0(t0)
+    jal lpmdebugiowrite             ; word 2: the window's worst work
+    daddiu a0, s2, 8
+    ld a1, 96(s1)                   ; word 3: the RSP's clocks in the window, 32 bits
+    la t0, global_nesrecrspseen
+    ld t0, 0(t0)
+    dsubu a1, a1, t0
+    dsll32 a1, a1, 0
+    dsrl32 a1, a1, 0
+    jal lpmdebugiowrite
+    daddiu a0, s2, 12
+    ld t0, #R_ENTRIES_B(s0)
+    daddiu t0, t0, 1
+    sd t0, #R_ENTRIES_B(s0)
+nes_rec_flush_seen:
+    ld t0, 0(s1)                    ; the window's baselines moved on
+    la t1, global_nesrecshownseen
+    sd t0, 0(t1)
+    ld t0, 8(s1)
+    ld t1, 112(s1)
+    daddu t0, t0, t1
+    la t1, global_nesrecnotseen
+    sd t0, 0(t1)
+    la t0, global_hostaistarvations
+    ld t0, 0(t0)
+    la t1, global_nesrecstarveseen
+    sd t0, 0(t1)
+    ld t0, 96(s1)
+    la t1, global_nesrecrspseen
+    sd t0, 0(t1)
+    la t1, global_nesrecwinp
+    sd zero, 0(t1)
+    la t1, global_nesrecwinw
+    sd zero, 0(t1)
+    la t1, global_nesrecwinheld
+    sd zero, 0(t1)
+nes_rec_flush_put:
+    ld t0, #R_UPDATES_B(s0)
+    daddiu t0, t0, 1
+    jal nesrecputall                ; the summary out
+    sd t0, #R_UPDATES_B(s0)         ; (delay slot) one update more
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
 EndProcedure
 
-; What the game changed since the frame before, from state the port keeps anyway (no counter in the hot unit):
-; the eight 1 KB CHR slots and the four PRG slots (MapChrSlots / MapPrgSlots: a bank switch), the 32 palette bytes,
-; and the name tables as 64 blocks of 64 bytes, each folded to one word (rotate-xor of its 8 doublewords) and
-; compared with the frame before's fold - a screen being redrawn (a world entered, a map shown) changes many blocks,
-; a scrolling playfield a few. OUT: chr | prg << 8 | pal << 16 | nt << 24 (each 8 bits), the baselines moved on.
-; Its cost: ~600 loads a frame, compiled code at the frame's wrap.
-Procedure.i NesRecChanges()
-  Protected k.i, j.i, x.i, v.i, nchr.i, nprg.i, npal.i, blocks.i, a.i
-  For k = 0 To 7
-    If MapChrSlots(k) <> NesRecChrLast(k) : nchr + 1 : NesRecChrLast(k) = MapChrSlots(k) : EndIf
-  Next
-  For k = 0 To 3
-    If MapPrgSlots(k) <> NesRecPrgLast(k) : nprg + 1 : NesRecPrgLast(k) = MapPrgSlots(k) : EndIf
-  Next
-  For k = 0 To 31
-    If Pal(k) <> NesRecPalLast(k) : npal + 1 : NesRecPalLast(k) = Pal(k) : EndIf
-  Next
-  a = @Nt(0)
-  For k = 0 To 63
-    x = 0
-    For j = 0 To 7
-      v = PeekQ(a) : a + 8
-      x = ((x << 7) | ((x >> 57) & $7F)) ! v
-    Next
-    If x <> NesRecNtSig(k) : blocks + 1 : NesRecNtSig(k) = x : EndIf
-  Next
-  ProcedureReturn nchr | (nprg << 8) | (npal << 16) | (blocks << 24)
+; ---- NesRecChanges: what the game changed since the frame before, from state the port keeps anyway (no counter in the
+; hot unit): the eight 1 KB CHR slots and the four PRG slots (MapChrSlots / MapPrgSlots: a bank switch), the 32
+; palette bytes, and the name tables as 64 blocks of 64 bytes, each folded to one word and compared with the frame
+; before's fold - a screen being redrawn (a world entered, a map shown) changes many blocks, a scrolling playfield a
+; few. Every baseline that differs is moved on.
+; THE FOLD of a block (its doublewords v0 .. v7): x = 0, then for each v: x = (x rotated left 7) xor v. A rotate of 0
+; is 0, so the first step is x = v0; each step after it is dsll 7 / dsrl32 25 (the 7 bits shifted out at the top, as
+; the twin's (x >> 57) & $7F) / or / xor - 4 instructions and the next doubleword's ld, issued two instructions before
+; its xor so its result is ready.
+; IN: nothing. OUT: a0 = chr | prg << 8 | pal << 16 | blocks << 24 (each <= 64). A leaf: changes t0-t3, a1-a7, v0, v1.
+; Its cost, predicted: ~3,100 instructions a frame + Nt's lines that are not in the D-cache (the band copy's
+; Hit_Writeback_Invalidate leaves few: up to 256 misses).
+; THE PLAIN TWIN:
+;   For k = 0 To 7
+;     If MapChrSlots(k) <> NesRecChrLast(k) : nchr + 1 : NesRecChrLast(k) = MapChrSlots(k) : EndIf
+;   Next
+;   For k = 0 To 3
+;     If MapPrgSlots(k) <> NesRecPrgLast(k) : nprg + 1 : NesRecPrgLast(k) = MapPrgSlots(k) : EndIf
+;   Next
+;   For k = 0 To 31
+;     If Pal(k) <> NesRecPalLast(k) : npal + 1 : NesRecPalLast(k) = Pal(k) : EndIf
+;   Next
+;   a = @Nt(0)
+;   For k = 0 To 63
+;     x = 0
+;     For j = 0 To 7
+;       v = PeekQ(a) : a + 8
+;       x = ((x << 7) | ((x >> 57) & $7F)) ! v
+;     Next
+;     If x <> NesRecNtSig(k) : blocks + 1 : NesRecNtSig(k) = x : EndIf
+;   Next
+;   ProcedureReturn nchr | (nprg << 8) | (npal << 16) | (blocks << 24)
+ProcedureNaked.i NesRecChanges()
+  ASM
+    la t0, global_mapchrslots
+    la t1, global_nesrecchrlast
+    move v0, zero                   ; v0 = CHR slots switched
+    addiu a1, zero, 8
+nes_rec_chg_chr:
+    ld t2, 0(t0)                    ; the slot now
+    ld t3, 0(t1)                    ; a frame ago
+    daddiu t0, t0, 8
+    beq t2, t3, nes_rec_chg_chr_same
+    addiu a1, a1, -1
+    addiu v0, v0, 1                 ; switched: counted, the baseline moved
+    sd t2, 0(t1)
+nes_rec_chg_chr_same:
+    bnez a1, nes_rec_chg_chr
+    daddiu t1, t1, 8
+    la t0, global_mapprgslots
+    la t1, global_nesrecprglast
+    move v1, zero                   ; v1 = PRG slots switched
+    addiu a1, zero, 4
+nes_rec_chg_prg:
+    ld t2, 0(t0)
+    ld t3, 0(t1)
+    daddiu t0, t0, 8
+    beq t2, t3, nes_rec_chg_prg_same
+    addiu a1, a1, -1
+    addiu v1, v1, 1
+    sd t2, 0(t1)
+nes_rec_chg_prg_same:
+    bnez a1, nes_rec_chg_prg
+    daddiu t1, t1, 8
+    la t0, global_pal
+    la t1, global_nesrecpallast
+    move a2, zero                   ; a2 = palette bytes changed
+    addiu a1, zero, 32
+nes_rec_chg_pal:
+    lbu t2, 0(t0)
+    lbu t3, 0(t1)
+    daddiu t0, t0, 1
+    beq t2, t3, nes_rec_chg_pal_same
+    addiu a1, a1, -1
+    addiu a2, a2, 1
+    sb t2, 0(t1)
+nes_rec_chg_pal_same:
+    bnez a1, nes_rec_chg_pal
+    daddiu t1, t1, 1
+    la t0, global_nt                ; t0 -> the block's first doubleword
+    la t1, global_nesrecntsig       ; t1 -> its fold a frame ago
+    move a3, zero                   ; a3 = blocks changed
+    addiu a1, zero, 64
+nes_rec_chg_nt:
+    ld t2, 0(t0)                    ; x = v0
+    ld a4, 8(t0)
+    ld a5, 16(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6                   ; x rotated left 7
+    xor t2, t2, a4                  ; ^ v1
+    ld a4, 24(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a5                  ; ^ v2
+    ld a5, 32(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a4                  ; ^ v3
+    ld a4, 40(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a5                  ; ^ v4
+    ld a5, 48(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a4                  ; ^ v5
+    ld a4, 56(t0)
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a5                  ; ^ v6
+    ld a7, 0(t1)                    ; the fold a frame ago
+    dsll t3, t2, 7
+    dsrl32 a6, t2, 25
+    or t2, t3, a6
+    xor t2, t2, a4                  ; ^ v7: the block's fold
+    daddiu t0, t0, 64
+    beq t2, a7, nes_rec_chg_nt_same
+    addiu a1, a1, -1
+    addiu a3, a3, 1                 ; changed: counted, the fold kept
+    sd t2, 0(t1)
+nes_rec_chg_nt_same:
+    bnez a1, nes_rec_chg_nt
+    daddiu t1, t1, 8
+    sll v1, v1, 8
+    sll a2, a2, 16
+    sll a3, a3, 24
+    or a0, v0, v1
+    or a0, a0, a2
+    jr ra
+    or a0, a0, a3
+  EndASM
 EndProcedure
 
-; One event out (16 words, PI writes): entries 0-255 are the run's first events, 256-511 a ring of the latest.
-Procedure NesRecEvent()          ; the event in NesRecE
-  Protected n.i = NesRecW(#R_EVENTS), slot.i, a.i, k.i
-  If n < 256 : slot = n : Else : slot = 256 + ((n - 256) & 255) : EndIf
-  a = NesRecBase + #NES_REC_EVENTS + slot * #NES_REC_EVENT_WORDS * 4
-  For k = 0 To #NES_REC_EVENT_WORDS - 1 : LpmDebugIoWrite(a + k * 4, NesRecE(k) & $FFFFFFFF) : Next
-  NesRecW(#R_EVENTS) + 1
+; ---- NesRecEvent: the event in NesRecE out - its #NES_REC_EVENT_WORDS words, a PI write each, into entry n (n < 256:
+; the run's first events) or 256 + (n - 256) & 255 (a ring of the latest 256; (n - 256) & 255 = n & 255); then
+; W(#R_EVENTS) + 1. IN: nothing. OUT: nothing. KEEPS s0-s2 (saved).
+; THE PLAIN TWIN:
+;   Protected n.i = NesRecW(#R_EVENTS), slot.i, a.i, k.i
+;   If n < 256 : slot = n : Else : slot = 256 + ((n - 256) & 255) : EndIf
+;   a = NesRecBase + #NES_REC_EVENTS + slot * #NES_REC_EVENT_WORDS * 4
+;   For k = 0 To #NES_REC_EVENT_WORDS - 1 : LpmDebugIoWrite(a + k * 4, NesRecE(k) & $FFFFFFFF) : Next
+;   NesRecW(#R_EVENTS) + 1
+ProcedureNaked NesRecEvent()
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    la t0, global_nesrecw
+    ld t1, #R_EVENTS_B(t0)          ; n = events so far
+    slti t2, t1, 256
+    bnez t2, nes_rec_ev_slot
+    move t3, t1                     ; (delay slot) the first 256: slot n
+    andi t3, t1, 255
+    addiu t3, t3, 256               ; then the ring: 256 + n & 255
+nes_rec_ev_slot:
+    dsll t1, t3, 6
+    dsll t2, t3, 3
+    daddu t1, t1, t2                ; slot x 72 (#NES_REC_EVENT_WORDS x 4)
+    la t0, global_nesrecbase
+    ld s0, 0(t0)
+    daddu s0, s0, t1
+    lui t1, 0x0001
+    ori t1, t1, 0x1000              ; t1 = #NES_REC_EVENTS ($11000; checked at the file's head)
+    daddu s0, s0, t1                ; s0 = the entry's flash cart address
+    la s1, global_nesrece           ; s1 -> the event's word k
+    daddiu s2, s1, #NES_REC_EVENT_WORDS_B   ; s2 = its end
+nes_rec_ev_word:
+    lwu a1, 4(s1)                   ; NesRecE(k) & $FFFFFFFF
+    daddiu s1, s1, 8
+    move a0, s0
+    jal lpmdebugiowrite
+    daddiu s0, s0, 4
+    bne s1, s2, nes_rec_ev_word
+    nop
+    la t0, global_nesrecw
+    ld t1, #R_EVENTS_B(t0)
+    daddiu t1, t1, 1
+    sd t1, #R_EVENTS_B(t0)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
 EndProcedure
 
-; Every frame: an event when the frame had a sound underrun, a picture skipped, a drain or a wait, or its work
-; exceeded one NES frame - with what the frame did (NesRecChanges) and the sound buffer at this moment.
-Procedure.i NesRecSat16(v.i)            ; a count into 16 bits (65,535 and over: 65,535)
-  If v < 0 : ProcedureReturn 0 : EndIf
-  If v > $FFFF : ProcedureReturn $FFFF : EndIf
-  ProcedureReturn v
+; ---- NesRecEventCheck(frame, d, w): every frame - this frame's parts of the work split (NesRecT less its value at the
+; frame before's wrap), what the game changed (NesRecChanges, every frame: it moves its own baselines), and the show's
+; and the sound's counts since the frame before; an event (NesRecEvent) when the frame had a sound underrun (why 1), a
+; picture skipped (2), work over one NES frame (4), a drain (8) or a wait (16). The twin reads the parts and the split
+; count before NesRecChanges and the rest after it; NesRecChanges reads and writes none of them, so here it runs first
+; and every difference is taken after it, with the same values.
+; A count into 16 bits (the twin's NesRecSat16): below 0 is 0, over 65,535 is 65,535 (nes_rec_sat16, a leaf on a0).
+; IN: a0 = frame, a1 = d (the period), a2 = w (the work). OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   For k = 0 To #NES_REC_T - 1 : NesRecTD(k) = NesRecT(k) - NesRecTLast(k) : NesRecTLast(k) = NesRecT(k) : Next
+;   split = NesShowStat(7) - NesRecSplitSeen : NesRecSplitSeen = NesShowStat(7)
+;   ch = NesRecChanges()
+;   starve = HostAiStarvations - NesRecStarveFrame : NesRecStarveFrame = HostAiStarvations
+;   skip = NesShowStat(1) + NesShowStat(14) - NesRecSkipSeen : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14)
+;   bands = NesShowStat(10) - NesRecBandsSeen : NesRecBandsSeen = NesShowStat(10)
+;   fb = NesShowStat(5) - NesRecFbSeen : NesRecFbSeen = NesShowStat(5)
+;   drains = NesShowStat(4) - NesRecDrainSeen : NesRecDrainSeen = NesShowStat(4)
+;   waits = NesShowStat(3) - NesRecWaitSeen : NesRecWaitSeen = NesShowStat(3)
+;   If starve : why | 1 : EndIf
+;   If skip : why | 2 : EndIf
+;   If w > #NES_REC_SLOW : why | 4 : EndIf
+;   If drains : why | 8 : EndIf
+;   If waits : why | 16 : EndIf
+;   If why = 0 : ProcedureReturn : EndIf
+;   q = ApuProduced - HostPcmRead : If q < 0 : q = 0 : EndIf : If q > $FFFF : q = $FFFF : EndIf
+;   ai = (PeekL($A4500004) & $3FFFF) >> 2                  ; AI_LEN: bytes left of the DMA playing, as samples
+;   NesRecE(#E_FRAME) = frame
+;   NesRecE(#E_FLAGS) = why | ((starve & 255) << 8) | ((skip & 255) << 16) | ((PpuMask & 255) << 24)
+;   NesRecE(#E_WORK) = w : NesRecE(#E_PERIOD) = d
+;   NesRecE(#E_SOUND) = q | ((ai & $FFFF) << 16)
+;   NesRecE(#E_BANKS) = (ch & $FFFFFF) | ((PpuCtrl & 255) << 24)
+;   NesRecE(#E_NT) = ((ch >> 24) & 255) | ((bands & 255) << 8) | ((drains & 255) << 16) | ((waits & 255) << 24)
+;   q = NesRecPSum / 4687500 : If fb > 4095 : fb = 4095 : EndIf
+;   NesRecE(#E_MORE) = fb | ((q & $FFFFF) << 12)
+;   NesRecE(#E_TBAND) = NesRecTD(#T_BAND) : NesRecE(#E_TFB) = NesRecTD(#T_FB) : NesRecE(#E_TLIST) = NesRecTD(#T_LIST)
+;   NesRecE(#E_TSHOW) = NesRecTD(#T_SHOW) : NesRecE(#E_TAPU) = NesRecTD(#T_APU)
+;   NesRecE(#E_NAPU) = NesRecSat16(NesRecTD(#T_NAPU)) | (NesRecSat16(NesRecTD(#T_NAPUSEG)) << 16)
+;   NesRecE(#E_NBUS) = NesRecSat16(NesRecTD(#T_NDMC)) | (NesRecSat16(NesRecTD(#T_N2007)) << 16)
+;   NesRecE(#E_NSPLIT) = NesRecSat16(split) | (NesRecSat16(fb - split) << 16)
+;   NesRecE(#E_TSYN) = NesRecTD(#T_SYN)
+;   NesRecE(#E_TREST) = w - NesRecTD(#T_BAND) - NesRecTD(#T_FB) - NesRecTD(#T_SHOW) - NesRecTD(#T_APU) - NesRecTD(#T_SYN)
+;   NesRecEvent()
+; REGISTERS after NesRecChanges: s0 frame, s1 d, s2 w, s3 ch; a1 split, a2 starve, a3 skip, a4 bands, a5 fb, a6 drains,
+; a7 waits, v0 why; t0-t3, t8, t9, v1 scratch. The event's words go to NesRecE (t9 = its base).
+ProcedureNaked NesRecEventCheck(frame.i, d.i, w.i)
+  ASM
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    move s0, a0
+    move s1, a1
+    jal nesrecchanges               ; every frame: the baselines move whether or not there is an event
+    move s2, a2
+    move s3, a0                     ; s3 = ch
+    la t0, global_nesrect           ; the parts: TD(k) = T(k) - TLast(k), TLast(k) = T(k)
+    la t1, global_nesrectlast
+    la t2, global_nesrectd
+    addiu v1, zero, #NES_REC_T
+nes_rec_chk_td:
+    ld t3, 0(t0)
+    ld t8, 0(t1)
+    daddiu t0, t0, 8
+    dsubu t8, t3, t8
+    sd t8, 0(t2)
+    sd t3, 0(t1)
+    daddiu t1, t1, 8
+    addiu v1, v1, -1
+    bnez v1, nes_rec_chk_td
+    daddiu t2, t2, 8
+    la t0, global_nesshowstat       ; t0 = NesShowStat(0)
+    ld t1, 56(t0)                   ; split = Stat(7) - SplitSeen
+    la t2, global_nesrecsplitseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a1, t1, t3
+    la t2, global_hostaistarvations ; starve
+    ld t1, 0(t2)
+    la t2, global_nesrecstarveframe
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a2, t1, t3
+    ld t1, 8(t0)                    ; skip = Stat(1) + Stat(14) - SkipSeen
+    ld t3, 112(t0)
+    daddu t1, t1, t3
+    la t2, global_nesrecskipseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a3, t1, t3
+    ld t1, 80(t0)                   ; bands = Stat(10) - BandsSeen
+    la t2, global_nesrecbandsseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a4, t1, t3
+    ld t1, 40(t0)                   ; fb = Stat(5) - FbSeen
+    la t2, global_nesrecfbseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a5, t1, t3
+    ld t1, 32(t0)                   ; drains = Stat(4) - DrainSeen
+    la t2, global_nesrecdrainseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a6, t1, t3
+    ld t1, 24(t0)                   ; waits = Stat(3) - WaitSeen
+    la t2, global_nesrecwaitseen
+    ld t3, 0(t2)
+    sd t1, 0(t2)
+    dsubu a7, t1, t3
+    sltu v0, zero, a2               ; why: 1 an underrun
+    sltu t1, zero, a3
+    sll t1, t1, 1
+    or v0, v0, t1                   ; 2 a picture skipped
+    lui t1, 0x000B
+    ori t1, t1, 0xE6C2              ; #NES_REC_SLOW = 779,970 ($BE6C2; checked at the file's head)
+    slt t1, t1, s2
+    sll t1, t1, 2
+    or v0, v0, t1                   ; 4 work over one NES frame (signed, as the twin's w > #NES_REC_SLOW)
+    sltu t1, zero, a6
+    sll t1, t1, 3
+    or v0, v0, t1                   ; 8 a drain
+    sltu t1, zero, a7
+    sll t1, t1, 4
+    or v0, v0, t1                   ; 16 a wait
+    la t9, global_nesrece           ; t9 = the event's words
+    beqz v0, nes_rec_chk_ret        ; nothing happened: no event
+    nop
+    sd s0, #E_FRAME_B(t9)
+    andi t1, a2, 255
+    dsll t1, t1, 8
+    or t1, v0, t1
+    andi t2, a3, 255
+    dsll t2, t2, 16
+    or t1, t1, t2
+    la t2, global_ppumask
+    ld t2, 0(t2)
+    andi t2, t2, 255
+    dsll t2, t2, 24
+    or t1, t1, t2
+    sd t1, #E_FLAGS_B(t9)           ; why | starve << 8 | skip << 16 | PPUMASK << 24
+    sd s2, #E_WORK_B(t9)
+    sd s1, #E_PERIOD_B(t9)
+    la t0, global_apuproduced       ; q = the samples made and not given to the AI, 0 .. $FFFF
+    ld t1, 0(t0)
+    la t0, global_hostpcmread
+    ld t2, 0(t0)
+    dsubu t1, t1, t2
+    bgez t1, nes_rec_chk_q1
+    nop
+    move t1, zero
+nes_rec_chk_q1:
+    ori t2, zero, 0xFFFF
+    slt t3, t2, t1
+    beqz t3, nes_rec_chk_q2
+    nop
+    move t1, t2
+nes_rec_chk_q2:
+    lui t0, 0xA450
+    lw t2, 4(t0)                    ; AI_LEN
+    srl t2, t2, 2
+    andi t2, t2, 0xFFFF             ; (AI_LEN & $3FFFF) >> 2: bits 17-2, the samples left of the DMA playing
+    dsll t2, t2, 16
+    or t1, t1, t2
+    sd t1, #E_SOUND_B(t9)
+    lui t1, 0x00FF
+    ori t1, t1, 0xFFFF
+    and t1, s3, t1                  ; ch & $FFFFFF
+    la t2, global_ppuctrl
+    ld t2, 0(t2)
+    andi t2, t2, 255
+    dsll t2, t2, 24
+    or t1, t1, t2
+    sd t1, #E_BANKS_B(t9)
+    dsrl t1, s3, 24
+    andi t1, t1, 255                ; the name-table blocks
+    andi t2, a4, 255
+    dsll t2, t2, 8
+    or t1, t1, t2
+    andi t2, a6, 255
+    dsll t2, t2, 16
+    or t1, t1, t2
+    andi t2, a7, 255
+    dsll t2, t2, 24
+    or t1, t1, t2
+    sd t1, #E_NT_B(t9)
+    la t0, global_nesrecpsum        ; tenths of a second: NesRecPSum / 4,687,500 (a rare path: the divide)
+    ld t1, 0(t0)
+    lui t2, 0x0047
+    ori t2, t2, 0x868C              ; 4,687,500 ($47868C): Count ticks in 0.1 s
+    ddiv t1, t2
+    slti t3, a5, 4096               ; fb at most 4,095 (before the split's use of it, as in the twin)
+    bnez t3, nes_rec_chk_fb
+    nop
+    addiu a5, zero, 4095
+nes_rec_chk_fb:
+    mflo t1
+    lui t2, 0x000F
+    ori t2, t2, 0xFFFF
+    and t1, t1, t2
+    dsll t1, t1, 12
+    or t1, a5, t1
+    sd t1, #E_MORE_B(t9)
+    la t0, global_nesrectd          ; the parts
+    ld t1, #T_BAND_B(t0)
+    sd t1, #E_TBAND_B(t9)
+    ld t1, #T_FB_B(t0)
+    sd t1, #E_TFB_B(t9)
+    ld t1, #T_LIST_B(t0)
+    sd t1, #E_TLIST_B(t9)
+    ld t1, #T_SHOW_B(t0)
+    sd t1, #E_TSHOW_B(t9)
+    ld t1, #T_APU_B(t0)
+    sd t1, #E_TAPU_B(t9)
+    ld t1, #T_SYN_B(t0)
+    sd t1, #E_TSYN_B(t9)
+    ld t1, #T_BAND_B(t0)            ; the rest: w less bands, fallback lines, hand-over, APU timing, synthesis
+    dsubu t3, s2, t1
+    ld t1, #T_FB_B(t0)
+    dsubu t3, t3, t1
+    ld t1, #T_SHOW_B(t0)
+    dsubu t3, t3, t1
+    ld t1, #T_APU_B(t0)
+    dsubu t3, t3, t1
+    ld t1, #T_SYN_B(t0)
+    dsubu t3, t3, t1
+    sd t3, #E_TREST_B(t9)
+    move v1, t0                     ; v1 = NesRecTD (the leaf keeps it)
+    jal nes_rec_sat16
+    ld a0, #T_NAPU_B(v1)
+    move t3, a0
+    jal nes_rec_sat16
+    ld a0, #T_NAPUSEG_B(v1)
+    dsll a0, a0, 16
+    or t3, t3, a0
+    sd t3, #E_NAPU_B(t9)            ; APU timing calls | of them the segment path << 16
+    jal nes_rec_sat16
+    ld a0, #T_NDMC_B(v1)
+    move t3, a0
+    jal nes_rec_sat16
+    ld a0, #T_N2007_B(v1)
+    dsll a0, a0, 16
+    or t3, t3, a0
+    sd t3, #E_NBUS_B(t9)            ; DMC bytes | $2007 writes << 16
+    jal nes_rec_sat16
+    move a0, a1
+    move t3, a0
+    jal nes_rec_sat16
+    dsubu a0, a5, a1                ; fb - split (fb as clamped)
+    dsll a0, a0, 16
+    or t3, t3, a0
+    sd t3, #E_NSPLIT_B(t9)          ; split lines | the other fallback lines << 16
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    j nesrecevent                   ; the event out (a tail call: it returns to this one's caller)
+    daddiu sp, sp, 48
+nes_rec_chk_ret:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    jr ra
+    daddiu sp, sp, 48
+nes_rec_sat16:                      ; leaf: a0 into 0 .. 65,535; changes t8 only
+    bltz a0, nes_rec_sat16_zero
+    ori t8, zero, 0xFFFF
+    slt t8, t8, a0
+    beqz t8, nes_rec_sat16_ret
+    nop
+    jr ra
+    ori a0, zero, 0xFFFF
+nes_rec_sat16_zero:
+    move a0, zero
+nes_rec_sat16_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
-Procedure NesRecEventCheck(frame.i, d.i, w.i)
-  Protected ch.i, starve.i, skip.i, bands.i, fb.i, drains.i, waits.i, why.i, q.i, ai.i, k.i, split.i
-  For k = 0 To #NES_REC_T - 1 : NesRecTD(k) = NesRecT(k) - NesRecTLast(k) : NesRecTLast(k) = NesRecT(k) : Next
-  split = NesShowStat(7) - NesRecSplitSeen : NesRecSplitSeen = NesShowStat(7)
-  ch = NesRecChanges()
-  starve = HostAiStarvations - NesRecStarveFrame : NesRecStarveFrame = HostAiStarvations
-  skip = NesShowStat(1) + NesShowStat(14) - NesRecSkipSeen : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14)
-  bands = NesShowStat(10) - NesRecBandsSeen : NesRecBandsSeen = NesShowStat(10)
-  fb = NesShowStat(5) - NesRecFbSeen : NesRecFbSeen = NesShowStat(5)
-  drains = NesShowStat(4) - NesRecDrainSeen : NesRecDrainSeen = NesShowStat(4)
-  waits = NesShowStat(3) - NesRecWaitSeen : NesRecWaitSeen = NesShowStat(3)
-  If starve : why | 1 : EndIf
-  If skip : why | 2 : EndIf
-  If w > #NES_REC_SLOW : why | 4 : EndIf
-  If drains : why | 8 : EndIf
-  If waits : why | 16 : EndIf
-  If why = 0 : ProcedureReturn : EndIf
-  q = ApuProduced - HostPcmRead : If q < 0 : q = 0 : EndIf : If q > $FFFF : q = $FFFF : EndIf
-  ai = (PeekL($A4500004) & $3FFFF) >> 2                  ; AI_LEN: bytes left of the DMA playing, as samples
-  NesRecE(#E_FRAME) = frame
-  NesRecE(#E_FLAGS) = why | ((starve & 255) << 8) | ((skip & 255) << 16) | ((PpuMask & 255) << 24)
-  NesRecE(#E_WORK) = w : NesRecE(#E_PERIOD) = d
-  NesRecE(#E_SOUND) = q | ((ai & $FFFF) << 16)
-  NesRecE(#E_BANKS) = (ch & $FFFFFF) | ((PpuCtrl & 255) << 24)
-  NesRecE(#E_NT) = ((ch >> 24) & 255) | ((bands & 255) << 8) | ((drains & 255) << 16) | ((waits & 255) << 24)
-  q = NesRecPSum / 4687500 : If fb > 4095 : fb = 4095 : EndIf
-  NesRecE(#E_MORE) = fb | ((q & $FFFFF) << 12)
-  NesRecE(#E_TBAND) = NesRecTD(#T_BAND) : NesRecE(#E_TFB) = NesRecTD(#T_FB) : NesRecE(#E_TLIST) = NesRecTD(#T_LIST)
-  NesRecE(#E_TSHOW) = NesRecTD(#T_SHOW) : NesRecE(#E_TAPU) = NesRecTD(#T_APU)
-  NesRecE(#E_NAPU) = NesRecSat16(NesRecTD(#T_NAPU)) | (NesRecSat16(NesRecTD(#T_NAPUSEG)) << 16)
-  NesRecE(#E_NBUS) = NesRecSat16(NesRecTD(#T_NDMC)) | (NesRecSat16(NesRecTD(#T_N2007)) << 16)
-  NesRecE(#E_NSPLIT) = NesRecSat16(split) | (NesRecSat16(fb - split) << 16)
-  NesRecE(#E_TSYN) = NesRecTD(#T_SYN)
-  NesRecE(#E_TREST) = w - NesRecTD(#T_BAND) - NesRecTD(#T_FB) - NesRecTD(#T_SHOW) - NesRecTD(#T_APU) - NesRecTD(#T_SYN)
-  NesRecEvent()
-EndProcedure
-
-; Once a guest frame, at its wrap (NesHostGuestFrame): the period since the last wrap, the work in it, the RDP's
-; counters, the pads; every #NES_REC_WINDOW frames the summary and a series entry out.
-Procedure NesRecFrame(frame.i)
-  Protected now.i, d.i, w.i, ms.i, k.i, c.i, v.i
-  If NesRecOn = 0 : ProcedureReturn : EndIf
-  now = LpmCpuCount() & $FFFFFFFF
-  If NesRecFirst = 0                                     ; the first guest frame: the readings to measure from
-    NesRecFirst = 1
-    NesRecW(#R_STATE) = 2
-    For k = 0 To 3 : NesRecDpcLast(k) = PeekL($A4100010 + 4 * k) & $FFFFFF : Next
-    NesRecChanges()                                      ; the baselines of "what changed in a frame"
-    NesRecBandsSeen = NesShowStat(10) : NesRecFbSeen = NesShowStat(5) : NesRecDrainSeen = NesShowStat(4)
-    NesRecWaitSeen = NesShowStat(3) : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14) : NesRecStarveFrame = HostAiStarvations
-    For k = 0 To #NES_REC_T - 1 : NesRecTLast(k) = NesRecT(k) : Next
-    NesRecSplitSeen = NesShowStat(7)
-  Else
-    d = (now - NesRecLast) & $FFFFFFFF
-    w = d - (NesRecWait - NesRecLastWait)
-    If w < 0 : w = 0 : EndIf
-    NesRecPSum + d : NesRecWSum + w : NesRecW(#R_MEASURED) + 1
-    If d > NesRecW(#R_PMAX) : NesRecW(#R_PMAX) = d : NesRecW(#R_PMAXF) = frame : EndIf
-    If w > NesRecW(#R_WMAX) : NesRecW(#R_WMAX) = w : NesRecW(#R_WMAXF) = frame : EndIf
-    If d > NesRecWinP : NesRecWinP = d : EndIf
-    If w > NesRecWinW : NesRecWinW = w : EndIf
-    ms = d / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
-    NesRecW(#R_PHIST + ms) + 1
-    ms = w / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
-    NesRecW(#R_WHIST + ms) + 1
-    For k = 0 To 3
-      c = PeekL($A4100010 + 4 * k) & $FFFFFF              ; DPC CLOCK, BUFBUSY, PIPEBUSY, TMEM
-      v = (c - NesRecDpcLast(k)) & $FFFFFF
-      NesRecDpcSum(k) + v : NesRecDpcLast(k) = c
-      If k = 2 And v > NesRecW(#R_PIPEMAX) : NesRecW(#R_PIPEMAX) = v : EndIf
-    Next
-    NesRecEventCheck(frame, d, w)
-  EndIf
-  NesRecLast = now : NesRecLastWait = NesRecWait
-  If (NesController | NesController2) <> 0 : NesRecW(#R_HELD) + 1 : NesRecWinHeld + 1 : EndIf
-  NesRecW(#R_PADS) = (NesController & 255) | ((NesController2 & 255) << 8)
-  If frame % #NES_REC_WINDOW = 0 : NesRecFlush(frame, 1) : EndIf
+; ---- NesRecFrame(frame): once a guest frame, at its wrap (NesHostGuestFrame): the period since the last wrap, the work
+; in it (the period less the Count slept for a buffer, NesRecWait), their sums, worsts and 1 ms histograms, the RDP's
+; four counters, the event check, the pads; every #NES_REC_WINDOW frames the summary and a series entry out.
+; THE HISTOGRAM'S DIVIDE: ms = min(t / 46,875, 63). For t >= 64 x 46,875 = 3,000,000 the answer is 63; below it,
+; t / 46,875 = (t x 5,864,063) >> 38 exactly (5,864,063 = ceil(2^38 / 46,875); its excess over 2^38 / 46,875 is
+; e = 46,181 / 46,875, and e x t < 2^38 / 46,875 for every t < 3,000,000 - the condition for a multiply by a rounded-up
+; reciprocal to give the floor (Hacker's Delight 10-4)). One dmult (~10 cycles) for the twin's ddiv (~69).
+; The window's `frame % 60` is a ddiv (once a frame), as the twin's: the remainder's sign that of frame.
+; Count: `mfc0 $9`, the CPU's Count register - the low 32 bits of the twin's LpmCpuCount(), which is all it keeps.
+; IN: a0 = frame. OUT: nothing. KEEPS s0-s2 (saved).
+; THE PLAIN TWIN:
+;   If NesRecOn = 0 : ProcedureReturn : EndIf
+;   now = LpmCpuCount() & $FFFFFFFF
+;   If NesRecFirst = 0                                     ; the first guest frame: the readings to measure from
+;     NesRecFirst = 1
+;     NesRecW(#R_STATE) = 2
+;     For k = 0 To 3 : NesRecDpcLast(k) = PeekL($A4100010 + 4 * k) & $FFFFFF : Next
+;     NesRecChanges()                                      ; the baselines of "what changed in a frame"
+;     NesRecBandsSeen = NesShowStat(10) : NesRecFbSeen = NesShowStat(5) : NesRecDrainSeen = NesShowStat(4)
+;     NesRecWaitSeen = NesShowStat(3) : NesRecSkipSeen = NesShowStat(1) + NesShowStat(14) : NesRecStarveFrame = HostAiStarvations
+;     For k = 0 To #NES_REC_T - 1 : NesRecTLast(k) = NesRecT(k) : Next
+;     NesRecSplitSeen = NesShowStat(7)
+;   Else
+;     d = (now - NesRecLast) & $FFFFFFFF
+;     w = d - (NesRecWait - NesRecLastWait)
+;     If w < 0 : w = 0 : EndIf
+;     NesRecPSum + d : NesRecWSum + w : NesRecW(#R_MEASURED) + 1
+;     If d > NesRecW(#R_PMAX) : NesRecW(#R_PMAX) = d : NesRecW(#R_PMAXF) = frame : EndIf
+;     If w > NesRecW(#R_WMAX) : NesRecW(#R_WMAX) = w : NesRecW(#R_WMAXF) = frame : EndIf
+;     If d > NesRecWinP : NesRecWinP = d : EndIf
+;     If w > NesRecWinW : NesRecWinW = w : EndIf
+;     ms = d / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
+;     NesRecW(#R_PHIST + ms) + 1
+;     ms = w / #NES_REC_MS : If ms > 63 : ms = 63 : EndIf
+;     NesRecW(#R_WHIST + ms) + 1
+;     For k = 0 To 3
+;       c = PeekL($A4100010 + 4 * k) & $FFFFFF              ; DPC CLOCK, BUFBUSY, PIPEBUSY, TMEM
+;       v = (c - NesRecDpcLast(k)) & $FFFFFF
+;       NesRecDpcSum(k) + v : NesRecDpcLast(k) = c
+;       If k = 2 And v > NesRecW(#R_PIPEMAX) : NesRecW(#R_PIPEMAX) = v : EndIf
+;     Next
+;     NesRecEventCheck(frame, d, w)
+;   EndIf
+;   NesRecLast = now : NesRecLastWait = NesRecWait
+;   If (NesController | NesController2) <> 0 : NesRecW(#R_HELD) + 1 : NesRecWinHeld + 1 : EndIf
+;   NesRecW(#R_PADS) = (NesController & 255) | ((NesController2 & 255) << 8)
+;   If frame % #NES_REC_WINDOW = 0 : NesRecFlush(frame, 1) : EndIf
+; REGISTERS: s0 frame, s1 now, s2 W(0); t9 = $FFFFFF in the RDP loops.
+ProcedureNaked NesRecFrame(frame.i)
+  ASM
+    la t0, global_nesrecon
+    ld t0, 0(t0)
+    beqz t0, nes_rec_frame_off      ; no record kept: nothing
+    nop
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    move s0, a0                     ; s0 = frame
+    mfc0 s1, $9
+    dsll32 s1, s1, 0
+    dsrl32 s1, s1, 0                ; s1 = now, Count zero-extended
+    la s2, global_nesrecw           ; s2 = W(0)
+    lui t9, 0x00FF
+    ori t9, t9, 0xFFFF              ; t9 = $FFFFFF (the RDP's counters are 24 bits)
+    lui t3, 0xA410                  ; the DPC's registers (KSEG1 $A4100000); CLOCK .. TMEM at +$10 .. +$1C
+    la t0, global_nesrecfirst
+    ld t1, 0(t0)
+    bnez t1, nes_rec_frame_next
+    addiu t1, zero, 1
+    sd t1, 0(t0)                    ; the first guest frame: the readings to measure from
+    addiu t1, zero, 2
+    sd t1, #R_STATE_B(s2)           ; state 2: running
+    la t0, global_nesrecdpclast
+    lw t1, 0x10(t3)
+    lw t2, 0x14(t3)
+    and t1, t1, t9
+    and t2, t2, t9
+    sd t1, 0(t0)
+    sd t2, 8(t0)
+    lw t1, 0x18(t3)
+    lw t2, 0x1C(t3)
+    and t1, t1, t9
+    and t2, t2, t9
+    sd t1, 16(t0)
+    jal nesrecchanges               ; the baselines of "what changed in a frame"
+    sd t2, 24(t0)                   ; (delay slot) TMEM's
+    la t0, global_nesshowstat
+    ld t1, 80(t0)
+    la t2, global_nesrecbandsseen
+    sd t1, 0(t2)
+    ld t1, 40(t0)
+    la t2, global_nesrecfbseen
+    sd t1, 0(t2)
+    ld t1, 32(t0)
+    la t2, global_nesrecdrainseen
+    sd t1, 0(t2)
+    ld t1, 24(t0)
+    la t2, global_nesrecwaitseen
+    sd t1, 0(t2)
+    ld t1, 8(t0)
+    ld t2, 112(t0)
+    daddu t1, t1, t2
+    la t2, global_nesrecskipseen
+    sd t1, 0(t2)
+    ld t1, 56(t0)
+    la t2, global_nesrecsplitseen
+    sd t1, 0(t2)
+    la t1, global_hostaistarvations
+    ld t1, 0(t1)
+    la t2, global_nesrecstarveframe
+    sd t1, 0(t2)
+    la t0, global_nesrect
+    la t1, global_nesrectlast
+    addiu t2, zero, #NES_REC_T
+nes_rec_frame_tl:
+    ld t3, 0(t0)
+    daddiu t0, t0, 8
+    sd t3, 0(t1)
+    addiu t2, t2, -1
+    bnez t2, nes_rec_frame_tl
+    daddiu t1, t1, 8
+    b nes_rec_frame_tail
+    nop
+nes_rec_frame_next:
+    la t0, global_nesreclast
+    ld t1, 0(t0)
+    dsubu a1, s1, t1
+    dsll32 a1, a1, 0
+    dsrl32 a1, a1, 0                ; a1 = d = (now - NesRecLast) & $FFFFFFFF
+    la t0, global_nesrecwait
+    ld t1, 0(t0)
+    la t0, global_nesreclastwait
+    ld t2, 0(t0)
+    dsubu t1, t1, t2
+    dsubu a2, a1, t1                ; a2 = w = d less the sleep in the frame
+    bgez a2, nes_rec_frame_w
+    nop
+    move a2, zero
+nes_rec_frame_w:
+    la t0, global_nesrecpsum
+    ld t1, 0(t0)
+    daddu t1, t1, a1
+    sd t1, 0(t0)
+    la t0, global_nesrecwsum
+    ld t1, 0(t0)
+    daddu t1, t1, a2
+    sd t1, 0(t0)
+    ld t1, #R_MEASURED_B(s2)
+    daddiu t1, t1, 1
+    sd t1, #R_MEASURED_B(s2)
+    ld t1, #R_PMAX_B(s2)            ; the worst period and its frame
+    slt t1, t1, a1
+    beqz t1, nes_rec_frame_pmax
+    nop
+    sd a1, #R_PMAX_B(s2)
+    sd s0, #R_PMAXF_B(s2)
+nes_rec_frame_pmax:
+    ld t1, #R_WMAX_B(s2)            ; the worst work and its frame
+    slt t1, t1, a2
+    beqz t1, nes_rec_frame_wmax
+    nop
+    sd a2, #R_WMAX_B(s2)
+    sd s0, #R_WMAXF_B(s2)
+nes_rec_frame_wmax:
+    la t0, global_nesrecwinp        ; the window's worsts
+    ld t1, 0(t0)
+    slt t2, t1, a1
+    beqz t2, nes_rec_frame_winp
+    nop
+    sd a1, 0(t0)
+nes_rec_frame_winp:
+    la t0, global_nesrecwinw
+    ld t1, 0(t0)
+    slt t2, t1, a2
+    beqz t2, nes_rec_frame_winw
+    nop
+    sd a2, 0(t0)
+nes_rec_frame_winw:
+    lui t8, 0x002D
+    ori t8, t8, 0xC6C0              ; t8 = 64 x #NES_REC_MS = 3,000,000 ($2DC6C0)
+    lui v1, 0x0059
+    ori v1, v1, 0x7A7F              ; v1 = ceil(2^38 / 46,875) = 5,864,063 ($597A7F)
+    slt t1, a1, t8                  ; the period's 1 ms bin
+    beqz t1, nes_rec_frame_p63
+    addiu t2, zero, 63
+    dmult a1, v1
+    mflo t2
+    dsrl32 t2, t2, 6                ; >> 38
+nes_rec_frame_p63:
+    dsll t2, t2, 3
+    daddu t2, t2, s2
+    ld t1, #R_PHIST_B(t2)
+    daddiu t1, t1, 1
+    sd t1, #R_PHIST_B(t2)
+    slt t1, a2, t8                  ; the work's 1 ms bin
+    beqz t1, nes_rec_frame_w63
+    addiu t2, zero, 63
+    dmult a2, v1
+    mflo t2
+    dsrl32 t2, t2, 6
+nes_rec_frame_w63:
+    dsll t2, t2, 3
+    daddu t2, t2, s2
+    ld t1, #R_WHIST_B(t2)
+    daddiu t1, t1, 1
+    sd t1, #R_WHIST_B(t2)
+    la t0, global_nesrecdpclast     ; the RDP's counters: v = (c - last) & $FFFFFF, summed
+    la t1, global_nesrecdpcsum
+    daddiu t3, t3, 0x10
+    addiu a3, zero, 4
+nes_rec_frame_dpc:
+    lw a4, 0(t3)                    ; c
+    ld a5, 0(t0)                    ; the last reading
+    and a4, a4, t9
+    dsubu a5, a4, a5
+    and a5, a5, t9                  ; v
+    sd a4, 0(t0)
+    ld a6, 0(t1)
+    daddu a6, a6, a5
+    sd a6, 0(t1)
+    addiu t2, zero, 2               ; k = 2 (PIPEBUSY): its most in a frame
+    bne a3, t2, nes_rec_frame_dpc_k
+    nop
+    ld a6, #R_PIPEMAX_B(s2)
+    slt a6, a6, a5
+    beqz a6, nes_rec_frame_dpc_k
+    nop
+    sd a5, #R_PIPEMAX_B(s2)
+nes_rec_frame_dpc_k:
+    daddiu t3, t3, 4
+    daddiu t0, t0, 8
+    addiu a3, a3, -1
+    bnez a3, nes_rec_frame_dpc
+    daddiu t1, t1, 8
+    jal nesreceventcheck            ; NesRecEventCheck(frame, d, w)
+    move a0, s0
+nes_rec_frame_tail:
+    la t0, global_nesreclast
+    sd s1, 0(t0)                    ; NesRecLast = now
+    la t0, global_nesrecwait
+    ld t1, 0(t0)
+    la t0, global_nesreclastwait
+    sd t1, 0(t0)
+    la t0, global_nescontroller
+    ld t1, 0(t0)
+    la t0, global_nescontroller2
+    ld t2, 0(t0)
+    or t3, t1, t2
+    beqz t3, nes_rec_frame_pads     ; a button held: counted
+    andi t1, t1, 255
+    ld t3, #R_HELD_B(s2)
+    daddiu t3, t3, 1
+    sd t3, #R_HELD_B(s2)
+    la t0, global_nesrecwinheld
+    ld t3, 0(t0)
+    daddiu t3, t3, 1
+    sd t3, 0(t0)
+nes_rec_frame_pads:
+    andi t2, t2, 255
+    dsll t2, t2, 8
+    or t1, t1, t2
+    sd t1, #R_PADS_B(s2)            ; pad 1 | pad 2 << 8
+    addiu t0, zero, #NES_REC_WINDOW
+    ddiv s0, t0
+    mfhi t0                         ; frame % 60
+    move a0, s0
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    bnez t0, nes_rec_frame_off
+    daddiu sp, sp, 32
+    j nesrecflush                   ; a window's end: NesRecFlush(frame, 1), a tail call
+    addiu a1, zero, 1
+nes_rec_frame_off:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
 ; NesRecHashFb(fb) - the NES picture in a shown buffer (KSEG0, invalidated; 320 x 240 RGBA16, the NES at x 32-287)
@@ -514,36 +1528,181 @@ nes_rec_hash_b:
   EndASM
 EndProcedure
 
-; A frame's picture is drawn and shown (show.n64, NesShowFrameEnd: its SYNC_FULL waited, its buffer not yet given to
-; another frame): hashed into the record while no button has been seen, one frame in #NES_REC_HASH_EVERY.
-Procedure NesRecPicture(frame.i, fb.i, fbl.i)
-  Protected n.i, a.i
-  If NesRecOn = 0 Or NesRecW(#R_HASHSTOP) : ProcedureReturn : EndIf
+; ---- NesRecPicture(frame, fb, fbl): a frame's picture is drawn and shown (show.n64, NesShowFrameEnd: its SYNC_FULL
+; waited, its buffer not yet given to another frame): hashed into the record while no button has been seen, one frame
+; in #NES_REC_HASH_EVERY (a power of two: frame % it = frame & (it - 1) for frame >= 0, and the show's frame numbers
+; are). The hash's own time is taken out of the hand-over's part (NesRecT(3)), inside which it runs.
+; The buffer's address as the twin makes it: (fb & $1FFFFFFF) | $80000000 with $80000000 a positive 64-bit constant -
+; the KSEG0 address zero-extended (ori / dsll 16 builds that one; lui would sign-extend it) - for the invalidate and
+; for NesRecHashFb (which sign-extends it itself).
+; IN: a0 = frame, a1 = fb (0: not shown), a2 = fbl (the frame's fallback lines). OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   If NesRecOn = 0 Or NesRecW(#R_HASHSTOP) : ProcedureReturn : EndIf
+;   CompilerIf #NES_REC_HASH_PADSTOP
+;     If (NesController | NesController2) <> 0 : NesRecW(#R_HASHSTOP) = frame : ProcedureReturn : EndIf
+;   CompilerEndIf
+;   If fb = 0 Or frame % #NES_REC_HASH_EVERY : ProcedureReturn : EndIf
+;   n = NesRecW(#R_HASHES)
+;   If n >= #NES_REC_HASH_MAX : ProcedureReturn : EndIf
+;   Protected t0.i = LpmCpuCount()
+;   fb = (fb & $1FFFFFFF) | $80000000
+;   LpmCacheInvalidateData(fb, #HOST_WIDTH * #HOST_HEIGHT * 2)
+;   NesRecHashA = $351B5058 : NesRecHashB = $351B5058
+;   NesRecHashFb(fb)
+;   a = NesRecBase + #NES_REC_HASHES + n * 32
+;   LpmDebugIoWrite(a, frame)
+;   LpmDebugIoWrite(a + 4, NesRecHashA & $FFFFFFFF) : LpmDebugIoWrite(a + 8, (NesRecHashA >> 32) & $FFFFFFFF)
+;   LpmDebugIoWrite(a + 12, NesRecHashB & $FFFFFFFF) : LpmDebugIoWrite(a + 16, (NesRecHashB >> 32) & $FFFFFFFF)
+;   LpmDebugIoWrite(a + 20, fbl)
+;   NesRecW(#R_HASHES) = n + 1
+;   NesRecT(3) - ((LpmCpuCount() - t0) & $FFFFFFFF)
+CompilerIf #NES_REC_HASH_EVERY & (#NES_REC_HASH_EVERY - 1)
+  CompilerError "console_record.n64: #NES_REC_HASH_EVERY must be a power of two (NesRecPicture's frame & (it - 1))"
+CompilerEndIf
+ProcedureNaked NesRecPicture(frame.i, fb.i, fbl.i)
+  ASM
+    la t0, global_nesrecon
+    ld t0, 0(t0)
+    beqz t0, nes_rec_pic_ret        ; no record kept
+    nop
+    la t3, global_nesrecw
+    ld t0, #R_HASHSTOP_B(t3)
+    bnez t0, nes_rec_pic_ret        ; hashing has stopped for good
+    nop
+  EndASM
   CompilerIf #NES_REC_HASH_PADSTOP
-    If (NesController | NesController2) <> 0 : NesRecW(#R_HASHSTOP) = frame : ProcedureReturn : EndIf
+    ASM
+    la t0, global_nescontroller
+    ld t1, 0(t0)
+    la t0, global_nescontroller2
+    ld t2, 0(t0)
+    or t1, t1, t2
+    beqz t1, nes_rec_pic_nopad
+    nop
+    jr ra                           ; the first button: hashing stops at this frame
+    sd a0, #R_HASHSTOP_B(t3)
+nes_rec_pic_nopad:
+    EndASM
   CompilerEndIf
-  If fb = 0 Or frame % #NES_REC_HASH_EVERY : ProcedureReturn : EndIf
-  n = NesRecW(#R_HASHES)
-  If n >= #NES_REC_HASH_MAX : ProcedureReturn : EndIf
-  Protected t0.i = LpmCpuCount()
-  fb = (fb & $1FFFFFFF) | $80000000
-  LpmCacheInvalidateData(fb, #HOST_WIDTH * #HOST_HEIGHT * 2)
-  NesRecHashA = $351B5058 : NesRecHashB = $351B5058
-  NesRecHashFb(fb)
-  a = NesRecBase + #NES_REC_HASHES + n * 32
-  LpmDebugIoWrite(a, frame)
-  LpmDebugIoWrite(a + 4, NesRecHashA & $FFFFFFFF) : LpmDebugIoWrite(a + 8, (NesRecHashA >> 32) & $FFFFFFFF)
-  LpmDebugIoWrite(a + 12, NesRecHashB & $FFFFFFFF) : LpmDebugIoWrite(a + 16, (NesRecHashB >> 32) & $FFFFFFFF)
-  LpmDebugIoWrite(a + 20, fbl)
-  NesRecW(#R_HASHES) = n + 1
-  NesRecT(3) - ((LpmCpuCount() - t0) & $FFFFFFFF)   ; the hash is the record's own, not the hand-over's (it runs
-EndProcedure                                       ; inside NesShowAcquire, which is timed as the hand-over)
+  ASM
+    beqz a1, nes_rec_pic_ret        ; not shown
+    andi t0, a0, #NES_REC_HASH_EVERY-1
+    bnez t0, nes_rec_pic_ret        ; not a hashed frame
+    nop
+    ld t0, #R_HASHES_B(t3)
+    slti t1, t0, #NES_REC_HASH_MAX
+    beqz t1, nes_rec_pic_ret        ; the hashes' room is full
+    nop
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    move s0, a0                     ; s0 = frame
+    move s1, a2                     ; s1 = fbl
+    dsll t1, t0, 5                  ; s2 = a = NesRecBase + #NES_REC_HASHES + n x 32
+    daddiu t0, t0, 1
+    sd t0, #R_HASHES_B(t3)          ; n + 1 (nothing between reads it)
+    la t0, global_nesrecbase
+    ld s2, 0(t0)
+    daddu s2, s2, t1
+    lui t1, 0x0001
+    ori t1, t1, 0xA000              ; #NES_REC_HASHES = $1A000 (checked at the file's head)
+    daddu s2, s2, t1
+    mfc0 s3, $9                     ; s3 = Count at the start
+    lui t0, 0x1FFF
+    ori t0, t0, 0xFFFF
+    and a1, a1, t0                  ; fb & $1FFFFFFF
+    ori t0, zero, 0x8000
+    dsll t0, t0, 16                 ; $80000000, zero-extended
+    or a0, a1, t0
+    sd a0, 40(sp)                   ; the buffer, kept for the hash
+    lui a1, 0x0002
+    jal lpmcacheinvalidatedata      ; LpmCacheInvalidateData(fb, 320 x 240 x 2)
+    ori a1, a1, 0x5800              ; (delay slot) 153,600 = $25800
+    lui t1, 0x351B
+    ori t1, t1, 0x5058              ; both hashes start at $351B5058
+    la t0, global_nesrechasha
+    sd t1, 0(t0)
+    la t0, global_nesrechashb
+    sd t1, 0(t0)
+    jal nesrechashfb
+    ld a0, 40(sp)
+    move a1, s0
+    jal lpmdebugiowrite             ; the frame
+    move a0, s2
+    la t0, global_nesrechasha
+    lwu a1, 4(t0)
+    jal lpmdebugiowrite             ; hash A, low and high
+    daddiu a0, s2, 4
+    la t0, global_nesrechasha
+    lwu a1, 0(t0)
+    jal lpmdebugiowrite
+    daddiu a0, s2, 8
+    la t0, global_nesrechashb
+    lwu a1, 4(t0)
+    jal lpmdebugiowrite             ; hash B, low and high
+    daddiu a0, s2, 12
+    la t0, global_nesrechashb
+    lwu a1, 0(t0)
+    jal lpmdebugiowrite
+    daddiu a0, s2, 16
+    move a1, s1
+    jal lpmdebugiowrite             ; the fallback lines
+    daddiu a0, s2, 20
+    mfc0 t1, $9
+    dsubu t1, t1, s3
+    dsll32 t1, t1, 0
+    dsrl32 t1, t1, 0                ; the hash's ticks, 32 bits
+    la t0, global_nesrect
+    ld t2, 24(t0)
+    dsubu t2, t2, t1
+    sd t2, 24(t0)                   ; NesRecT(3): the hash is not the hand-over's
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    daddiu sp, sp, 48
+nes_rec_pic_ret:
+    jr ra
+    nop
+  EndASM
+EndProcedure
 
-; The emulator stopped (RunGame's NES STOP): its reason, and the whole summary out now.
-Procedure NesRecStop()
-  If NesRecOn = 0 : ProcedureReturn : EndIf
-  NesRecW(#R_STATE) = 3 : NesRecW(#R_CODE) = BadOpcode : NesRecW(#R_PC) = PC : NesRecW(#R_WORKER) = WorkerError
-  NesRecFlush(WorkerFrames, 0)
+; ---- NesRecStop: the emulator stopped (RunGame's NES STOP): its reason, and the whole summary out now.
+; IN: nothing. OUT: nothing.
+; THE PLAIN TWIN:
+;   If NesRecOn = 0 : ProcedureReturn : EndIf
+;   NesRecW(#R_STATE) = 3 : NesRecW(#R_CODE) = BadOpcode : NesRecW(#R_PC) = PC : NesRecW(#R_WORKER) = WorkerError
+;   NesRecFlush(WorkerFrames, 0)
+ProcedureNaked NesRecStop()
+  ASM
+    la t0, global_nesrecon
+    ld t0, 0(t0)
+    beqz t0, nes_rec_stop_ret
+    nop
+    la t3, global_nesrecw
+    addiu t1, zero, 3
+    sd t1, #R_STATE_B(t3)           ; state 3: the emulator stopped
+    la t0, global_badopcode
+    ld t1, 0(t0)
+    sd t1, #R_CODE_B(t3)
+    la t0, global_pc
+    ld t1, 0(t0)
+    sd t1, #R_PC_B(t3)
+    la t0, global_workererror
+    ld t1, 0(t0)
+    sd t1, #R_WORKER_B(t3)
+    la t0, global_workerframes
+    ld a0, 0(t0)
+    j nesrecflush                   ; NesRecFlush(WorkerFrames, 0), a tail call
+    move a1, zero
+nes_rec_stop_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
 ; The game did not start (2: the cartridge did not load, 3: the show's set-up refused).
