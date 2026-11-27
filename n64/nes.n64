@@ -529,12 +529,21 @@ nes_hgf_print:
 nes_hgf_printed:
   EndASM
   CompilerIf #VERIFY_FRAME>0 Or #NES_MEASURE_QUEUE Or #NES_RSP_CHECK
+  CompilerIf #VERIFY_FRAME=0 And #NES_RSP_CHECK=0
+  ASM
+    la t0, global_hosttelemetryenabled
+    ld t0, 0(t0)
+    beqz t0, nes_hgf_checked         ; only the measuring line is left to the check, and it needs the telemetry on
+    nop
+  EndASM
+  CompilerEndIf
   ASM
     move a0, s0
     jal neshostframecheck
     move a1, s1                      ; (delay slot)
     bnez a0, nes_hgf_out             ; the RSP check halted: 1
     nop
+nes_hgf_checked:
   EndASM
   CompilerEndIf
   CompilerIf #NES_RDP_SHOW
