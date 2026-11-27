@@ -91,6 +91,7 @@ Procedure.i NesLibPrepare(item.i)
     NesLibError="Game file could not be opened."
     ProcedureReturn 0
   EndIf
+  NesRomClean(NesFatBufferAddress())    ; an old dumper's header: bytes 7-15 read as zero (romheader.n64)
   expected=NesRomSize(NesFatBufferAddress())
   If expected=0
     NesLibError="This mapper or ROM format is unsupported."

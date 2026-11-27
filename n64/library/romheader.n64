@@ -1,5 +1,40 @@
 XIncludeFile "boards.pmi"
 
+; NesRomClean(header): the documented iNES header detection, applied once to the loaded 16-byte header before anything
+; reads it (the loader, NesRuntimeLoad). Byte 7 & $0C = $08: NES 2.0, kept. $04 or $0C, or $00 with bytes 12-15 not all
+; zero: ARCHAIC iNES - bytes 7-15 are not header fields (old dumpers wrote text there, "DiskDude!"), so they are read as
+; zero: the mapper is byte 6's high nibble alone (byte 7's upper nibble ignored), and byte 7's flags, the NES 2.0
+; fields and the TV byte are not read. Else plain iNES, kept. WHY: such a header named mapper 64-79 for 56 USA dumps
+; (65 for MMC1 games such as Willow) and the loader refused them; the folder census before / after (design note N.77)
+; shows only those 56 change, each to its board's mapper.
+; IN: a0 = the header (16-byte aligned: the loader's buffer). Clobbers t0, t1. A leaf.
+; THE PLAIN TWIN:
+;   f = PeekA(header + 7) & $0C
+;   If f = 4 Or f = 12 Or (f = 0 And PeekL(header + 12) <> 0) : FillMemory(header + 7, 9, 0) : EndIf
+ProcedureNaked NesRomClean(header.i)
+  ASM
+    lbu t0, 7(a0)
+    andi t0, t0, 12                 ; the format bits
+    addiu t1, zero, 8
+    beq t0, t1, nrc_done            ; NES 2.0: kept
+    nop
+    bnez t0, nrc_zero               ; $04 / $0C: archaic
+    nop
+    lw t1, 12(a0)                   ; bytes 12-15 (aligned: the buffer is)
+    beqz t1, nrc_done               ; all zero: iNES, kept
+    nop
+nrc_zero:
+    sb zero, 7(a0)                  ; bytes 7-15 read as zero
+    sb zero, 8(a0)
+    sb zero, 9(a0)
+    sh zero, 10(a0)
+    sw zero, 12(a0)
+nrc_done:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+
 Procedure.i NesRomMapper(header.i)
   ProcedureReturn (PeekA(header+6)>>4)|(PeekA(header+7)&$F0)
 EndProcedure

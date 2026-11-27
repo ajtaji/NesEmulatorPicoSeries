@@ -19,7 +19,9 @@ Global NesRuntimeSaveBytes.i
 ;   72 dest | 80 mapper | 88 flags | 96 submapper
 ; THE PLAIN TWIN (the compiled procedure, as it was, but the module look-up in place of the #GAME_MAPPER test):
 ;   header = (@NesRuntimeHeader[0] + 15) & ~15
-;   If NesCartRead(#NES_RUNTIME_BASE, header, 16) = 0 Or NesRomSize(header) = 0 : ProcedureReturn 0 : EndIf
+;   If NesCartRead(#NES_RUNTIME_BASE, header, 16) = 0 : ProcedureReturn 0 : EndIf
+;   NesRomClean(header)                        ; the archaic-iNES rule (romheader.n64)
+;   If NesRomSize(header) = 0 : ProcedureReturn 0 : EndIf
 ;   flags = PeekA(header + 6) : CartMapper = NesRomMapper(header) : CartSubmapper = NesRomSubmapper(header)
 ;   If NesModuleInstall(CartMapper) = 0 : ProcedureReturn 0 : EndIf
 ;   prg = PeekA(header + 4) * 16384 : chrBytes = PeekA(header + 5) * 8192
@@ -80,6 +82,8 @@ ProcedureNaked.i NesRuntimeLoad()
     addiu a2, zero, 16
     beqz a0, nrl_fail
     nop
+    jal nesromclean                 ; the archaic-iNES rule: bytes 7-15 of an old dumper's header read as zero
+    ld a0, 8(sp)
     jal nesromsize                  ; 0: not a header this cart can run
     ld a0, 8(sp)
     beqz a0, nrl_fail
