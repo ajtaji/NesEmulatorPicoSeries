@@ -100,6 +100,19 @@ Procedure.i NesNmiCap(n.i)
   If d<n
     n=d : If n<1 : n=1 : EndIf
   EndIf
+  ; and, while a sample plays, at the next DMC byte fetch F (the unit's mmc3_budget_dmc, the hardware rule: the
+  ; fetch's stall lands at the boundary at or after F, not at the end of a 128-cycle window); the APU stands at
+  ; WorkerClock here. An empty buffer with bytes left fetches at once: 1.
+  If DmcBytes>0
+    If DmcEmpty
+      d=1
+    Else
+      d=DmcTimer+(DmcBits-1)*DmcTable(ApuReg(16)&15)-(CpuCycles-WorkerClock)
+    EndIf
+    If d<n
+      n=d : If n<1 : n=1 : EndIf
+    EndIf
+  EndIf
   ProcedureReturn n
 EndProcedure
 """
