@@ -637,6 +637,20 @@ EndProcedure
 ;   NesSegOn = 0 : NesSegOpen = 0
 ; CLOBBERS t0-t2.
 #NES_SEG_POOL_BYTES = #NES_SEG_POOL * #NES_SEG_BYTES
+; THE SPLIT LINES' RUN PINNED (design note N.73): NesSegFrame, NesSegStoreAsm, NesSegFirst and NesSegDraw are one
+; layout unit (each falls through or ends in a delay slot that is not a nop); NesSegDraw runs at every span of a split
+; line. Unpinned, the run's place moved with every change of the code before it: on one build it landed on the
+; unit's per-dot sets (ppu_adv_save, u_ppuadvance, ppu_adv_start: +137 K I-misses over the run, +2 K cycles a frame).
+; NesSegPin pads with zero words to the next address that is 11892 modulo 16384 - the place the run had in the record
+; run before (NesSegDraw on rel. sets 338-343 from cpurun's, where it met no unit line), so it holds in every show
+; build. It runs on into NesSegFrame (no jr / j / b); nothing enters it. Anything written between them breaks the pin.
+CompilerIf #NES_RDP_SHOW
+ProcedureNaked NesSegPin()
+  ASM
+    .alignabs 16384, 11892
+  EndASM
+EndProcedure
+CompilerEndIf
 ProcedureNaked NesSegFrame(p.i)
   ASM
     dsll t0, a0, 3

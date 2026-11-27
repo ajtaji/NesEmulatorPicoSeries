@@ -7,12 +7,37 @@ CompilerIf #NES_MMC1_ROWS
   Global Dim NesDirtyRows.a(64)
 CompilerEndIf
 
-Procedure NesInvalidateMap()
-  NesVideoSerial+=1 : NesVideoReset=NesVideoSerial
+; NesInvalidateMap(): every cached row stale (a mapping change). Assembly (design note N.73). THE PLAIN TWIN:
+;   NesVideoSerial+=1 : NesVideoReset=NesVideoSerial
+;   CompilerIf #NES_MMC1_ROWS
+;     For i=0 To 7 : PokeI(@NesDirtyRows(0)+i*8,-1) : Next
+;   CompilerEndIf
+; CLOBBERS t0-t2.
+ProcedureNaked NesInvalidateMap()
+  ASM
+    la t0, global_nesvideoserial
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    la t0, global_nesvideoreset
+    sd t1, 0(t0)
+  EndASM
   CompilerIf #NES_MMC1_ROWS
-    Protected i.i
-    For i=0 To 7 : PokeI(@NesDirtyRows(0)+i*8,-1) : Next
+  ASM
+    la t0, global_nesdirtyrows
+    daddiu t1, zero, -1
+    daddiu t2, t0, 64
+nes_inv_map_rows:
+    sd t1, 0(t0)                     ; 8 bytes of row marks at a time
+    daddiu t0, t0, 8
+    bne t0, t2, nes_inv_map_rows
+    nop
+  EndASM
   CompilerEndIf
+  ASM
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
 Procedure NesInvalidateTileRow(addr.i)

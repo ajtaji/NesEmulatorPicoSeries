@@ -473,6 +473,17 @@ ProcedureNaked NesFbWaitCall()
   EndASM
 EndProcedure
 
+; THE DRAIN CALL'S CHAIN PINNED (design note N.73): the layout places NesShowDrainCall at the head of a chain the
+; compiler builds from the call graph - NesChrPairAt, the display's interrupt and LpmDisplayTryGet, MapCopy, MapperChr,
+; MapperUpdate, MapperMirror - whose place moved with the code before it; on one build MapperChr landed on the unit's
+; APU sets (apu_advance_body, apu_publish_frame: +118 K I-misses, +1.7 K cycles a frame). NesShowDrainPin pads to the
+; next address that is 2644 modulo 16384, the chain's place in the record run before (MapperChr on rel. sets 155-162,
+; met by no unit line). It runs on into NesShowDrainCall; nothing enters it.
+ProcedureNaked NesShowDrainPin()
+  ASM
+    .alignabs 16384, 2644
+  EndASM
+EndProcedure
 ; NesShowDrainCall: a CHR-RAM row write while the show is busy (chrpairs.n64, NesChrPairAt). Then the common tail
 ; that puts every register back.
 ProcedureNaked NesShowDrainCall()

@@ -223,6 +223,73 @@ Procedure.i NesReaderActive()
   ProcedureReturn DmcBytes>0
 EndProcedure
 CompilerEndIf
+; NesCurrentPoll(acc): the poll rule of the read at PC when nothing the guest can see has moved since the frame was
+; delivered (0: none). IN ASSEMBLY in the runtime-ROM builds (design note N.73, the owner's order; ~2.4 calls a frame
+; in the record cart): the tests as compiled, then a tail call of NesRuntimePoll(PC, acc) (runtime.n64). The other
+; builds keep the compiled form below. IN: a0 = acc. OUT: a0. Changes t0-t3 before the tail call.
+; THE PLAIN TWIN:
+;     If WorkerFrames<>NesDeliveredFrame : ProcedureReturn 0 : EndIf
+;     If acc<>((PpuStatus&$E0)|(PpuBus&31)) Or WorkerNmi<>NesSeenNmi Or WorkerDmcCycles<>NesSeenDmc
+;       ProcedureReturn 0
+;     EndIf
+;     If FI=0 And (WorkerIrq|MapIrq)<>0 : ProcedureReturn 0 : EndIf
+;     CompilerIf #NES_RUNTIME_ROM
+;       ProcedureReturn NesRuntimePoll(PC,acc)
+;     CompilerElse
+;       ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
+;     CompilerEndIf
+CompilerIf #NES_RUNTIME_ROM
+ProcedureNaked.i NesCurrentPoll(acc.i)
+  ASM
+    la t0, global_workerframes
+    ld t0, 0(t0)
+    la t1, global_nesdeliveredframe
+    ld t1, 0(t1)
+    bne t0, t1, nes_cpoll_none       ; not the frame delivered
+    nop
+    la t0, global_ppustatus
+    ld t0, 0(t0)
+    andi t0, t0, 0xE0
+    la t1, global_ppubus
+    ld t1, 0(t1)
+    andi t1, t1, 31
+    or t0, t0, t1
+    bne a0, t0, nes_cpoll_none       ; acc <> (PpuStatus & $E0) | (PpuBus & 31)
+    nop
+    la t0, global_workernmi
+    ld t0, 0(t0)
+    la t1, global_nesseennmi
+    ld t1, 0(t1)
+    bne t0, t1, nes_cpoll_none       ; an NMI since
+    nop
+    la t0, global_workerdmccycles
+    ld t0, 0(t0)
+    la t1, global_nesseendmc
+    ld t1, 0(t1)
+    bne t0, t1, nes_cpoll_none       ; a DMC fetch since
+    nop
+    la t0, global_fi
+    ld t0, 0(t0)
+    bnez t0, nes_cpoll_rule          ; interrupts masked
+    nop
+    la t0, global_workerirq
+    ld t0, 0(t0)
+    la t1, global_mapirq
+    ld t1, 0(t1)
+    or t0, t0, t1
+    bnez t0, nes_cpoll_none          ; an IRQ pending
+    nop
+nes_cpoll_rule:
+    move a1, a0                      ; acc
+    la t0, global_pc
+    j nesruntimepoll                 ; NesRuntimePoll(PC, acc) (a tail call)
+    ld a0, 0(t0)                     ; (delay slot)
+nes_cpoll_none:
+    jr ra
+    move a0, zero                    ; (delay slot) 0
+  EndASM
+EndProcedure
+CompilerElse
 Procedure.i NesCurrentPoll(acc.i)
   If WorkerFrames<>NesDeliveredFrame : ProcedureReturn 0 : EndIf
   If acc<>((PpuStatus&$E0)|(PpuBus&31)) Or WorkerNmi<>NesSeenNmi Or WorkerDmcCycles<>NesSeenDmc
@@ -235,6 +302,7 @@ Procedure.i NesCurrentPoll(acc.i)
     ProcedureReturn NesPollRule(NesPollOffset(PC),acc)
   CompilerEndIf
 EndProcedure
+CompilerEndIf
 
 CompilerIf #GAME_SAVE_BYTES>0
 XIncludeFile "save_backing.pmi"
@@ -313,30 +381,64 @@ CompilerEndIf
 CompilerIf #NES_CONSOLE_RECORD
   Declare NesRecFrame(frame.i)          ; the console record (console_record.n64)
 CompilerEndIf
-Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
+; NesHostGuestFrame(lastFrame, start): once a guest frame (the core's frame wrap): the frame delivered, the input,
+; the APU caught up, the sound fed, the record's frame, the battery save, the runtime's exit check, the show's check
+; point; 1 ends the run (the checking builds). IN ASSEMBLY (design note N.73, the owner's order). Compiled on purpose:
+; NesHostFramePrint (the frame 1 / 60 / 120 line: string formatting) and, in the checking builds, NesHostFrameCheck /
+; NesHostFrameEnd (their printed lines, the RSP check's halt, the checkpoint frame's capture). IN: a0 lastFrame, a1
+; start. OUT: a0. KEEPS s0, s1 (saved).
+; THE PLAIN TWIN:
+;     Protected elapsed.i
+;     NesDeliveredFrame=lastFrame : HostInputPoll()
+;     CompilerIf #NES_APU_SPLIT
+;       NesApuCatchUp()                     ; the APU at WorkerClock while a sample plays (apusplit.n64, N.26d)
+;     CompilerEndIf
+;     HostAudioPoll()
+;     CompilerIf #NES_CONSOLE_RECORD
+;       NesRecFrame(lastFrame)
+;     CompilerEndIf
+;     CompilerIf #GAME_SAVE_BYTES>0
+;       If NesSavePending : NesSaveFlush() : EndIf
+;     CompilerEndIf
+;     CompilerIf #NES_RUNTIME_ROM
+;       CompilerIf #GAME_SAVE_BYTES>0
+;         If NesSavePending=0 : NesRuntimeCheckExit() : EndIf
+;       CompilerElse
+;         NesRuntimeCheckExit()
+;       CompilerEndIf
+;     CompilerEndIf
+;     If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
+;       elapsed=(LpmCpuCount()-start) & $FFFFFFFF
+;       LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))
+;     EndIf
+;     CompilerIf #NES_MEASURE_QUEUE
+;       If HostTelemetryEnabled And (lastFrame%60)=0
+;         elapsed=(LpmCpuCount()-start) & $FFFFFFFF
+;         LpmDebugPrint("NES LIVE "+Str(lastFrame)+" COUNT "+Str(elapsed)+" AI STARVATIONS "+Str(HostAiStarvations)+" LAST "+Str(HostAiLastStarvation)+" PCM DROPPED "+Str(HostAudioDropped))
+;       EndIf
+;     CompilerEndIf
+;     CompilerIf #NES_RSP_CHECK
+;       If NesRspHalt : LpmDebugPrint("NES RSP CHECK STOPPED AT FRAME "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
+;     CompilerEndIf
+;     CompilerIf #NES_RDP_SHOW
+;       NesShowPoll(0)                      ; a check point of the show's hand-over (show.n64)
+;     CompilerEndIf
+;     CompilerIf #VERIFY_FRAME>0
+;       If lastFrame=#VERIFY_FRAME : HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
+;     CompilerEndIf
+;     ProcedureReturn 0
+Procedure NesHostFramePrint(lastFrame.i, start.i)
+  Protected elapsed.i = (LpmCpuCount() - start) & $FFFFFFFF
+  LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))
+EndProcedure
+CompilerIf #VERIFY_FRAME>0 Or #NES_MEASURE_QUEUE Or #NES_RSP_CHECK
+Procedure.i NesHostFrameCheck(lastFrame.i, start.i)   ; the checking builds' lines (after the frame 1 / 60 / 120 one)
   Protected elapsed.i
-  NesDeliveredFrame=lastFrame : HostInputPoll()
-  CompilerIf #NES_APU_SPLIT
-    NesApuCatchUp()                     ; the APU at WorkerClock while a sample plays (apusplit.n64, N.26d)
+  CompilerIf #VERIFY_FRAME>0
+    If (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME) And lastFrame<>1 And lastFrame<>60 And lastFrame<>120
+      NesHostFramePrint(lastFrame, start)
+    EndIf
   CompilerEndIf
-  HostAudioPoll()
-  CompilerIf #NES_CONSOLE_RECORD
-    NesRecFrame(lastFrame)
-  CompilerEndIf
-  CompilerIf #GAME_SAVE_BYTES>0
-    If NesSavePending : NesSaveFlush() : EndIf
-  CompilerEndIf
-  CompilerIf #NES_RUNTIME_ROM
-    CompilerIf #GAME_SAVE_BYTES>0
-      If NesSavePending=0 : NesRuntimeCheckExit() : EndIf
-    CompilerElse
-      NesRuntimeCheckExit()
-    CompilerEndIf
-  CompilerEndIf
-  If lastFrame=1 Or lastFrame=60 Or lastFrame=120 Or (#VERIFY_FRAME>0 And (lastFrame%60=0 Or lastFrame=#VERIFY_FRAME))
-    elapsed=(LpmCpuCount()-start) & $FFFFFFFF
-    LpmDebugPrint("NES FRAME "+Str(lastFrame)+" CPU "+Str(CpuCycles)+" PCM "+Str(ApuProduced)+" PC "+Str(PC)+" COUNT "+Str(elapsed))
-  EndIf
   CompilerIf #NES_MEASURE_QUEUE
     If HostTelemetryEnabled And (lastFrame%60)=0
       elapsed=(LpmCpuCount()-start) & $FFFFFFFF
@@ -346,13 +448,122 @@ Procedure.i NesHostGuestFrame(lastFrame.i,start.i)
   CompilerIf #NES_RSP_CHECK
     If NesRspHalt : LpmDebugPrint("NES RSP CHECK STOPPED AT FRAME "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
   CompilerEndIf
+  ProcedureReturn 0
+EndProcedure
+CompilerEndIf
+CompilerIf #VERIFY_FRAME>0
+Procedure NesHostFrameEnd(lastFrame.i)                ; the checkpoint frame
+  HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame))
+EndProcedure
+CompilerEndIf
+ProcedureNaked.i NesHostGuestFrame(lastFrame.i,start.i)
+  ASM
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    move s0, a0                      ; lastFrame
+    move s1, a1                      ; start
+    la t0, global_nesdeliveredframe
+    sd a0, 0(t0)
+    jal hostinputpoll
+    nop
+  EndASM
+  CompilerIf #NES_APU_SPLIT
+  ASM
+    jal nesapucatchup                ; the APU at WorkerClock while a sample plays (apusplit.n64, N.26d)
+    nop
+  EndASM
+  CompilerEndIf
+  ASM
+    jal hostaudiopoll
+    nop
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+  ASM
+    jal nesrecframe
+    move a0, s0                      ; (delay slot)
+  EndASM
+  CompilerEndIf
+  CompilerIf #GAME_SAVE_BYTES>0
+  ASM
+    la t0, global_nessavepending
+    ld t0, 0(t0)
+    beqz t0, nes_hgf_saved
+    nop
+    jal nessaveflush
+    nop
+nes_hgf_saved:
+  EndASM
+  CompilerEndIf
+  CompilerIf #NES_RUNTIME_ROM
+    CompilerIf #GAME_SAVE_BYTES>0
+    ASM
+    la t0, global_nessavepending
+    ld t0, 0(t0)
+    bnez t0, nes_hgf_exit            ; a save still pending: no exit check this frame
+    nop
+    jal nesruntimecheckexit
+    nop
+nes_hgf_exit:
+    EndASM
+    CompilerElse
+    ASM
+    jal nesruntimecheckexit
+    nop
+    EndASM
+    CompilerEndIf
+  CompilerEndIf
+  ASM
+    addiu t0, zero, 1
+    beq s0, t0, nes_hgf_print
+    addiu t0, zero, 60               ; (delay slot)
+    beq s0, t0, nes_hgf_print
+    addiu t0, zero, 120              ; (delay slot)
+    bne s0, t0, nes_hgf_printed
+    nop
+nes_hgf_print:
+    move a0, s0
+    jal neshostframeprint            ; frames 1, 60, 120: the frame's line
+    move a1, s1                      ; (delay slot)
+nes_hgf_printed:
+  EndASM
+  CompilerIf #VERIFY_FRAME>0 Or #NES_MEASURE_QUEUE Or #NES_RSP_CHECK
+  ASM
+    move a0, s0
+    jal neshostframecheck
+    move a1, s1                      ; (delay slot)
+    bnez a0, nes_hgf_out             ; the RSP check halted: 1
+    nop
+  EndASM
+  CompilerEndIf
   CompilerIf #NES_RDP_SHOW
-    NesShowPoll(0)                      ; a check point of the show's hand-over (show.n64)
+  ASM
+    jal nesshowpoll                  ; a check point of the show's hand-over (show.n64)
+    move a0, zero                    ; (delay slot)
+  EndASM
   CompilerEndIf
   CompilerIf #VERIFY_FRAME>0
-    If lastFrame=#VERIFY_FRAME : HostDrainCapture() : LpmDebugPrint("NES CHECKPOINT "+Str(lastFrame)) : ProcedureReturn 1 : EndIf
+  ASM
+    addiu t0, zero, #VERIFY_FRAME
+    bne s0, t0, nes_hgf_zero
+    nop
+    jal neshostframeend              ; the checkpoint frame: captured, 1
+    move a0, s0                      ; (delay slot)
+    b nes_hgf_out
+    addiu a0, zero, 1                ; (delay slot)
+nes_hgf_zero:
+  EndASM
   CompilerEndIf
-  ProcedureReturn 0
+  ASM
+    move a0, zero
+nes_hgf_out:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
 EndProcedure
 
 CompilerIf #NES_RUNTIME_ROM And #GAME_MAPPER=4

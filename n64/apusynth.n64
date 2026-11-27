@@ -172,11 +172,28 @@ ProcedureNaked NesSynRenderTimeTwin(t.i)
     dsrl a0, a0, 1
   EndASM
 EndProcedure
-Procedure NesSynRenderTime(t.i)
+; NesSynRenderTime(t): the synthesis brought to guest time t (the unit's APU timing calls it, the compiled ABI): the
+; RSP's room for it (rspsyn.n64's NesSynRspRoom, a tail call); the checking build's CPU twin first. Assembly (design
+; note N.73). THE PLAIN TWIN:
+;   CompilerIf #NES_SYN_CHECK : NesSynRenderTimeTwin(t) : CompilerEndIf
+;   NesSynRspRoom(t)
+ProcedureNaked NesSynRenderTime(t.i)
   CompilerIf #NES_SYN_CHECK
-    NesSynRenderTimeTwin(t)
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    jal nessynrendertimetwin         ; the twin's samples to t (the checking build)
+    nop
+    ld a0, 8(sp)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+  EndASM
   CompilerEndIf
-  NesSynRspRoom(t)
+  ASM
+    j nessynrsproom                  ; NesSynRspRoom(t) (a tail call)
+    nop
+  EndASM
 EndProcedure
 CompilerElse
 ProcedureNaked NesSynRenderTime(t.i)
