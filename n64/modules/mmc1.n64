@@ -1,0 +1,372 @@
+; modules/mmc1.n64 - the MMC1 (mapper 1, SxROM) mapper module: its hot part, as it runs in the mapper slot
+; (unit/slot.n64; the mapper-modules design note, sections 2-3). Its cold part (the power-on) is modules/mmc1_cold.n64.
+;
+; THE BOARD (the MMC1's published register behaviour; the reference is the project's compiled MMC1, mmc1.n64 and the
+; shared core's MapperWrite / MapperUpdate, which this module reproduces write for write):
+;   $6000-$7FFF  8 KB work RAM, enabled while PRG register bit 4 is clear (never write-protected).
+;   $8000-$FFFF  one serial port: a write with bit 7 set empties the 5-bit shift register and sets the control
+;                register's PRG mode bits (control | $0C); else bit 0 enters the shift register from the top, and the
+;                fifth bit loads the register picked by A14-A13 - $8000 control, $A000 CHR bank 0, $C000 CHR bank 1,
+;                $E000 PRG bank - with the five bits, and the shift register empties. A write in the CPU cycle right
+;                after the previous one (the second write of a read-modify-write instruction) is ignored unless it
+;                is a reset - the stamps of the two writes are compared (MapLastWrite).
+;   control: bits 0-1 mirroring (0 one-screen A, 1 one-screen B, 2 vertical, 3 horizontal), bits 2-3 PRG mode
+;   (0-1: 32 KB at $8000, the bank's bit 0 ignored; 2: the first 16 KB fixed at $8000, the bank at $C000; 3: the
+;   bank at $8000, the last 16 KB fixed at $C000), bit 4 CHR mode (0: 8 KB, CHR bank 0's bit 0 ignored; 1: two
+;   4 KB banks). PRG bank bits 0-3 the 16 KB bank, bit 4 the work RAM disable.
+;   Banks are published through the common helpers (mmc3_registers.n64: MapperPrg 8 KB slots and the PRG biases,
+;   MapperChr 1 KB slots, the band cut and the CHR biases or the CHR-RAM copy, MapperMirror the name-table slots),
+;   so the core's PRG fetch, the old renderer and the band record see MMC1 exactly as they see MMC3.
+;
+; THE ENTRIES (unit/slot.n64): no IRQ, no PPU clocking, no CPU timer, no expansion reads:
+;   budget          the full window (128), and the common DMC bound while a sample plays (MMC3's budget with its
+;                   IRQ disabled, which is the state MMC1 is always in)
+;   irq_deadline    never ($7FFF_FFFF_FFFF_FFFF, as mmc3_fetch_deadline_never)
+;   ppu_ticks, ppu_addr, clock_irq, cpu_ticks   nothing (return)
+;   write           the work RAM and the serial port (below)
+;   write_sync      the timed register write's sync decision (below), then write, then the common close
+;   write_fast      every $8000-$FFFF write goes on to the common timed path (nes_mmc3_bus_write_timed)
+;   read            open bus (not called: MMC1 has nothing at $4020-$5FFF)
+;
+; THE CONTRACT (modules/mmc3.n64's): in through the table; out by j / jal to common labels only; a relative branch
+; never leaves the two slots (build.py, check_mapper_slot).
+; CHECKED BY: the guest's per-instruction digest every frame against the compiled MMC1 reference core (cputrace.n64,
+; build.py trace_compiled_writes), the oracle's pictures and sound, the shown picture against the old renderer.
+  ASM
+u_mappercpubudget:                  ; +0
+    b mmc1_e_budget
+    nop
+u_nesmmc3fetchdeadline:             ; +8 never: the largest positive cycle
+    b mmc1_e_never
+    nop
+u_mapperpputicks:                   ; +16 no PPU clocking
+    jr ra
+    nop
+u_mappera12:                        ; +24 no A12 watch
+    jr ra
+    nop
+u_mapperwrite:                      ; +32
+    b mmc1_e_write
+    nop
+nes_slot_write_sync:                ; +40
+    b mmc1_e_write_sync
+    nop
+nes_slot_write_fast:                ; +48 every register write is timed: the common timed path
+    j nes_mmc3_bus_write_timed
+    nop
+u_mapperclockirq:                   ; +56 no IRQ counter
+    jr ra
+    nop
+nes_slot_cpu_ticks:                 ; +64 no CPU timer
+    jr ra
+    nop
+nes_slot_read:                      ; +72 open bus
+    jr ra
+    move v0, zero
+
+; ---- budget: the window's length. MMC1 raises no IRQ, so the full 128 cycles, bounded by the next DMC fetch while a
+; sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 = @MapIrq). Out a0.
+; THE PLAIN TWIN: n = 128 : If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf (F the next fetch's cycle)
+mmc1_e_budget:
+    la a1, global_mapirq            ; the DMC bound's base register
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, mmc1_budget_dmc        ; a sample plays: the common bound
+    addiu a0, zero, 128             ; (delay slot) the full window
+    jr ra
+    nop
+mmc1_budget_dmc:
+    j mmc3_budget_dmc               ; the common DMC bound (an absolute jump: no relative branch leaves the slots)
+    nop
+
+; ---- irq_deadline: never. Out a0 = $7FFF_FFFF_FFFF_FFFF (all ones shifted right once).
+mmc1_e_never:
+    daddiu a0, zero, -1
+    jr ra
+    dsrl a0, a0, 1
+
+; ---- write_sync: a timed $8000-$FFFF write's sync decision. Entered by branch from the common timed path with its
+; 32-byte frame on the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. A write that can change a mapping (a
+; reset, or a fifth bit: the shift register's sentinel, bit 0, is set) first brings every device to the write
+; (u_workeradvance: the APU, the PPU and its band cut see the old banks up to here); an intermediate bit (or an
+; ignored write after one) changes only the shift register and the stamp, so only the CPU clock moves
+; (u_nesmmc3advancecputime). Then the write with the stamp read again (as MMC3's: after the devices moved), then the
+; common close (unit/write.n64: it pops the frame and returns).
+; THE PLAIN TWIN:
+;   If value & 128 Or MapShift & 1 : WorkerAdvance(stamp) : Else : NesAdvanceCpuTime(stamp) : EndIf
+;   MapperWrite(addr, value, CpuCycles + AccessPhase)
+mmc1_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    la t0, global_mapshift
+    ld t0, 0(t0)                    ; the shift register
+    andi t1, a1, 128
+    andi t0, t0, 1                  ; the sentinel at bit 0: this bit is the fifth
+    or t0, t0, t1
+    bnez t0, mmc1_sync_full         ; a reset or a fifth bit: a mapping may change
+    nop
+    jal u_nesmmc3advancecputime     ; an intermediate bit: the CPU clock only
+    move a0, a2
+    b mmc1_synced
+    nop
+mmc1_sync_full:
+    jal u_workeradvance             ; every device to the write
+    move a0, a2
+mmc1_synced:
+    la t0, global_cpucycles         ; the stamp again, after the devices moved
+    ld a2, 0(t0)
+    ld t1, global_accessphase-global_cpucycles(t0)
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal mmc1_e_write                ; MapperWrite(addr, value, stamp)
+    daddu a2, a2, t1
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64)
+    nop
+
+; ---- write: the work RAM and the serial port. In: a0 address ($6000-$FFFF), a1 value, a2 stamp. Clobbers t0-t3,
+; a0-a3 (and what the bank helpers clobber, through mmc1_update / mmc1_prg, which keep their own frames).
+; THE PLAIN TWIN (mmc1.n64's MapperWrite, the project's reference):
+;   If addr < $8000
+;     If MapRamEnable And MapRamProtect = 0 : MapRam(addr & 8191) = value : NesSaveChanged(addr & 8191) : EndIf
+;   Else
+;     old = MapLastWrite : MapLastWrite = stamp
+;     If value & 128
+;       MapShift = 16 : If MapControl | 12 <> MapControl : MapControl = MapControl | 12 : MapperUpdate() : EndIf
+;     ElseIf stamp - old <> 1
+;       r = (value & 1) << 4 | MapShift >> 1
+;       If MapShift & 1 = 0 : MapShift = r
+;       Else
+;         MapShift = 16
+;         Select addr >> 13 & 3
+;           Case 0 : If MapControl <> r : MapControl = r : MapperUpdate() : EndIf
+;           Case 1 : If MapChr0 <> r : MapChr0 = r : MapperUpdate() : EndIf
+;           Case 2 : If MapChr1 <> r : MapChr1 = r : MapperUpdate() : EndIf
+;           Case 3 : If MapPrgReg <> r : MapPrgReg = r : MapperPrgOnly() : EndIf    ; mmc1_prg
+;         EndSelect
+;       EndIf
+;     EndIf
+;   EndIf
+mmc1_e_write:
+    andi t0, a0, 0x8000
+    beqz t0, mmc1_write_ram         ; $6000-$7FFF: the work RAM
+    nop
+    la t3, global_mapcontrol
+    ld t0, global_maplastwrite-global_mapcontrol(t3)
+    sd a2, global_maplastwrite-global_mapcontrol(t3)    ; this write's stamp, for the next one
+    andi t1, a1, 128
+    bnez t1, mmc1_write_reset       ; bit 7: the reset
+    dsubu t0, a2, t0                ; (delay slot) the cycles since the last write
+    addiu t1, zero, 1
+    beq t0, t1, mmc1_write_done     ; the very next cycle: ignored (a read-modify-write's second write)
+    ld t0, global_mapshift-global_mapcontrol(t3)
+    andi t1, a1, 1
+    dsrl t2, t0, 1
+    sll t1, t1, 4
+    or t1, t1, t2                   ; the bit in from the top: (value & 1) << 4 | MapShift >> 1
+    andi t0, t0, 1
+    beqz t0, mmc1_write_done        ; not the fifth bit: the shift register only ...
+    sd t1, global_mapshift-global_mapcontrol(t3)  ; (delay slot) ... which holds it
+    addiu t2, zero, 16
+    sd t2, global_mapshift-global_mapcontrol(t3)  ; the fifth: the shift register empties (the sentinel at bit 4)
+    srl t0, a0, 13
+    andi t0, t0, 3                  ; the register: A14-A13
+    beqz t0, mmc1_write_control
+    addiu t2, zero, 1
+    beq t0, t2, mmc1_write_chr0
+    addiu t2, zero, 2
+    beq t0, t2, mmc1_write_chr1
+    nop
+    ld t0, global_mapprgreg-global_mapcontrol(t3)   ; $E000: the PRG bank
+    beq t0, t1, mmc1_write_done     ; the value it holds: nothing changes
+    nop
+    b mmc1_prg                      ; the PRG banks and the RAM enable only (a tail branch)
+    sd t1, global_mapprgreg-global_mapcontrol(t3)
+mmc1_write_control:                 ; $8000
+    ld t0, 0(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    b mmc1_update
+    sd t1, 0(t3)
+mmc1_write_chr0:                    ; $A000
+    ld t0, global_mapchr0-global_mapcontrol(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    b mmc1_update
+    sd t1, global_mapchr0-global_mapcontrol(t3)
+mmc1_write_chr1:                    ; $C000
+    ld t0, global_mapchr1-global_mapcontrol(t3)
+    beq t0, t1, mmc1_write_done
+    nop
+    b mmc1_update
+    sd t1, global_mapchr1-global_mapcontrol(t3)
+mmc1_write_reset:                   ; the shift register empties; PRG mode 3 (control | $0C)
+    addiu t0, zero, 16
+    sd t0, global_mapshift-global_mapcontrol(t3)
+    ld t0, 0(t3)
+    ori t1, t0, 12
+    beq t0, t1, mmc1_write_done     ; already mode 3: nothing changes
+    nop
+    b mmc1_update
+    sd t1, 0(t3)
+mmc1_write_ram:                     ; $6000-$7FFF, enabled and not protected
+    la t0, global_mapramenable
+    ld t1, 0(t0)
+    beqz t1, mmc1_write_done
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, mmc1_write_done
+    andi a0, a0, 8191
+    la t0, global_mapram
+    daddu t0, t0, a0
+  EndASM
+  CompilerIf #GAME_SAVE_BYTES>0
+    ; THE SAVE MARK in place, as MMC3's (modules/mmc3_write.n64, design note 8c): the battery RAM's 256-byte page is
+    ; marked dirty here. a0 = the offset (0-8191), a1 the value, t0 the byte's address.
+    ; THE PLAIN TWIN (save.n64's NesSaveChanged):
+    ;   If NesSaveOnline And offset>=0 And offset<NesSaveLimit : NesSaveDirty(offset>>8)=1 : NesSavePending=1 : EndIf
+    ASM
+      sb a1, 0(t0)                  ; the store
+      la t0, global_nessaveonline
+      ld t1, 0(t0)                  ; NesSaveOnline (0 until the save is read at load)
+      ld t2, global_nesruntimesavebytes-global_nessaveonline(t0)
+      beqz t1, mmc1_write_done
+      slt t2, a0, t2                ; offset < NesSaveLimit
+      beqz t2, mmc1_write_done
+      srl t1, a0, 8                 ; the page
+      la t3, global_nessavedirty
+      daddu t3, t3, t1
+      addiu t1, zero, 1
+      sb t1, 0(t3)                  ; NesSaveDirty(page) = 1
+      jr ra
+      sd t1, global_nessavepending-global_nessaveonline(t0)   ; NesSavePending = 1
+    EndASM
+  CompilerElse
+    ASM
+      jr ra
+      sb a1, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+mmc1_write_done:
+    jr ra
+    nop
+
+; ---- mmc1_update: every mapping from the registers - the PRG banks and the RAM enable (mmc1_prg), the eight 1 KB CHR
+; slots, the mirroring. Each helper changes only what differs (and cuts the open band first when CHR or mirroring
+; changes). In: nothing. Clobbers t0-t3, a0-a3 and what the helpers may (MapperChr's CHR-RAM copy calls MapCopy).
+; FRAME (48 B): 0 ra | 8 the slot | 16 the low half's first bank | 24 the high half's first bank
+; THE PLAIN TWIN (mmc1.n64's MapperUpdate, published through the common helpers):
+;   mmc1_prg()
+;   If MapControl & 16 : lo = MapChr0 * 4 : hi = MapChr1 * 4 : Else : lo = (MapChr0 & 30) * 4 : hi = lo + 4 : EndIf
+;   For i = 0 To 7 : If i < 4 : MapperChr(i, lo + i) : Else : MapperChr(i, hi + i - 4) : EndIf : Next
+;   m = MapControl & 3 : If m < 2 : MapperMirror(m + 2) : Else : MapperMirror(3 - m) : EndIf
+;   (MapperChr masks the bank by the CHR size, as mmc1.n64 masks the half's first bank: the same, a half's
+;   first bank being a multiple of 4 and the mask at least 7.)
+mmc1_update:
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    jal mmc1_prg                    ; the PRG banks and the RAM enable first, as mmc1.n64
+    nop
+    la t3, global_mapcontrol
+    ld t0, 0(t3)
+    ld t1, global_mapchr0-global_mapcontrol(t3)
+    andi t2, t0, 16
+    bnez t2, mmc1_chr_4k            ; control bit 4: two 4 KB banks
+    andi t2, t1, 30                 ; (delay slot) 8 KB: CHR bank 0 without its bit 0
+    sll t2, t2, 2                   ; the 8 KB bank's first 1 KB bank
+    sd t2, 16(sp)
+    b mmc1_chr_go
+    daddiu t2, t2, 4                ; (delay slot) its upper half
+mmc1_chr_4k:
+    sll t2, t1, 2                   ; CHR bank 0's first 1 KB bank
+    sd t2, 16(sp)
+    ld t2, global_mapchr1-global_mapcontrol(t3)
+    sll t2, t2, 2                   ; CHR bank 1's
+mmc1_chr_go:
+    sd t2, 24(sp)
+    sd zero, 8(sp)
+mmc1_chr_slot:
+    ld a0, 8(sp)                    ; the slot
+    andi t0, a0, 4
+    bnez t0, mmc1_chr_bank          ; slots 4-7: the high half ...
+    ld a1, 24(sp)
+    ld a1, 16(sp)                   ; ... slots 0-3: the low half
+mmc1_chr_bank:
+    andi t0, a0, 3
+    jal mapperchr                   ; MapperChr(slot, half's first + (slot & 3))
+    daddu a1, a1, t0
+    ld a0, 8(sp)
+    daddiu a0, a0, 1
+    sltiu t0, a0, 8
+    bnez t0, mmc1_chr_slot
+    sd a0, 8(sp)
+    la t3, global_mapcontrol
+    ld t0, 0(t3)
+    andi t0, t0, 3                  ; the mirroring: 0 one-screen A, 1 one-screen B, 2 vertical, 3 horizontal
+    sltiu t1, t0, 2
+    bnez t1, mmc1_mirror
+    addiu a0, t0, 2                 ; MapperMirror's modes: 2 one-screen A, 3 one-screen B ...
+    addiu t1, zero, 3
+    subu a0, t1, t0                 ; ... 1 vertical, 0 horizontal
+mmc1_mirror:
+    ld ra, 0(sp)
+    j mappermirror                  ; a tail call: it returns to mmc1_update's caller
+    daddiu sp, sp, 48
+
+; ---- mmc1_prg: the four 8 KB PRG slots from the control register's PRG mode and the PRG bank, and the work RAM's
+; enable from the PRG bank's bit 4. Clobbers t0-t3, a0-a3. FRAME (32 B): 0 ra | 8 the $8000 bank | 16 the $C000 bank
+; THE PLAIN TWIN (mmc1.n64's NesMapMmc1Prg; n = the 8 KB banks of the ROM):
+;   b = (MapPrgReg & 15) * 2 : mode = MapControl >> 2 & 3
+;   If mode < 2 : lo = b & ~3 : hi = lo + 2 : ElseIf mode = 2 : lo = 0 : hi = b : Else : lo = b : hi = n - 2 : EndIf
+;   MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, hi) : MapperPrg(3, hi + 1)
+;   MapRamEnable = Bool(MapPrgReg & 16 = 0) : MapRamProtect = 0
+;   (MapperPrg masks each bank by the ROM's size; mmc1.n64 masks lo and hi before adding 1: the same, lo and hi
+;   being even and the mask odd.)
+mmc1_prg:
+    la a3, global_mapcontrol
+    ld t0, 0(a3)
+    ld t1, global_mapprgreg-global_mapcontrol(a3)
+    ld t2, global_mapprgbytes-global_mapcontrol(a3)
+    srl t0, t0, 2
+    andi t0, t0, 3                  ; the PRG mode
+    andi a0, t1, 15
+    sll a0, a0, 1                   ; the 16 KB bank's first 8 KB bank
+    dsrl t2, t2, 13                 ; n
+    sltiu t3, t0, 2
+    bnez t3, mmc1_prg_32k
+    addiu a1, t2, -2                ; (delay slot) the last 16 KB's first 8 KB bank (mode 3's $C000)
+    addiu t3, zero, 2
+    bne t0, t3, mmc1_prg_publish    ; mode 3: the bank at $8000, the last 16 KB at $C000
+    nop
+    move a1, a0                     ; mode 2: the bank at $C000 ...
+    b mmc1_prg_publish
+    move a0, zero                   ; ... the first 16 KB at $8000
+mmc1_prg_32k:
+    srl a0, a0, 2
+    sll a0, a0, 2                   ; 32 KB: the bank's bit 0 ignored
+    addiu a1, a0, 2
+mmc1_prg_publish:
+    andi t1, t1, 16
+    sltiu t1, t1, 1
+    sd t1, global_mapramenable-global_mapcontrol(a3)   ; the work RAM: on while PRG bank bit 4 is clear
+    sd zero, global_mapramprotect-global_mapcontrol(a3)
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    move a1, a0
+    jal mapperprg                   ; MapperPrg(0, lo)
+    move a0, zero
+    ld a1, 8(sp)
+    addiu a0, zero, 1
+    jal mapperprg                   ; MapperPrg(1, lo + 1)
+    daddiu a1, a1, 1
+    ld a1, 16(sp)
+    jal mapperprg                   ; MapperPrg(2, hi)
+    addiu a0, zero, 2
+    ld a1, 16(sp)
+    addiu a0, zero, 3
+    jal mapperprg                   ; MapperPrg(3, hi + 1)
+    daddiu a1, a1, 1
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM

@@ -1,0 +1,132 @@
+; modules/mmc1_cold.n64 - the MMC1 (mapper 1) module's COLD part, assembled in the cold slot (unit/cold_slot.n64): its
+; entry table (the layout every module's cold part opens with, modules/mmc3_cold.n64) and its power-on.
+;
+; nes_cold_init - WHAT: the mapper state's power-on for MMC1, then every mapping from it (the reference: the shared
+; core's MapperInit as it runs for mapper 1 - the same stores in the same order, its MMC1 update mmc1.n64's).
+; HOW: the scalar fields are stored in MapperInit's order; the arrays' clears are byte loops (MapRam 8 KB, MapCiram
+; 4 KB); MapMirrorMode = -1 so that MapperMirror(PpuMirroring) publishes the header's mirroring;
+; ExtraMapperInit (compiled, shared: the extra boards' state, none of it MMC1's, cleared as MapperInit clears it);
+; then mmc1_update (modules/mmc1.n64: the PRG banks and RAM enable, CHR, mirroring from control = $0C).
+; In: nothing. Out: nothing. Clobbers what a compiled call may. FRAME (16 B): 0 ra.
+; THE PLAIN TWIN (MapperInit, anvil/mappers.pi4, for CartMapper = 1):
+;   MapManaged = 1 : MapIrq = 0 : MapSelect = 0 : MapRamEnable = 1 : MapRamProtect = 0
+;   MapShift = $10 : MapControl = $0C : MapChr0 = 0 : MapChr1 = 0 : MapPrgReg = 0
+;   MapLastWrite = -10 : MapIrqLatch = 0 : MapIrqCount = 0 : MapReload = 0 : MapIrqEnable = 0
+;   MapDots = 0 : MapLowSince = 0 : MapA12 = 0 : MapSpriteBits = 255 : MapIrqClocks = 0 : MapIrqAssertions = 0
+;   For i = 0 To 7 : MapRegs(i) = 0 : MapChrSlots(i) = -1 : Next
+;   MapRegs(1) = 2 : MapRegs(2) = 4 : MapRegs(3) = 5 : MapRegs(4) = 6 : MapRegs(5) = 7 : MapRegs(7) = 1
+;   For i = 0 To 3 : MapPrgSlots(i) = -1 : Next : MapRam() = 0 : MapCiram() = 0
+;   MapMirrorMode = -1 : MapperMirror(PpuMirroring) : ExtraMapperInit() : MapperUpdate()
+  ASM
+nes_cold_init:                      ; +0
+    b mmc1_cold_init
+    nop
+nes_cold_reserved:                  ; +8
+    jr ra
+    nop
+nes_cold_maptable:                  ; +16: no register handler table (MMC1 decodes its port in mmc1_e_write)
+    .word 0, 0, 0, 0, 0, 0, 0, 0
+mmc1_cold_init:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    addiu t1, zero, 1
+    la t0, global_mapmanaged
+    sd t1, 0(t0)                    ; MapManaged = 1
+    la t0, global_mapirq
+    sd zero, 0(t0)
+    la t0, global_mapselect
+    sd zero, 0(t0)
+    la t0, global_mapramenable
+    sd t1, 0(t0)                    ; MapRamEnable = 1
+    la t0, global_mapramprotect
+    sd zero, 0(t0)
+    addiu t2, zero, 16
+    la t0, global_mapshift
+    sd t2, 0(t0)                    ; MapShift = $10: empty (the sentinel at bit 4)
+    addiu t2, zero, 12
+    la t0, global_mapcontrol
+    sd t2, 0(t0)                    ; MapControl = $0C: PRG mode 3
+    la t0, global_mapchr0
+    sd zero, 0(t0)
+    la t0, global_mapchr1
+    sd zero, 0(t0)
+    la t0, global_mapprgreg
+    sd zero, 0(t0)
+    daddiu t2, zero, -10
+    la t0, global_maplastwrite
+    sd t2, 0(t0)                    ; MapLastWrite = -10: no write was the cycle before
+    la t0, global_mapirqlatch
+    sd zero, 0(t0)
+    la t0, global_mapirqcount
+    sd zero, 0(t0)
+    la t0, global_mapreload
+    sd zero, 0(t0)
+    la t0, global_mapirqenable
+    sd zero, 0(t0)
+    la t0, global_mapdots
+    sd zero, 0(t0)
+    la t0, global_maplowsince
+    sd zero, 0(t0)
+    la t0, global_mapa12
+    sd zero, 0(t0)
+    addiu t2, zero, 255
+    la t0, global_mapspritebits
+    sd t2, 0(t0)
+    la t0, global_mapirqclocks
+    sd zero, 0(t0)
+    la t0, global_mapirqassertions
+    sd zero, 0(t0)
+    la t0, global_mapregs           ; MapRegs: 0, 2, 4, 5, 6, 7, 0, 1
+    sd zero, 0(t0)
+    addiu t2, zero, 2
+    sd t2, 8(t0)
+    addiu t2, zero, 4
+    sd t2, 16(t0)
+    addiu t2, zero, 5
+    sd t2, 24(t0)
+    addiu t2, zero, 6
+    sd t2, 32(t0)
+    addiu t2, zero, 7
+    sd t2, 40(t0)
+    sd zero, 48(t0)
+    sd t1, 56(t0)
+    daddiu t2, zero, -1
+    la t0, global_mapchrslots       ; the eight CHR slots: none mapped (-1), so the update publishes each
+    addiu t3, zero, 8
+mmc1_init_chr:
+    sd t2, 0(t0)
+    addiu t3, t3, -1
+    bnez t3, mmc1_init_chr
+    daddiu t0, t0, 8
+    la t0, global_mapprgslots       ; the four PRG slots: none mapped
+    sd t2, 0(t0)
+    sd t2, 8(t0)
+    sd t2, 16(t0)
+    sd t2, 24(t0)
+    la t0, global_mapram            ; the work RAM: 8 KB of zeros (by bytes: a byte array's alignment is the
+    addiu t3, zero, 8192            ; compiler's to choose)
+mmc1_init_ram:
+    sb zero, 0(t0)
+    addiu t3, t3, -1
+    bnez t3, mmc1_init_ram
+    daddiu t0, t0, 1
+    la t0, global_mapciram          ; the name-table RAM: 4 KB of zeros (by bytes, as the work RAM)
+    addiu t3, zero, 4096
+mmc1_init_ciram:
+    sb zero, 0(t0)
+    addiu t3, t3, -1
+    bnez t3, mmc1_init_ciram
+    daddiu t0, t0, 1
+    la t0, global_mapmirrormode
+    sd t2, 0(t0)                    ; MapMirrorMode = -1: the next MapperMirror publishes
+    la t0, global_ppumirroring
+    jal mappermirror                ; MapperMirror(PpuMirroring): the header's mirroring
+    ld a0, 0(t0)
+    jal extramapperinit             ; ExtraMapperInit() (compiled, shared)
+    nop
+    jal mmc1_update                 ; every mapping (modules/mmc1.n64)
+    nop
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM

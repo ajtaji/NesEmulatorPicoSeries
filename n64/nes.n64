@@ -640,6 +640,9 @@ Procedure RunGame()
     NesRuntimeIndexMmc3Waits()
   CompilerEndIf
   CpuReset()
+  CompilerIf #NES_IDLE_OFF
+    NesIdleEnabled=0                    ; checking build: every idle / RAM-wait shortcut off (build.py --idle-off)
+  CompilerEndIf
   LpmDebugPrint("NES RESET "+Str(PC)+" MAPPER "+Str(CartMapper))
   start=LpmCpuCount()
   CompilerIf #NES_UNIT

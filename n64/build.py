@@ -78,6 +78,8 @@ def trace_bus_reads(code):
     """Checking build: fold every PPU / APU register read into the CPU trace."""
     old = "  ElseIf addr<$4000 Or addr=$4015\n    CpuNow()\n"
     proc = "Procedure.i NesReadPeripheral(addr.i)\n"
+    if code.count(proc) == 0:           # a reference core outside the unit: the bus's read is the shared NesReadSlow
+        proc = "Procedure.i NesReadSlow(addr.i)\n"
     if code.count(old) != 1 or code.count(proc) != 1:
         raise ValueError("peripheral read path changed")
     code = code.replace(old, old + "    NesCpuTraceRead(addr)\n")
@@ -124,6 +126,16 @@ def trace_native_serial(code):
     if code.count(branch) != 1:
         raise ValueError("MMC1 native serial branch changed")
     return code.replace(branch, "bne $t1, $zero, nes_absolute_store\n")
+
+
+def trace_no_fill(code):
+    """Checking build of a reference core outside the unit: without the threaded core's RAM-fill shortcut (stage_fill:
+    a STA abs,X / INX / BNE loop done in one step), which the unit has not, so that both builds step - and fold -
+    every instruction of such a loop. Exact either way; only which instructions are folded differs."""
+    from stage_fill import FILL_LOOP
+    if code.count(FILL_LOOP) > 1:
+        raise ValueError("native RAM fill entry changed")
+    return code.replace(FILL_LOOP, "nes_native_9d:\n")
 
 
 def check_hot_unit(symbols):
@@ -206,7 +218,14 @@ def check_mapper_slot(symbols, image, slot_bytes, cold_bytes):
     for offset, label in enumerate(COLD_ENTRIES):
         if sym.get(label) != cold + 8 * offset:
             raise RuntimeError(f"the cold slot's entry {label} is not at cold slot + {8 * offset}")
+    # a module's data in its parts (tables) is not decoded: the span from a label <name>_data to <name>_data_end, and
+    # the cold slot's register table (nes_cold_maptable, 8 words)
+    data = [(sym[k], sym[k + "_end"]) for k in sym if k.endswith("_data") and k + "_end" in sym
+            and (slot <= sym[k] < end or cold <= sym[k] < cold_end)]
+    data.append((sym["nes_cold_maptable"], sym["nes_cold_maptable"] + 32))
     for pc in [*range(slot, fill, 4), *range(cold, cold_fill, 4)]:
+        if any(lo <= pc < hi for lo, hi in data):
+            continue
         w = struct.unpack_from(">I", image, pc - IMAGE_BASE)[0]
         op, rt = w >> 26, (w >> 16) & 31
         if op in (4, 5, 6, 7, 20, 21, 22, 23) or (op == 1 and rt in (0, 1, 2, 3, 16, 17, 18, 19)):
@@ -238,6 +257,19 @@ def outside_slots(image, symbols, slot_bytes, cold_bytes):
             (slot, cold))
 
 
+def first_difference(a, b, symbols, places, slot_bytes, cold_bytes):
+    """Where two compiles' images first differ outside the slots, by the default compile's nearest symbol."""
+    sym = sorted((int(x.split()[0], 16), x.split()[1]) for x in symbols.decode(errors="replace").splitlines()
+                 if len(x.split()) >= 2)
+    slot, cold = places
+    for i in range(min(len(a), len(b))):
+        if a[i] != b[i] and not (slot <= i < slot + slot_bytes or cold <= i < cold + cold_bytes):
+            pc = IMAGE_BASE + i
+            near = [s for s in sym if s[0] <= pc]
+            return f"first at ${pc:08X} ({near[-1][1]} + {pc - near[-1][0]})" if near else f"first at ${pc:08X}"
+    return f"sizes {len(a)} and {len(b)}"
+
+
 def outside_symbols(symbols, places, slot_bytes, cold_bytes):
     """The build's symbols that lie outside both slots (the common code's and the variables'), as a set of lines."""
     slot, cold = (IMAGE_BASE + p for p in places)
@@ -261,7 +293,6 @@ def build(args, *, controller_trace=()):
     if not compiler.is_file():
         raise ValueError(f"missing compiler: {compiler}")
     runtime = getattr(args, "runtime", False)
-    unit_only = getattr(args, "unit_only", False)   # library cores: build the unit (any mapper) or refuse
     if runtime:
         mapper = getattr(args, "runtime_mapper", 1)
         cart = SimpleNamespace(mapper=mapper, submapper=0, mirror=0, ram_size=0,
@@ -277,8 +308,6 @@ def build(args, *, controller_trace=()):
     if cpu_core == "asm" and not runtime:
         raise ValueError("the assembly 6502 core is built for the runtime cartridge only")
     unit = runtime and (cpu_core == "asm" or cart.mapper == 4)
-    if unit_only and not unit:
-        raise ValueError("this configuration is not the unit build")
     stage_as = UNIT_MAPPER if unit else cart.mapper   # what the shared sources are staged for
     if runtime and unit:
         # the battery RAM of every module: MapRam's 8 KB, marked dirty by the modules' own work-RAM writes
@@ -311,6 +340,12 @@ def build(args, *, controller_trace=()):
     if unit and cpu_core == "reference" and cart.mapper != 4:
         raise ValueError("the unit build's reference core is MMC3's checking build (mapper 4 only)")
     cpu_trace = getattr(args, "cpu_trace", False)
+    # the checking builds that compare two cores' digests over different shortcut rules (the unit's against a reference
+    # core outside it): every idle-loop and RAM-wait shortcut off (NesIdleEnabled = 0 from load), so that both step,
+    # and fold, every instruction. The shortcuts are exact; the oracles (sound, checkpoints) run with them on.
+    idle_off = getattr(args, "idle_off", False)
+    if idle_off and not (runtime and args.check_frame):
+        raise ValueError("--idle-off is a runtime verification build")
     a12_check = getattr(args, "a12_check", False)
     ppu_check = getattr(args, "ppu_check", False)
     twin_check = getattr(args, "twin_check", False)
@@ -353,6 +388,7 @@ def build(args, *, controller_trace=()):
         "NES_CONSOLE_RECORD": int(console_record),
         "NES_REC_PICTURES_ALL": int(record_pictures),
         "NES_CPU_TRACE": int(cpu_trace),
+        "NES_IDLE_OFF": int(idle_off),
         "NES_A12_CHECK": int(a12_check),
         "NES_PPU_CHECK": int(ppu_check),
         "NES_TWIN_CHECK": int(twin_check or rsp_check),
@@ -417,6 +453,8 @@ def build(args, *, controller_trace=()):
                 code = stage_cpu(stage_poll(code), cart.mapper, program, has_ram_waits, chain_nrom, mmc1_20k, runtime)
                 if cpu_trace:
                     code = trace_reference(code)
+                    if not unit:
+                        code = trace_no_fill(code)
                     if not unit and cart.mapper == 1:
                         code = trace_native_serial(code)
                 if runtime and not unit and cart.mapper == 1:
@@ -521,7 +559,8 @@ def build(args, *, controller_trace=()):
                 built[module] = check_mapper_slot(app / "nes.bin.sym", image, slot_bytes, cold_bytes)
                 there, at = outside_slots(image, symbols, slot_bytes, cold_bytes)
                 if at != places or there != common:
-                    raise RuntimeError(f"mapper {module}'s compile changed the image outside the mapper slots")
+                    raise RuntimeError(f"mapper {module}'s compile changed the image outside the mapper slots: "
+                                       + first_difference(first[0], image, first[1], places, slot_bytes, cold_bytes))
                 if outside_symbols(symbols, at, slot_bytes, cold_bytes) != common_symbols:
                     raise RuntimeError(f"mapper {module}'s compile changed the symbols outside the mapper slots")
                 print(f"NES mapper module {module} ({MODULES[module]}): the image outside the slots byte for byte "
@@ -562,6 +601,8 @@ if __name__ == "__main__":
                         help="the 6502 core: asm (cpu6502.n64, the runtime MMC3 default) or the reference interpreter")
     parser.add_argument("--cpu-trace", action="store_true",
                         help="checking build: a per-frame digest of the state after every instruction (needs --check-frame)")
+    parser.add_argument("--idle-off", action="store_true",
+                        help="checking build: every idle-loop and RAM-wait shortcut off from load (needs --check-frame)")
     parser.add_argument("--a12-check", action="store_true",
                         help="checking build: the exact and the analytic A12 walks compared at every call (needs --check-frame)")
     parser.add_argument("--ppu-check", action="store_true",

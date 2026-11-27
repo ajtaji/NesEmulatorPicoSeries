@@ -69,19 +69,19 @@ Global Dim NesCpuTraceFrames.i(4096)
 
 ProcedureNaked NesCpuTraceGlobals()
   ASM
-    la a3, global_nesmmc3bias
-    ld a1, global_pc-global_nesmmc3bias(a3)
-    ld v1, global_nesopenbus-global_nesmmc3bias(a3)
-    ld a2, global_left-global_nesmmc3bias(a3)
-    ld a4, global_a-global_nesmmc3bias(a3)
-    ld a5, global_x-global_nesmmc3bias(a3)
-    ld a6, global_y-global_nesmmc3bias(a3)
-    ld a7, global_fz-global_nesmmc3bias(a3)
-    ld t8, global_fn-global_nesmmc3bias(a3)
-    ld t9, global_fc-global_nesmmc3bias(a3)
-    ld t3, global_nesinstructions-global_nesmmc3bias(a3)
+    la a3, global_pc                  ; a base for the globals (any mapper's build: the PC's own)
+    ld a1, global_pc-global_pc(a3)
+    ld v1, global_nesopenbus-global_pc(a3)
+    ld a2, global_left-global_pc(a3)
+    ld a4, global_a-global_pc(a3)
+    ld a5, global_x-global_pc(a3)
+    ld a6, global_y-global_pc(a3)
+    ld a7, global_fz-global_pc(a3)
+    ld t8, global_fn-global_pc(a3)
+    ld t9, global_fc-global_pc(a3)
+    ld t3, global_nesinstructions-global_pc(a3)
     j nescputracestep
-    ld v0, global_accessphase-global_nesmmc3bias(a3)
+    ld v0, global_accessphase-global_pc(a3)
   EndASM
 EndProcedure
 
