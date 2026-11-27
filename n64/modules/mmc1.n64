@@ -312,10 +312,14 @@ mmc1_mirror:
     daddiu sp, sp, 48
 
 ; ---- mmc1_prg: the four 8 KB PRG slots from the control register's PRG mode and the PRG bank, and the work RAM's
-; enable from the PRG bank's bit 4. Clobbers t0-t3, a0-a3. FRAME (32 B): 0 ra | 8 the $8000 bank | 16 the $C000 bank
+; enable from the PRG bank's bit 4. Clobbers t0-t3, t8, a0-a3. FRAME (32 B): 0 ra | 8 the $8000 bank | 16 the $C000 bank
 ; THE PLAIN TWIN (mmc1.n64's NesMapMmc1Prg; n = the 8 KB banks of the ROM):
 ;   b = (MapPrgReg & 15) * 2 : mode = MapControl >> 2 & 3
+;   outer = 0 : If n > 32 : outer = (MapChr0 & 16) * 2 : n = 32 : EndIf   ; SUROM (512 KB): CHR bank 0 bit 4 = PRG A18
 ;   If mode < 2 : lo = b & ~3 : hi = lo + 2 : ElseIf mode = 2 : lo = 0 : hi = b : Else : lo = b : hi = n - 2 : EndIf
+;   lo + outer : hi + outer
+;   (SUROM's games write the same bit 4 to both CHR registers; the board's A12-dependent choice in 4 KB CHR mode
+;   is not modelled: CHR bank 0's bit is used in both modes.)
 ;   MapperPrg(0, lo) : MapperPrg(1, lo + 1) : MapperPrg(2, hi) : MapperPrg(3, hi + 1)
 ;   MapRamEnable = Bool(MapPrgReg & 16 = 0) : MapRamProtect = 0
 ;   (MapperPrg masks each bank by the ROM's size; mmc1.n64 masks lo and hi before adding 1: the same, lo and hi
@@ -330,6 +334,14 @@ mmc1_prg:
     andi a0, t1, 15
     sll a0, a0, 1                   ; the 16 KB bank's first 8 KB bank
     dsrl t2, t2, 13                 ; n
+    sltiu t3, t2, 33
+    bnez t3, mmc1_prg_half          ; 256 KB or less: no outer bank
+    move t8, zero                   ; (delay slot) the outer bank's first 8 KB bank: 0
+    ld t3, global_mapchr0-global_mapcontrol(a3)
+    andi t3, t3, 16                 ; SUROM: CHR bank 0's bit 4 picks the 256 KB half (PRG A18)
+    sll t8, t3, 1                   ; 16 -> 32: the half's first 8 KB bank
+    addiu t2, zero, 32              ; n: the half's 8 KB banks (the "last bank" of mode 3 is the half's)
+mmc1_prg_half:
     sltiu t3, t0, 2
     bnez t3, mmc1_prg_32k
     addiu a1, t2, -2                ; (delay slot) the last 16 KB's first 8 KB bank (mode 3's $C000)
@@ -344,6 +356,8 @@ mmc1_prg_32k:
     sll a0, a0, 2                   ; 32 KB: the bank's bit 0 ignored
     addiu a1, a0, 2
 mmc1_prg_publish:
+    daddu a0, a0, t8                ; both halves' banks in the chosen 256 KB (SUROM; 0 otherwise)
+    daddu a1, a1, t8
     andi t1, t1, 16
     sltiu t1, t1, 1
     sd t1, global_mapramenable-global_mapcontrol(a3)   ; the work RAM: on while PRG bank bit 4 is clear

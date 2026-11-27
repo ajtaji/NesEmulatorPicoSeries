@@ -14,6 +14,8 @@ def board_table_source():
             lines.append("  Data.l 0,0,0,0")
             continue
         prg, chr_ = BOARD_LIMITS.get(mapper, (524288, 262144))
+        if mapper == 1:
+            prg = 524288    # SUROM / SXROM: the N64 module's outer PRG bank (modules/mmc1.n64); the shared table says 256 KB
         ram = {5: 8, 69: 1}.get(mapper, int(mapper in LEGACY_RAM_BOARDS))
         submask = sum(1 << sub for sub in BOARD_SUBMAPPERS.get(mapper, {0}))
         lines.append(f"  Data.l {prg // 16384},{min(64, chr_ // 8192)},{ram},{submask}")
