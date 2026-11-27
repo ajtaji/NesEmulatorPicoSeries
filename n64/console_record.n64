@@ -14,7 +14,7 @@
 ; hashes every picture (#NES_REC_PICTURES_ALL, the scrolling test cart) 0x01800000 - 0x019D0FFF (KSEG1 $B1800000;
 ; 0x1D1000 bytes) - the two never overlap, and no other cart of the project uses either. The cart asks the SC64
 ; once, at start, to allow writes to its ROM space (as the tile probe and the hardware carts do: NesRecScEnable); the
-; record is kept only if its header reads back, and the side bands say so (show.n64: green kept, yellow not).
+; record is kept only if its header reads back (the summary says which; nothing on the screen does).
 ;   +$0000   the header, 16 words: "NESC", the ROM's CRC (the cartridge's word at $10), the version, the power-ons
 ;            seen, the run slot this power-on writes, #NES_REC_HASH_MAX, #NES_REC_HASH_EVERY (version 5), the VI's
 ;            control word (word 7: its bits 8-9 the output filter, 2 resample, 3 the nearest pixel)
@@ -283,7 +283,7 @@ Procedure NesRecOpen()
   LpmDebugIoWrite(NesRecBase + #R_BOOT * 4, boots) : NesRecShadow(#R_BOOT) = boots
   LpmDebugIoWrite(NesRecBase + #R_STATE * 4, 1) : NesRecShadow(#R_STATE) = 1
   LpmDebugIoWrite(NesRecBase, #NES_REC_RUN_MAGIC)
-  NesRecOn = 1 : NesRecKept = 1         ; the side bands green (show.n64); yellow if this point is never reached
+  NesRecOn = 1 : NesRecKept = 1         ; kept (the record's own state; nothing is drawn for it)
   LpmDebugPrint("NES RECORD: flash cart SDRAM $0" + Hex(#NES_REC - $B0000000) + ", power-on " + Str(boots) + ", slot " + Str(slot))
 EndProcedure
 

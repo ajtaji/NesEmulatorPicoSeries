@@ -6,9 +6,10 @@
 ; can reach RDRAM by any eviction - the record and its OAM snapshot written back) and the band's job queued for the
 ; RSP program rspband.n64rsp (unchanged from the checking build: one NES_RSP_SETUP naming this band's slot and this
 ; frame's areas, one NES_RSP_BAND, one fence). THE RSP HANDS THE FRAME'S WORDS TO THE RDP ITSELF (design note N.62):
-; each band job at its end once the frame is attached; the CPU only attaches a frame (its buffer, the side bands and
+; each band job at its end once the frame is attached; the CPU only attaches a frame (its buffer and
 ; the HAND step, once the SYNC_FULL before is through - LpmRdpSyncFullDone - and a buffer is free) and detaches it (the
-; HAND step for the rest, the fallback lines, the SYNC_FULL that shows it), at its check points: a band's close, line
+; HAND step for the rest, the fallback lines, the black borders and crop (NesShowBorders), the SYNC_FULL that shows
+; it), at its check points: a band's close, line
 ; 240 (NesShowFrameEnd), every 16 visible lines (DisplayWaitLine, host.n64), the frame's wrap (NesHostGuestFrame).
 ; Nothing waits for the RDP at line 240: a frame set is reused only once the frame that used it last is drawn, looked
 ; at - and slept for if need be - at the set's first write (NesShowAcquire).
@@ -30,10 +31,25 @@
 ; (NesShowFallback) copies the slots into the picture after the last band, as the old blit drew each line.
 ;
 ; THE CHECKING BUILD (#NES_SHOW_CHECK, --show-check): every frame is finished at its end, the RDP waited for, and
-; the shown picture's 256 x 240 pixels hashed (NesShowHashFb), printed "NES PIC frame hash fallback-lines". With
+; the shown picture's KEPT pixels hashed (NesShowHashFb: the NES columns #NES_CROP_X .. 255 - #NES_CROP_X, lines
+; #NES_CROP_Y .. 239 - #NES_CROP_Y), printed "NES PIC frame hash fallback-lines", and everything else of the buffer
+; checked black (NesShowBorderAsm: a frame with any other colour there printed "NES PIC BORDER frame value"). With
 ; --old-show the same hash is taken of the old renderer's picture (NesShowHashRef: the CI8 rows and the per-line
 ; palettes, the pixel the old blit writes) at line 239: the reference.
 XIncludeFile "rspband_ids.pmi"
+
+; THE PICTURE ON THE SCREEN (2026-11-26). The buffer is 320 x 240 and the NES picture's 256 columns sit at x 32-287.
+; EVERYTHING ELSE IS BLACK ON EVERY PICTURE SHOWN: the borders x 0-31 and 288-319 and the crop below are filled black
+; by NesShowBorders, in the picture's own list AFTER the RSP's words and before the SYNC_FULL that shows it - so no
+; buffer of the three ever goes on screen with anything there but black (LpmDisplayInit makes all three black first;
+; the only other picture is NesShowStopped's red screen). THE CROP: a CRT's overscan hid the picture's outer columns
+; (the NES's own left-column mask is 8 wide); #NES_CROP_X columns each side and #NES_CROP_Y lines top and bottom are
+; drawn black. A multiple of 4 (the checking hash reads 8 bytes at a time), 0 .. 64; 0 .. 112.
+#NES_CROP_X = 8
+#NES_CROP_Y = 0
+CompilerIf #NES_CROP_X < 0 Or #NES_CROP_X > 64 Or (#NES_CROP_X & 3) <> 0 Or #NES_CROP_Y < 0 Or #NES_CROP_Y > 112
+  CompilerError "show.n64: #NES_CROP_X must be 0 .. 64 and a multiple of 4, #NES_CROP_Y 0 .. 112"
+CompilerEndIf
 
 CompilerIf #NES_RDP_SHOW
 ASM
@@ -89,6 +105,7 @@ Global NesFbN.i, NesFbOver.i, NesFbRowBase.i, NesFbPalBase.i, NesFbLineBase.i, N
 Global Dim NesShowStat.i(16)
 CompilerIf #NES_SHOW_CHECK
   Global NesShowHash.i
+  Global NesShowBorder.i, NesShowBorderBad.i   ; the pixels outside the kept columns ORed; frames with any not black
   Global Dim NesShowChr.i(3)            ; a CHR-RAM row write's pair word and empty-row byte: start, ticks, writes
 CompilerEndIf
 CompilerIf #NES_CONSOLE_RECORD
@@ -663,7 +680,7 @@ EndProcedure
 ; until one frees, unless the sound reserve runs low (then 0: the frame is not shown); 2 until one frees.
 CompilerIf #NES_CONSOLE_RECORD
   Global NesRecWait.i, NesRecWaitFrom.i, NesRecWaitSyn.i ; the console record (console_record.n64): Count ticks slept here for a buffer
-  Global NesRecKept.i                   ; 1 once the record's header read back from the flash cart (the bands' colour)
+  Global NesRecKept.i                   ; 1 once the record's header read back from the flash cart (read from the dump)
 CompilerEndIf
 Procedure.i NesShowGetFb(wait.i)
   Protected fb.i, seen.i
@@ -697,6 +714,21 @@ Procedure.i NesFbPalSame(a.i, b.i)
   ProcedureReturn 1
 EndProcedure
 
+; After the RSP's words the RDP holds THEIR modes (one cycle, the combiner PRIM, the last band's backdrop colour), not
+; the ones the library believes it set: the syncs the program owes, the library's own mode words as it believes them
+; sent again (the twin's restore), its state cache forgotten - so the library's next mode call sends what it means.
+; WHY (2026-11-26, the blue side bands of cart 5): the attach drew its side bands with LpmRdpModeFill after
+; LpmRdpForget only; Forget clears the combiner and colour cache, NOT the other-modes cache, so from the second picture
+; on (the library still believing FILL from the first) SET_OTHER_MODES was not sent, and the bands' FILL_RECTANGLEs
+; ran in the band words' one-cycle mode, coloured by their combiner: the PRIM colour - the last band's NES backdrop
+; (SMB3's sky: blue), so the bands changed colour with the picture before. Only a frame with fallback lines (whose
+; list sends the modes again) gave the next picture green bands.
+Procedure NesShowRdpAdopt()
+  LpmRdpCmd($27000000, 0) : LpmRdpCmd($28000000, 0) : LpmRdpCmd($26000000, 0)
+  If lpm_rdp_cycle <> -1 : LpmRdpCmd($2F000000 | lpm_rdp_om_hi, lpm_rdp_om_lo) : EndIf
+  LpmRdpForget() : LpmRdpTmemReset()
+EndProcedure
+
 ; The frame's fallback lines, after its last band: the syncs the RSP's words owe, the library's own mode words as it
 ; believes them (it did not see the RSP's), its combiner, colours and TMEM forgotten; then the old blit's calls in
 ; copy mode (the TLUT entry of each CI8 index written into the picture as it is) - A RUN OF LINES AT A TIME (design
@@ -711,9 +743,7 @@ Procedure NesShowFallback(p.i)
   CompilerIf #NES_CONSOLE_RECORD
     tr = LpmCpuCount()
   CompilerEndIf
-  LpmRdpCmd($27000000, 0) : LpmRdpCmd($28000000, 0) : LpmRdpCmd($26000000, 0)
-  If lpm_rdp_cycle <> -1 : LpmRdpCmd($2F000000 | lpm_rdp_om_hi, lpm_rdp_om_lo) : EndIf
-  LpmRdpForget() : LpmRdpTmemReset()
+  NesShowRdpAdopt()
   LpmRdpModeCopy(0)
   i = 0
   While i < n
@@ -738,9 +768,22 @@ Procedure NesShowFallback(p.i)
   CompilerEndIf
 EndProcedure
 
+; The picture's borders and crop, black, after everything else of it (the RSP's words, the fallback lines): x 0 ..
+; 32 + #NES_CROP_X and 288 - #NES_CROP_X .. 320 on every line, and #NES_CROP_Y lines top and bottom. In fill mode,
+; sent as such (NesShowRdpAdopt first). Five commands and two (four) rectangles a picture.
+Procedure NesShowBorders()
+  NesShowRdpAdopt()
+  LpmRdpModeFill(LpmRgb16(0, 0, 0))
+  LpmRdpFillRect(0, 0, 32 + #NES_CROP_X, 240) : LpmRdpFillRect(288 - #NES_CROP_X, 0, 320, 240)
+  CompilerIf #NES_CROP_Y > 0
+    LpmRdpFillRect(32 + #NES_CROP_X, 0, 288 - #NES_CROP_X, #NES_CROP_Y)
+    LpmRdpFillRect(32 + #NES_CROP_X, 240 - #NES_CROP_Y, 288 - #NES_CROP_X, 240)
+  CompilerEndIf
+EndProcedure
+
 ; THE HAND-OVER BY THE RSP (design note N.62). The band jobs hand their own words to the RDP once their frame is
 ; ATTACHED (rspband.n64rsp: the band's end, and the HAND step - NES_RSP_BAND with record 0). The CPU attaches a frame
-; - its buffer, the side bands, the HAND step - once the frame before is detached, the SYNC_FULL before is through
+; - its buffer, the HAND step - once the frame before is detached, the SYNC_FULL before is through
 ; (LpmRdpSyncFullDone: the library's gate, not waited for) and a buffer is free; it DETACHES it - the HAND step for the
 ; rest, the old path's lines, the SYNC_FULL that shows it - once it has ended. Nothing here waits unless told to.
 
@@ -768,18 +811,7 @@ Procedure.i NesShowAttach(s.i, wait.i)
     NesShowFb(s) = fb
   EndIf
   LpmRdpForget()                          ; (the RSP's words left the RDP's modes: the library's own sent again)
-  LpmRdpAttach(fb)
-  CompilerIf #VERIFY_FRAME = 0
-    ; THE CONSOLE MARK (the playable cart only): the 32-pixel borders, which no NES pixel covers, green on every
-    ; picture shown - running and healthy. NesShowStopped turns the whole screen red.
-    CompilerIf #NES_CONSOLE_RECORD
-      ; with the console record: GREEN while the record is kept, YELLOW when the flash cart did not keep it
-      If NesRecKept : LpmRdpModeFill(LpmRgb16(0, 24, 0)) : Else : LpmRdpModeFill(LpmRgb16(24, 24, 0)) : EndIf
-    CompilerElse
-      LpmRdpModeFill(LpmRgb16(0, 24, 0))
-    CompilerEndIf
-    LpmRdpFillRect(0, 0, 32, 240) : LpmRdpFillRect(288, 0, 320, 240)
-  CompilerEndIf
+  LpmRdpAttach(fb)                        ; (nothing drawn here: the borders are drawn at the detach, NesShowBorders)
   LpmRspqRdpFlush(NesShowProg)            ; the attach through the queue (its gate passes: decided above)
   LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(s) & $1FFFFFFF, s)   ; the HAND step: attached, words so far
   NesShowAtt(s) = 1
@@ -791,6 +823,7 @@ Procedure NesShowDetach(s.i)
   Protected fb.i = NesShowFb(s)
   LpmRspqCmd(NesShowProg, #NES_RSP_BAND, 0, NesShowArea(s) & $1FFFFFFF, s | 256)   ; the HAND step: the rest, and
   NesShowFallback(s)                                                                ; the set no longer attached
+  NesShowBorders()
   LpmRspqRdpDetachShow(NesShowProg, fb)
   NesShowTicket(s) = lpm_rdp_frames_sent
   NesShowShown(s) = fb : NesShowFb(s) = 0 : NesShowDone(s) = 1 : NesShowStat(0) + 1
@@ -905,33 +938,82 @@ ProcedureNaked NesShowAcquireCall()
 EndProcedure
 
 CompilerIf #NES_SHOW_CHECK
-; The shown picture's hash (KSEG0 address a0, invalidated): rows 0-239, x 32-287, a doubleword (4 pixels) at a time,
-; rotate-xor-add as the video digest. CLOBBERS a0-a2, t0-t3.
-ProcedureNaked NesShowHashFb(fb.i)
+; The shown picture's hash: IN a0 the first kept pixel (KSEG0, invalidated), a1 the kept bytes of a row (a multiple
+; of 8), a2 the kept rows (1 or more), a3 the bytes from a row's last kept pixel to the next row's first. Each row's
+; kept pixels a doubleword (4 pixels) at a time, rotate-xor-add as the video digest, into NesShowHash. CLOBBERS a0-a4,
+; t0-t3.
+ProcedureNaked NesShowHashFbAsm(at.i, rowbytes.i, rows.i, skip.i)
   ASM
     sll a0, a0, 0
     la t0, global_nesshowhash
     ld t3, 0(t0)
-    daddiu a0, a0, 64                ; x 32
-    addiu a2, zero, 240
 nes_show_hash_row:
-    daddiu a1, a0, 512
+    daddu a4, a0, a1                 ; the row's end of kept pixels
 nes_show_hash_px:
     ld t1, 0(a0)
     daddiu a0, a0, 8
     xor t3, t3, t1
     dsll t2, t3, 7
     dsrl32 t3, t3, 25
-    or t3, t3, t2
-    bne a0, a1, nes_show_hash_px
-    daddu t3, t3, t1
-    daddiu a0, a0, 128               ; the next row's x 32 (a row is 640 bytes)
+    or t3, t3, t2                    ; rotated left 7
+    bne a0, a4, nes_show_hash_px
+    daddu t3, t3, t1                 ; (delay slot) + the doubleword
+    daddu a0, a0, a3                 ; the next row's first kept pixel
     addiu a2, a2, -1
     bnez a2, nes_show_hash_row
     nop
     jr ra
     sd t3, 0(t0)
   EndASM
+EndProcedure
+
+; Every pixel of the buffer outside the NES columns kept, ORed: IN a0 the buffer (KSEG0, invalidated, 320 x 240 x 2),
+; a1 the bytes of a row before the first kept column, a2 the byte offset of the first column after the last kept one.
+; For each of the 240 rows the doublewords [0, a1) and [a2, 640) ORed into NesShowBorder (all zero but the alpha bit
+; = black). CLOBBERS a0-a4, t0, t1, t3.
+ProcedureNaked NesShowBorderAsm(fb.i, left.i, right.i)
+  ASM
+    sll a0, a0, 0
+    daddu t3, zero, zero
+    addiu a3, zero, 240
+nes_show_bd_row:
+    daddu a4, a0, a1                 ; the left part's end
+    daddu t0, a0, zero
+nes_show_bd_l:
+    ld t1, 0(t0)
+    daddiu t0, t0, 8
+    bne t0, a4, nes_show_bd_l
+    or t3, t3, t1                    ; (delay slot)
+    daddu t0, a0, a2                 ; the right part's start
+    daddiu a4, a0, 640               ; the row's end
+nes_show_bd_r:
+    ld t1, 0(t0)
+    daddiu t0, t0, 8
+    bne t0, a4, nes_show_bd_r
+    or t3, t3, t1                    ; (delay slot)
+    daddiu a0, a0, 640
+    addiu a3, a3, -1
+    bnez a3, nes_show_bd_row
+    nop
+    la t0, global_nesshowborder
+    jr ra
+    sd t3, 0(t0)
+  EndASM
+EndProcedure
+
+Procedure NesShowHashFb(fb.i)
+  Protected r.i, x.i, v.i
+  NesShowHashFbAsm(fb + #NES_CROP_Y * 640 + (32 + #NES_CROP_X) * 2, (256 - 2 * #NES_CROP_X) * 2, 240 - 2 * #NES_CROP_Y, 640 - (256 - 2 * #NES_CROP_X) * 2)
+  NesShowBorderAsm(fb, (32 + #NES_CROP_X) * 2, (288 - #NES_CROP_X) * 2)
+  CompilerIf #NES_CROP_Y > 0               ; the cropped lines' middles
+    For r = 0 To 239
+      If r < #NES_CROP_Y Or r >= 240 - #NES_CROP_Y
+        For x = (32 + #NES_CROP_X) * 2 To (288 - #NES_CROP_X) * 2 - 8 Step 8 : NesShowBorder = NesShowBorder | PeekI(fb + r * 640 + x) : Next
+      EndIf
+    Next
+  CompilerEndIf
+  v = NesShowBorder
+  NesShowBorder = (v & $FFFE) | ((v >> 16) & $FFFE) | ((v >> 32) & $FFFE) | ((v >> 48) & $FFFE)   ; colour bits only
 EndProcedure
 
 ; The picture of set p's last frame hashed (drawn: NesShowAcquire, or the run's end; its buffer is on screen or
@@ -946,6 +1028,10 @@ Procedure NesShowCheckPrev(p.i)
     NesShowHash = $351B5058
     NesShowHashFb(fb)
     LpmDebugPrint("NES PIC " + Str(NesShowPrevFrameNo(p)) + " " + Hex(NesShowHash) + " " + Str(NesShowPrevFbN(p)))
+    If NesShowBorder
+      NesShowBorderBad + 1
+      LpmDebugPrint("NES PIC BORDER " + Str(NesShowPrevFrameNo(p)) + " " + Hex(NesShowBorder))
+    EndIf
   Else
     LpmDebugPrint("NES PIC " + Str(NesShowPrevFrameNo(p)) + " NOT SHOWN " + Str(NesShowPrevFbN(p)))
   EndIf
@@ -1062,6 +1148,7 @@ Procedure NesShowStopped()
   LpmRdpFinish()
   fb = NesShowGetFb(2)
   LpmRdpAttach(fb)
+  NesShowRdpAdopt()                       ; (the RSP's words left their modes: fill mode sent as such, as NesShowBorders)
   LpmRdpModeFill(LpmRgb16(31, 0, 0)) : LpmRdpFillRect(0, 0, 320, 240)
   LpmRspqRdpDetachShow(NesShowProg, fb)
 EndProcedure
@@ -1076,6 +1163,7 @@ Procedure NesShowReport()
   NesSegReport()
   CompilerIf #NES_SHOW_CHECK
     LpmDebugPrint("NES SHOW CHR ROW WRITES " + Str(NesShowChr(2)) + " TICKS " + Str(NesShowChr(1)))
+    LpmDebugPrint("NES SHOW BORDER FRAMES NOT BLACK " + Str(NesShowBorderBad) + " CROP " + Str(#NES_CROP_X) + " " + Str(#NES_CROP_Y))
   CompilerEndIf
 EndProcedure
 CompilerEndIf
@@ -1084,9 +1172,21 @@ CompilerElseIf #NES_SHOW_CHECK
 ; ---- the reference (--old-show --show-check): the old renderer's picture of the frame, hashed as NesShowHashFb ----
 Global NesShowHash.i
 ; Each line's pixel x is its palette's entry (CI8 index & 31) - the palette of the last line up to it whose
-; NesPaletteChange is set (line 0's always is) - as the old blit's copy-mode TLUT writes it. CLOBBERS a0-a6, t0-t3.
+; NesPaletteChange is set (line 0's always is) - as the old blit's copy-mode TLUT writes it. Only the KEPT pixels are
+; hashed, in NesShowHashFb's order: the columns NesShowRefX .. + NesShowRefSpan of the lines NesShowRefY0 ..
+; NesShowRefY1 - 1 (every line's palette still followed). CLOBBERS a0-a7, t0-t3, t8, v0, v1.
+Global NesShowRefX.i = #NES_CROP_X, NesShowRefSpan.i = 256 - 2 * #NES_CROP_X
+Global NesShowRefY0.i = #NES_CROP_Y, NesShowRefY1.i = 240 - #NES_CROP_Y
 ProcedureNaked NesShowHashRefAsm()
   ASM
+    la t0, global_nesshowrefx
+    ld v0, 0(t0)                     ; the first kept column
+    la t0, global_nesshowrefspan
+    ld v1, 0(t0)                     ; the kept columns (a multiple of 4)
+    la t0, global_nesshowrefy0
+    ld a7, 0(t0)                     ; the first kept line
+    la t0, global_nesshowrefy1
+    ld t8, 0(t0)                     ; one past the last
     la a0, global_linepixels
     daddiu a0, a0, 15
     dsrl a0, a0, 4
@@ -1104,41 +1204,48 @@ nes_ref_row:
     sll t1, a5, 6
     daddu a3, a6, t1                 ; this line's palette (64 bytes a line)
 nes_ref_keep:
-    daddiu a1, a0, 256
+    sltu t0, a5, a7
+    bnez t0, nes_ref_next            ; above the kept lines
+    sltu t0, a5, t8                  ; (delay slot)
+    beqz t0, nes_ref_next            ; below them
+    daddu a2, a0, v0                 ; (delay slot) the first kept pixel
+    daddu a1, a2, v1                 ; one past the last
 nes_ref_quad:
-    lbu t2, 0(a0)
+    lbu t2, 0(a2)
     andi t2, t2, 31
     sll t2, t2, 1
     daddu t2, a3, t2
     lhu t1, 0(t2)
-    lbu t2, 1(a0)
+    lbu t2, 1(a2)
     andi t2, t2, 31
     sll t2, t2, 1
     daddu t2, a3, t2
     lhu t2, 0(t2)
     dsll t1, t1, 16
     or t1, t1, t2
-    lbu t2, 2(a0)
+    lbu t2, 2(a2)
     andi t2, t2, 31
     sll t2, t2, 1
     daddu t2, a3, t2
     lhu t2, 0(t2)
     dsll t1, t1, 16
     or t1, t1, t2
-    lbu t2, 3(a0)
+    lbu t2, 3(a2)
     andi t2, t2, 31
     sll t2, t2, 1
     daddu t2, a3, t2
     lhu t2, 0(t2)
     dsll t1, t1, 16
     or t1, t1, t2                    ; 4 pixels as the picture holds them (the first in the high halfword)
-    daddiu a0, a0, 4
+    daddiu a2, a2, 4
     xor t3, t3, t1
     dsll t2, t3, 7
     dsrl32 t3, t3, 25
     or t3, t3, t2
-    bne a0, a1, nes_ref_quad
+    bne a2, a1, nes_ref_quad
     daddu t3, t3, t1
+nes_ref_next:
+    daddiu a0, a0, 256               ; the next line's row
     addiu a5, a5, 1
     sltiu t0, a5, 240
     bnez t0, nes_ref_row

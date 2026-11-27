@@ -20,7 +20,7 @@ The first command writes **n64/build/nes.z64** with the original demo. Boot the 
 | Start / Select | Start / Z |
 | Player 1 / Player 2 | Controller port 1 / 2 |
 
-The port reads NTSC or PAL guest timing from the NES header. The VI uses the console's TV standard. The guest PPU renders 256 × 240 in a centered 320 × 240 framebuffer with three VI buffers. The AI receives 16-bit stereo at a nominal 48 kHz, with the mono NES mix on both channels.
+The port reads NTSC or PAL guest timing from the NES header. The VI uses the console's TV standard. The guest PPU renders 256 × 240 in a centered 320 × 240 framebuffer with three VI buffers. In the runtime MMC3 cartridge everything outside the picture is black on every shown frame, and the outer 8 columns on each side, which a CRT's overscan hid, are drawn black as well (`#NES_CROP_X` and `#NES_CROP_Y` in `show.n64`). An emulator stop shows a red screen. The AI receives 16-bit stereo at a nominal 48 kHz, with the mono NES mix on both channels.
 
 The VR4300 executes the Anvil 2A03 core. Its MIPS interpreter uses computed jumps and keeps the NES registers, flags and cycle budget in host registers across ordinary instructions. Memory-mapped operations use the shared bus handlers. The builder recognizes short read-only loops in the selected PRG banks. On MMC1 and CNROM, it verifies the entire loop fits within the active physical 8 KiB slot. The CPU can batch a RAM wait within an execution window, or a PPU status wait up to the first event that could change the returned value or signal an interrupt. Timed writes, sprite-zero hits, sprite overflow, frame IRQs and DMC reads bound those intervals.
 
