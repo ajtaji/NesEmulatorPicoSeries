@@ -631,9 +631,29 @@ Procedure NesSegInit(nt.i)               ; nt: the show's band-input slots (NesS
   NesSegFrame(0)
 EndProcedure
 
-Procedure NesSegFrame(p.i)              ; a frame starts on set p's pool (show: NesShowSet; the checking builds: line 0)
-  NesSegNext = NesSegBaseP(p) : NesSegEnd = NesSegBaseP(p) + #NES_SEG_POOL * #NES_SEG_BYTES
-  NesSegOn = 0 : NesSegOpen = 0
+; NesSegFrame(p) - a frame starts on set p's pool (show: NesShowSet's tail call; the checking builds: line 0).
+; Assembly (design note N.71). THE PLAIN TWIN:
+;   NesSegNext = NesSegBaseP(p) : NesSegEnd = NesSegBaseP(p) + #NES_SEG_POOL * #NES_SEG_BYTES
+;   NesSegOn = 0 : NesSegOpen = 0
+; CLOBBERS t0-t2.
+#NES_SEG_POOL_BYTES = #NES_SEG_POOL * #NES_SEG_BYTES
+ProcedureNaked NesSegFrame(p.i)
+  ASM
+    dsll t0, a0, 3
+    la t1, global_nessegbasep
+    daddu t1, t1, t0
+    ld t2, 0(t1)                     ; set p's pool (KSEG1)
+    la t1, global_nessegnext
+    sd t2, 0(t1)
+    daddiu t2, t2, #NES_SEG_POOL_BYTES
+    la t1, global_nessegend
+    sd t2, 0(t1)
+    la t1, global_nessegon
+    sd zero, 0(t1)
+    la t1, global_nessegopen
+    jr ra
+    sd zero, 0(t1)                   ; (delay slot)
+  EndASM
 EndProcedure
 
 ; nes_seg_store - a segment opens: a0 = k0, a1 = k1, a2 = v (the state: PpuFineX, PpuCtrl, PpuMask, MapChrSlots, Nt).
@@ -926,44 +946,44 @@ nes_seg_draw_end:
 EndProcedure
 
 ; NesSegPublish - dot 256 of a split line drawn by its record: the record written and its job queued as a band's.
-Procedure NesSegPublish()
-  Protected rec.i, n.i, st.i, m.i, idx.i
-  n = PeekI(NesUnitBase + #NES_U_BANDCOUNT)
-  idx = n
-  rec = NesBandBase + n * #NES_BAND_BYTES
-  PokeI(NesUnitBase + #NES_U_BANDCOUNT, n + 1)
-  st = NesSeg0St
-  m = (PpuMask & $E1) | ((st >> 8) & $16)
-  If NesSegCount : m = m | 8 : EndIf
-  PokeQ(rec + #NES_B_FIRST, PpuLine) : PokeQ(rec + #NES_B_END, PpuLine + 1)
-  PokeQ(rec + #NES_B_V, NesSeg0V)
-  PokeQ(rec + #NES_B_STATE, (st & 255) | (m << 8) | (((st >> 16) & 7) << 16) | ((PpuT & $7FFF) << 32))
-  PokeQ(rec + #NES_B_MIRROR, MapMirrorMode)
-  PokeQ(rec + #NES_B_OAM, NesSeg0Oam)
-  PokeQ(rec + #NES_B_BANKS, NesSeg0Banks)                ; (big-endian: slot 0's number in the first byte)
-  PokeL(rec + #NES_B_BANKS + 8, NesSegCount) : PokeL(rec + #NES_B_BANKS + 12, NesSegFirstE & $1FFFFFFF)
-  For n = 0 To 24 Step 8 : PokeQ(rec + #NES_B_PAL + n, PeekQ(@Pal(0) + n)) : Next
-  NesSegStat(0) + 1 : NesSegStat(1) + NesSegCount
-  If NesSegCount > NesSegStat(3) : NesSegStat(3) = NesSegCount : EndIf
-  NesSegOn = 0 : NesSegOpen = 0
-  CompilerIf #NES_TWIN_CHECK
-    NesTwinBand(rec)
-  CompilerEndIf
-  CompilerIf #NES_RSP_CHECK
-    LpmCacheWritebackData(rec, #NES_BAND_BYTES)
-    LpmCacheWritebackData(NesOamBase + NesSeg0Oam * 256, 256)
-    NesRspBand(rec)
-  CompilerEndIf
-  CompilerIf #NES_RDP_SHOW
-    NesShowBand(rec)
-  CompilerEndIf
-EndProcedure
+; Documented VR4300 assembly (the owner's order: the emulator's glue in assembly; design note N.71), folded into the
+; unit's way in, NesSegPublishCall (below): no compiled frame between the unit and NesShowBand.
+; THE PLAIN TWIN (the compiled procedure it replaces):
+;   Protected rec.i, n.i, st.i, m.i, idx.i
+;   n = PeekI(NesUnitBase + #NES_U_BANDCOUNT)
+;   idx = n
+;   rec = NesBandBase + n * #NES_BAND_BYTES
+;   PokeI(NesUnitBase + #NES_U_BANDCOUNT, n + 1)
+;   st = NesSeg0St
+;   m = (PpuMask & $E1) | ((st >> 8) & $16)
+;   If NesSegCount : m = m | 8 : EndIf
+;   PokeQ(rec + #NES_B_FIRST, PpuLine) : PokeQ(rec + #NES_B_END, PpuLine + 1)
+;   PokeQ(rec + #NES_B_V, NesSeg0V)
+;   PokeQ(rec + #NES_B_STATE, (st & 255) | (m << 8) | (((st >> 16) & 7) << 16) | ((PpuT & $7FFF) << 32))
+;   PokeQ(rec + #NES_B_MIRROR, MapMirrorMode)
+;   PokeQ(rec + #NES_B_OAM, NesSeg0Oam)
+;   PokeQ(rec + #NES_B_BANKS, NesSeg0Banks)                ; (big-endian: slot 0's number in the first byte)
+;   PokeL(rec + #NES_B_BANKS + 8, NesSegCount) : PokeL(rec + #NES_B_BANKS + 12, NesSegFirstE & $1FFFFFFF)
+;   For n = 0 To 24 Step 8 : PokeQ(rec + #NES_B_PAL + n, PeekQ(@Pal(0) + n)) : Next
+;   NesSegStat(0) + 1 : NesSegStat(1) + NesSegCount
+;   If NesSegCount > NesSegStat(3) : NesSegStat(3) = NesSegCount : EndIf
+;   NesSegOn = 0 : NesSegOpen = 0
+;   CompilerIf #NES_TWIN_CHECK : NesTwinBand(rec) : CompilerEndIf
+;   CompilerIf #NES_RSP_CHECK
+;     LpmCacheWritebackData(rec, #NES_BAND_BYTES) : LpmCacheWritebackData(NesOamBase + NesSeg0Oam * 256, 256)
+;     NesRspBand(rec)
+;   CompilerEndIf
+;   CompilerIf #NES_RDP_SHOW : NesShowBand(rec) : CompilerEndIf
+; HOW: rec = NesBandBase + (n << 6) + (n << 5) (96 n); the shifts of st are logical (dsrl): the masks keep only bits
+; the arithmetic shift gives the same. Pal is 32 bytes, 8-byte aligned (the compiled PeekQ reads it with ld too). rec
+; lives in s0 (saved at 152(sp), in the call's own frame) for the checking builds' calls after the stores.
 
 Procedure NesSegReport()
   LpmDebugPrint("NES SEG SPLIT LINES BY RECORD " + Str(NesSegStat(0)) + " SEGMENTS " + Str(NesSegStat(1)) + " MOST A LINE " + Str(NesSegStat(3)) + " ON THE OLD PATH " + Str(NesSegStat(2)) + " (NO RECORD " + Str(NesSegStat(4)) + ")")
 EndProcedure
 
-; The unit's way in at dot 256 (every register its callers may hold kept, as NesShowBandCall).
+; The unit's way in at dot 256 (ppu_adv_publish, through NesLivePublish): every register its callers may hold kept, as
+; NesShowBandCall; then NesSegPublish's body (above) in place.
 ProcedureNaked NesSegPublishCall()
   ASM
     daddiu sp, sp, -176
@@ -988,8 +1008,127 @@ ProcedureNaked NesSegPublishCall()
     sd t0, 136(sp)
     mflo t0
     sd t0, 144(sp)
-    jal nessegpublish
+    sd s0, 152(sp)
+    la t9, global_nesunitbase
+    ld t9, 0(t9)
+    ld t0, #NES_U_BANDCOUNT(t9)      ; n: the frame's next record
+    daddiu t1, t0, 1
+    sd t1, #NES_U_BANDCOUNT(t9)      ; taken
+    dsll t1, t0, 6
+    dsll t2, t0, 5
+    daddu t1, t1, t2                 ; n x 96
+    la t2, global_nesbandbase
+    ld t2, 0(t2)
+    daddu s0, t2, t1                 ; rec
+    la t0, global_nesseg0st
+    ld t1, 0(t0)                     ; st: segment 0's sprite state
+    la t0, global_ppumask
+    ld t2, 0(t0)
+    andi t2, t2, 0xE1                ; PPUMASK bits 0, 5-7 now
+    dsrl t3, t1, 8
+    andi t3, t3, 0x16                ; bits 1, 2, 4 of segment 0
+    or t2, t2, t3                    ; m
+    la t0, global_nessegcount
+    ld t8, 0(t0)                     ; NesSegCount
+    beqz t8, nsp_m
     nop
+    ori t2, t2, 8                    ; bit 3 when a segment draws
+nsp_m:
+    la t0, global_ppuline
+    ld t0, 0(t0)
+    sd t0, #NES_B_FIRST(s0)          ; first L
+    daddiu t0, t0, 1
+    sd t0, #NES_B_END(s0)            ; end L + 1
+    la t0, global_nesseg0v
+    ld t0, 0(t0)
+    sd t0, #NES_B_V(s0)              ; v at dot 0
+    andi t0, t1, 255                 ; st & 255 (PPUCTRL)
+    dsll t2, t2, 8
+    or t0, t0, t2                    ; | m << 8
+    dsrl t3, t1, 16
+    andi t3, t3, 7
+    dsll t3, t3, 16
+    or t0, t0, t3                    ; | ((st >> 16) & 7) << 16 (fine X)
+    la t3, global_pput
+    ld t3, 0(t3)
+    andi t3, t3, 0x7FFF
+    dsll32 t3, t3, 0
+    or t0, t0, t3                    ; | (PpuT & $7FFF) << 32
+    sd t0, #NES_B_STATE(s0)
+    la t0, global_mapmirrormode
+    ld t0, 0(t0)
+    sd t0, #NES_B_MIRROR(s0)
+    la t0, global_nesseg0oam
+    ld t0, 0(t0)
+    sd t0, #NES_B_OAM(s0)            ; segment 0's OAM snapshot
+    la t0, global_nesseg0banks
+    ld t0, 0(t0)
+    sd t0, #NES_B_BANKS(s0)          ; its 8 bank numbers
+    sw t8, #NES_B_BANKS+8(s0)        ; the segment count
+    la t0, global_nessegfirste
+    ld t0, 0(t0)
+    lui t1, 0x1FFF
+    ori t1, t1, 0xFFFF
+    and t0, t0, t1
+    sw t0, #NES_B_BANKS+12(s0)       ; the first entry, physical
+    la t0, global_pal
+    ld t1, 0(t0)
+    ld t2, 8(t0)
+    sd t1, #NES_B_PAL(s0)
+    sd t2, #NES_B_PAL+8(s0)
+    ld t1, 16(t0)
+    ld t2, 24(t0)
+    sd t1, #NES_B_PAL+16(s0)
+    sd t2, #NES_B_PAL+24(s0)         ; the palette now
+    la t0, global_nessegstat
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)                     ; (0) split lines by record
+    ld t1, 8(t0)
+    daddu t1, t1, t8
+    sd t1, 8(t0)                     ; (1) segments
+    ld t1, 24(t0)
+    slt t2, t1, t8
+    beqz t2, nsp_stat
+    nop
+    sd t8, 24(t0)                    ; (3) the most a line
+nsp_stat:
+    la t0, global_nessegon
+    sd zero, 0(t0)
+    la t0, global_nessegopen
+    sd zero, 0(t0)
+  EndASM
+  CompilerIf #NES_TWIN_CHECK
+  ASM
+    jal nestwinband                  ; the emitter twin's band (the checking builds)
+    move a0, s0                      ; (delay slot)
+  EndASM
+  CompilerEndIf
+  CompilerIf #NES_RSP_CHECK
+  ASM
+    move a0, s0
+    jal lpmcachewritebackdata        ; the record ...
+    addiu a1, zero, #NES_BAND_BYTES  ; (delay slot)
+    la t0, global_nesseg0oam
+    ld a0, 0(t0)
+    dsll a0, a0, 8
+    la t0, global_nesoambase
+    ld t0, 0(t0)
+    daddu a0, a0, t0
+    jal lpmcachewritebackdata        ; ... and its OAM snapshot to RDRAM
+    addiu a1, zero, 256              ; (delay slot)
+    jal nesrspband                   ; the RSP check's band
+    move a0, s0                      ; (delay slot)
+  EndASM
+  CompilerEndIf
+  CompilerIf #NES_RDP_SHOW
+  ASM
+    jal nesshowband                  ; its job queued as a band's (show.n64)
+    move a0, s0                      ; (delay slot)
+  EndASM
+  CompilerEndIf
+  ASM
+    ld s0, 152(sp)
     ld t0, 136(sp)
     mthi t0
     ld t0, 144(sp)
