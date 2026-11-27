@@ -239,16 +239,23 @@ nmicap_near:
     la t0, global_cpucycles
     ld t1, 0(t0)
     ld a7, global_nesstall-global_cpucycles(t0)
-    ld t0, global_nesnmidue-global_cpucycles(t0)
     daddu t1, t1, a7                ; the window's start (after the stall)
-    dsubu t0, t0, t1                ; the cycles to the due
-    slt t1, t0, a0
+    ld a7, global_nesnmidue-global_cpucycles(t0)
+    ld t0, global_nesframedue-global_cpucycles(t0)   ; (N.78) the frame's end is a due too
+    dsubu a7, a7, t1                ; the cycles to the NMI's due ...
+    dsubu t0, t0, t1                ; ... and to the frame's end
+    slt t1, t0, a7
+    beqz t1, nmicap_min
+    nop
+    move a7, t0                     ; the earlier
+nmicap_min:
+    slt t1, a7, a0
     beqz t1, nmicap_keep
     nop
-    blez t0, nmicap_one
+    blez a7, nmicap_one
     nop
     jr ra
-    move a0, t0
+    move a0, a7
 nmicap_one:
     jr ra
     addiu a0, zero, 1
@@ -275,7 +282,7 @@ nmicap_keep:
 ;   If NesStatusHorizon<CpuCycles And NesCpuHorizon<CpuCycles And MapIrq=0 And WorkerIrq=0 And DmcBytes=0 And
 ;      RenderLimit>=0 And ApuLimit>=0 And (MapIrqEnable=0 Or FetchLimit>=0)
 ;     h=Min(RenderLimit+1,ApuLimit) : If MapIrqEnable : h=Min(h,FetchLimit) : EndIf
-;     h=Min(h,NesNmiDue-135)                       ; (design note N.77)
+;     h=Min(h,NesNmiDue-135) : h=Min(h,NesFrameDue-135)    ; (design notes N.77, N.78: the frame's end is a due too)
 ;     row=((branchCycles-3)*2+atBranch)*4 : loops=(h-1-CpuCycles)/PeekU(?NesRamWaitPeriods+row)
 ;     If loops>0
 ;       CpuCycles+loops*PeekU(?NesRamWaitPeriods+row) : WorkerClock=CpuCycles
@@ -324,6 +331,14 @@ mmc3_coalesce_fetch:
 mmc3_coalesce_count:
     la a3, global_nesnmidue         ; and before the NMI's due less a whole window and an instruction (N.77): the
     ld a3, 0(a3)                    ; window batched after the skip, 128 cycles from a start < H, then ends before it
+    daddiu a3, a3, -135
+    slt a4, a3, t3
+    beqz a4, mmc3_coalesce_frame
+    nop
+    move t3, a3
+mmc3_coalesce_frame:
+    la a3, global_nesframedue       ; and before the frame's end the same way (N.78: the host samples the frame there)
+    ld a3, 0(a3)
     daddiu a3, a3, -135
     slt a4, a3, t3
     beqz a4, mmc3_coalesce_h

@@ -7,7 +7,8 @@ the staged worker) the same rules, in its own compiled form, so the two schedule
   R4  a $2002 read one dot before the set (line 241 dot 0) reads 0 and makes no flag or NMI that frame; a read on the
       set dot or one after (dots 1-2) reads 1 and the frame's NMI is not taken;
   R5  the edge is detected in the first cycle whose read point + 1 dot is at or after the set; the NMI is taken at the
-      first instruction boundary >= that cycle + 2 (NesNmiDue), and every CPU window ends there (NesNmiCap).
+      first instruction boundary >= that cycle + 2 (NesNmiDue), and every CPU window ends there (NesNmiCap) - and at
+      the frame's end (NesFrameDue, N.78), so the host samples a frame at the same instruction as the unit does.
 The rules and their hand-derived checks: the bench's probe cart carts/nmiprobe.s. The shared sources are not
 changed: other targets build them as they are.
 """
@@ -92,11 +93,20 @@ Procedure NesNmiDueSet(clock.i)
   Else
     NesNmiDue=$7FFFFFFFFFFFFFFF
   EndIf
+  ; the frame's end (design note N.78): the first cycle whose 3 dots reach line 0 dot 0 (NTSC; the odd frame's skipped
+  ; dot not counted, as the unit's u_nmidue); PAL: never. Every window ends there too (NesNmiCap), so the host's frame
+  ; sample falls on the same instruction as the unit's.
+  CompilerIf #GAME_PAL
+    NesFrameDue=$7FFFFFFFFFFFFFFF
+  CompilerElse
+    NesFrameDue=clock+((PpuLineCount-PpuLine)*341-PpuDot+2)/3
+  CompilerEndIf
 EndProcedure
 ; NesNmiCap(n): a CPU window of at most n cycles that ends at the first boundary at or after NesNmiDue (at least 1).
 Procedure.i NesNmiCap(n.i)
   Protected d.i
-  d=NesNmiDue-CpuCycles-NesStall
+  d=NesNmiDue : If NesFrameDue<d : d=NesFrameDue : EndIf     ; the earlier of the NMI's due and the frame's end (N.78)
+  d=d-CpuCycles-NesStall
   If d<n
     n=d : If n<1 : n=1 : EndIf
   EndIf

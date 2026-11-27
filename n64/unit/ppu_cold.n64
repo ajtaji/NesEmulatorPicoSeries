@@ -712,6 +712,13 @@ ppu_vbl_at:
     daddiu t1, t1, 2
     la t0, global_nesnmidue
     sd t1, 0(t0)                    ; NesNmiDue = NesNmiAt + 2 (R5): set here, the frame's prediction is not redone
+    la t0, global_nesframedue       ; the cap: the earlier of the due and the frame's end (N.78)
+    ld t0, 0(t0)
+    slt t2, t0, t1
+    beqz t2, ppu_vbl_cap
+    nop
+    move t1, t0
+ppu_vbl_cap:
     daddiu t1, t1, -514
     la t0, global_nesnmicapat
     sd t1, 0(t0)                    ; and the window cap's quick test
@@ -864,6 +871,43 @@ nmidue_never:
 nmidue_store:
     la t0, global_nesnmidue
     sd t1, 0(t0)
+    ; the frame's end (N.78): NTSC: PpuClock + ceil(((PpuLineCount - PpuLine) x 341 - PpuDot) / 3), the first cycle whose
+    ; 3 dots reach line 0 dot 0 (the odd frame's skipped dot not counted); PAL: never. Kept in NesFrameDue; the cap
+    ; is the earlier of it and the NMI's due.
+    la t0, global_cartpal
+    ld t0, 0(t0)
+    bnez t0, nmidue_frame_never
+    nop
+    la t0, global_ppuline
+    ld t2, 0(t0)
+    ld t3, global_ppudot-global_ppuline(t0)
+    ld t0, global_ppulinecount-global_ppuline(t0)
+    subu t2, t0, t2                 ; lines to the wrap
+    addiu t0, zero, 341
+    multu t2, t0
+    mflo t2
+    subu t2, t2, t3                 ; dots to line 0 dot 0
+    addiu t2, t2, 2
+    lui t3, 0xAAAA                  ; (four instructions after mflo: the HI / LO rule)
+    ori t3, t3, 0xAAAB
+    multu t2, t3
+    mfhi t2
+    srl t2, t2, 1                   ; ceil(dots / 3)
+    la t0, global_ppuclock
+    ld t0, 0(t0)
+    b nmidue_frame_store
+    daddu t2, t2, t0
+nmidue_frame_never:
+    daddiu t2, zero, -1
+    dsrl t2, t2, 1
+nmidue_frame_store:
+    la t0, global_nesframedue
+    sd t2, 0(t0)
+    slt t0, t2, t1
+    beqz t0, nmidue_cap             ; the NMI's due is the earlier
+    nop
+    move t1, t2
+nmidue_cap:
     daddiu t1, t1, -514             ; NesNmiCapAt: the window cap's quick test (unit/window.n64)
     la t0, global_nesnmicapat
     jr ra

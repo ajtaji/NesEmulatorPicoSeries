@@ -80,9 +80,8 @@ nes_mmc3_run_interrupts:
     bnez t1, nes_mmc3_run_irq ; not yet: the window to it (u_nmicap) runs first
     daddiu t1, zero, -1
     dsrl t1, t1, 1
-    sd t1, 0(t3)             ; taken: none due until the next frame's prediction
-    sd t1, global_nesnmicapat-global_cpucycles(s0)   ; (the cap's quick test: never near)
-    sd t0, global_nesseennmi-global_cpucycles(s0)
+    sd t1, 0(t3)             ; taken: none due until the next frame's prediction (NesNmiCapAt stays near: the exact
+    sd t0, global_nesseennmi-global_cpucycles(s0)   ; cap runs to the frame's end, the other due it reads - N.78)
     b nes_mmc3_run_interrupt
     nop
 nes_mmc3_run_irq:

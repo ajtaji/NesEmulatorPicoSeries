@@ -54,6 +54,12 @@ Global NesNmiAt.i, NesNmiDue.i = $7FFFFFFFFFFFFFFF, NesVblSuppress.i
 ; instructions that no window can reach the due (unit/window.n64). NesPpuTo = the CPU cycle the unit's PPU advance
 ; runs to (set by u_workeradvance, its only caller in the unit; read at the vblank set for NesNmiAt).
 Global NesNmiCapAt.i = $7FFFFFFFFFFFFDFD, NesPpuTo.i
+; NesFrameDue = the CPU cycle at which the PPU wraps to line 0 (NTSC: PpuClock + ceil(((PpuLineCount - PpuLine) x 341 -
+; PpuDot) / 3), predicted with the NMI's due; PAL: never): every CPU window ends there as it ends at the NMI's due, so
+; the host sees a frame's end at the same instruction in every scheduler (the frame samples; design note N.78), and
+; NesNmiCapAt is Min(NesNmiDue, NesFrameDue) - 514. The dot the odd frame skips is not counted: the end may come one
+; dot early, which the same rule in both schedulers makes no difference.
+Global NesFrameDue.i = $7FFFFFFFFFFFFFFF
 ; NesNmiDueFrame = WorkerFrames + 1 when NesNmiDue was last predicted (0: never): the prediction is the same at every
 ; later point of that frame (the PPU's time is fixed) until an event that sets the due itself (the set, a PPUCTRL bit-7
 ; change, a suppressing read, the NMI taken), so the unit predicts it once a frame (u_workeradvance).
