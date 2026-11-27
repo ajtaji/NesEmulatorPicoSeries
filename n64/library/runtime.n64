@@ -23,7 +23,7 @@ Global NesRuntimeSaveBytes.i
 ;   flags = PeekA(header + 6) : CartMapper = NesRomMapper(header) : CartSubmapper = NesRomSubmapper(header)
 ;   If NesModuleInstall(CartMapper) = 0 : ProcedureReturn 0 : EndIf
 ;   prg = PeekA(header + 4) * 16384 : chrBytes = PeekA(header + 5) * 8192
-;   size = prg : If prg = 16384 : size = 32768 : EndIf : If CartMapper = 2 : size = prg * 2 : EndIf   ; (the UxROM pairing: not in the unit build)
+;   size = prg : If prg = 16384 : size = 32768 : EndIf : If CartMapper = #NRL_PAIRED_MAPPER : size = prg * 2 : EndIf
 ;   chrStorage = chrBytes : If chrStorage = 0 : chrStorage = NesRomChrRam(CartMapper) : EndIf
 ;   If chrStorage > #CART_CHR_BANKS * 8192 : ProcedureReturn 0 : EndIf
 ;   total = size + chrStorage : NesPrgOnCart = 0 : base = #NES_CART_LOW
@@ -35,7 +35,7 @@ Global NesRuntimeSaveBytes.i
 ;   EndIf
 ;   CartPrg = base : CartChr = base + size
 ;   If NesPrgOnCart = 0
-;     If CartMapper = 2 And #NES_UNIT = 0      ; UxROM: each 16 KB bank paired with the fixed last one, 32 KB a view
+;     If CartMapper = #NRL_PAIRED_MAPPER       ; UxROM: each 16 KB bank paired with the fixed last one, 32 KB a view
 ;       dest = base
 ;       For offset = 0 To prg - 1 Step 16384
 ;         If NesCartRead(#NES_RUNTIME_BASE + 16 + offset, dest, 16384) = 0 : ProcedureReturn 0 : EndIf
@@ -57,6 +57,15 @@ Global NesRuntimeSaveBytes.i
 ;   PpuMirroring = flags & 1 : MapFourScreen = Bool(flags & 8)
 ;   NesRuntimeSaveBytes = NesRomSaveBytes(header, CartMapper) : MapBattery = Bool(NesRuntimeSaveBytes)
 ;   ProcedureReturn 1
+; #NRL_PAIRED_MAPPER: the mapper whose PRG is laid out in paired 32 KB views (each 16 KB bank with the fixed last one:
+; the old UxROM build's CartBank form). The unit build lays every mapper's PRG out as it is in the file - UxROM's
+; module publishes 8 KB slots through MapperPrg (modules/discrete.n64) - so there it is -1, which no mapper is (the
+; compares below keep their size, so nothing after them moves).
+CompilerIf #NES_UNIT
+  #NRL_PAIRED_MAPPER = -1
+CompilerElse
+  #NRL_PAIRED_MAPPER = 2
+CompilerEndIf
 ProcedureNaked.i NesRuntimeLoad()
   ASM
     daddiu sp, sp, -128
@@ -118,18 +127,10 @@ ProcedureNaked.i NesRuntimeLoad()
     ori t3, zero, 0x8000            ; a 16 KB PRG is mirrored: 32 KB
 nrl_size_mapper:
     ld t0, 80(sp)
-  EndASM
-  CompilerIf #NES_UNIT=0
-    ; (the unit build lays UxROM's PRG out as it is in the file, as every other mapper's: its module publishes 8 KB
-    ; slots through MapperPrg, modules/discrete.n64; the paired views are the old UxROM build's CartBank form)
-    ASM
-    addiu t8, zero, 2
+    addiu t8, zero, #NRL_PAIRED_MAPPER   ; (the unit build: -1, no mapper)
     bne t0, t8, nrl_size_done
     nop
     sll t3, t1, 1                   ; UxROM: each 16 KB bank and the fixed one, 32 KB a view
-    EndASM
-  CompilerEndIf
-  ASM
 nrl_size_done:
     sd t3, 32(sp)
     bnez t2, nrl_chr_storage
@@ -199,20 +200,9 @@ nrl_placed:
     ld t1, 0(t1)
     bnez t1, nrl_prg_done
     ld t0, 80(sp)
-  EndASM
-  CompilerIf #NES_UNIT=0
-    ASM
-    addiu t1, zero, 2
-    bne t0, t1, nrl_prg_linear      ; (the unit build: every mapper linear, as above)
+    addiu t1, zero, #NRL_PAIRED_MAPPER   ; (the unit build: -1, no mapper)
+    bne t0, t1, nrl_prg_linear
     nop
-    EndASM
-  CompilerElse
-    ASM
-    b nrl_prg_linear
-    nop
-    EndASM
-  CompilerEndIf
-  ASM
     ; UxROM: view k = bank k at +0, the fixed last bank at +16 KB (the first read; the others copy it)
     ld t0, 48(sp)
     sd t0, 72(sp)                   ; dest = base
