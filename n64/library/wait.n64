@@ -29,7 +29,7 @@
 ;     ProcedureReturn rule
 ; HOW: every compare signed 64-bit as compiled ($8000 / $FFFD / $FF01 by ori: beyond slti's reach); length = 2 + (mode
 ; >= 3); the bytes read in the twin's order.
-CompilerIf #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ProcedureNaked.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
   ASM
     ori t1, zero, 0x8000
@@ -161,7 +161,7 @@ CompilerEndIf
 ;   mode=PeekA(?NesRuntimeWaitOpcodes+op)
 ;   If mode=0 : ProcedureReturn 0 : EndIf
 ;   ProcedureReturn NesRuntimeWaitPair(pc,pc+2+Bool((mode&7)>=3),0)
-CompilerIf #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ProcedureNaked.i NesRamWaitRule(pc.i)
   ASM
     dsrl t0, a0, 13
@@ -271,7 +271,7 @@ nes_runtime_nrom_plain:
 EndProcedure
 CompilerEndIf
 
-CompilerIf #GAME_MAPPER=4
+CompilerIf #NES_UNIT
 ; Cache both positive and negative decodes. The full tag includes the
 ; physical bank and guest PC, so bank switches need no invalidation.
 Global Dim NesMmc3WaitCache.q(1024)

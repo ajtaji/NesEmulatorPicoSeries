@@ -193,10 +193,6 @@ MODULES = {4: "mmc3", 1: "mmc1",
 # staged for the cartridge's mapper: #GAME_MAPPER is UNIT_MAPPER ("chosen at load") and the sources' unit branches
 # test #NES_UNIT; the mapper's own code is its module, installed into the two slots at load (modules/install.n64).
 UNIT_MAPPER = -1
-# ... but for two sources still read #GAME_MAPPER=4 as "the unit build" (status.n64's status-read rule and
-# library/wait.n64's RAM-wait index, both in another worker's conversion at the time of writing): until they test
-# #NES_UNIT, game.pmi carries this constant for the unit build. No other source of the unit build reads it as 4.
-UNIT_GAME_MAPPER = 4
 
 
 def module_store(modules, slot_bytes, cold_bytes):
@@ -457,7 +453,7 @@ def build(args, *, controller_trace=()):
         "NES_HAS_POLLS": int((runtime_waits or has_polls) and not idle_off),
         "NES_HAS_RAM_WAITS": int(runtime_waits or has_ram_waits),
         "VERIFY_INPUT": int(bool(controller_trace)),
-        "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": UNIT_GAME_MAPPER if unit else cart.mapper, "GAME_SUB": cart.submapper,
+        "VERIFY_FRAME": args.check_frame, "GAME_PAL": int(header_is_pal(header)), "GAME_MAPPER": UNIT_MAPPER if unit else cart.mapper, "GAME_SUB": cart.submapper,
         "GAME_SAVE_BYTES": save_bytes, "GAME_SAVE_BANKS": save_banks,
         "GAME_SAVE_LINEAR": int(save_banks == 4 and not getattr(args, "banked_sram_128", False)),
         "GAME_MIRROR": cart.mirror, "GAME_RAM": cart.ram_size,
