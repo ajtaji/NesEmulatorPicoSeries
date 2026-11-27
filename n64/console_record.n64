@@ -200,6 +200,11 @@ Global Dim NesRecChrLast.i(8)
 Global Dim NesRecPrgLast.i(4)
 Global Dim NesRecPalLast.a(32)
 Global Dim NesRecNtSig.i(64)
+; THE NAME-TABLE MARK (design note N.72): a bit per 64-byte CIRAM block written since the last fold (unit/write.n64,
+; u_ppuwrite, after the CIRAM store) - all set at the start, so the first fold reads every block (its baselines); the
+; CIRAM pages of the four tables at the last fold (a change remaps every block: all folded)
+Global NesNtDirty.i = -1
+Global Dim NesRecNtMapLast.i(4)
 Global Dim NesRecE.i(#NES_REC_EVENT_WORDS)   ; the event being written (NesRecEventCheck, NesRecEvent)
 Global Dim NesRecTLast.i(#NES_REC_T)    ; NesRecT at the frame before's wrap (the frame's parts are the differences)
 Global Dim NesRecTD.i(#NES_REC_T)       ; this frame's parts
@@ -729,7 +734,8 @@ EndProcedure
 ; is 0, so the first step is x = v0; each step after it is dsll 7 / dsrl32 25 (the 7 bits shifted out at the top, as
 ; the twin's (x >> 57) & $7F) / or / xor - 4 instructions and the next doubleword's ld, issued two instructions before
 ; its xor so its result is ready.
-; IN: nothing. OUT: a0 = chr | prg << 8 | pal << 16 | blocks << 24 (each <= 64). A leaf: changes t0-t3, a1-a7, v0, v1.
+; IN: nothing. OUT: a0 = chr | prg << 8 | pal << 16 | blocks << 24 (each <= 64). A leaf: changes t0-t3, t8, t9, a1-a7,
+; v0, v1. SINCE N.72 the name tables are folded only where a write reached them (THE MARK, below).
 ; Its cost, predicted: ~3,100 instructions a frame + Nt's lines that are not in the D-cache (the band copy's
 ; Hit_Writeback_Invalidate leaves few: up to 256 misses).
 ; THE PLAIN TWIN:
@@ -742,16 +748,28 @@ EndProcedure
 ;   For k = 0 To 31
 ;     If Pal(k) <> NesRecPalLast(k) : npal + 1 : NesRecPalLast(k) = Pal(k) : EndIf
 ;   Next
+;   dirty = NesNtDirty : NesNtDirty = 0                    ; (N.72: the CIRAM blocks written since the last fold)
+;   For k = 0 To 3
+;     If MapNtSlots(k) <> NesRecNtMapLast(k) : dirty = -1 : NesRecNtMapLast(k) = MapNtSlots(k) : EndIf
+;   Next
 ;   a = @Nt(0)
 ;   For k = 0 To 63
-;     x = 0
-;     For j = 0 To 7
-;       v = PeekQ(a) : a + 8
-;       x = ((x << 7) | ((x >> 57) & $7F)) ! v
-;     Next
-;     If x <> NesRecNtSig(k) : blocks + 1 : NesRecNtSig(k) = x : EndIf
+;     If (dirty >> (MapNtSlots(k >> 4) * 16 + (k & 15))) & 1  ; the block's CIRAM block written (or the map changed)
+;       x = 0
+;       For j = 0 To 7
+;         v = PeekQ(a + j * 8)
+;         x = ((x << 7) | ((x >> 57) & $7F)) ! v
+;       Next
+;       If x <> NesRecNtSig(k) : blocks + 1 : NesRecNtSig(k) = x : EndIf
+;     EndIf
+;     a + 64
 ;   Next
 ;   ProcedureReturn nchr | (nprg << 8) | (npal << 16) | (blocks << 24)
+; WHY THE MARK GIVES THE SAME COUNT (N.72): a logical block's bytes change only by u_ppuwrite's alias stores (the CIRAM
+; block written, through MapNtSlots) or by the map's rebuild (MapperMirror copies CIRAM into Nt: a MapNtSlots change);
+; a block neither reached keeps its bytes, so its fold equals its baseline and the twin above counted and moved
+; nothing for it. (Nt is also cleared at a reset - GuestClear, before the first fold - and the record cart is MMC3:
+; MapNtSlots 0-3, its CIRAM 4 KB, 64 blocks.)
 ProcedureNaked.i NesRecChanges()
   ASM
     la t0, global_mapchrslots
@@ -799,11 +817,51 @@ nes_rec_chg_pal:
 nes_rec_chg_pal_same:
     bnez a1, nes_rec_chg_pal
     daddiu t1, t1, 1
+    la t8, global_nesntdirty        ; THE MARK (N.72): t9 = the CIRAM blocks written since the last fold
+    ld t9, 0(t8)
+    sd zero, 0(t8)                  ; cleared: this fold takes them
+    la t0, global_mapntslots
+    la t1, global_nesrecntmaplast
+    addiu a1, zero, 4
+nes_rec_chg_map:
+    ld t2, 0(t0)                    ; a table's CIRAM page now
+    ld t3, 0(t1)                    ; at the last fold
+    daddiu t0, t0, 8
+    beq t2, t3, nes_rec_chg_map_same
+    addiu a1, a1, -1
+    daddiu t9, zero, -1             ; remapped: every block folded
+    sd t2, 0(t1)
+nes_rec_chg_map_same:
+    bnez a1, nes_rec_chg_map
+    daddiu t1, t1, 8
+    move a3, zero                   ; a3 = blocks changed
+    beqz t9, nes_rec_chg_nt_end     ; no name-table write since the last fold: nothing to read
+    nop
     la t0, global_nt                ; t0 -> the block's first doubleword
     la t1, global_nesrecntsig       ; t1 -> its fold a frame ago
-    move a3, zero                   ; a3 = blocks changed
+    la a0, global_mapntslots        ; the four tables' CIRAM pages
     addiu a1, zero, 64
 nes_rec_chg_nt:
+    daddiu t2, zero, 64
+    dsubu t2, t2, a1                ; k, the block
+    srl t3, t2, 4
+    sll t3, t3, 3
+    daddu t3, a0, t3
+    ld t3, 0(t3)                    ; MapNtSlots(k >> 4)
+    sll t3, t3, 4
+    andi t2, t2, 15
+    daddu t3, t3, t2                ; its CIRAM block
+    dsrlv t3, t9, t3
+    andi t3, t3, 1
+    bnez t3, nes_rec_chg_nt_fold    ; written (or remapped): folded
+    nop
+    daddiu t0, t0, 64               ; not reached: its bytes as at its last fold - skipped
+    addiu a1, a1, -1
+    bnez a1, nes_rec_chg_nt
+    daddiu t1, t1, 8
+    b nes_rec_chg_nt_end
+    nop
+nes_rec_chg_nt_fold:
     ld t2, 0(t0)                    ; x = v0
     ld a4, 8(t0)
     ld a5, 16(t0)
@@ -849,6 +907,7 @@ nes_rec_chg_nt:
 nes_rec_chg_nt_same:
     bnez a1, nes_rec_chg_nt
     daddiu t1, t1, 8
+nes_rec_chg_nt_end:
     sll v1, v1, 8
     sll a2, a2, 16
     sll a3, a3, 24

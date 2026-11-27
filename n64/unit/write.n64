@@ -322,6 +322,24 @@ nes_mmc3_ppu_ciram_write:
   ASM
     sb a1, 0(t2)
   EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+      ; ---- THE RECORD'S NAME-TABLE MARK (record build only; console_record.n64's NesRecChanges, design note N.72) ----
+      ; WHAT: the 64-byte CIRAM block just written, one bit of NesNtDirty, so the record's per-frame fold reads only the
+      ; name-table blocks a write reached (the fold was ~19 K cycles a frame: Nt's 256 lines missing, N.67). In: a0 the
+      ; CIRAM offset (0-4095), a1 the value (also at 16(sp)); t2, t3 free (each set again below). a1 is used as scratch
+      ; and read back from its slot. THE PLAIN TWIN:
+      ;   NesNtDirty = NesNtDirty | (1 << (offset >> 6))
+      srl t3, a0, 6
+      daddiu t2, zero, 1
+      dsllv t2, t2, t3                ; the block's bit
+      la t3, global_nesntdirty
+      ld a1, 0(t3)
+      or a1, a1, t2
+      sd a1, 0(t3)
+      ld a1, 16(sp)                   ; the value again
+    EndASM
+  CompilerEndIf
   CompilerIf #NES_RDP_SHOW Or #NES_RSP_CHECK
     CompilerIf #NES_RDP_SHOW = 0
       ASM
