@@ -76,117 +76,628 @@ Procedure NesSynRspInit(now.i)
   NesApuLastAt = now + ApuSampleLeft - ApuSampleBase   ; (read only once a sample is counted, which sets it)
 EndProcedure
 
-; A job's end seen: the RSP's done count, its tails (the logs freed), its error, its clocks.
-Procedure NesSynSeen()
-  Protected c.i
-  NesSynOut = 0
-  NesSynDone = PeekL(NesSynRspK1 + #NES_SYN_STATUS) & $FFFFFFFF
-  c = PeekL(NesSynRspK1 + 248) & $FFFFFFFF
-  If c And WorkerError = 0
-    LpmDebugPrint("NES SYN RSP STOP " + Str(c) + " at sample " + Str(NesSynDone)) : WorkerError = c
-  EndIf
+; ======================================================================================================================
+; THE JOBS' CPU SIDE IN ASSEMBLY (design note N.68, 2026-11-27): NesSynJobPoll (with its body), NesSynWanted, NesSynSeen,
+; NesSynSend, NesSynWb, NesSynCycleOf, NesSynRspRoom and NesSynFinish are hand-written VR4300 assembly; each one's PLAIN
+; TWIN, the compiled procedure it replaces, is kept in its header, and the proof is the checking build (--syn-check:
+; every sample of every AI block the RSP wrote equal to the CPU twin apusynth.n64's) and the oracles' WAV byte for byte.
+; Compiled on purpose and why: NesSynRspInit (once, before the guest runs), NesSynStopPrint (the stop's one printed line:
+; string formatting through the library, only when the RSP has stopped) and NesSynCheckBlock (the checking build's
+; comparison, not part of the emulator that ships).
+; WHY ASSEMBLY, AND WHAT IT SAVES: the poll runs ~6,100 times a guest frame (HostAudioPoll at every display line), and
+; the compiled NesSynJobPoll + NesSynJobPollBody + NesSynWanted spent 2,770 + 4,616 + 1,192 cycles a frame on it
+; (the record cart's SMB3 replay): two calls with frames, every global's address rebuilt from gp. The common case - a job outstanding
+; and not done, or none due - is ~15 instructions here, with one uncached read of the job's status word.
+; THE STATE BLOCK's KSEG1 address (NesSynRspK1) is kept as the compiled code made it, ((base & $1FFFFFFF) | $A0000000:
+; a positive 64-bit value); every use here sign-extends it first (sll r, r, 0), the canonical 32-bit-mode address.
+; Its words read here (rspsyn.n64rsp's header): +68 the RSP's next sample cycle, +72 its fraction, +80 the DMC log's
+; tail, +88 the jobs' DPC_CLOCK sum, +208 the main log's tail, +248 its error, +256 (#NES_SYN_STATUS) the samples done,
+; +260 the jobs done. A 32-bit word the twin masks with $FFFFFFFF is read with lwu (zero-extended), one it does not
+; (PeekL alone: +68) with lw.
+; THE CONVENTION (Help/VR4300.txt): arguments a0-a7 (the 9th at 0(sp) of the caller's sp at the jal), the result in a0,
+; s0-s7 / fp / sp / gp kept; the compiled callers (host.n64's HostAudioPoll and HostDrainCapture, apusynth.n64's
+; NesSynRenderTime) call these unchanged.
+; ======================================================================================================================
+
+; ---- NesSynStopPrint(c): the RSP synthesis stopped with error c: the line printed and WorkerError = c (compiled).
+Procedure NesSynStopPrint(c.i)
+  LpmDebugPrint("NES SYN RSP STOP " + Str(c) + " at sample " + Str(NesSynDone)) : WorkerError = c
+EndProcedure
+
+; ---- NesSynSeen: a job's end seen - the RSP's done count, its error (a stop: NesSynStopPrint), its tails (the logs
+; freed; not in the checking build, where the twin's tails stay), the jobs' clocks summed (a 32-bit counter: the
+; difference zero-extended), one job more. IN: nothing. OUT: nothing. A leaf but for the stop's print; changes t0-t3,
+; a0 (and, at a stop, what a compiled call may).
+; THE PLAIN TWIN:
+;   NesSynOut = 0
+;   NesSynDone = PeekL(NesSynRspK1 + #NES_SYN_STATUS) & $FFFFFFFF
+;   c = PeekL(NesSynRspK1 + 248) & $FFFFFFFF
+;   If c And WorkerError = 0
+;     LpmDebugPrint("NES SYN RSP STOP " + Str(c) + " at sample " + Str(NesSynDone)) : WorkerError = c
+;   EndIf
+;   CompilerIf #NES_SYN_CHECK = 0
+;     NesApuLogTail = PeekL(NesSynRspK1 + 208) & $FFFFFFFF
+;     NesApuDmcTail = PeekL(NesSynRspK1 + 80) & $FFFFFFFF
+;   CompilerEndIf
+;   c = PeekL(NesSynRspK1 + 88) & $FFFFFFFF                ; the jobs' DPC_CLOCK ticks, a 32-bit sum
+;   NesSynClocks + ((c - NesSynClkSeen) & $FFFFFFFF) : NesSynClkSeen = c
+;   NesSynJobs + 1
+ProcedureNaked NesSynSeen()
+  ASM
+    la t0, global_nessynrspk1
+    ld t1, 0(t0)
+    sll t1, t1, 0                   ; t1 = the state block (KSEG1)
+    la t0, global_nessynout
+    sd zero, 0(t0)                  ; no job outstanding
+    lwu t2, #NES_SYN_STATUS(t1)
+    la t0, global_nessyndone
+    sd t2, 0(t0)                    ; the samples the RSP has rendered
+    lwu a0, 248(t1)                 ; its error (0: none)
+    beqz a0, nes_syn_seen_ok
+    nop
+    la t0, global_workererror
+    ld t2, 0(t0)
+    bnez t2, nes_syn_seen_ok        ; an earlier stop is the one kept
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal nessynstopprint             ; NesSynStopPrint(c)
+    sd t1, 8(sp)
+    ld t1, 8(sp)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+nes_syn_seen_ok:
+  EndASM
   CompilerIf #NES_SYN_CHECK = 0
-    NesApuLogTail = PeekL(NesSynRspK1 + 208) & $FFFFFFFF
-    NesApuDmcTail = PeekL(NesSynRspK1 + 80) & $FFFFFFFF
+    ASM
+    lwu t2, 208(t1)
+    la t0, global_nesapulogtail
+    sd t2, 0(t0)                    ; the main log's tail: its entries up to here are free
+    lwu t2, 80(t1)
+    la t0, global_nesapudmctail
+    sd t2, 0(t0)                    ; and the DMC log's
+    EndASM
   CompilerEndIf
-  c = PeekL(NesSynRspK1 + 88) & $FFFFFFFF                ; the jobs' DPC_CLOCK ticks, a 32-bit sum
-  NesSynClocks + ((c - NesSynClkSeen) & $FFFFFFFF) : NesSynClkSeen = c
-  NesSynJobs + 1
+  ASM
+    lwu t2, 88(t1)                  ; c = the jobs' DPC_CLOCK sum
+    la t0, global_nessynclkseen
+    ld t3, 0(t0)
+    sd t2, 0(t0)
+    dsubu t3, t2, t3
+    dsll32 t3, t3, 0
+    dsrl32 t3, t3, 0                ; (c - seen) & $FFFFFFFF
+    la t0, global_nessynclocks
+    ld t2, 0(t0)
+    daddu t2, t2, t3
+    sd t2, 0(t0)
+    la t0, global_nessynjobs
+    ld t2, 0(t0)
+    daddiu t2, t2, 1
+    jr ra
+    sd t2, 0(t0)
+  EndASM
 EndProcedure
 
-; The log entries [from, to) of a ring (count entries of size bytes at base) written back for the RSP's DMA.
-Procedure NesSynWb(base.i, size.i, count.i, from.i, to.i)
-  Protected a.i, b.i
-  If to <= from : ProcedureReturn : EndIf
-  If to - from >= count : LpmCacheWritebackData(base, size * count) : ProcedureReturn : EndIf
-  a = from & (count - 1) : b = to & (count - 1)
-  If a < b
-    LpmCacheWritebackData(base + a * size, (b - a) * size)
-  Else
-    LpmCacheWritebackData(base + a * size, (count - a) * size)
-    If b : LpmCacheWritebackData(base, b * size) : EndIf
-  EndIf
+; ---- NesSynWb(base, size, count, from, to): the log entries [from, to) of a ring (count entries of size bytes at base,
+; count a power of two; from / to grow without end, an entry is index & (count - 1)) written back for the RSP's DMA
+; (LpmCacheWritebackData: Hit_Writeback_D over the bytes). Nothing when to <= from; the whole ring when to - from >=
+; count; else one span, or two when it wraps. The products size x k by dmult (size is 16 or 8: ~5 cycles each).
+; IN: a0 base, a1 size, a2 count, a3 from, a4 to. OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   If to <= from : ProcedureReturn : EndIf
+;   If to - from >= count : LpmCacheWritebackData(base, size * count) : ProcedureReturn : EndIf
+;   a = from & (count - 1) : b = to & (count - 1)
+;   If a < b
+;     LpmCacheWritebackData(base + a * size, (b - a) * size)
+;   Else
+;     LpmCacheWritebackData(base + a * size, (count - a) * size)
+;     If b : LpmCacheWritebackData(base, b * size) : EndIf
+;   EndIf
+ProcedureNaked NesSynWb(base.i, size.i, count.i, from.i, to.i)
+  ASM
+    slt t0, a3, a4
+    beqz t0, nes_syn_wb_ret         ; to <= from: nothing new
+    dsubu t0, a4, a3
+    slt t0, t0, a2
+    bnez t0, nes_syn_wb_part
+    nop
+    dmult a1, a2
+    mflo a1                         ; the whole ring: size x count
+    j lpmcachewritebackdata         ; (a tail call; a0 = base)
+    nop
+nes_syn_wb_part:
+    daddiu t1, a2, -1
+    and t2, a3, t1                  ; a = from & (count - 1)
+    and t3, a4, t1                  ; b = to & (count - 1)
+    slt t0, t2, t3
+    beqz t0, nes_syn_wb_wrap
+    dsubu t1, t3, t2                ; (delay slot) b - a
+    dmult t2, a1
+    mflo t2
+    daddu a0, a0, t2                ; base + a x size
+    nop                             ; (two instructions between an mflo and the next multiply)
+    dmult t1, a1
+    mflo a1                         ; (b - a) x size
+    j lpmcachewritebackdata
+    nop
+nes_syn_wb_wrap:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    move s0, a0                     ; s0 = base
+    move s1, a1                     ; s1 = size
+    move s2, t3                     ; s2 = b
+    dsubu t1, a2, t2                ; count - a
+    dmult t2, a1
+    mflo t2
+    daddu a0, a0, t2
+    nop                             ; (two instructions between an mflo and the next multiply)
+    dmult t1, a1
+    jal lpmcachewritebackdata       ; from a to the ring's end
+    mflo a1
+    beqz s2, nes_syn_wb_done        ; b = 0: the span ended at the ring's end
+    move a0, s0
+    dmult s2, s1
+    jal lpmcachewritebackdata       ; the ring's start up to b
+    mflo a1
+nes_syn_wb_done:
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    daddiu sp, sp, 32
+nes_syn_wb_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
-; One job: render until n samples are done; x = the cycle of sample n - 1.
-Procedure NesSynSend(n.i, x.i)
-  Protected mh.i = NesApuLogHead, dh.i = NesApuDmcHead
-  NesSynWb(@NesApuLog(0), 16, #NES_APU_LOG_ENTRIES, NesSynWbMain, mh) : NesSynWbMain = mh
-  NesSynWb(@NesApuDmcLog(0), 8, #NES_APU_DMC_ENTRIES, NesSynWbDmc, dh) : NesSynWbDmc = dh
-  LpmRspqCmd7Pri(NesShowProg, #NES_RSP_SYNJOB, n & $FFFFFFFF, x & $FFFFFFFF, mh & $FFFFFFFF, dh & $FFFFFFFF, NesSynRspPhys, 0, 0)
-  NesSynSent + 1 : NesSynOut = 1
+; ---- NesSynSend(n, x): one job - render until n samples are done, x = the cycle of sample n - 1. The two logs'
+; entries since the last job written back (NesSynWb), the job queued on the priority ring with the heads it may read
+; up to; one job sent, one outstanding. LpmRspqCmd7Pri takes nine arguments: the ninth (g = 0) at 0(sp).
+; IN: a0 = n, a1 = x. OUT: nothing. KEEPS s0-s3 (saved).
+; THE PLAIN TWIN:
+;   Protected mh.i = NesApuLogHead, dh.i = NesApuDmcHead
+;   NesSynWb(@NesApuLog(0), 16, #NES_APU_LOG_ENTRIES, NesSynWbMain, mh) : NesSynWbMain = mh
+;   NesSynWb(@NesApuDmcLog(0), 8, #NES_APU_DMC_ENTRIES, NesSynWbDmc, dh) : NesSynWbDmc = dh
+;   LpmRspqCmd7Pri(NesShowProg, #NES_RSP_SYNJOB, n & $FFFFFFFF, x & $FFFFFFFF, mh & $FFFFFFFF, dh & $FFFFFFFF, NesSynRspPhys, 0, 0)
+;   NesSynSent + 1 : NesSynOut = 1
+ProcedureNaked NesSynSend(n.i, x.i)
+  ASM
+    daddiu sp, sp, -48
+    sd zero, 0(sp)                  ; the ninth argument's slot (g = 0)
+    sd ra, 8(sp)
+    sd s0, 16(sp)
+    sd s1, 24(sp)
+    sd s2, 32(sp)
+    sd s3, 40(sp)
+    move s0, a0                     ; s0 = n
+    move s1, a1                     ; s1 = x
+    la t0, global_nesapuloghead
+    ld s2, 0(t0)                    ; s2 = mh
+    la t0, global_nesapudmchead
+    ld s3, 0(t0)                    ; s3 = dh
+    la a0, global_nesapulog
+    addiu a1, zero, 16
+    addiu a2, zero, #NES_APU_LOG_ENTRIES
+    la t0, global_nessynwbmain
+    ld a3, 0(t0)
+    jal nessynwb                    ; the main log's new entries written back
+    move a4, s2
+    la t0, global_nessynwbmain
+    sd s2, 0(t0)
+    la a0, global_nesapudmclog
+    addiu a1, zero, 8
+    addiu a2, zero, #NES_APU_DMC_ENTRIES
+    la t0, global_nessynwbdmc
+    ld a3, 0(t0)
+    jal nessynwb                    ; and the DMC log's
+    move a4, s3
+    la t0, global_nessynwbdmc
+    sd s3, 0(t0)
+    la t0, global_nesshowprog
+    ld a0, 0(t0)                    ; the RSP program (show.n64's, which holds the synthesis's segments)
+    addiu a1, zero, #NES_RSP_SYNJOB
+    dsll32 a2, s0, 0
+    dsrl32 a2, a2, 0                ; n & $FFFFFFFF
+    dsll32 a3, s1, 0
+    dsrl32 a3, a3, 0                ; x & $FFFFFFFF
+    dsll32 a4, s2, 0
+    dsrl32 a4, a4, 0                ; mh & $FFFFFFFF
+    dsll32 a5, s3, 0
+    dsrl32 a5, a5, 0                ; dh & $FFFFFFFF
+    la t0, global_nessynrspphys
+    ld a6, 0(t0)                    ; the state block (physical)
+    jal lpmrspqcmd7pri
+    move a7, zero                   ; (delay slot) f = 0; g = 0 at 0(sp)
+    la t0, global_nessynsent
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    la t0, global_nessynout
+    addiu t1, zero, 1
+    sd t1, 0(t0)
+    ld ra, 8(sp)
+    ld s0, 16(sp)
+    ld s1, 24(sp)
+    ld s2, 32(sp)
+    ld s3, 40(sp)
+    jr ra
+    daddiu sp, sp, 48
+  EndASM
 EndProcedure
 
-; The cycle of sample k (k > the RSP's done count, no job outstanding), stepped from the RSP's own cadence: only when
-; a job is capped below ApuProduced (rare).
-Procedure.i NesSynCycleOf(k.i)
-  Protected at.i, frac.i, d.i
-  at = PeekL(NesSynRspK1 + 68) : frac = PeekL(NesSynRspK1 + 72) & $FFFFFFFF : d = NesSynDone
-  While d < k
-    frac + ApuFracStep : at + ApuSampleBase
-    If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
-    d + 1
-  Wend
-  ProcedureReturn at
+; ---- NesSynCycleOf(k): the cycle of sample k (k > the RSP's done count, no job outstanding), stepped from the RSP's
+; own cadence (its next sample's cycle +68 and fraction +72): only when a job is capped below ApuProduced (rare).
+; IN: a0 = k. OUT: a0 = the cycle. A leaf: changes t0-t3, a1-a4.
+; THE PLAIN TWIN:
+;   at = PeekL(NesSynRspK1 + 68) : frac = PeekL(NesSynRspK1 + 72) & $FFFFFFFF : d = NesSynDone
+;   While d < k
+;     frac + ApuFracStep : at + ApuSampleBase
+;     If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
+;     d + 1
+;   Wend
+;   ProcedureReturn at
+ProcedureNaked.i NesSynCycleOf(k.i)
+  ASM
+    la t0, global_nessynrspk1
+    ld t1, 0(t0)
+    sll t1, t1, 0
+    lw a1, 68(t1)                   ; at (PeekL: sign-extended, as the twin)
+    lwu a2, 72(t1)                  ; frac
+    la t0, global_nessyndone
+    ld a3, 0(t0)                    ; d
+    la t0, global_apufracstep
+    ld t1, 0(t0)
+    la t0, global_apufracden
+    ld t2, 0(t0)
+    la t0, global_apusamplebase
+    ld t3, 0(t0)
+nes_syn_cyc_loop:
+    slt a4, a3, a0
+    beqz a4, nes_syn_cyc_done
+    daddu a2, a2, t1                ; (delay slot) frac + step (when the loop ends, an unused value)
+    daddu a1, a1, t3                ; at + base
+    slt a4, a2, t2
+    bnez a4, nes_syn_cyc_loop
+    daddiu a3, a3, 1                ; (delay slot) d + 1
+    dsubu a2, a2, t2                ; the fraction carries:
+    b nes_syn_cyc_loop
+    daddiu a1, a1, 1                ; one cycle more
+nes_syn_cyc_done:
+    jr ra
+    move a0, a1
+  EndASM
 EndProcedure
 
-; 1 when an AI block is made (ApuProduced) but not rendered: the RSP's job must not wait behind graphics.
-Procedure.i NesSynWanted()
-  ProcedureReturn Bool(HostAudioReady And ApuProduced - HostPcmRead >= #HOST_AUDIO_FRAMES And NesSynDone - HostPcmRead < #HOST_AUDIO_FRAMES)
+; ---- NesSynWanted: 1 when an AI block is made (ApuProduced) but not rendered - the RSP's job must not wait behind
+; graphics. IN: nothing. OUT: a0 = 0 / 1. A leaf: changes t0-t2.
+; THE PLAIN TWIN:
+;   ProcedureReturn Bool(HostAudioReady And ApuProduced - HostPcmRead >= #HOST_AUDIO_FRAMES And NesSynDone - HostPcmRead < #HOST_AUDIO_FRAMES)
+ProcedureNaked.i NesSynWanted()
+  ASM
+    la t0, global_hostaudioready
+    ld t0, 0(t0)
+    beqz t0, nes_syn_wanted_ret     ; the AI not started: 0
+    move a0, zero
+    la t0, global_hostpcmread
+    ld t1, 0(t0)
+    la t0, global_apuproduced
+    ld t2, 0(t0)
+    dsubu t2, t2, t1
+    slti t2, t2, #HOST_AUDIO_FRAMES
+    bnez t2, nes_syn_wanted_ret     ; no whole block made: 0
+    nop
+    la t0, global_nessyndone
+    ld t2, 0(t0)
+    dsubu t2, t2, t1
+    slti a0, t2, #HOST_AUDIO_FRAMES ; 1 when the block is not rendered yet
+nes_syn_wanted_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
-Procedure NesSynJobPollBody()
-  Protected n.i, x.i
-  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
-  If NesSynOut
-    If (PeekL(NesSynRspK1 + #NES_SYN_STATUS + 4) & $FFFFFFFF) <> (NesSynSent & $FFFFFFFF)
-      If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
-      ProcedureReturn
-    EndIf
-    NesSynSeen()
-  EndIf
-  n = ApuProduced
-  If n > HostPcmRead + #NES_SYN_CAP : n = HostPcmRead + #NES_SYN_CAP : EndIf
-  If n <= NesSynDone : ProcedureReturn : EndIf
-  If n - NesSynDone < #NES_SYN_BATCH And NesSynWanted() = 0 : ProcedureReturn : EndIf
-  If n = ApuProduced : x = NesApuLastAt : Else : x = NesSynCycleOf(n - 1) : EndIf
-  NesSynSend(n, x)
-  If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
-EndProcedure
-
-Procedure NesSynJobPoll()
+; ---- NesSynJobPoll: from HostAudioPoll after NesApuCount (at every display line). With a job outstanding: if it is
+; not done, hurry the priority ring when a block waits (and stop); if done, take its end (NesSynSeen). Then a new job
+; when ApuProduced (capped at HostPcmRead + #NES_SYN_CAP) is #NES_SYN_BATCH past the done count, or a block waits.
+; The twin's `If NesSynWanted() And LpmRspqPriWaiting()` is evaluated left to right with the second only when the
+; first holds (LpmRspqPriWaiting reads the ring's state and changes nothing, so the order cannot change a result).
+; In the record build the body is timed into NesRecT(9) (the synthesis's CPU side), Count read with mfc0 $9 (the low
+; 32 bits of the twin's LpmCpuCount(), all it keeps).
+; IN: nothing. OUT: nothing. KEEPS s0-s2 (saved).
+; THE PLAIN TWIN:
+;   Procedure NesSynJobPollBody()
+;     Protected n.i, x.i
+;     If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+;     If NesSynOut
+;       If (PeekL(NesSynRspK1 + #NES_SYN_STATUS + 4) & $FFFFFFFF) <> (NesSynSent & $FFFFFFFF)
+;         If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
+;         ProcedureReturn
+;       EndIf
+;       NesSynSeen()
+;     EndIf
+;     n = ApuProduced
+;     If n > HostPcmRead + #NES_SYN_CAP : n = HostPcmRead + #NES_SYN_CAP : EndIf
+;     If n <= NesSynDone : ProcedureReturn : EndIf
+;     If n - NesSynDone < #NES_SYN_BATCH And NesSynWanted() = 0 : ProcedureReturn : EndIf
+;     If n = ApuProduced : x = NesApuLastAt : Else : x = NesSynCycleOf(n - 1) : EndIf
+;     NesSynSend(n, x)
+;     If NesSynWanted() And LpmRspqPriWaiting() : LpmRspqPriGo() : EndIf
+;   EndProcedure
+;   Procedure NesSynJobPoll()
+;     CompilerIf #NES_CONSOLE_RECORD
+;       Protected t0.i = LpmCpuCount()
+;       NesSynJobPollBody()
+;       NesRecT(9) + ((LpmCpuCount() - t0) & $FFFFFFFF)     ; the synthesis's CPU side (console_record.n64)
+;     CompilerElse
+;       NesSynJobPollBody()
+;     CompilerEndIf
+;   EndProcedure
+ProcedureNaked NesSynJobPoll()
+  ASM
+    la t0, global_nessynrspk1
+    ld t1, 0(t0)
+    beqz t1, nes_syn_poll_ret       ; the RSP synthesis not set up
+    nop
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+  EndASM
   CompilerIf #NES_CONSOLE_RECORD
-    Protected t0.i = LpmCpuCount()
-    NesSynJobPollBody()
-    NesRecT(9) + ((LpmCpuCount() - t0) & $FFFFFFFF)     ; the synthesis's CPU side (console_record.n64)
-  CompilerElse
-    NesSynJobPollBody()
+    ASM
+    mfc0 s2, $9                     ; s2 = Count at the start (the record's timing)
+    EndASM
   CompilerEndIf
+  ASM
+    la t0, global_nessynout
+    ld t2, 0(t0)
+    beqz t2, nes_syn_poll_new       ; no job outstanding
+    sll t1, t1, 0                   ; (delay slot) the state block, KSEG1
+    lw t2, #NES_SYN_STATUS+4(t1)    ; the jobs the RSP has finished (low 32 bits compared)
+    la t0, global_nessynsent
+    lw t3, 4(t0)                    ; NesSynSent's low word
+    beq t2, t3, nes_syn_poll_seen
+    nop
+    jal nessynwanted                ; not done yet: hurry it if a block waits for it
+    nop
+    beqz a0, nes_syn_poll_end
+    nop
+    jal lpmrspqpriwaiting
+    nop
+    beqz a0, nes_syn_poll_end
+    nop
+    jal lpmrspqprigo
+    nop
+    b nes_syn_poll_end
+    nop
+nes_syn_poll_seen:
+    jal nessynseen                  ; its end taken
+    nop
+nes_syn_poll_new:
+    la t0, global_apuproduced
+    ld s0, 0(t0)                    ; s0 = n = ApuProduced ...
+    la t0, global_hostpcmread
+    ld t1, 0(t0)
+    daddiu t1, t1, #NES_SYN_CAP     ; ... at most HostPcmRead + the cap
+    slt t2, t1, s0
+    beqz t2, nes_syn_poll_capped
+    nop
+    move s0, t1
+nes_syn_poll_capped:
+    la t0, global_nessyndone
+    ld t1, 0(t0)
+    slt t2, t1, s0
+    beqz t2, nes_syn_poll_end       ; n <= done: nothing to render
+    dsubu t1, s0, t1                ; (delay slot) n - done
+    slti t2, t1, #NES_SYN_BATCH
+    beqz t2, nes_syn_poll_go        ; a batch's worth: go
+    nop
+    jal nessynwanted                ; fewer: only when a block waits for them
+    nop
+    beqz a0, nes_syn_poll_end
+    nop
+nes_syn_poll_go:
+    la t0, global_apuproduced
+    ld t1, 0(t0)
+    bne s0, t1, nes_syn_poll_cyc    ; capped: the cycle of sample n - 1 from the RSP's cadence
+    nop
+    la t0, global_nesapulastat
+    b nes_syn_poll_send
+    ld s1, 0(t0)                    ; (delay slot) x = the last sample counted's cycle
+nes_syn_poll_cyc:
+    jal nessyncycleof
+    daddiu a0, s0, -1
+    move s1, a0
+nes_syn_poll_send:
+    move a0, s0
+    jal nessynsend                  ; NesSynSend(n, x)
+    move a1, s1
+    jal nessynwanted
+    nop
+    beqz a0, nes_syn_poll_end
+    nop
+    jal lpmrspqpriwaiting
+    nop
+    beqz a0, nes_syn_poll_end
+    nop
+    jal lpmrspqprigo
+    nop
+nes_syn_poll_end:
+  EndASM
+  CompilerIf #NES_CONSOLE_RECORD
+    ASM
+    mfc0 t1, $9
+    dsubu t1, t1, s2
+    dsll32 t1, t1, 0
+    dsrl32 t1, t1, 0                ; the poll's ticks, 32 bits
+    la t0, global_nesrect
+    ld t2, 72(t0)
+    daddu t2, t2, t1
+    sd t2, 72(t0)                   ; NesRecT(9): the synthesis's CPU side
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    daddiu sp, sp, 32
+nes_syn_poll_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
-; Every sample at a cycle <= t rendered by the RSP now (a log has no room: apusynth.n64's NesSynRenderTime).
-Procedure NesSynRspRoom(t.i)
-  Protected n.i = ApuProduced, x.i = NesApuLastAt, at.i = NesApuSampleAt, frac.i = ApuSampleFrac
-  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
-  If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
-  While at <= t                         ; the samples after ApuProduced up to t (NesApuCount's cadence)
-    x = at : n + 1
-    frac + ApuFracStep : at + ApuSampleBase
-    If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
-  Wend
-  If n > NesSynDone
-    NesSynSend(n, x) : LpmRspqPriSync() : NesSynSeen()
-  EndIf
-  NesSynRooms + 1
+; ---- NesSynRspRoom(t): every sample at a cycle <= t rendered by the RSP now (a log has no room: apusynth.n64's
+; NesSynRenderTime): the job outstanding waited for, the samples after ApuProduced up to t counted with NesApuCount's
+; cadence, one job for them waited for. IN: a0 = t. OUT: nothing. KEEPS s0-s4 (saved).
+; THE PLAIN TWIN:
+;   Protected n.i = ApuProduced, x.i = NesApuLastAt, at.i = NesApuSampleAt, frac.i = ApuSampleFrac
+;   If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+;   If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
+;   While at <= t                         ; the samples after ApuProduced up to t (NesApuCount's cadence)
+;     x = at : n + 1
+;     frac + ApuFracStep : at + ApuSampleBase
+;     If frac >= ApuFracDen : frac - ApuFracDen : at + 1 : EndIf
+;   Wend
+;   If n > NesSynDone
+;     NesSynSend(n, x) : LpmRspqPriSync() : NesSynSeen()
+;   EndIf
+;   NesSynRooms + 1
+ProcedureNaked NesSynRspRoom(t.i)
+  ASM
+    la t0, global_nessynrspk1
+    ld t0, 0(t0)
+    beqz t0, nes_syn_room_ret
+    nop
+    daddiu sp, sp, -48
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    sd s1, 16(sp)
+    sd s2, 24(sp)
+    sd s3, 32(sp)
+    sd s4, 40(sp)
+    move s2, a0                     ; s2 = t
+    la t0, global_apuproduced       ; read first, as the twin's declarations do
+    ld s0, 0(t0)                    ; s0 = n
+    la t0, global_nesapulastat
+    ld s1, 0(t0)                    ; s1 = x
+    la t0, global_nesapusampleat
+    ld s3, 0(t0)                    ; s3 = at
+    la t0, global_apusamplefrac
+    ld s4, 0(t0)                    ; s4 = frac
+    la t0, global_nessynout
+    ld t0, 0(t0)
+    beqz t0, nes_syn_room_count
+    nop
+    jal lpmrspqprisync              ; the job outstanding: waited for, its end taken
+    nop
+    jal nessynseen
+    nop
+nes_syn_room_count:
+    move a0, s3
+    move a1, s4
+    la t0, global_apufracstep
+    ld t1, 0(t0)
+    la t0, global_apufracden
+    ld t2, 0(t0)
+    la t0, global_apusamplebase
+    ld t3, 0(t0)
+nes_syn_room_loop:
+    slt t0, s2, a0
+    bnez t0, nes_syn_room_counted   ; at > t: done counting
+    nop
+    move s1, a0                     ; x = at
+    daddiu s0, s0, 1                ; n + 1
+    daddu a1, a1, t1                ; frac + step
+    slt t0, a1, t2
+    bnez t0, nes_syn_room_loop
+    daddu a0, a0, t3                ; (delay slot) at + base
+    dsubu a1, a1, t2                ; the fraction carries: one cycle more
+    b nes_syn_room_loop
+    daddiu a0, a0, 1
+nes_syn_room_counted:
+    la t0, global_nessyndone
+    ld t1, 0(t0)
+    slt t0, t1, s0
+    beqz t0, nes_syn_room_done      ; n <= done: nothing to render
+    nop
+    move a0, s0
+    jal nessynsend                  ; NesSynSend(n, x), waited for, its end taken
+    move a1, s1
+    jal lpmrspqprisync
+    nop
+    jal nessynseen
+    nop
+nes_syn_room_done:
+    la t0, global_nessynrooms
+    ld t1, 0(t0)
+    daddiu t1, t1, 1
+    sd t1, 0(t0)
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    ld s1, 16(sp)
+    ld s2, 24(sp)
+    ld s3, 32(sp)
+    ld s4, 40(sp)
+    daddiu sp, sp, 48
+nes_syn_room_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
-; Every sample ApuProduced has counted rendered now (the oracle's end, HostDrainCapture).
-Procedure NesSynFinish()
-  If NesSynRspK1 = 0 : ProcedureReturn : EndIf
-  If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
-  If ApuProduced > NesSynDone
-    NesSynSend(ApuProduced, NesApuLastAt) : LpmRspqPriSync() : NesSynSeen()
-  EndIf
+; ---- NesSynFinish: every sample ApuProduced has counted rendered now (the oracle's end, HostDrainCapture).
+; IN: nothing. OUT: nothing. KEEPS ra's caller frame (saved).
+; THE PLAIN TWIN:
+;   If NesSynRspK1 = 0 : ProcedureReturn : EndIf
+;   If NesSynOut : LpmRspqPriSync() : NesSynSeen() : EndIf
+;   If ApuProduced > NesSynDone
+;     NesSynSend(ApuProduced, NesApuLastAt) : LpmRspqPriSync() : NesSynSeen()
+;   EndIf
+ProcedureNaked NesSynFinish()
+  ASM
+    la t0, global_nessynrspk1
+    ld t0, 0(t0)
+    beqz t0, nes_syn_fin_ret
+    nop
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t0, global_nessynout
+    ld t0, 0(t0)
+    beqz t0, nes_syn_fin_rest
+    nop
+    jal lpmrspqprisync
+    nop
+    jal nessynseen
+    nop
+nes_syn_fin_rest:
+    la t0, global_apuproduced
+    ld a0, 0(t0)
+    la t0, global_nessyndone
+    ld t1, 0(t0)
+    slt t1, t1, a0
+    beqz t1, nes_syn_fin_done
+    nop
+    la t0, global_nesapulastat
+    jal nessynsend                  ; NesSynSend(ApuProduced, NesApuLastAt), waited for, its end taken
+    ld a1, 0(t0)
+    jal lpmrspqprisync
+    nop
+    jal nessynseen
+    nop
+nes_syn_fin_done:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+nes_syn_fin_ret:
+    jr ra
+    nop
+  EndASM
 EndProcedure
 
 CompilerIf #NES_SYN_CHECK
