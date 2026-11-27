@@ -90,24 +90,237 @@ Procedure HostQueueAudio(produced.i)
 EndProcedure
 CompilerEndIf
 
+; ======================================================================================================================
+; THE HOST'S PER-FRAME GLUE IN ASSEMBLY (design note N.69, 2026-11-27): HostAudioPoll, DisplayWaitLine, DisplayFrame,
+; HostPad, HostHarvestPads, HostRequestPads and (with the replayed input off) HostInputPoll are hand-written VR4300
+; assembly in the runtime-MMC3 builds (#NES_APU_SPLIT / #NES_RDP_SHOW, the cart that ships and its checking builds);
+; each one's PLAIN TWIN, the compiled procedure it replaces, is kept in its header. Compiled on purpose, and why:
+; HostAiReport (the oracle build's two printed lines: string formatting through the library), the oracle build's
+; HostQueueAudio / HostDrainCapture (the checking build's AI queue and drain with their counters; the cart that ships
+; uses host_audio_queue.n64's assembly), HostPresent and the RDP_SHOW = 0 forms (the --old-show reference build and the
+; other mappers' builds: no check here executes them), HostInputPoll with the replayed input (the test fixture) and
+; HostBegin (once, at power-on).
+; THE CONVENTION (Help/VR4300.txt): arguments a0-a7, the result in a0, s0-s7 / fp / sp / gp kept; t-, a- and
+; v-registers may change. The callers (the hot unit's u_ppubeginline and line 239, nes.n64's NesHostGuestFrame,
+; unit/write.n64's $4016 strobe) call these unchanged.
+; WHY ASSEMBLY, AND WHAT IT SAVES (the record cart's SMB3 replay before this change, cycles a guest frame): compiled,
+; HostAudioPoll 920, DisplayWaitLine 1,309, HostPad 920 + its six library calls 879, HostHarvestPads 604, HostRequestPads
+; 81, HostInputPoll 43 (an empty procedure's frame): every global's address rebuilt from gp, a frame per call.
+; FEWER SYNTHESIS POLLS (the measured part, N.69): the RSP synthesis's job poll (NesSynJobPoll, an uncached status read
+; each time, 2,668 cycles a frame) ran at every DisplayWaitLine - every 16 lines, 17 a frame - and at the two others.
+; What it must do, and how often (20 kHz: 1.27 samples a line): (1) start a job once #NES_SYN_BATCH (256) samples wait -
+; 201 lines' worth; polling every 64 lines starts it at most 81 samples (64 lines) later; (2) see a job's end before the
+; AI needs its block - the AI is fed from HostPcmRead with #HOST_AUDIO_RESERVE (768) samples behind ApuProduced before
+; the first block and two blocks held (1,024 samples, 806 lines) after it, so a 64-line delay in seeing an end and
+; another in starting the job leave over 600 lines of the slack; (3) hurry the priority ring when a block waits - the
+; same bound. So the job is polled at lines 64, 128 and 192 here, at line 239 (DisplayFrame) and at the frame's wrap
+; (NesHostGuestFrame, via HostAudioPoll): five a frame, the longest gap 65 lines. NesApuCount and HostQueueAudio still
+; run every 16 lines (ApuProduced stays as current for the show's sound reserve and the AI is fed as before).
+; ======================================================================================================================
+
+; (DisplayWaitLine and DisplayFrame come FIRST in this file's assembly on purpose - design note N.69, THE PLACEMENT: the
+; compiler lays these naked procedures out in source order, and this order puts DisplayWaitLine, run 17 times a frame,
+; on I-cache sets where the hot unit's lines are cold instead of on the per-line draw path ppu_draw_*.)
+CompilerIf #NES_RDP_SHOW
+; ---- DisplayWaitLine(line): every 16 lines (the hot unit's u_ppubeginline). At line 224 the pads' read started (before
+; the guest's usual vblank strobe; not with the replayed input); the samples counted and the AI fed (as HostAudioPoll),
+; the synthesis's job polled only at lines 64, 128 and 192 (the header above: five polls a frame with line 239 and the
+; frame's wrap); then a check point of the show's hand-over (show.n64): NesShowPoll(1 + #NES_SHOW_CHECK) at line 0 -
+; the frame before handed with a buffer waited for (unless the sound reserve runs low; the checking build never leaves a
+; frame unshown for the sound) - else NesShowPoll(0). IN: a0 = line. OUT: nothing. KEEPS s0 (saved: the line).
+; THE PLAIN TWIN (the compiled procedure; its HostAudioPoll() polled the job at every call):
+;   CompilerIf #VERIFY_INPUT=0
+;     If line=224 : HostRequestPads() : EndIf
+;   CompilerEndIf
+;   HostAudioPoll()
+;   If line=0 : NesShowPoll(1+#NES_SHOW_CHECK) : Else : NesShowPoll(0) : EndIf
+ProcedureNaked DisplayWaitLine(line.i)
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd s0, 8(sp)
+    move s0, a0                     ; s0 = line
+  EndASM
+  CompilerIf #VERIFY_INPUT=0
+    ASM
+    addiu t0, zero, 224
+    bne s0, t0, display_wait_audio
+    nop
+    jal hostrequestpads             ; line 224: the pads' read started
+    nop
+display_wait_audio:
+    EndASM
+  CompilerEndIf
+  ASM
+    jal nesapucount                 ; ApuProduced brought to the APU's time
+    nop
+  EndASM
+  CompilerIf #NES_RSP_SYN
+    ASM
+    andi t0, s0, 63
+    bnez t0, display_wait_queue     ; not a multiple of 64: no job poll
+    sltiu t1, s0, 240               ; (delay slot) 1 below line 240
+    beqz s0, display_wait_queue     ; line 0: the frame's wrap has just polled
+    nop
+    beqz t1, display_wait_queue     ; line 256: line 239 has just polled
+    nop
+    jal nessynjobpoll               ; lines 64, 128, 192: the RSP's job
+    nop
+display_wait_queue:
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_apuproduced
+    jal hostqueueaudio              ; HostQueueAudio(ApuProduced)
+    ld a0, 0(t0)
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
+    jal hostaireport                ; the oracle build's counters (compiled)
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+    sltiu a0, s0, 1                 ; 1 at line 0, else 0
+  EndASM
+  CompilerIf #NES_SHOW_CHECK
+    ASM
+    sll a0, a0, 1                   ; the checking build: 2 at line 0 (1 + #NES_SHOW_CHECK)
+    EndASM
+  CompilerEndIf
+  ASM
+    jal nesshowpoll                 ; the show's check point
+    nop
+    ld ra, 0(sp)
+    ld s0, 8(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+
+; ---- DisplayFrame: line 239 (the hot unit). The samples counted, the job polled, the AI fed (HostAudioPoll); the
+; frame's picture is handed at line 240 by the show itself (NesShowFrameEnd). Then the pads: with the replayed input a
+; read started when none is outstanding; else, when line 224 did not start one, HostRequestPads now; the mark cleared.
+; IN / OUT: nothing. A frame of 16 bytes (ra).
+; THE PLAIN TWIN (#NES_RDP_SHOW):
+;   HostAudioPoll()
+;   CompilerIf #VERIFY_INPUT
+;     If HostPadPending=0 : HostPadPending=LpmPadReadAsync() : EndIf
+;   CompilerElse
+;     If HostPadRequested=0 : HostRequestPads() : EndIf
+;     HostPadRequested=0
+;   CompilerEndIf
+ProcedureNaked DisplayFrame()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal hostaudiopoll
+    nop
+  EndASM
+  CompilerIf #VERIFY_INPUT
+    ASM
+    la t0, global_hostpadpending
+    ld t1, 0(t0)
+    bnez t1, display_frame_ret      ; a read outstanding
+    nop
+    jal lpmpadreadasync
+    nop
+    la t0, global_hostpadpending
+    sd a0, 0(t0)                    ; HostPadPending = the ticket
+    EndASM
+  CompilerElse
+    ASM
+    la t0, global_hostpadrequested
+    ld t1, 0(t0)
+    bnez t1, display_frame_clear    ; line 224 started it
+    nop
+    jal hostrequestpads
+    nop
+display_frame_clear:
+    la t0, global_hostpadrequested
+    sd zero, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+display_frame_ret:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+CompilerEndIf
+
+CompilerIf #VERIFY_FRAME>0
+; ---- HostAiReport: the oracle build's AI counters printed every 60 frames and at the verify frame (compiled: string
+; formatting through the library; the checking build only). Was the tail of the compiled HostAudioPoll.
+Procedure HostAiReport()
+  If WorkerFrames>HostAiReported And (WorkerFrames%60=0 Or WorkerFrames=#VERIFY_FRAME)
+    HostAiReported=WorkerFrames
+    LpmDebugPrint("NES AI QUEUED "+Str(HostAiQueued)+" UNDERRUNS "+Str(HostAiUnderruns)+" FRAME "+Str(WorkerFrames))
+    LpmDebugPrint("NES AI READY ON EMPTY "+Str(HostAiReadyOnEmpty)+" LAST "+Str(HostLastEmptyFrame)+" COALESCED "+Str(HostCoalesced)+" FRAME "+Str(WorkerFrames))
+  EndIf
+EndProcedure
+CompilerEndIf
+
+CompilerIf #NES_APU_SPLIT
+; ---- HostAudioPoll: the samples the guest's time has produced counted (NesApuCount), the RSP synthesis's job polled
+; (NesSynJobPoll), the AI fed (HostQueueAudio(ApuProduced)); in the oracle build the counters' report (HostAiReport).
+; From the frame's wrap (NesHostGuestFrame) and line 239 (DisplayFrame); DisplayWaitLine runs the same steps itself,
+; with the job poll only every 64 lines. IN: nothing. OUT: nothing. A frame of 16 bytes (ra); changes what a
+; compiled call may.
+; THE PLAIN TWIN:
+;   NesApuCount()                       ; the samples the guest's time has produced (apusplit.n64)
+;   CompilerIf #NES_RSP_SYN
+;     NesSynJobPoll()                   ; the RSP renders them at the guest's pace (rspsyn.n64)
+;   CompilerEndIf
+;   HostQueueAudio(ApuProduced)
+;   CompilerIf #VERIFY_FRAME>0
+;     If WorkerFrames>HostAiReported And (WorkerFrames%60=0 Or WorkerFrames=#VERIFY_FRAME)
+;       HostAiReported=WorkerFrames
+;       LpmDebugPrint("NES AI QUEUED ...") : LpmDebugPrint("NES AI READY ON EMPTY ...")
+;     EndIf
+;   CompilerEndIf
+ProcedureNaked HostAudioPoll()
+  ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal nesapucount                 ; ApuProduced brought to the APU's time
+    nop
+  EndASM
+  CompilerIf #NES_RSP_SYN
+    ASM
+    jal nessynjobpoll               ; the RSP's job: its end seen, the next one sent
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_apuproduced
+    jal hostqueueaudio              ; HostQueueAudio(ApuProduced): a rendered block to the AI
+    ld a0, 0(t0)
+  EndASM
+  CompilerIf #VERIFY_FRAME>0
+    ASM
+    jal hostaireport                ; the oracle build's counters (compiled)
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM
+EndProcedure
+CompilerElse
 Procedure HostAudioPoll()
-  CompilerIf #NES_APU_SPLIT
-    NesApuCount()                       ; the samples the guest's time has produced (apusplit.n64)
-    CompilerIf #NES_RSP_SYN
-      NesSynJobPoll()                   ; the RSP renders them at the guest's pace (rspsyn.n64)
-    CompilerEndIf
-  CompilerElseIf #NES_APU_BLOCKED
+  CompilerIf #NES_APU_BLOCKED
     NesRenderBlock()
   CompilerEndIf
   HostQueueAudio(ApuProduced)
   CompilerIf #VERIFY_FRAME>0
-    If WorkerFrames>HostAiReported And (WorkerFrames%60=0 Or WorkerFrames=#VERIFY_FRAME)
-      HostAiReported=WorkerFrames
-      LpmDebugPrint("NES AI QUEUED "+Str(HostAiQueued)+" UNDERRUNS "+Str(HostAiUnderruns)+" FRAME "+Str(WorkerFrames))
-      LpmDebugPrint("NES AI READY ON EMPTY "+Str(HostAiReadyOnEmpty)+" LAST "+Str(HostLastEmptyFrame)+" COALESCED "+Str(HostCoalesced)+" FRAME "+Str(WorkerFrames))
-    EndIf
+    HostAiReport()
   CompilerEndIf
 EndProcedure
+CompilerEndIf
 
 CompilerIf #VERIFY_FRAME>0
 Procedure HostDrainCapture()
@@ -156,18 +369,84 @@ Procedure HostDrainCapture()
 EndProcedure
 CompilerEndIf
 
-Procedure.i HostPad(port.i)
-  Protected buttons.i = LpmPadButtons(port), keys.i
-  Protected x.i = LpmPadStickX(port), y.i = LpmPadStickY(port)
-  If buttons & #LPM_PAD_A : keys | 1 : EndIf
-  If buttons & #LPM_PAD_B : keys | 2 : EndIf
-  If buttons & #LPM_PAD_Z : keys | 4 : EndIf
-  If buttons & #LPM_PAD_START : keys | 8 : EndIf
-  If buttons & #LPM_PAD_UP Or y > 40 : keys | 16 : EndIf
-  If buttons & #LPM_PAD_DOWN Or y < -40 : keys | 32 : EndIf
-  If buttons & #LPM_PAD_LEFT Or x < -40 : keys | 64 : EndIf
-  If buttons & #LPM_PAD_RIGHT Or x > 40 : keys | 128 : EndIf
-  ProcedureReturn keys
+; ---- HostPad(port): the N64 pad's state as the NES pad's 8 bits (A 1, B 2, Z = select 4, START 8, up 16, down 32,
+; left 64, right 128; the stick past 40 counts as the cross). The pad's state is read where the library keeps it, its
+; hot block (#LPM_HOT_PAD_NOW / _X / _Y + port x 8: lpm_exceptions.n64 names these constants as the state itself,
+; written by LpmPadTake) - what LpmPadButtons / LpmPadStickX / LpmPadStickY return; a port outside 0-3 answers 0 as
+; they do. HOW: the N64's buttons A B Z START at bits 15-12 and the cross UP DOWN LEFT RIGHT at bits 11-8 map to the
+; NES bits 0-3 and 4-7 in REVERSED order, so each is one shift right by an odd count and one mask (bit 15 >> 15 = bit
+; 0, bit 14 >> 13 = bit 1, ... bit 8 >> 1 = bit 7); the stick's four tests are signed compares (slti) of the 64-bit
+; values. IN: a0 = port. OUT: a0 = the keys. A leaf: changes t0-t3, t9.
+; THE PLAIN TWIN:
+;   Protected buttons.i = LpmPadButtons(port), keys.i
+;   Protected x.i = LpmPadStickX(port), y.i = LpmPadStickY(port)
+;   If buttons & #LPM_PAD_A : keys | 1 : EndIf
+;   If buttons & #LPM_PAD_B : keys | 2 : EndIf
+;   If buttons & #LPM_PAD_Z : keys | 4 : EndIf
+;   If buttons & #LPM_PAD_START : keys | 8 : EndIf
+;   If buttons & #LPM_PAD_UP Or y > 40 : keys | 16 : EndIf
+;   If buttons & #LPM_PAD_DOWN Or y < -40 : keys | 32 : EndIf
+;   If buttons & #LPM_PAD_LEFT Or x < -40 : keys | 64 : EndIf
+;   If buttons & #LPM_PAD_RIGHT Or x > 40 : keys | 128 : EndIf
+;   ProcedureReturn keys
+CompilerIf #LPM_PAD_A <> $8000 Or #LPM_PAD_B <> $4000 Or #LPM_PAD_Z <> $2000 Or #LPM_PAD_START <> $1000 Or #LPM_PAD_UP <> $0800 Or #LPM_PAD_DOWN <> $0400 Or #LPM_PAD_LEFT <> $0200 Or #LPM_PAD_RIGHT <> $0100
+  CompilerError "HostPad's shifts assume the library's button bits 15-8 (A B Z START UP DOWN LEFT RIGHT)"
+CompilerEndIf
+#HOST_PAD_NOW = #LPM_HOT_PAD_NOW - #LPM_HOT     ; the pads' buttons, from the hot block's base
+#HOST_PAD_X = #LPM_HOT_PAD_X - #LPM_HOT         ; their sticks' x
+#HOST_PAD_Y = #LPM_HOT_PAD_Y - #LPM_HOT         ; and y
+ProcedureNaked.i HostPad(port.i)
+  ASM
+    sltiu t0, a0, 4
+    beqz t0, host_pad_ret           ; not a port: 0 (as the library's readers)
+    dsll t0, a0, 3                  ; (delay slot) port x 8
+    la t9, #LPM_HOT
+    daddu t9, t9, t0                ; the port's words in the hot block
+    ld t1, #HOST_PAD_NOW(t9)        ; t1 = the buttons
+    ld t2, #HOST_PAD_X(t9)          ; t2 = x
+    ld t3, #HOST_PAD_Y(t9)          ; t3 = y
+    dsrl a0, t1, 15
+    andi a0, a0, 1                  ; A (bit 15) -> 1
+    dsrl t0, t1, 13
+    andi t0, t0, 2                  ; B (14) -> 2
+    or a0, a0, t0
+    dsrl t0, t1, 11
+    andi t0, t0, 4                  ; Z (13) -> 4
+    or a0, a0, t0
+    dsrl t0, t1, 9
+    andi t0, t0, 8                  ; START (12) -> 8
+    or a0, a0, t0
+    dsrl t0, t1, 7
+    andi t0, t0, 16                 ; UP (11) -> 16
+    or a0, a0, t0
+    dsrl t0, t1, 5
+    andi t0, t0, 32                 ; DOWN (10) -> 32
+    or a0, a0, t0
+    dsrl t0, t1, 3
+    andi t0, t0, 64                 ; LEFT (9) -> 64
+    or a0, a0, t0
+    dsrl t0, t1, 1
+    andi t0, t0, 128                ; RIGHT (8) -> 128
+    or a0, a0, t0
+    slti t0, t3, 41
+    xori t0, t0, 1                  ; y > 40 ...
+    sll t0, t0, 4
+    or a0, a0, t0                   ; ... up
+    slti t0, t3, -40                ; y < -40 ...
+    sll t0, t0, 5
+    or a0, a0, t0                   ; ... down
+    slti t0, t2, -40                ; x < -40 ...
+    sll t0, t0, 6
+    or a0, a0, t0                   ; ... left
+    slti t0, t2, 41
+    xori t0, t0, 1                  ; x > 40 ...
+    sll t0, t0, 7
+    jr ra
+    or a0, a0, t0                   ; (delay slot) ... right
+host_pad_ret:
+    jr ra
+    move a0, zero
+  EndASM
 EndProcedure
 
 CompilerIf #VERIFY_INPUT
@@ -175,32 +454,95 @@ CompilerIf #VERIFY_INPUT
 CompilerElse
   Global HostPadRequested.i
 
-  Procedure HostHarvestPads()
-    If HostPadPending=0 : ProcedureReturn : EndIf
-    If LpmPadReadDone()=0 : ProcedureReturn : EndIf
-    HostPadPending=0
-    NesController=HostPad(0)
-    NesController2=HostPad(1)
+  ; ---- HostHarvestPads: when a pad read is outstanding and has arrived (LpmPadReadDone, which also takes it in), both
+  ; NES pads from it. From HostRequestPads and the guest's $4016 strobe (unit/write.n64). IN / OUT: nothing. A frame
+  ; of 16 bytes (ra); changes what a compiled call may.
+  ; THE PLAIN TWIN:
+  ;   If HostPadPending=0 : ProcedureReturn : EndIf
+  ;   If LpmPadReadDone()=0 : ProcedureReturn : EndIf
+  ;   HostPadPending=0
+  ;   NesController=HostPad(0)
+  ;   NesController2=HostPad(1)
+  ProcedureNaked HostHarvestPads()
+    ASM
+    la t0, global_hostpadpending
+    ld t0, 0(t0)
+    beqz t0, host_harvest_ret       ; no read outstanding
+    daddiu sp, sp, -16              ; (delay slot)
+    sd ra, 0(sp)
+    jal lpmpadreaddone              ; arrived? (taken in when it has)
+    nop
+    beqz a0, host_harvest_done      ; not yet
+    nop
+    la t0, global_hostpadpending
+    sd zero, 0(t0)                  ; the read taken
+    jal hostpad
+    move a0, zero
+    la t0, global_nescontroller
+    sd a0, 0(t0)                    ; NesController = HostPad(0)
+    jal hostpad
+    addiu a0, zero, 1
+    la t0, global_nescontroller2
+    sd a0, 0(t0)                    ; NesController2 = HostPad(1)
+host_harvest_done:
+    ld ra, 0(sp)
+host_harvest_ret:
+    jr ra
+    daddiu sp, sp, 16
+    EndASM
   EndProcedure
 
-  Procedure HostRequestPads()
-    HostHarvestPads()
-    If HostPadPending=0 : HostPadPending=LpmPadReadAsync() : EndIf
-    HostPadRequested=Bool(HostPadPending)
+  ; ---- HostRequestPads: the pads harvested, then a new read started when none is outstanding; HostPadRequested = 1 when
+  ; one is (DisplayFrame starts one itself when line 224 did not). IN / OUT: nothing. A frame of 16 bytes (ra).
+  ; THE PLAIN TWIN:
+  ;   HostHarvestPads()
+  ;   If HostPadPending=0 : HostPadPending=LpmPadReadAsync() : EndIf
+  ;   HostPadRequested=Bool(HostPadPending)
+  ProcedureNaked HostRequestPads()
+    ASM
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    jal hostharvestpads
+    nop
+    la t0, global_hostpadpending
+    ld a0, 0(t0)
+    bnez a0, host_request_mark      ; still outstanding: no new read
+    nop
+    jal lpmpadreadasync             ; the ticket (0: the joybus queue is full)
+    nop
+    la t0, global_hostpadpending
+    sd a0, 0(t0)
+host_request_mark:
+    sltu a0, zero, a0               ; Bool(HostPadPending)
+    la t0, global_hostpadrequested
+    sd a0, 0(t0)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+    EndASM
   EndProcedure
 CompilerEndIf
+CompilerIf #VERIFY_INPUT
 Procedure HostInputPoll()
-  CompilerIf #VERIFY_INPUT
-    If HostPadPending
-      If LpmPadReadDone()=0 : ProcedureReturn : EndIf
-      HostPadPending=0
-    Else
-      LpmPadRead()
-    EndIf
-    NesController = NesReplayPad(WorkerFrames)
-    NesController2 = HostPad(1)
-  CompilerEndIf
+  If HostPadPending
+    If LpmPadReadDone()=0 : ProcedureReturn : EndIf
+    HostPadPending=0
+  Else
+    LpmPadRead()
+  EndIf
+  NesController = NesReplayPad(WorkerFrames)
+  NesController2 = HostPad(1)
 EndProcedure
+CompilerElse
+; ---- HostInputPoll without the replayed input: nothing (the pads are read at line 224 and harvested at the strobe).
+; THE PLAIN TWIN: an empty procedure (its frame alone cost 43 cycles a frame).
+ProcedureNaked HostInputPoll()
+  ASM
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerEndIf
 
 CompilerIf #NES_RDP_SHOW=0
 Procedure HostPresent(waitMode.i)
@@ -230,31 +572,23 @@ CompilerEndIf
 CompilerIf #NES_SHOW_CHECK And #NES_RDP_SHOW=0
   Declare NesShowHashRef()
 CompilerEndIf
+CompilerIf #NES_RDP_SHOW=0
 Procedure DisplayWaitLine(line.i)
   CompilerIf #VERIFY_INPUT=0
     ; Start the transfer before the guest's usual vblank strobe.
     If line=224 : HostRequestPads() : EndIf
   CompilerEndIf
   HostAudioPoll()
-  CompilerIf #NES_RDP_SHOW
-    ; A check point of the show's hand-over (show.n64). At line 0 the frame before is handed with a buffer waited
-    ; for, as HostPresent(1) did (unless the sound reserve runs low: then it is not shown, HostCoalesced).
-    ; The checking build never leaves a frame unshown for the sound (it runs slower than the console: #NES_SHOW_CHECK).
-    If line=0 : NesShowPoll(1+#NES_SHOW_CHECK) : Else : NesShowPoll(0) : EndIf
-  CompilerElse
-    If line=0
-      HostPresent(1)
-      ; The previous RDP transfer must release the indexed pixels before reuse.
-      While LpmRdpFramesDone()<NesIndexTicket : Wend
-    EndIf
-  CompilerEndIf
+  If line=0
+    HostPresent(1)
+    ; The previous RDP transfer must release the indexed pixels before reuse.
+    While LpmRdpFramesDone()<NesIndexTicket : Wend
+  EndIf
 EndProcedure
 
 Procedure DisplayFrame()
   HostAudioPoll()
-  CompilerIf #NES_RDP_SHOW
-    ; The frame's picture is handed at line 240, after its last band (show.n64, NesShowFrameEnd).
-  CompilerElseIf #VERIFY_FRAME>0
+  CompilerIf #VERIFY_FRAME>0
     CompilerIf #NES_SHOW_CHECK
       NesShowHashRef()                  ; the reference: the old renderer's picture of this frame (show.n64)
     CompilerEndIf
@@ -272,6 +606,7 @@ Procedure DisplayFrame()
     HostPadRequested=0
   CompilerEndIf
 EndProcedure
+CompilerEndIf
 
 Procedure.i HostBegin()
   LpmInterruptsInit()

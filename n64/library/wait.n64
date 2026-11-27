@@ -24,6 +24,77 @@ Procedure.i NesRuntimeWaitPair(readPc.i, branchPc.i, atBranch.i)
   ProcedureReturn rule
 EndProcedure
 
+; ---- NesRamWaitRule(pc): the RAM-wait rule of the instruction at guest pc (0: none) - the read / branch pair that
+; makes a wait loop, decoded by NesRuntimeWaitPair. At a branch opcode (op & 31 = 16) the pair is the 2- or 3-byte
+; read before it (the 2-byte form first); at a read opcode (its NesRuntimeWaitOpcodes entry nonzero, mode = the entry
+; & 7: 3 and up are 3-byte forms) the pair is it and the branch after it.
+; IN ASSEMBLY for MMC3 (design note N.69, 2026-11-27): from the load's index (NesRuntimeIndexMmc3Waits, 8,192 PCs a
+; PRG bank: the 5,673 cycles a frame the record cart's profile gives this label are that load spread over the run),
+; the hashed cache's miss (unit/cold.n64) and the reference build's ramwait.n64. The pointer is NesMmc3Pointer(pc) =
+; NesMmc3Bias((pc >> 13) & 3) + pc (nes.n64's macro). NesRuntimeWaitPair (once a decode, at load and on a miss) stays
+; compiled by order; the other mappers' builds keep the compiled form below (no check here builds them).
+; THE CHECK: every rule of the image indexed at load feeds the core's wait batches, so the guest digest every frame
+; (SMB3, MM4) and the oracles run it.
+; IN: a0 = pc. OUT: a0 = the rule. A frame of 16 bytes on the branch path (ra, pc); changes what a compiled call may.
+; THE PLAIN TWIN:
+;   Protected ptr.i=NesRuntimePrgPointer(pc), op.i=PeekA(ptr), rule.i, mode.i
+;   If (op&31)=16
+;     rule=NesRuntimeWaitPair(pc-2,pc,1)
+;     If rule : ProcedureReturn rule : EndIf
+;     ProcedureReturn NesRuntimeWaitPair(pc-3,pc,1)
+;   EndIf
+;   mode=PeekA(?NesRuntimeWaitOpcodes+op)
+;   If mode=0 : ProcedureReturn 0 : EndIf
+;   ProcedureReturn NesRuntimeWaitPair(pc,pc+2+Bool((mode&7)>=3),0)
+CompilerIf #GAME_MAPPER=4
+ProcedureNaked.i NesRamWaitRule(pc.i)
+  ASM
+    dsrl t0, a0, 13
+    andi t0, t0, 3
+    dsll t0, t0, 3                  ; the bank slot's word: ((pc >> 13) & 3) x 8
+    la t1, global_nesmmc3bias
+    daddu t1, t1, t0
+    ld t1, 0(t1)
+    daddu t1, t1, a0                ; ptr = NesMmc3Bias(slot) + pc
+    lbu t2, 0(t1)                   ; op = the opcode at pc
+    andi t3, t2, 31
+    addiu t0, zero, 16
+    bne t3, t0, nes_rwr_read        ; not a branch
+    nop
+    daddiu sp, sp, -16              ; a branch: the read before it
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    move a1, a0                     ; branchPc = pc
+    daddiu a0, a0, -2               ; readPc = pc - 2 (a 2-byte read)
+    jal nesruntimewaitpair
+    addiu a2, zero, 1               ; (delay slot) atBranch = 1
+    bnez a0, nes_rwr_pop            ; found
+    ld a1, 8(sp)                    ; (delay slot) branchPc = pc
+    daddiu a0, a1, -3               ; readPc = pc - 3 (a 3-byte read)
+    jal nesruntimewaitpair
+    addiu a2, zero, 1
+nes_rwr_pop:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+nes_rwr_read:
+    la t0, nesruntimewaitopcodes
+    daddu t0, t0, t2
+    lbu t3, 0(t0)                   ; the opcode's entry
+    beqz t3, nes_rwr_none           ; not a read of a wait: 0
+    andi t3, t3, 7                  ; (delay slot) mode & 7
+    sltiu t3, t3, 3
+    xori t3, t3, 1                  ; Bool((mode & 7) >= 3): a 3-byte read
+    daddiu a1, a0, 2
+    daddu a1, a1, t3                ; branchPc = pc + 2 + that
+    j nesruntimewaitpair            ; (a tail call: a0 = readPc = pc)
+    move a2, zero                   ; (delay slot) atBranch = 0
+nes_rwr_none:
+    jr ra
+    move a0, zero
+  EndASM
+EndProcedure
+CompilerElse
 Procedure.i NesRamWaitRule(pc.i)
   Protected ptr.i=NesRuntimePrgPointer(pc), op.i=PeekA(ptr), rule.i, mode.i
   If (op&31)=16
@@ -35,6 +106,7 @@ Procedure.i NesRamWaitRule(pc.i)
   If mode=0 : ProcedureReturn 0 : EndIf
   ProcedureReturn NesRuntimeWaitPair(pc,pc+2+Bool((mode&7)>=3),0)
 EndProcedure
+CompilerEndIf
 
 
 CompilerIf #GAME_MAPPER=0

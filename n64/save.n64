@@ -15,12 +15,54 @@ CompilerElse
   EndMacro
 CompilerEndIf
 
+; ---- NesSaveChanged(offset): a battery-backed byte at offset was written (the mappers' PRG-RAM writes: unit/write.n64's
+; $6000-$7FFF store, the board registers): when the save is online and the offset inside the save, its 256-byte page
+; marked dirty and the save pending (NesSaveFlush writes the dirty pages at the frame's wrap).
+; WHY ASSEMBLY (design note N.69): it is called at EVERY PRG-RAM write - SMB3 and MM4 write their work RAM there
+; hundreds of times a frame - and compiled it built a frame and rebuilt each global's address (1,771 cycles a frame in
+; the record cart's SMB3 replay, where the save is never online). The common case here is three instructions.
+; THE CHECK: the offline path runs at every PRG-RAM write in every check (the guest digests, the record); the online
+; path (a battery cart) is executed by none of this work's checks - it is the twin's three statements, written out.
+; IN: a0 = offset. OUT: nothing. A leaf: changes t0-t2.
+; THE PLAIN TWIN:
+;   If NesSaveOnline And offset>=0 And offset<NesSaveLimit
+;     NesSaveDirty(offset>>8)=1
+;     NesSavePending=1
+;   EndIf
+; (The built-in-ROM builds, #NES_RUNTIME_ROM = 0, keep the compiled procedure: no check here builds them.)
+CompilerIf #NES_RUNTIME_ROM
+ProcedureNaked NesSaveChanged(offset.i)
+  ASM
+    la t0, global_nessaveonline
+    ld t0, 0(t0)
+    beqz t0, nes_save_changed_ret   ; no save online (every cart without a battery)
+    nop
+    bltz a0, nes_save_changed_ret   ; below the save
+    nop
+    la t0, global_nesruntimesavebytes
+    ld t1, 0(t0)                  ; NesSaveLimit: the loaded cart's save bytes
+    slt t1, a0, t1
+    beqz t1, nes_save_changed_ret   ; past the save
+    dsra t0, a0, 8                  ; (delay slot) the page: offset >> 8
+    la t1, global_nessavedirty
+    daddu t1, t1, t0
+    addiu t2, zero, 1
+    sb t2, 0(t1)                    ; NesSaveDirty(page) = 1
+    la t1, global_nessavepending
+    sd t2, 0(t1)                    ; NesSavePending = 1
+nes_save_changed_ret:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerElse
 Procedure NesSaveChanged(offset.i)
   If NesSaveOnline And offset>=0 And offset<NesSaveLimit
     NesSaveDirty(offset>>8)=1
     NesSavePending=1
   EndIf
 EndProcedure
+CompilerEndIf
 
 CompilerIf #GAME_SAVE_LINEAR
 ; SummerCart64 SRAM 1M exposes all 128 KiB consecutively on PI domain 2.

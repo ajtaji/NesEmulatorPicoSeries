@@ -56,6 +56,228 @@ CompilerEndIf
 ; A second read may reuse the status up to (but excluding) the next edge
 ; capable of changing the answer or interrupting the CPU. Reads still clear
 ; vblank and the PPU write toggle. A write or other bus sync ends the interval.
+;
+; NesSetStatusHorizon IN ASSEMBLY (design note N.69, 2026-11-27), the builds without the MMC1 raster deadline
+; (#NES_DMC_RASTER_DEADLINE = 0: the runtime-MMC3 cart and its checking builds); the raster-deadline builds keep the
+; compiled procedure below (no check here builds them). From unit/write.n64's $2002 read (u_nesreaddev), with the
+; MMC3 IRQ disabled and the stamp past the last horizon, after u_workeradvance.
+; WHAT: NesStatusHorizon = stamp + cycles, where cycles (> 0, else nothing is set) is the CPU cycles before the first
+; event that could change the status or raise an interrupt: the end of the line, or of the vblank / pre-render span,
+; or the sprite-0 hit's eight-dot span, or the first line a sprite could hit or overflow (NesNextOverflow), bounded by
+; the APU frame counter's step 4 and its reset delay; none while a DMC byte is pending.
+; HOW, step by step as the twin: dots = 341 - PpuDot, changed by the line's case; cycles = (dots - 1) / 3 (NTSC) or
+; >> 2 (PAL). The division: (dots - 1) < 3 gives cycles <= 0 (truncation toward zero), and every later step only
+; LOWERS cycles (two minimums), so nothing would be set - it returns at once; otherwise 0 <= dots - 1 < 2^32 and
+; x / 3 = (x x $AAAAAAAB) >> 33 exactly (Hacker's Delight 10-3, the unsigned 32-bit magic number): multu, mfhi, srl 1
+; (5 cycles, not ddiv's 69). The sprite-0 case changes dots to event - PpuDot <= 256 - PpuDot < 341 - PpuDot, so the
+; twin's `dots = 341 - PpuDot` test is the same as "the sprite-0 case did not run": that case branches past it.
+; The products by 341 are dmult (exact, signed; both operands small).
+; REGISTERS: v1 = stamp, t8 = PpuDot, t9 = PpuLine, t3 = PpuPreLine, a1 = dots, a2 = PpuMask then cycles, a3 =
+; PpuStatus, a4-a7 / v0 the OAM case's values. NesNextOverflow (a leaf, above) changes t0-t2, a0-a3, v0: around it ra,
+; v1, t8, t9 are kept on the stack (32 bytes). Changes t0-t3, t8, t9, a1-a7, v0, v1 (the compiled ABI allows these).
+; THE CHECK: the guest digest every frame (SMB3 3,600, MM4 330: a wrong horizon changes when $2002 re-reads its
+; status, so the guest's flow) and the oracles. The PAL branch (one shift) is executed by none of this work's checks.
+; THE PLAIN TWIN: the compiled procedure below, as built when #NES_DMC_RASTER_DEADLINE = 1.
+CompilerIf #NES_DMC_RASTER_DEADLINE = 0
+ProcedureNaked NesSetStatusHorizon(stamp.i)
+  ASM
+    la t0, global_dmcbytes
+    ld t0, 0(t0)
+    bgtz t0, nes_sh_ret             ; a DMC byte pending: no horizon
+    move v1, a0                     ; (delay slot) v1 = stamp
+    la t0, global_ppudot
+    ld t8, 0(t0)                    ; t8 = PpuDot
+    la t0, global_ppuline
+    ld t9, 0(t0)                    ; t9 = PpuLine
+    la t0, global_ppupreline
+    ld t3, 0(t0)                    ; t3 = PpuPreLine
+    addiu a1, zero, 341
+    dsubu a1, a1, t8                ; dots = 341 - PpuDot
+    beq t9, t3, nes_sh_edge         ; the pre-render line ...
+    addiu t0, zero, 241
+    beq t9, t0, nes_sh_edge         ; ... or line 241
+    slti t0, t9, 240
+    bnez t0, nes_sh_visible         ; a visible line
+    slti t0, t9, 242                ; (delay slot)
+    bnez t0, nes_sh_cycles          ; line 240: the line's end
+    slt t0, t9, t3                  ; (delay slot)
+    beqz t0, nes_sh_cycles          ; (past the pre-render line: none of the cases)
+    dsubu t0, t3, t9                ; (delay slot) 241 < line < pre: dots = (pre - line) x 341 - PpuDot + 1
+    addiu a1, zero, 341
+    dmult t0, a1
+    mflo a1
+    dsubu a1, a1, t8
+    b nes_sh_cycles
+    daddiu a1, a1, 1
+nes_sh_edge:                        ; the pre-render line or 241
+    beqz t8, nes_sh_ret             ; at dot 0: no horizon
+    nop
+    bne t9, t3, nes_sh_cycles
+    nop
+    b nes_sh_cycles
+    daddiu a1, a1, -1               ; the pre-render line: one dot fewer
+nes_sh_visible:
+    beqz t8, nes_sh_ret             ; at dot 0: no horizon
+    nop
+    la t0, global_ppumask
+    ld a2, 0(t0)                    ; a2 = PpuMask
+    la t0, global_ppustatus
+    ld a3, 0(t0)                    ; a3 = PpuStatus
+    sltiu t0, t8, 256
+    beqz t0, nes_sh_oam             ; the sprite-0 case: PpuDot < 256 ...
+    andi t0, a2, 24
+    xori t0, t0, 24
+    bnez t0, nes_sh_oam             ; ... both layers on ...
+    andi t0, a3, 64
+    bnez t0, nes_sh_oam             ; ... no hit yet ...
+    nop
+    la t0, global_sprcount
+    ld t0, 0(t0)
+    blez t0, nes_sh_oam             ; ... a sprite on the line ...
+    nop
+    la t0, global_sprindex
+    ld t0, 0(t0)
+    bnez t0, nes_sh_oam             ; ... and it is sprite 0 (SprIndex(0) = 0) ...
+    nop
+    la t0, global_sprx
+    ld a4, 0(t0)                    ; a4 = SprX(0)
+    daddiu a6, zero, -8             ; ~7
+    daddiu a5, a4, 7
+    and a5, a5, a6                  ; (SprX(0) + 7) & ~7
+    slt t0, a5, t8
+    bnez t0, nes_sh_oam             ; ... and PpuDot <= that
+    and a4, a4, a6                  ; (delay slot) event = SprX(0) & ~7
+    slt t0, a4, t8
+    beqz t0, nes_sh_s0
+    daddiu t0, t8, 7                ; (delay slot)
+    dsra t0, t0, 3
+    dsll a4, t0, 3                  ; PpuDot > event: event = ((PpuDot + 7) >> 3) << 3
+nes_sh_s0:
+    slt t0, t8, a4
+    beqz t0, nes_sh_ret             ; event <= PpuDot: no horizon
+    nop
+    b nes_sh_cycles                 ; (the OAM case is skipped: dots changed)
+    dsubu a1, a4, t8                ; (delay slot) dots = event - PpuDot
+nes_sh_oam:
+    la t0, global_oamcachedirty
+    ld t0, 0(t0)
+    bnez t0, nes_sh_cycles          ; the OAM case only with the counts cached
+    nop
+    la t0, global_oam
+    lbu a4, 0(t0)
+    daddiu a4, a4, 1                ; a4 = spriteY = Oam(0) + 1
+    la t0, global_ppuctrl
+    ld t0, 0(t0)
+    andi t0, t0, 32
+    dsrl t0, t0, 2
+    daddiu a5, t0, 8                ; a5 = height: 8, or 16 with PPUCTRL bit 5
+    addiu a6, zero, 240             ; a6 = limit
+    daddiu a7, t9, 1                ; a7 = PpuLine + 1
+    andi t0, a2, 24
+    xori t0, t0, 24
+    bnez t0, nes_sh_ovf             ; sprite 0's line: both layers on ...
+    andi t0, a3, 64
+    bnez t0, nes_sh_ovf             ; ... no hit yet ...
+    daddu t0, a4, a5                ; (delay slot) spriteY + height
+    slt t0, a7, t0
+    beqz t0, nes_sh_ovf             ; ... and it is not above the next line
+    move v0, a4                     ; (delay slot) line = spriteY ...
+    slt t0, t9, a4
+    bnez t0, nes_sh_line
+    nop
+    move v0, a7                     ; ... or PpuLine + 1 when spriteY <= PpuLine
+nes_sh_line:
+    slt t0, v0, a6
+    beqz t0, nes_sh_ovf
+    nop
+    move a6, v0                     ; limit = line
+nes_sh_ovf:
+    andi t0, a2, 24
+    beqz t0, nes_sh_lim             ; a layer on ...
+    andi t0, a3, 32
+    bnez t0, nes_sh_lim             ; ... and no overflow yet:
+    nop
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    sd v1, 8(sp)
+    sd t8, 16(sp)
+    sd t9, 24(sp)
+    daddiu a0, t9, 1
+    jal nesnextoverflow             ; limit = NesNextOverflow(PpuLine + 1, limit)
+    move a1, a6
+    move a6, a0
+    ld ra, 0(sp)
+    ld v1, 8(sp)
+    ld t8, 16(sp)
+    ld t9, 24(sp)
+    daddiu sp, sp, 32
+nes_sh_lim:
+    dsubu t0, a6, t9
+    addiu a1, zero, 341
+    dmult t0, a1
+    mflo a1
+    dsubu a1, a1, t8                ; dots = (limit - PpuLine) x 341 - PpuDot
+    addiu t0, zero, 240
+    bne a6, t0, nes_sh_cycles
+    nop
+    daddiu a1, a1, 342              ; limit 240: on to the vblank's start
+nes_sh_cycles:
+    daddiu t0, a1, -1               ; dots - 1
+    slti t1, t0, 3
+    bnez t1, nes_sh_ret             ; cycles <= 0: nothing set (every bound below only lowers it)
+    nop
+  EndASM
+  CompilerIf #GAME_PAL
+    ASM
+    dsra a2, t0, 2                  ; PAL: cycles = (dots - 1) >> 2
+    EndASM
+  CompilerElse
+    ASM
+    lui t1, 0xAAAA
+    ori t1, t1, 0xAAAB              ; the magic number $AAAAAAAB (low 32 bits: multu reads only those)
+    multu t0, t1
+    mfhi a2
+    srl a2, a2, 1                   ; NTSC: cycles = (dots - 1) / 3 = (x x $AAAAAAAB) >> 33
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_apuinhibit
+    ld t1, 0(t0)
+    bnez t1, nes_sh_reset           ; the frame IRQ inhibited ...
+    nop
+    la t0, global_apufive
+    ld t1, 0(t0)
+    bnez t1, nes_sh_reset           ; ... or the five-step mode: no step-4 bound
+    nop
+    la t0, global_apustep4
+    ld t1, 0(t0)
+    la t0, global_apuframeclock
+    ld t2, 0(t0)
+    dsubu t1, t1, t2
+    daddiu t1, t1, -1               ; event = ApuStep4 - ApuFrameClock - 1
+    slt t0, t1, a2
+    beqz t0, nes_sh_reset
+    nop
+    move a2, t1                     ; cycles = event
+nes_sh_reset:
+    la t0, global_apuresetdelay
+    ld t1, 0(t0)
+    blez t1, nes_sh_set             ; no reset pending
+    slt t0, a2, t1                  ; (delay slot)
+    bnez t0, nes_sh_set             ; cycles below the delay
+    nop
+    daddiu a2, t1, -1               ; cycles = ApuResetDelay - 1
+nes_sh_set:
+    blez a2, nes_sh_ret
+    daddu t0, v1, a2                ; (delay slot) stamp + cycles
+    la t1, global_nesstatushorizon
+    sd t0, 0(t1)                    ; NesStatusHorizon
+nes_sh_ret:
+    jr ra
+    nop
+  EndASM
+EndProcedure
+CompilerElse
 Procedure NesSetStatusHorizon(stamp.i)
   Protected dots.i, cycles.i, event.i, line.i, limit.i, spriteY.i, height.i
   CompilerIf #NES_DMC_RASTER_DEADLINE
@@ -109,6 +331,7 @@ Procedure NesSetStatusHorizon(stamp.i)
   CompilerEndIf
   If cycles>0 : NesStatusHorizon=stamp+cycles : EndIf
 EndProcedure
+CompilerEndIf
 
 ; The CPU can run through ordinary raster work until a device could signal
 ; an interrupt or the host could observe a frame boundary. Timestamped MMIO
