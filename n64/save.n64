@@ -93,7 +93,7 @@ EndProcedure
 ;   LpmResetRelease()
 ;   If ticket=0 : ProcedureReturn #LPM_SAVE_ALIGN : EndIf
 ;   ProcedureReturn #LPM_SAVE_OK
-; CHECKED BY: the save cart (rdp-tools/carts/save.s, battery MMC3) with #NES_SAVE_PROC = 1, twin against assembly
+; CHECKED BY: the bench's battery-MMC3 save test cart with #NES_SAVE_PROC = 1, twin against assembly
 ; (twin_tree.py): the staging page, the dirty bytes, pending, the write error, the run's lines.
 ProcedureNaked.i NesSaveWrite(offset.i, page.i, bytes.i)
   ASM
