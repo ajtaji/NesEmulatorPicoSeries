@@ -114,8 +114,8 @@ Global C65Link.i, C65Ea.i, C65Value.i, C65Count.i, C65Fetch.i
 ; with the procedure written after it (EmitCore_Mips.pbi's layout rule for a ProcedureNaked that runs on), and the pad
 ; therefore lands immediately before `cpurun`'s label. Nothing ever calls or enters CpuRunPin (its label is the pad's
 ; first byte); the pad is never executed. Its cost is RDRAM only: 0 to 16,380 bytes, by build (the note gives each).
-; 2048 was chosen so the shipped / oracle / checking builds pad least (their natural cpurun lay at $254-$6B4 mod 16 KB
-; on the tree before the pin; the record build pays ~11 KB instead).
+; 2048 was chosen above the shipped / oracle / checking builds' natural cpurun on the tree before the pin ($254-$6B4
+; mod 16 KB); the glue pins (host.n64, rspsyn.n64) that lie before the unit in some builds add their own pads to it.
 ProcedureNaked CpuRunPin()
   ASM
     .alignabs 16384, 2048
