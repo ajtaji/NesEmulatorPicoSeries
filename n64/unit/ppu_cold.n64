@@ -560,10 +560,36 @@ ppu_cut_close:
     ld t9, 16(v1)
     sd t9, #NES_B_PAL+16(t2)
     ld t9, 24(v1)
+    sd t9, #NES_B_PAL+24(t2)
+    ; THE BACKDROP OF A RENDERING-OFF BAND (N.79 item 2). The PPU's rule: with PPUMASK bits 3-4 clear every dot
+    ; shows the palette byte v addresses when v is in $3F00-$3FFF (bits 8-13 set; the 14-bit bus), else byte 0;
+    ; $3F10 / $14 / $18 / $1C are mirrors of $00 / $04 / $08 / $0C (the palette RAM has no bytes there - the write
+    ; handler folds them, unit/write.n64). Both renderers draw such a band from the record's PAL+0 alone (the RSP
+    ; program, rspband.n64rsp; the twin, twin.n64), so the record carries the byte the band's lines showed: the
+    ; band's v (U_BANDV, v at its first line's dot 0 - a move of v through the palette range cuts the band,
+    ; ppu_cut_off, so it is v on every line of the band) picks the byte. The RSP and the twin change nothing.
+    ; In: t2 = the record, v1 = Pal; uses t8, t9.
+    ld t9, #NES_B_STATE(t2)
+    andi t9, t9, 0x1800             ; PPUMASK bits 3-4 (the state word holds PPUMASK << 8)
+    bnez t9, ppu_cut_pal_done       ; rendering on: byte 0 is the backdrop
+    ld t9, #NES_B_V(t2)
+    andi t8, t9, 0x3F00
+    xori t8, t8, 0x3F00
+    bnez t8, ppu_cut_pal_done       ; v outside the palette: byte 0
+    andi t9, t9, 31                 ; the palette index v addresses
+    andi t8, t9, 0x13
+    xori t8, t8, 0x10
+    bnez t8, ppu_cut_pal_byte       ; not $10 / $14 / $18 / $1C
+    nop
+    andi t9, t9, 0x0F               ; a mirror: its byte at $00 / $04 / $08 / $0C
+ppu_cut_pal_byte:
+    daddu t9, v1, t9
+    lbu t9, 0(t9)
+    sb t9, #NES_B_PAL(t2)           ; the backdrop byte the band shows
+ppu_cut_pal_done:
   EndASM
   CompilerIf #NES_PPU_CHECK Or #NES_TWIN_CHECK Or #NES_WB_MEASURE Or #NES_RDP_SHOW
     ASM
-      sd t9, #NES_B_PAL+24(t2)
       daddiu sp, sp, -16
       sd ra, 0(sp)
     EndASM
@@ -607,7 +633,7 @@ ppu_cut_close:
   CompilerElse
     ASM
       jr ra
-      sd t9, #NES_B_PAL+24(t2)
+      nop
     EndASM
   CompilerEndIf
   ASM
@@ -616,12 +642,62 @@ ppu_cut_lost:
     daddiu t8, t8, 1
     jr ra
     sd t8, #NES_U_BANDLOST(v0)
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+ppu_cut_off:
+    ; u_ppucut with RENDERING OFF (N.79 item 2; the band rule's comment in unit/ppu.n64). The band shows one
+    ; input besides PPUMASK and the palette bytes, which cut through u_ppucut_always: v, when it addresses the
+    ; palette - the backdrop is then the byte at mirror(v & $1F) (ppu_cut_close). So the band ends when v moves
+    ; INTO, OUT OF or WITHIN $3F00-$3FFF; every other change (PPUCTRL, t, fine X, CHR banks, mirroring, a name
+    ; table or CHR-RAM write, v moving outside the palette) is not seen and returns, as before. The callers that
+    ; move v, told apart by a0 as the register handlers hold it (the register x 4, nes_ppu_write_dispatch;
+    ; the $2007 read sets it so too): $2006 (a0 = 24) on its SECOND write (PpuW = 1; the new v is
+    ; (t & $7F00) | a1, a1 the byte written), $2007 (a0 = 28) by its increment (v + 1, or + 32 under PPUCTRL
+    ; bit 2; the first always cuts on a WRITE with v in the palette, this adds the read and the step in).
+    ; The mapper's cuts (mmc3_registers.n64) hold a guest address in a0 (>= $8000): never a move of v.
+    ; Uses t2, t3, t8, t9 (u_ppucut's clobbers; its callers keep a0-a7, t0, t1).
+    la t8, global_ppuv
+    ld t9, 0(t8)                    ; v now
+    andi t3, t9, 0x3F00
+    xori t3, t3, 0x3F00
+    beqz t3, u_ppucut_always        ; v addresses the palette: whatever the move, the colour shown may change
+    sltiu t3, a0, 32
+    beqz t3, ppu_cut_done           ; not a PPU register handler: v does not move
+    addiu t3, zero, 28
+    beq a0, t3, ppu_cut_off_step    ; $2007: the increment
+    addiu t3, zero, 24
+    bne a0, t3, ppu_cut_done        ; $2000 / $2005: t, not v
+    nop
+    ld t2, global_ppuw-global_ppuv(t8)
+    beqz t2, ppu_cut_done           ; $2006's first write: t only
+    ld t2, global_pput-global_ppuv(t8)
+    andi t2, t2, 0x7F00
+    b ppu_cut_off_new
+    or t2, t2, a1                   ; the second write's v
+ppu_cut_off_step:
+    ld t2, global_ppuctrl-global_ppuv(t8)
+    andi t2, t2, 4
+    beqz t2, ppu_cut_off_new
+    addiu t2, t9, 1                 ; + 1 ...
+    addiu t2, t9, 32                ; ... or + 32 (PPUCTRL bit 2)
+ppu_cut_off_new:
+    andi t2, t2, 0x3F00             ; (bit 14 and above are not on the PPU's bus)
+    xori t2, t2, 0x3F00
+    bnez t2, ppu_cut_done           ; the new v is outside the palette too: not seen
+    nop
+    b u_ppucut_always               ; it enters the palette: the band ends before the move
+    nop
+    EndASM
+  CompilerEndIf
+  ASM
 nes_ppu_read_data:
-    ld a0, global_ppuv-global_ppubus(a2)
     daddiu sp, sp, -32
     sd ra, 0(sp)
+    addiu a0, zero, 28              ; the cut's decision reads the register as the handlers hold it (ppu_cut_off)
     jal u_ppucut                    ; the read moves v: the band ends first
     sd a2, 16(sp)
+    ld a0, global_ppuv-global_ppubus(a2)
     andi a0, a0, 0x3FFF
     sltiu t0, a0, 0x3F00
     beqz t0, nes_ppu_read_palette

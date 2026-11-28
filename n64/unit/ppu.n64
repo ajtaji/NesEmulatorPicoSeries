@@ -47,8 +47,10 @@
 ;   split (a bit in U_SPLIT, the fallback lines of step N5) and the band ends before it; at dot 256
 ;   or later the line is complete and is the band's last.
 ;   In the shipped N5 path (#NES_RDP_SHOW) a band whose rendering is off (PPUMASK bits 3-4 clear) shows only the
-;   backdrop, so only a PPUMASK change and a palette write cut it (u_ppucut_always); the other inputs change
-;   unseen and its record holds them as at the close (design note N.27, fix 1).
+;   backdrop - palette byte 0, or the byte at mirror(v & $1F) while v addresses the palette (N.79 item 2) - so only
+;   a PPUMASK change, a palette write (u_ppucut_always) and a move of v into, out of or within $3F00-$3FFF
+;   (ppu_cut_off, the cold part) cut it; the other inputs change unseen and its record holds them as at the close
+;   (design note N.27, fix 1). The record's PAL+0 is the byte the band showed (ppu_cut_close, NesSegPublish).
 ;   OAM is cut differently, from the renderer's own rule: a line's sprites are evaluated and drawn
 ;   from OAM at the line's dot 0, so a write to OAM ($2004, or an OAM DMA, whose copy is the shared
 ;   worker's) changes the picture from the NEXT line on, never in the middle of one. Every such
@@ -577,11 +579,14 @@ u_ppucut:                           ; leaf: close the open band BEFORE a picture
       ; copy and RSP job) and split every line a write landed in (each a fallback line the old renderer drew):
       ; ~7.5 ms of a ~34 ms frame, measured (N.27). Only the shipped N5 path: the checking builds that compare the
       ; records with the renderer line by line (--ppu-check, --twin-check, --rsp-check) keep the old rule.
-      ; Uses t8 only (u_ppucut's clobbers).
+      ; Uses t8 only (u_ppucut's clobbers). ONE input such a band shows besides those two: v itself, when it
+      ; addresses the palette ($3F00-$3FFF) - the backdrop is then the palette byte at mirror(v & $1F), not byte 0
+      ; (N.79 item 2). So with rendering off the decision goes to the cold part (ppu_cut_off, unit/ppu_cold.n64): a
+      ; change of v into, out of or within the palette range cuts, every other change returns.
       la t8, global_ppumask
       ld t8, 0(t8)
       andi t8, t8, 24
-      beqz t8, ppu_cut_done         ; rendering off: not seen, no cut
+      beqz t8, ppu_cut_off          ; rendering off: only a move of v through the palette is seen (cold part)
       nop
 u_ppucut_always:                    ; the cut whatever the mask (PPUMASK changes, palette writes)
     EndASM
@@ -642,8 +647,12 @@ ppu_begin_row:
       sll a0, a0, 8
       addu t0, t0, a0
       la t1, global_neslinerow
-      jr ra
       sd t0, 0(t1)
+      la t0, global_ppuv            ; v at the line's dot 0 for the old renderer's backdrop-at-v rule (NesLineV,
+      ld t1, 0(t0)                  ; indexed.n64, N.79 item 2): the same v the RSP show's band record takes, so
+      la t0, global_neslinev        ; both renderers show a line whose v moves inside it the same way (U_LINEV is
+      jr ra                         ; the RDP show's slot: in this build its offset is the handler table's)
+      sd t1, 0(t0)
     EndASM
   CompilerEndIf
   ASM

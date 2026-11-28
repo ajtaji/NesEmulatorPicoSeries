@@ -321,6 +321,28 @@ ppu_chk_live_pal:
     daddiu v0, v0, 8
     bne v0, t3, ppu_chk_live_pal
     daddiu v1, v1, 8
+    la v1, global_ppumask           ; the backdrop byte of a rendering-off band (N.79 item 2, as ppu_cut_close
+    ld t9, 0(v1)                    ; writes it): the byte at mirror(v & $1F) when v addresses the palette - v
+    andi t9, t9, 24                 ; is the band's on every line (a move through the palette cuts)
+    bnez t9, ppu_chk_live_pal_done
+    nop
+    la v1, global_ppuv
+    ld t9, 0(v1)
+    andi t8, t9, 0x3F00
+    xori t8, t8, 0x3F00
+    bnez t8, ppu_chk_live_pal_done
+    andi t9, t9, 31
+    andi t8, t9, 0x13
+    xori t8, t8, 0x10
+    bnez t8, ppu_chk_live_pal_byte
+    nop
+    andi t9, t9, 0x0F
+ppu_chk_live_pal_byte:
+    la v1, global_pal
+    daddu v1, v1, t9
+    lbu t9, 0(v1)
+    sb t9, 24(a0)
+ppu_chk_live_pal_done:
     la v1, global_oam
     daddiu t3, a0, 312
 ppu_chk_live_oam:

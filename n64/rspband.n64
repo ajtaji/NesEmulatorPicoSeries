@@ -979,6 +979,9 @@ EndProcedure
 ;   PokeQ(rec + #NES_B_BANKS, NesSeg0Banks)                ; (big-endian: slot 0's number in the first byte)
 ;   PokeL(rec + #NES_B_BANKS + 8, NesSegCount) : PokeL(rec + #NES_B_BANKS + 12, NesSegFirstE & $1FFFFFFF)
 ;   For n = 0 To 24 Step 8 : PokeQ(rec + #NES_B_PAL + n, PeekQ(@Pal(0) + n)) : Next
+;   If (m & $18) = 0 And (NesSeg0V & $3F00) = $3F00                      ; N.79 item 2: the rendering-off backdrop
+;     i = NesSeg0V & 31 : If (i & $13) = $10 : i = i & $0F : EndIf : PokeA(rec + #NES_B_PAL, Pal(i))
+;   EndIf
 ;   NesSegStat(0) + 1 : NesSegStat(1) + NesSegCount
 ;   If NesSegCount > NesSegStat(3) : NesSegStat(3) = NesSegCount : EndIf
 ;   NesSegOn = 0 : NesSegOpen = 0
@@ -1094,6 +1097,24 @@ nsp_m:
     ld t2, 24(t0)
     sd t1, #NES_B_PAL+16(s0)
     sd t2, #NES_B_PAL+24(s0)         ; the palette now
+    ld t1, #NES_B_STATE(s0)          ; the backdrop of a rendering-off line (N.79 item 2, as ppu_cut_close): the
+    andi t1, t1, 0x1800              ; byte at mirror(v & $1F) when v (at the line's dot 0) addresses the palette
+    bnez t1, nsp_pal_done            ; PPUMASK bits 3-4 set: byte 0
+    ld t1, #NES_B_V(s0)
+    andi t2, t1, 0x3F00
+    xori t2, t2, 0x3F00
+    bnez t2, nsp_pal_done            ; v outside $3F00-$3FFF: byte 0
+    andi t1, t1, 31
+    andi t2, t1, 0x13
+    xori t2, t2, 0x10
+    bnez t2, nsp_pal_byte            ; not $10 / $14 / $18 / $1C
+    nop
+    andi t1, t1, 0x0F                ; a mirror of $00 / $04 / $08 / $0C
+nsp_pal_byte:
+    daddu t1, t0, t1
+    lbu t1, 0(t1)
+    sb t1, #NES_B_PAL(s0)
+nsp_pal_done:
     la t0, global_nessegstat
     ld t1, 0(t0)
     daddiu t1, t1, 1
