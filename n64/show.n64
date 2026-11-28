@@ -539,6 +539,79 @@ nes_show_restore:
   EndASM
 EndProcedure
 
+; NesShowOamSetWait() - THE FRAME'S OAM SNAPSHOT SET MADE SAFE BEFORE ITS FIRST SNAPSHOT (design note N.79 item 1;
+; the race of N.78 item 3). Called once a frame from ppu_line_frame (unit/ppu_cold.n64, the cold part: no hot byte)
+; before the frame's first snapshot index is stored. The set chosen at line 0 is NesShowCur's (x 32); the frame two
+; before used it last, and NesShowFence(NesShowCur) is still the fence after that frame's LAST band job (NesShowSet
+; clears Ticket / Shown / Bands / Free / Att / Done / Ended / Fb and not the fence; this frame's first close is the
+; next writer, after line 0). Until that fence has passed, a job still queued may read a snapshot this frame is about
+; to overwrite - Zelda frame 39's race, which the two sets made two frames wide; this wait closes it for a show any
+; number of frames late. A band's RECORD has had the same wait at its close since N5 (NesShowBand); the snapshot,
+; taken at the band's open, had none.
+; WHAT (the twin, the compiled form):
+;   f = NesShowFence(NesShowCur) : If f And LpmRspqFenceDone(f) = 0 : LpmRspqWait(f) : NesShowStat(3) + 1 : EndIf
+; HOW: the fence is read; 0 (no job ever queued on the set: the first two frames) returns at once; LpmRspqFenceDone
+; (compiled; a0 = the fence, v0 = 1 when the RSP has passed it) is the normal case - one call a frame, the fence a
+; frame old; else LpmRspqWait (compiled) waits and the wait is counted in NesShowStat(3) beside the record waits.
+; Keeps every register its caller may hold (the full save of NesShowBandCall and the common restore tail: a0-a7,
+; t0-t3, t8, t9, v0, v1, hi / lo); the compiled calls keep s0-s7 themselves.
+ProcedureNaked NesShowOamSetWait()
+  ASM
+    daddiu sp, sp, -176
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    sd a3, 32(sp)
+    sd a4, 40(sp)
+    sd a5, 48(sp)
+    sd a6, 56(sp)
+    sd a7, 64(sp)
+    sd t0, 72(sp)
+    sd t1, 80(sp)
+    sd t2, 88(sp)
+    sd t3, 96(sp)
+    sd t8, 104(sp)
+    sd t9, 112(sp)
+    sd v0, 120(sp)
+    sd v1, 128(sp)
+    mfhi t0
+    sd t0, 136(sp)
+    mflo t0
+    sd t0, 144(sp)
+    la t0, global_nesshowcur
+    ld t0, 0(t0)                     ; p: the frame's set
+    la t1, global_nesshowfence
+    dsll t0, t0, 3
+    daddu t1, t1, t0
+    ld a0, 0(t1)                     ; f = NesShowFence(p): after the set's last job, two frames ago
+    bnez a0, nsow_fence
+    nop
+    j nes_show_restore               ; no job has ever used the set
+    nop
+nsow_fence:
+    jal lpmrspqfencedone
+    nop
+    beqz v0, nsow_wait
+    nop
+    j nes_show_restore               ; passed: every snapshot of the set is free
+    nop
+nsow_wait:
+    la t0, global_nesshowcur
+    ld t0, 0(t0)
+    la t1, global_nesshowfence
+    dsll t0, t0, 3
+    daddu t1, t1, t0
+    jal lpmrspqwait                  ; not yet: wait (correctness; counted)
+    ld a0, 0(t1)                     ; (delay slot)
+    la t0, global_nesshowstat
+    ld t1, 24(t0)
+    daddiu t1, t1, 1
+    j nes_show_restore
+    sd t1, 24(t0)                    ; NesShowStat(3): waits
+  EndASM
+EndProcedure
+
 Declare NesShowSet(p.i)
 Procedure.i NesShowInit()
   Protected need.i, space.i, a1.i
