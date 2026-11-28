@@ -40,6 +40,8 @@ nes_bus_write_low:
 ; call-out, which also ends the window - a host quantity). The move frees 8 hot bytes (the two calls were hot).
 ; In: a2 the stamp, 8(sp) the address (u_nesreaddev's frame). Out: a0 the value; leaves by a jump to nes_read_close.
 ; THE PLAIN TWIN: SyncApu(stamp) : If addr < $4020 : v = ApuReadStatus() : Else : v = SlotRead(addr) : EndIf
+; (u_nesreaddev is the assembly core's call-out, #NES_CPU_ASM; the compiled core's builds have no nes_read_close.)
+  CompilerIf #NES_CPU_ASM
   ASM
 nes_read_apu_cold:
     jal u_nesmmc3syncapu
@@ -58,6 +60,7 @@ nes_read_slot:
     j nes_read_close
     move a0, v0
   EndASM
+  CompilerEndIf
 
 ; ---- the $2004 port (OAMDATA), from unit/ppu.n64 (C4, N.46b: 0 cycles a guest frame - SMB3 and MM4 fill OAM by
 ; the $4014 DMA), reached through u_ppuregwrite's / u_ppuregread's tables unchanged. In: a1 the value (write),
