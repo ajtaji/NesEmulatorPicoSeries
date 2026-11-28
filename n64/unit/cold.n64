@@ -232,23 +232,27 @@ nes_mmc3_wait_miss:
     daddiu sp, sp, 48
   EndASM
 
-; ---- nmicap_near: u_nmicap's exact cap, the due within a window and a stall (design note N.77) ----
-; a0 = Min(a0, NesNmiDue - CpuCycles - NesStall), at least 1. Clobbers t0, t1, a7; returns to u_nmicap's caller.
+; ---- nmicap_near: the exact cap near a due - the due within a window and a stall (design notes N.77, N.80b) ----
+; a0 = Min(a0, Min(NesNmiDue, NesFrameDue) - CpuCycles - NesStall), at least 1; and NesNmiCapAt = Min(the dues) - 514
+; stored again, so that after a due has passed (the NMI taken sets its due to "never") the quick test at the window
+; starts is far until the next due - without the store every window from the NMI to the frame's end came here (~100 a
+; frame, N.80). Linked into by `bltzal` from the window starts; a leaf; clobbers t0, t1, a7.
   ASM
 nmicap_near:
     la t0, global_cpucycles
-    ld t1, 0(t0)
-    ld a7, global_nesstall-global_cpucycles(t0)
-    daddu t1, t1, a7                ; the window's start (after the stall)
     ld a7, global_nesnmidue-global_cpucycles(t0)
-    ld t0, global_nesframedue-global_cpucycles(t0)   ; (N.78) the frame's end is a due too
-    dsubu a7, a7, t1                ; the cycles to the NMI's due ...
-    dsubu t0, t0, t1                ; ... and to the frame's end
-    slt t1, t0, a7
-    beqz t1, nmicap_min
+    ld t1, global_nesframedue-global_cpucycles(t0)   ; (N.78) the frame's end is a due too
+    dsubu t1, t1, a7                ; the frame's end less the NMI's due
+    bgez t1, nmicap_earliest        ; the NMI's is the earlier (or the only) one
     nop
-    move a7, t0                     ; the earlier
-nmicap_min:
+    daddu a7, a7, t1                ; the frame's end is
+nmicap_earliest:                    ; a7 = the earlier due
+    daddiu t1, a7, -514
+    sd t1, global_nesnmicapat-global_cpucycles(t0)   ; the quick test's word, from the dues as they are now
+    ld t1, 0(t0)
+    ld t0, global_nesstall-global_cpucycles(t0)
+    daddu t1, t1, t0                ; the window's start (after the stall)
+    dsubu a7, a7, t1                ; the cycles to the due
     slt t1, a7, a0
     beqz t1, nmicap_keep
     nop

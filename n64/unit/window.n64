@@ -81,27 +81,19 @@ nes_mmc3_wait_none:
   EndASM
 
 
-; ---- u_nmicap: the window's budget capped where the NMI is due (design note N.77) ----
-  ; WHAT: a0 = Min(a0, NesNmiDue - (CpuCycles + NesStall)), at least 1: the window (which opens after the stall) ends
-  ; at the first instruction boundary at or after NesNmiDue, where the NMI is taken (the edge detected by the end of
-  ; that instruction's penultimate cycle, R5). WHY HERE: every module's budget goes through it (the run loop and the
-  ; in-place window end), so no module carries the NMI rule. HOW: the hot test reads NesNmiCapAt = NesNmiDue - 514
-  ; (514 > any stall, 513 + 1): while NesNmiCapAt - CpuCycles >= a0 no window of a0 cycles after any stall reaches the
-  ; due, and the budget is kept; else the exact cap (nmicap_near, unit/cold.n64) with NesStall. A leaf; clobbers t0, t1,
-  ; a7 (both callers reload the core's registers after the budget: c65_in); keeps a1-a6. The two globals are read at
-  ; their offsets from CpuCycles (nes.n64's, a few KB apart).
-  ; THE PLAIN TWIN: d = NesNmiDue - CpuCycles - NesStall : If d < n : n = d : If n < 1 : n = 1 : EndIf : EndIf
+; ---- the window's budget capped where the NMI or the frame's end is due (design notes N.77, N.78, N.80b) ----
+  ; WHAT: a0 = Min(a0, Min(NesNmiDue, NesFrameDue) - (CpuCycles + NesStall)), at least 1: the window (which opens after
+  ; the stall) ends at the first instruction boundary at or after the due, where the NMI is taken (the edge detected by
+  ; the end of that instruction's penultimate cycle, R5) or the frame's end is sampled. WHERE: inline at the three window
+  ; starts (cpu6502.n64 c65_rw_window and the in-place window end, mmc3_run.n64) - six instructions, no call: every
+  ; module's budget passes one of them, so no module carries the rule. HOW: the hot test reads NesNmiCapAt =
+  ; Min(NesNmiDue, NesFrameDue) - 514 (514 > any stall, 513 + 1): while NesNmiCapAt - CpuCycles - a0 >= 0 no window of
+  ; a0 cycles after any stall reaches a due and the budget is kept; else `bltzal` links into the exact cap (nmicap_near,
+  ; unit/cold.n64, with NesStall), which also rewrites NesNmiCapAt from the dues as they are now - so once a due is
+  ; passed (the NMI taken: its due "never") the windows up to the next due keep to the quick test. Until N.80b this was
+  ; a called leaf (u_nmicap, 11 words + the call): 517 windows a frame paid ~13 cycles each in the record (N.80).
+  ; THE PLAIN TWIN: d = Min(NesNmiDue, NesFrameDue) - CpuCycles - NesStall : If d < n : n = d : If n < 1 : n = 1 : EndIf : EndIf
   ASM
-u_nmicap:
-    la t0, global_cpucycles
-    ld t1, 0(t0)
-    ld t0, global_nesnmicapat-global_cpucycles(t0)
-    dsubu t0, t0, t1                ; the cycles to the due, less 514 (never below a0 when no NMI is near)
-    slt t1, t0, a0
-    bnez t1, nmicap_near            ; near the due: the exact cap (cold)
-    nop
-    jr ra
-    nop
   EndASM
 
 ; ---- nesmmc3maskedbudget, from mmc3_budget.n64 ----

@@ -41,7 +41,11 @@ nes_mmc3_run_window:
     nop
     jal u_mappercpubudget
     nop
-    jal u_nmicap             ; the window ends where the NMI is due (unit/window.n64, design note N.77)
+    ld t1, 0(s0)             ; the window ends where the NMI or the frame's end is due (design note N.77 / N.80b):
+    ld t0, global_nesnmicapat-global_cpucycles(s0)   ; NesNmiCapAt = Min(NesNmiDue, NesFrameDue) - 514 ...
+    dsubu t0, t0, t1         ; ... less CpuCycles, less the budget: negative only when a window of a0 cycles
+    dsubu t0, t0, a0         ; after any stall (< 514) could reach a due
+    bltzal t0, nmicap_near   ; near a due: the exact cap (unit/cold.n64, a leaf: links ra, returns here)
     nop
     jal u_nesramcpuwindow
     move a1, zero
