@@ -569,36 +569,53 @@ u_ppucut:                           ; leaf: close the open band BEFORE a picture
   CompilerIf #NES_RDP_SHOW
     ASM
       ; RENDERING OFF (design note N.27, fix 1). With PPUMASK bits 3-4 clear every line of the open band is the
-      ; backdrop: palette byte 0 under the mask's emphasis / greyscale, whatever PPUCTRL, t, fine X, v, the name
-      ; tables, CHR and the mirroring hold (the old renderer writes index 0 on such a line; the RSP program draws
-      ; only the backdrop for a band with bits 3-4 clear - its background and sprite layers test them). So a change
-      ; of any of those is not seen and needs no cut: it returns here. PpuMask is the open band's own (a PPUMASK
-      ; change cuts first, through u_ppucut_always), and the two inputs such a band DOES show cut through
-      ; u_ppucut_always: a PPUMASK change ($2001) and a $2007 write to the palette. Without this, a game uploading
-      ; a screen with rendering off cut a band at every write after a whole line (each with its 4 KB name-table
-      ; copy and RSP job) and split every line a write landed in (each a fallback line the old renderer drew):
-      ; ~7.5 ms of a ~34 ms frame, measured (N.27). Only the shipped N5 path: the checking builds that compare the
-      ; records with the renderer line by line (--ppu-check, --twin-check, --rsp-check) keep the old rule.
-      ; Uses t8 only (u_ppucut's clobbers). ONE input such a band shows besides those two: v itself, when it
-      ; addresses the palette ($3F00-$3FFF) - the backdrop is then the palette byte at mirror(v & $1F), not byte 0
-      ; (N.79 item 2). So with rendering off the decision goes to the cold part (ppu_cut_off, unit/ppu_cold.n64): a
-      ; change of v into, out of or within the palette range cuts, every other change returns.
-      la t8, global_ppumask
-      ld t8, 0(t8)
-      andi t8, t8, 24
-      beqz t8, ppu_cut_off          ; rendering off: only a move of v through the palette is seen (cold part)
-      nop
+      ; backdrop: palette byte 0 under the mask's emphasis / greyscale - or, while v addresses the palette
+      ; ($3F00-$3FFF), the byte at mirror(v & $1F) (N.79 item 2) - whatever PPUCTRL, t, fine X, the name tables,
+      ; CHR and the mirroring hold (the old renderer's line palette and the RSP program both draw such a band from
+      ; that one byte). So a change of any of those is not seen and needs no cut; what IS seen cuts: a PPUMASK
+      ; change ($2001) and a $2007 write to the palette through u_ppucut_always, and a move of v into, out of or
+      ; within the palette range through the cold decision ppu_cut_off (unit/ppu_cold.n64). Without the
+      ; rendering-off rule a game uploading a screen cut a band at every write after a whole line (each with its
+      ; 4 KB name-table copy and RSP job) and split every line a write landed in: ~7.5 ms of a ~34 ms frame,
+      ; measured (N.27). Only the shipped N5 path: the checking builds that compare the records with the renderer
+      ; line by line (--ppu-check, --twin-check, --rsp-check) keep the old rule.
+      ; HOW (22 words, the same as before the cold decision - the record cart has no hot byte to spare): t9 says
+      ; whether the mask decides (0: u_ppucut) or not (24: u_ppucut_always, "rendering on"); the shared entry tests
+      ; the LINE first, so the vblank's register writes of a game that keeps PPUMASK off through its NMI work
+      ; (SMB3: ~40 a frame) end in the hot code and never visit the cold line (5.5 K cycles a frame, measured N.80).
+      b u_ppucut_entry
+      move t9, zero                 ; (delay slot) the decision is PPUMASK's
 u_ppucut_always:                    ; the cut whatever the mask (PPUMASK changes, palette writes)
+      addiu t9, zero, 24            ; "rendering on": no rendering-off decision
+u_ppucut_entry:
+    EndASM
+  CompilerElse
+    ASM
+u_ppucut_always:
     EndASM
   CompilerEndIf
   ASM
-    la v0, global_nesunitbase       ; clobbers t2 t3 t8 t9 v0 v1 only (callers keep a0-a7, t0, t1)
-    ld v0, 0(v0)                    ; NesUnitData
-    la t2, global_ppuline
+    la t2, global_ppuline           ; clobbers t2 t3 t8 t9 v0 v1 only (callers keep a0-a7, t0, t1)
     ld t3, 0(t2)
+    la v0, global_nesunitbase
     sltiu t8, t3, 240
-    beqz t8, ppu_cut_done           ; vblank or pre-render: no band is open
-    nop
+    beqz t8, ppu_cut_done           ; vblank or pre-render: no band is open, whatever the mask
+    ld t8, global_ppumask-global_ppuline(t2)   ; (delay slot) PPUMASK
+  EndASM
+  CompilerIf #NES_RDP_SHOW
+    ASM
+      or t8, t8, t9
+      andi t8, t8, 24
+      beqz t8, ppu_cut_off          ; rendering off on a visible line: the cold decision (back to ppu_cut_lined to
+      ld v0, 0(v0)                  ; cut, ppu_cut_done not to); (delay slot) NesUnitData
+ppu_cut_lined:                      ; t2 = &PpuLine, t3 = the line (< 240), v0 = NesUnitData
+    EndASM
+  CompilerElse
+    ASM
+      ld v0, 0(v0)                  ; NesUnitData
+    EndASM
+  CompilerEndIf
+  ASM
     ld t2, global_ppudot-global_ppuline(t2)
     beqz t2, ppu_cut_close          ; the line has not begun: the band ends before it
     sltiu t8, t2, 256
