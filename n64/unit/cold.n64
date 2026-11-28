@@ -31,6 +31,34 @@ nes_bus_write_low:
     nop
   EndASM
 
+; ---- nes_read_apu_cold: u_nesreaddev's read at $4015 and at $4020-$5FFF (unit/write.n64, nes_read_apu; step 4 of the
+; mapper modules, Action 52's nibble RAM). The APU is brought to the read; $4015 is its status (ApuReadStatus);
+; $4020-$5FFF is the module's (nes_slot_read, the slot's +72: 228 answers its nibble, every other module 0 - the open
+; bus's byte for such a read was the address's high byte before this route; a board without registers there has no
+; game reading there: the latch and MMC boards' carts never did). Cold: $4015 reads are a few a frame at most,
+; $4020-$5FFF reads none on most boards (the core sent them straight to the open bus before; they now take the device
+; call-out, which also ends the window - a host quantity). The move frees 8 hot bytes (the two calls were hot).
+; In: a2 the stamp, 8(sp) the address (u_nesreaddev's frame). Out: a0 the value; leaves by a jump to nes_read_close.
+; THE PLAIN TWIN: SyncApu(stamp) : If addr < $4020 : v = ApuReadStatus() : Else : v = SlotRead(addr) : EndIf
+  ASM
+nes_read_apu_cold:
+    jal u_nesmmc3syncapu
+    move a0, a2
+    ld a0, 8(sp)
+    sltiu t0, a0, 0x4020
+    beqz t0, nes_read_slot
+    nop
+    jal apureadstatus
+    nop
+    j nes_read_close
+    nop
+nes_read_slot:
+    jal nes_slot_read               ; the module's expansion read (a0 the address; v0 the byte)
+    nop
+    j nes_read_close
+    move a0, v0
+  EndASM
+
 ; ---- the $2004 port (OAMDATA), from unit/ppu.n64 (C4, N.46b: 0 cycles a guest frame - SMB3 and MM4 fill OAM by
 ; the $4014 DMA), reached through u_ppuregwrite's / u_ppuregread's tables unchanged. In: a1 the value (write),
 ; a2 = @PpuBus. ----

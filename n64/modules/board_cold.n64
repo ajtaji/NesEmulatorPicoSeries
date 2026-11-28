@@ -54,12 +54,12 @@ bd_cold_init:
     move a0, zero
     EndASM
   CompilerEndIf
-  CompilerIf #NES_SLOT_MODULE=113
+  CompilerIf #NES_SLOT_MODULE=113 Or #NES_SLOT_MODULE=228
     ASM
-    la t0, global_nesextraboard     ; NINA-306's register is at $4100: the bus routes $4020-$5FFF writes to the module
-    addiu t1, zero, 1               ; only for a board with NesExtraBoard set (unit/cold.n64), which LoadGame sets from
-    sd t1, 0(t0)                    ; the shared core's list - 113 is not on it (the shared core has no 113)
-    EndASM
+    la t0, global_nesextraboard     ; NINA-306's register is at $4100, Action 52's nibbles at $4020-$5FFF: the bus routes
+    addiu t1, zero, 1               ; $4020-$5FFF writes (and, 228, reads) to the module only for a board with
+    sd t1, 0(t0)                    ; NesExtraBoard set (unit/cold.n64); LoadGame sets it from the shared core's list
+    EndASM                          ; (228 is on it, 113 is not: set here for both)
   CompilerEndIf
   ASM
     ld ra, 0(sp)

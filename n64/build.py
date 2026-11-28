@@ -193,11 +193,16 @@ MODULES = {4: "mmc3", 1: "mmc1",
            8: "board", 13: "board", 34: "board", 41: "board", 71: "board", 79: "board", 113: "board", 144: "board",
            232: "board",
            # the MMC3-family variants (step 4): the multicart 47 and RAMBO-1 (modules/mmc3x.n64)
-           47: "mmc3x", 64: "mmc3x"}
+           47: "mmc3x", 64: "mmc3x",
+           # Action 52 / Cheetahmen 2 (step 4): a simple board with the register in the address (modules/board.n64)
+           228: "board",
+           # the CPU-cycle IRQ boards (step 4; no game in the folder): Irem H3001, Sunsoft-3, Konami VRC3 (modules/cycirq.n64)
+           65: "cycirq", 67: "cycirq", 73: "cycirq"}
 # THE UNIT BUILD: the runtime cartridge whose CPU runs the hot unit is built once for every mapper. Nothing of it is
 # staged for the cartridge's mapper: #GAME_MAPPER is UNIT_MAPPER ("chosen at load") and the sources' unit branches
 # test #NES_UNIT; the mapper's own code is its module, installed into the two slots at load (modules/install.n64).
 UNIT_MAPPER = -1
+UNIT_CHR_BANKS = 32     # the unit's CHR arenas: 32 x 8 KB (see CART_CHR_BANKS below)
 
 
 def header_fix_store(csv_path):
@@ -486,7 +491,11 @@ def build(args, *, controller_trace=()):
         "GAME_FOUR_SCREEN": int(bool(header[6] & 8)),
         "GAME_PRG": header[4] * 16384, "GAME_VIEWS": len(program),
         "GAME_CHR": chr_size, "GAME_CHR_RAM": int(not cart.chr),
-        "CART_CHR_BANKS": (max(4, min(64, max(BOARD_LIMITS.get(m, (524288, 262144))[1] for m in
+        # the unit's CHR arenas (Decoded, NesChrPairs, NesChrMask: 3.5 x the CHR in the image's variables) are sized by
+        # the largest CHR over the modules, CAPPED AT 256 KB (UNIT_CHR_BANKS): 228's 512 KB (Action 52) would put the
+        # variables into the stack (+784 KB); a CHR above the cap is refused at load (the loader's size rule) until the
+        # arenas move to the cartridge arena with the band record's halfword banks (the design note, step 4's 228)
+        "CART_CHR_BANKS": (max(4, min(UNIT_CHR_BANKS if unit else 64, max(BOARD_LIMITS.get(m, (524288, 262144))[1] for m in
                                               (MODULES if unit else (cart.mapper,))) // 8192))
                            if runtime else max(2, chr_size // 8192)),
     }

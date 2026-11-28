@@ -2110,8 +2110,8 @@ c65_rd_dev:                  ; $2000-$7FFF
     sltiu t1, t1, 3
     bnez t1, c65_rd_call     ; $4015-$4017
     sltiu t1, t2, 0x6000
-    bnez t1, c65_rd_open     ; nothing answers: open bus
-    nop
+    bnez t1, c65_rd_call     ; $4020-$5FFF: the device call-out (u_nesreaddev: a board's registers there, else the
+    nop                      ; open bus - step 4, Action 52's nibble RAM)
     ld t1, global_mapramenable-global_nesmmc3bias(a3)
     beqz t1, c65_rd_open
     andi t1, t2, 0x1FFF

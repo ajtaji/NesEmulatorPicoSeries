@@ -494,10 +494,8 @@ nes_read_synced:
     andi a0, a0, 0x3FFF
     b nes_read_close
     ld a0, 24(sp)
-nes_read_apu:                       ; $4015
-    jal u_nesmmc3syncapu
-    move a0, a2
-    jal apureadstatus
+nes_read_apu:                       ; $4015, and $4020-$5FFF (step 4): the cold part (unit/cold.n64), which returns
+    j nes_read_apu_cold             ; to nes_read_close
     nop
 nes_read_close:                     ; a0 = the value: CpuEndWindow, then NesOpenBus = value & 255
     la t0, global_cpucycles

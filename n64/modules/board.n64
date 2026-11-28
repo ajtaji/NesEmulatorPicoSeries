@@ -38,6 +38,17 @@
 ;                     Enhancer cartridge: bit 4 is the outer bank's bit 0 and bit 3 its bit 1); $C000-$FFFF: bits 0-1
 ;                     the 16 KB bank inside it at $8000; the outer bank's last 16 KB fixed at $C000; CHR-RAM.
 ;                     MapPrgReg = the inner bank, MapChr0 = the outer bank. No conflicts.
+;   228 Action 52 / Cheetahmen 2  the register is the ADDRESS and the value of a $8000-$FFFF write (the reference: anvil/
+;                     mapper_extra.pi4 case 228): address bits 6-10 the 16 KB PRG bank inside the chip, bits 11-12 the
+;                     512 KB chip (3 reads as 2: Action 52's third chip is wired twice), bit 5 the mode (1: that 16 KB
+;                     bank in both halves; 0: the 32 KB pair of its even bank), bit 13 the mirroring (0 vertical,
+;                     1 horizontal); the 8 KB CHR bank = address bits 0-3 << 2 | value bits 0-1. $4020-$5FFF: four
+;                     nibbles of RAM at (addr & 3), written through the bus's low-register route (NesExtraBoard) and
+;                     READ BACK through its read route (nes_slot_read, +72). MapPrgReg = the address, MapChr0 = the
+;                     value. No work RAM. AS BUILT: PRG in RDRAM only (Cheetahmen 2, 256 KB; the loader puts a PRG
+;                     past the arena on the cartridge - Action 52's 1.5 MB - for which MapperPrg's bias has no window
+;                     yet) and CHR up to the band record's byte-wide bank numbers (256 KB; Action 52's 512 KB is the
+;                     halfword step) - see the design note 8h.
 ; Every bank is published through the common helpers (mmc3_registers.n64): MapperPrg (8 KB slots, masked by the ROM's
 ; size: a 16 KB bank b is the two slots 2b, 2b + 1, a 32 KB bank b the four from 4b), MapperChr (1 KB slots, the band
 ; cut, the CHR-RAM copy), MapperMirror (the name-table slots: 0 horizontal, 1 vertical, 2 one-screen A, 3 B).
@@ -100,9 +111,25 @@ u_mapperclockirq:                   ; +56 no IRQ counter
 nes_slot_cpu_ticks:                 ; +64 no CPU timer
     jr ra
     nop
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=228
+    ASM
+nes_slot_read:                      ; +72 $4020-$5FFF: the nibble RAM, ExtraRegs(addr & 3)
+    andi a0, a0, 3
+    sll a0, a0, 3
+    la t0, global_extraregs
+    daddu t0, t0, a0
+    jr ra
+    ld v0, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
 nes_slot_read:                      ; +72 open bus
     jr ra
     move v0, zero
+    EndASM
+  CompilerEndIf
+  ASM
 
 ; ---- budget: the window's length (as the latch boards': no IRQ). The full 128 cycles, bounded by the next DMC
 ; fetch while a sample plays (the common bound, unit/cold.n64's mmc3_budget_dmc: a0 the budget, a1 = @MapIrq).
@@ -371,6 +398,31 @@ bd_apply_34_bnrom:
     la t0, global_mapprgreg
     sd a1, 0(t0)                    ; MapPrgReg = v
     EndASM
+  CompilerElseIf #NES_SLOT_MODULE=228
+    ASM
+    andi t0, a0, 0x8000
+    la t1, global_mapprgreg
+    beqz t0, bd_apply_228_low       ; $4020-$5FFF: a nibble
+    nop
+    move t0, t1
+    sd a0, 0(t0)                    ; MapPrgReg = the address
+    andi a1, a1, 3
+    sd a1, global_mapchr0-global_mapprgreg(t0)   ; MapChr0 = the value's bits 0-1
+    srl a0, a0, 13
+    andi a0, a0, 1
+    jal mappermirror                ; bit 13: 0 vertical (1), 1 horizontal (0)
+    xori a0, a0, 1
+    b bd_apply_update
+    nop
+bd_apply_228_low:
+    andi a0, a0, 3
+    sll a0, a0, 3
+    la t0, global_extraregs
+    daddu t0, t0, a0
+    andi a1, a1, 15
+    b bd_apply_done
+    sd a1, 0(t0)                    ; ExtraRegs(addr & 3) = value & 15
+    EndASM
   CompilerElse
     ASM
     andi t0, a0, 0x8000             ; 8 (FFE F3xxx)
@@ -561,6 +613,43 @@ bd_update:
     srl a0, a0, 4
     jal bd_chr8                     ; bits 4-7: the 8 KB CHR bank
     andi a0, a0, 15
+    EndASM
+;   228: a = MapPrgReg : chip = (a >> 11) & 3 : If chip = 3 : chip = 2 : EndIf : b = ((a >> 6) & 31) + chip * 32
+;        If a & 32 : lo = hi = 2b : Else : lo = (b & 254) * 2 : hi = lo + 2 : EndIf : MapperPrg(0, lo) : MapperPrg(1, lo + 1)
+;        MapperPrg(2, hi) : MapperPrg(3, hi + 1) : For i = 0 To 7 : MapperChr(i, (((a & 15) << 2) | MapChr0) * 8 + i) : Next
+  CompilerElseIf #NES_SLOT_MODULE=228
+    ASM
+    srl t1, t0, 11
+    andi t1, t1, 3                  ; the chip
+    xori t2, t1, 3
+    bnez t2, bd_228_chip
+    nop
+    addiu t1, zero, 2               ; chip 3 reads as 2
+bd_228_chip:
+    sll t1, t1, 5
+    srl a0, t0, 6
+    andi a0, a0, 31
+    addu a0, a0, t1                 ; b, the 16 KB bank
+    andi t1, t0, 32
+    bnez t1, bd_228_16k
+    sll a0, a0, 1                   ; 2b
+    andi a0, a0, 0xFFFC             ; the pair's even bank: (b & 254) * 2
+    jal bd_prg_pair
+    addiu a1, a0, 2
+    b bd_228_chr
+    nop
+bd_228_16k:
+    jal bd_prg_pair                 ; the 16 KB bank in both halves
+    move a1, a0
+bd_228_chr:
+    la t0, global_mapprgreg
+    ld t0, 0(t0)
+    andi a0, t0, 15
+    sll a0, a0, 2
+    la t1, global_mapchr0
+    ld t1, 0(t1)
+    jal bd_chr8                     ; the 8 KB CHR bank (a & 15) << 2 | the value's bits
+    or a0, a0, t1
     EndASM
   CompilerElse
     ASM

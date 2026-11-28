@@ -1,0 +1,217 @@
+; modules/cycirq_cold.n64 - the CPU-cycle IRQ boards' COLD part (65 Irem H3001, 67 Sunsoft-3, 73 Konami VRC3),
+; assembled in the cold slot (unit/cold_slot.n64): its entry table (the layout every module's cold part opens with,
+; modules/mmc3_cold.n64), the power-on and the publication. The hot part is modules/cycirq.n64 (the boards' rules are
+; in its header).
+;
+; nes_cold_init - the board's own power-on, run by LoadGame (NesModuleInit) after the shared MapperInit (which
+; LoadGame calls for these mappers: every field a board reads at its power-on value - ExtraRegs zeroed, the IRQ side
+; zeroed, the header's mirroring, MapCiram cleared - then MMC3's publication, which is not the board's).
+; HOW: MapRamEnable = 1 on 73 (8 KB of work RAM at $6000), else 0 (a $6000-$7FFF read is the open bus); MapRamProtect
+; = 0; MapIrqEnable = 0 (the counter stopped), ExtraIrqMode = 0 (the board's enable clear), ExtraFlags = 0 (67's
+; toggle / 73's control); the power-on registers (65: r(8) = 0, r(9) = 1, r(10) = n - 2 and r(0..7) = 0..7; 67:
+; r(0..3) = 0..3; 73: the 8 KB of CHR-RAM in slots 0-7); then ci_update publishes every PRG / CHR slot from the state.
+; In / out: nothing; clobbers what ci_update may. FRAME (16 B): 0 ra
+  ASM
+nes_cold_init:                      ; +0
+    b ci_cold_init
+    nop
+nes_cold_reserved:                  ; +8
+    jr ra
+    nop
+nes_cold_maptable:                  ; +16: no register handler table (the registers are decoded in ci_apply)
+    .word 0, 0, 0, 0, 0, 0, 0, 0
+nes_cold_moddata:                   ; +48: no module data (256 zero bytes, copied into NesUnitData at load all the same)
+    .space 256
+ci_cold_init:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    la t0, global_mapramenable
+    sd zero, global_mapramprotect-global_mapramenable(t0)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=73
+    ASM
+    addiu t1, zero, 1
+    sd t1, 0(t0)                    ; the work RAM
+    EndASM
+  CompilerElse
+    ASM
+    sd zero, 0(t0)                  ; no work RAM
+    EndASM
+  CompilerEndIf
+  ASM
+    la t0, global_mapirqenable
+    sd zero, 0(t0)
+    sd zero, global_extrairqmode-global_mapirqenable(t0)
+    sd zero, global_extraflags-global_mapirqenable(t0)
+    sd zero, global_extrairqrun-global_mapirqenable(t0)
+    sd zero, global_mapirq-global_mapirqenable(t0)
+    la t1, global_extraregs
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=65
+    ASM
+    sd zero, 64(t1)                 ; r(8) = 0
+    addiu t2, zero, 1
+    sd t2, 72(t1)                   ; r(9) = 1
+    la t0, global_mapprgbytes
+    ld t2, 0(t0)
+    dsrl t2, t2, 13
+    daddiu t2, t2, -2
+    sd t2, 80(t1)                   ; r(10) = n - 2
+    move t2, zero
+ci_init_chr:
+    sd t2, 0(t1)                    ; r(i) = i, i = 0..7
+    daddiu t1, t1, 8
+    daddiu t2, t2, 1
+    sltiu t3, t2, 8
+    bnez t3, ci_init_chr
+    nop
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=67
+    ASM
+    sd zero, 64(t1)                 ; r(8) = 0
+    move t2, zero
+ci_init_chr:
+    sd t2, 0(t1)                    ; r(i) = i, i = 0..3
+    daddiu t1, t1, 8
+    daddiu t2, t2, 1
+    sltiu t3, t2, 4
+    bnez t3, ci_init_chr
+    nop
+    EndASM
+  CompilerElse
+    ASM
+    sd zero, 64(t1)                 ; r(8) = 0
+    jal ci_chr8                     ; the 8 KB of CHR-RAM in slots 0-7
+    move a0, zero
+    EndASM
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j ci_update                     ; every mapping from the power-on state, a tail jump
+    nop
+
+; ---- ci_update: every PRG and CHR mapping from the registers, for a bank write (modules/cycirq.n64, ci_apply) and
+; the power-on. In: nothing. Clobbers t0-t3, a0-a3 and what the helpers may. FRAME (32 B): 0 ra | 8 i | 16 scratch
+; THE PLAIN TWIN:
+;   65: MapperPrg(0, r(8)) : MapperPrg(1, r(9)) : MapperPrg(2, r(10)) : MapperPrg(3, n - 1)
+;       For i = 0 To 7 : MapperChr(i, r(i)) : Next
+;   67: b = r(8) : MapperPrg(0, 2b) : MapperPrg(1, 2b + 1) : MapperPrg(2, n - 2) : MapperPrg(3, n - 1)
+;       For i = 0 To 3 : MapperChr(2i, 2 r(i)) : MapperChr(2i + 1, 2 r(i) + 1) : Next
+;   73: b = r(8) & 7 : the PRG as 67; the CHR-RAM stays in slots 0-7 (the power-on)
+ci_update:
+    daddiu sp, sp, -32
+    sd ra, 0(sp)
+    la t1, global_extraregs
+    ld a1, 64(t1)                   ; r(8)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=65
+    ASM
+    jal mapperprg                   ; MapperPrg(0, r(8))
+    move a0, zero
+    la t1, global_extraregs
+    ld a1, 72(t1)
+    jal mapperprg                   ; MapperPrg(1, r(9))
+    addiu a0, zero, 1
+    la t1, global_extraregs
+    ld a1, 80(t1)
+    jal mapperprg                   ; MapperPrg(2, r(10))
+    addiu a0, zero, 2
+    la t0, global_mapprgbytes
+    ld a1, 0(t0)
+    dsrl a1, a1, 13
+    daddiu a1, a1, -1
+    jal mapperprg                   ; MapperPrg(3, n - 1)
+    addiu a0, zero, 3
+    sd zero, 8(sp)
+ci_update_chr:
+    ld a0, 8(sp)
+    la t1, global_extraregs
+    sll t2, a0, 3
+    daddu t1, t1, t2
+    jal mapperchr                   ; MapperChr(i, r(i))
+    ld a1, 0(t1)
+    ld a0, 8(sp)
+    daddiu a0, a0, 1
+    sltiu t0, a0, 8
+    bnez t0, ci_update_chr
+    sd a0, 8(sp)
+    EndASM
+  CompilerElse
+    ASM
+    sll a1, a1, 1                   ; 2b
+    jal mapperprg                   ; MapperPrg(0, 2b)
+    move a0, zero
+    la t1, global_extraregs
+    ld a1, 64(t1)
+    sll a1, a1, 1
+    daddiu a1, a1, 1
+    jal mapperprg                   ; MapperPrg(1, 2b + 1)
+    addiu a0, zero, 1
+    la t0, global_mapprgbytes
+    ld a1, 0(t0)
+    dsrl a1, a1, 13
+    daddiu a1, a1, -2
+    jal mapperprg                   ; MapperPrg(2, n - 2)
+    addiu a0, zero, 2
+    la t0, global_mapprgbytes
+    ld a1, 0(t0)
+    dsrl a1, a1, 13
+    daddiu a1, a1, -1
+    jal mapperprg                   ; MapperPrg(3, n - 1)
+    addiu a0, zero, 3
+    EndASM
+    CompilerIf #NES_SLOT_MODULE=67
+      ASM
+    sd zero, 8(sp)
+ci_update_chr:
+    ld a0, 8(sp)
+    la t1, global_extraregs
+    sll t2, a0, 3
+    daddu t1, t1, t2
+    ld a1, 0(t1)
+    sll a1, a1, 1                   ; 2 r(i)
+    sd a1, 16(sp)
+    jal mapperchr                   ; MapperChr(2i, 2 r(i))
+    sll a0, a0, 1
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    sll a0, a0, 1
+    daddiu a1, a1, 1
+    jal mapperchr                   ; MapperChr(2i + 1, 2 r(i) + 1)
+    addiu a0, a0, 1
+    ld a0, 8(sp)
+    daddiu a0, a0, 1
+    sltiu t0, a0, 4
+    bnez t0, ci_update_chr
+    sd a0, 8(sp)
+      EndASM
+    CompilerEndIf
+  CompilerEndIf
+  ASM
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 32
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=73
+    ASM
+; ---- ci_chr8 (73): the eight 1 KB CHR-RAM slots: slot i = bank i (the simple boards' bd_chr8 with c = 0). In: a0 = 0.
+; FRAME (16 B): 0 ra | 8 i
+ci_chr8:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+ci_chr8_slot:
+    ld a0, 8(sp)
+    jal mapperchr                   ; MapperChr(i, i)
+    move a1, a0
+    ld a0, 8(sp)
+    daddiu a0, a0, 1
+    sltiu t0, a0, 8
+    bnez t0, ci_chr8_slot
+    sd a0, 8(sp)
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+    EndASM
+  CompilerEndIf

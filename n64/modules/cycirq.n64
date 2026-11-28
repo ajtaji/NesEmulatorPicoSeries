@@ -1,0 +1,574 @@
+; modules/cycirq.n64 - the CPU-CYCLE IRQ boards' module, hot part, as it runs in the mapper slot (unit/slot.n64; the
+; mapper-modules design note, sections 2-3 and step 4, "not done" 65 / 67 / 73): the Irem H3001 (65), the Sunsoft-3
+; (67) and the Konami VRC3 (73). One source, three modules: each compile assembles the board named by
+; #NES_SLOT_MODULE (build.py compiles once per module). The cold part (the table, the power-on, the publication) is
+; modules/cycirq_cold.n64. No game in the ROM folder uses these boards (65 appears only as a garbage header): they are
+; written from the documented board rules alone and checked by a register-exercise cart each (bench: conform_irq.py,
+; carts/conform_irq.s - our own 6502 source), the step's rule for a board without a game.
+;
+; THE BOARDS (v = the value written; n = the ROM's 8 KB PRG banks; r(i) = ExtraRegs(i)):
+;   65  Irem H3001   $8000 / $A000 / $C000 (any address of the 4 KB page): r(8) / r(9) / r(10), the 8 KB PRG banks at
+;                    $8000 / $A000 / $C000; $E000-$FFFF the last bank. $B000-$B007: r(0..7), the 1 KB CHR bank of
+;                    slot A0-A2. $9001: mirroring, bit 7 (0 vertical, 1 horizontal). $9003: bit 7 the IRQ enable;
+;                    acknowledges. $9004: the counter reloaded from the latch; acknowledges. $9005 / $9006: the
+;                    16-bit latch's high / low byte. THE COUNTER: counts down one every CPU cycle while enabled and
+;                    above 0; the cycle it reaches 0 asserts the IRQ and the counting stops (a reload restarts it).
+;                    Power-on: r(8) = 0, r(9) = 1, r(10) = n - 2 (the documented power-on banks), r(0..7) = 0..7
+;                    (the CHR slots linear: the board's power-on CHR banks are not documented; stated here).
+;   67  Sunsoft-3    $8800 / $9800 / $A800 / $B800 (A11 set: (addr & $F800)): r(0..3), the 2 KB CHR bank of the 2 KB
+;                    slot 0-3. $C800: the 16-bit counter's bytes, high first then low (a toggle; $D800 resets it).
+;                    $D800: bit 4 the IRQ enable; acknowledges. $E800: bits 0-1 the mirroring: 0 vertical, 1
+;                    horizontal, 2 one-screen A, 3 one-screen B. $F800: r(8), the 16 KB PRG bank at $8000 (the last 16
+;                    KB fixed at $C000). THE COUNTER: counts down one every CPU cycle while enabled; the cycle it
+;                    passes from 0 to $FFFF asserts the IRQ and clears the enable. Power-on: r(8) = 0, r(0..3) = 0..3
+;                    (linear; stated as for 65).
+;   73  Konami VRC3  $8000 / $9000 / $A000 / $B000 (the 4 KB page): bits 0-3 of v into bits 0-3 / 4-7 / 8-11 / 12-15
+;                    of the 16-bit latch. $C000: bit 0 "enable after acknowledge" (E), bit 1 the counting, bit 2 the
+;                    mode (0: 16-bit, 1: 8-bit); when bit 1 is set the counter is loaded from the latch. $D000:
+;                    acknowledges; the counting = E. $F000: r(8) bits 0-2, the 16 KB PRG bank at $8000 (the last fixed
+;                    at $C000). 8 KB of CHR-RAM; 8 KB of work RAM at $6000. THE COUNTER: counts up one every CPU
+;                    cycle while counting; the cycle it overflows ($FFFF -> 0, or in 8-bit mode its low byte $FF ->
+;                    $00) asserts the IRQ and reloads it from the latch (the low byte alone in 8-bit mode), counting
+;                    on: the IRQ is periodic with the period 65536 - latch (256 - (latch & 255) in 8-bit mode).
+;                    Power-on: r(8) = 0, the CHR-RAM in slots 0-7, the work RAM enabled.
+; Every bank is published through the common helpers (mmc3_registers.n64): MapperPrg (8 KB slots), MapperChr (1 KB
+; slots), MapperMirror (0 horizontal, 1 vertical, 2 one-screen A, 3 B), in ci_update (cold part) - one publication
+; for the writes and the power-on, the simple boards' shape (modules/board.n64).
+;
+; THE COUNTER IN CLOSED FORM (the cycle side of RAMBO-1 without the prescaler, 8h): no cycle is stepped. The module
+; keeps THE EXPIRY (ExtraIrqCount): the absolute CPU cycle at which the counter's rule asserts the IRQ, computed at the
+; register write from the write's stamp (the devices were brought to it: the fetch clock NesMmc3FetchClock = the stamp
+; there) - 65: stamp + counter; 67: stamp + counter + 1; 73: stamp + period - and MapIrqEnable = 1 while the counter
+; runs (THE SCHEDULER'S GATE: unit/advance.n64 consults the fetch deadline and walks the fetch clock only while it is
+; set; the board's own enable bit lives in ExtraIrqMode). The three entries then are: irq_deadline (+8) = the expiry
+; (the common scheduler ends every CPU window at it: the fetch limit); budget (+0) = Min(128, expiry - CpuCycles), 1
+; when due, the masked-IRQ and DMC bounds as the MMC3's; ppu_ticks (+16, a0 = the span the advance hands the module
+; from the fetch clock) asserts MapIrq when the span reaches the expiry (fetch clock + span >= expiry), then the
+; board's consequence: 65 stops (MapIrqEnable = 0, the counter 0), 67 stops and clears its enable (the counter $FFFF),
+; 73 steps the expiry by the period. A counter stopped by its register keeps its remaining count (ExtraIrqRun) for
+; the next enable. Exactness: the IRQ is taken at the end of the instruction that reaches the expiry cycle, as the
+; MMC3's is at its window end (the window ends at the expiry: the budget).
+; THE ENTRIES (unit/slot.n64): budget, deadline, ppu_ticks above; a12 nothing; write (+32) the untimed $6000-$7FFF
+; entry: 73's work RAM (the save mark as the simple boards'), nothing on 65 / 67; write_sync (+40): every device to
+; the write, then ci_apply with the stamp, then the common close; write_fast (+48): every $8000-$FFFF write timed;
+; clock_irq / cpu_ticks nothing; read the open bus.
+; THE CONTRACT (modules/mmc3.n64's): in through the table; out by j / jal to common labels only; a relative branch
+; never leaves the two slots (build.py, check_mapper_slot).
+; CHECKED BY: the register-exercise cart of each board (bench: conform_irq.py + carts/conform_irq.s: every bank by
+; value, the mirroring, the IRQ's cycle count against the rule within the engine's tolerance, the acknowledge, the
+; work RAM / open bus); the step's SMB3 / MM4 proofs and the record for the common code (unchanged by this module).
+  ASM
+u_mappercpubudget:                  ; +0
+    b ci_e_budget
+    nop
+u_nesmmc3fetchdeadline:             ; +8 the expiry while the counter runs
+    b ci_e_deadline
+    nop
+u_mapperpputicks:                   ; +16 the counter over the span
+    b ci_e_pputicks
+    nop
+u_mappera12:                        ; +24 no A12 watch
+    jr ra
+    nop
+u_mapperwrite:                      ; +32 the untimed entry: $6000-$7FFF from the bus's work-RAM path
+    b ci_e_write
+    nop
+nes_slot_write_sync:                ; +40 the timed write: sync, apply, close
+    b ci_e_write_sync
+    nop
+nes_slot_write_fast:                ; +48 every $8000-$FFFF write is a timed register write
+    j nes_mmc3_bus_write_timed
+    nop
+u_mapperclockirq:                   ; +56 no clock from outside
+    jr ra
+    nop
+nes_slot_cpu_ticks:                 ; +64 (the counter is advanced from ppu_ticks: the common advance calls that)
+    jr ra
+    nop
+nes_slot_read:                      ; +72 open bus
+    jr ra
+    move v0, zero
+
+; ---- budget: the window's length. Out a0; a1 = @MapIrq for the common DMC tail.
+; THE PLAIN TWIN: If MapIrq : n = (FI = 0) ? 1 : MaskedBudget() : Else : n = 128
+;   If MapIrqEnable : d = ExtraIrqCount - CpuCycles : If d < 128 : n = Max(d, 1) : EndIf : EndIf
+;   If DmcBytes > 0 : n = Min(n, F - CpuCycles) : EndIf : EndIf
+ci_e_budget:
+    la a1, global_mapirq
+    ld t0, 0(a1)
+    bnez t0, ci_budget_pending
+    ld t1, global_mapirqenable-global_mapirq(a1)
+    beqz t1, ci_budget_dmc          ; the counter not running: the full window
+    addiu a0, zero, 128
+    ld t2, global_extrairqcount-global_mapirq(a1)
+    ld t3, global_cpucycles-global_mapirq(a1)
+    dsubu t2, t2, t3                ; the cycles to the expiry
+    slt t3, t2, a0
+    beqz t3, ci_budget_dmc          ; beyond the window
+    nop
+    bgtz t2, ci_budget_near
+    nop
+    addiu t2, zero, 1               ; due or past: one cycle, the advance delivers it
+ci_budget_near:
+    move a0, t2
+ci_budget_dmc:
+    ld t0, global_dmcbytes-global_mapirq(a1)
+    bgtz t0, ci_budget_dmc_far
+    nop
+    jr ra
+    nop
+ci_budget_dmc_far:
+    j mmc3_budget_dmc               ; the common DMC bound (unit/cold.n64; an absolute jump)
+    nop
+ci_budget_pending:                  ; the IRQ asserted: one cycle, or the masked bound while I is set
+    ld t1, global_fi-global_mapirq(a1)
+    beqz t1, ci_budget_one
+    nop
+    j u_nesmmc3maskedbudget
+    nop
+ci_budget_one:
+    jr ra
+    addiu a0, zero, 1
+
+; ---- irq_deadline: the expiry while the counter runs (the fetch clock itself while an IRQ is asserted), else never.
+ci_e_deadline:
+    la a1, global_mapirqenable
+    ld t0, 0(a1)
+    beqz t0, ci_deadline_never
+    ld t0, global_mapirq-global_mapirqenable(a1)
+    bnez t0, ci_deadline_now
+    nop
+    jr ra
+    ld a0, global_extrairqcount-global_mapirqenable(a1)
+ci_deadline_now:
+    jr ra
+    ld a0, global_nesmmc3fetchclock-global_mapirqenable(a1)
+ci_deadline_never:
+    daddiu a0, zero, -1
+    jr ra
+    dsrl a0, a0, 1
+
+; ---- ppu_ticks: the span a0 (CPU cycles) from the fetch clock (not yet stored by the advance: it holds the span's
+; start). The IRQ when the span reaches the expiry, then the board's consequence. Clobbers t0-t3.
+; THE PLAIN TWIN: If MapIrqEnable And NesMmc3FetchClock + span >= ExtraIrqCount
+;   If MapIrq = 0 : MapIrq = 1 : MapIrqAssertions + 1 : EndIf
+;   65: MapIrqEnable = 0 : ExtraIrqRun = 0   67: MapIrqEnable = 0 : ExtraIrqMode = 0 : ExtraIrqRun = $FFFF
+;   73: Repeat : ExtraIrqCount + ExtraIrqRun : Until ExtraIrqCount > NesMmc3FetchClock + span
+ci_e_pputicks:
+    la t0, global_mapirqenable
+    ld t1, 0(t0)
+    beqz t1, ci_ticks_done
+    ld t2, global_nesmmc3fetchclock-global_mapirqenable(t0)
+    daddu t2, t2, a0                ; the clock at the span's end
+    ld t3, global_extrairqcount-global_mapirqenable(t0)
+    slt t1, t2, t3
+    bnez t1, ci_ticks_done          ; the expiry lies beyond the span
+    nop
+    ld t1, global_mapirq-global_mapirqenable(t0)
+    bnez t1, ci_ticks_after         ; asserted already (not yet acknowledged)
+    addiu t1, zero, 1
+    sd t1, global_mapirq-global_mapirqenable(t0)
+    ld t1, global_mapirqassertions-global_mapirqenable(t0)
+    daddiu t1, t1, 1
+    sd t1, global_mapirqassertions-global_mapirqenable(t0)
+ci_ticks_after:
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=65
+    ASM
+    sd zero, 0(t0)                  ; the counting stops at 0
+    sd zero, global_extrairqrun-global_mapirqenable(t0)
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=67
+    ASM
+    sd zero, 0(t0)                  ; the enable cleared by the wrap
+    sd zero, global_extrairqmode-global_mapirqenable(t0)
+    ori t1, zero, 0xFFFF
+    sd t1, global_extrairqrun-global_mapirqenable(t0)   ; the counter wrapped to $FFFF
+    EndASM
+  CompilerElse
+    ASM
+    ld t1, global_extrairqrun-global_mapirqenable(t0)   ; 73: the period
+ci_ticks_period:
+    daddu t3, t3, t1
+    slt t2, t2, t3                  ; (t2 the span's end: consumed)
+    beqz t2, ci_ticks_period_more
+    nop
+    sd t3, global_extrairqcount-global_mapirqenable(t0)
+    jr ra
+    nop
+ci_ticks_period_more:
+    ld t2, global_nesmmc3fetchclock-global_mapirqenable(t0)
+    b ci_ticks_period
+    daddu t2, t2, a0
+    EndASM
+  CompilerEndIf
+  ASM
+ci_ticks_done:
+    jr ra
+    nop
+
+; ---- write (the untimed entry): a $6000-$7FFF write. In: a0 address, a1 value (a2 = 0: untimed). 73: the work RAM
+; with the save mark (the simple boards' bd_ram_store, modules/board.n64); 65 / 67: no work RAM. Clobbers t0-t3, a0.
+; THE PLAIN TWIN (73): If MapRamEnable And MapRamProtect = 0 : MapRam(addr & 8191) = value
+;   If NesSaveOnline And (addr & 8191) < NesRuntimeSaveBytes : NesSaveDirty((addr & 8191) >> 8) = 1 : NesSavePending = 1
+ci_e_write:
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=73
+    ASM
+    la t0, global_mapramenable
+    ld t1, 0(t0)
+    beqz t1, ci_write_done
+    ld t1, global_mapramprotect-global_mapramenable(t0)
+    bnez t1, ci_write_done
+    andi a0, a0, 8191
+    la t0, global_mapram
+    daddu t0, t0, a0
+    sb a1, 0(t0)                    ; the store
+    la t0, global_nessaveonline
+    ld t1, 0(t0)
+    ld t2, global_nesruntimesavebytes-global_nessaveonline(t0)
+    beqz t1, ci_write_done
+    slt t2, a0, t2
+    beqz t2, ci_write_done
+    srl t1, a0, 8
+    la t3, global_nessavedirty
+    daddu t3, t3, t1
+    addiu t1, zero, 1
+    sb t1, 0(t3)                    ; NesSaveDirty(page) = 1
+    jr ra
+    sd t1, global_nessavepending-global_nessaveonline(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+ci_write_done:
+    jr ra
+    nop
+
+; ---- write_sync: a timed register write ($8000-$FFFF). Entered by branch from the common timed path with its
+; 32-byte frame on the stack (0(sp) = ra): a0 addr, a1 value, a2 the stamp. Every device is brought to the write
+; (u_workeradvance: the fetch clock then equals the stamp), the register applied with the stamp (the counter's
+; "now"), then the common close (unit/write.n64).
+; THE PLAIN TWIN: WorkerAdvance(stamp) : ci_apply(addr, value, stamp)
+ci_e_write_sync:
+    sd a0, 8(sp)
+    sd a1, 16(sp)
+    sd a2, 24(sp)
+    jal u_workeradvance             ; every device to the write
+    move a0, a2
+    ld a0, 8(sp)
+    ld a1, 16(sp)
+    jal ci_apply                    ; the register
+    ld a2, 24(sp)
+    j nes_mmc3_bus_write_close      ; the common close (unit/write.n64)
+    nop
+
+; ---- ci_apply: the register write, devices synced. In: a0 address ($8000-$FFFF), a1 value (0-255), a2 the stamp
+; (the CPU cycle of the write: the counter's now). Clobbers t0-t3, a0-a3 and what the bank helpers clobber.
+; FRAME (16 B): 0 ra. Each board's rule is in the header; a bank register publishes through ci_update (cold part).
+ci_apply:
+    daddiu sp, sp, -16
+    sd ra, 0(sp)
+  EndASM
+  CompilerIf #NES_SLOT_MODULE=65
+    ASM
+; 65: the page (addr >> 12) & 7: 0 $8000, 1 $9000 (the control registers by A0-A2), 2 $A000, 3 $B000 (CHR by A0-A2),
+; 4 $C000; 5-7 nothing.
+    srl t0, a0, 12
+    andi t0, t0, 7
+    la t1, global_extraregs
+    beqz t0, ci65_prg0
+    addiu t2, t0, -1
+    beqz t2, ci65_control
+    addiu t2, t0, -2
+    beqz t2, ci65_prg1
+    addiu t2, t0, -3
+    beqz t2, ci65_chr
+    addiu t2, t0, -4
+    bnez t2, ci_apply_done          ; $D000-$FFFF: nothing
+    nop
+    b ci_apply_update
+    sd a1, 80(t1)                   ; $C000: r(10)
+ci65_prg0:
+    b ci_apply_update
+    sd a1, 64(t1)                   ; $8000: r(8)
+ci65_prg1:
+    b ci_apply_update
+    sd a1, 72(t1)                   ; $A000: r(9)
+ci65_chr:
+    andi t0, a0, 7
+    sll t0, t0, 3
+    daddu t1, t1, t0
+    b ci_apply_update
+    sd a1, 0(t1)                    ; $B000-$B007: r(A0-A2)
+ci65_control:
+    andi t0, a0, 7
+    addiu t2, t0, -1
+    beqz t2, ci65_mirror            ; $9001
+    addiu t2, t0, -3
+    beqz t2, ci65_enable            ; $9003
+    addiu t2, t0, -4
+    beqz t2, ci65_reload            ; $9004
+    addiu t2, t0, -5
+    la t1, global_mapirqlatch
+    ld t3, 0(t1)
+    beqz t2, ci65_latch_high        ; $9005
+    addiu t2, t0, -6
+    bnez t2, ci_apply_done          ; $9000, $9002, $9007: nothing
+    andi t3, t3, 0xFF00
+    or t3, t3, a1                   ; $9006: the low byte
+    b ci_apply_done
+    sd t3, 0(t1)
+ci65_latch_high:
+    andi t3, t3, 0xFF
+    sll a1, a1, 8
+    or t3, t3, a1
+    b ci_apply_done
+    sd t3, 0(t1)
+ci65_mirror:
+    srl a0, a1, 7
+    xori a0, a0, 1                  ; bit 7: 0 vertical (MapperMirror 1), 1 horizontal (0)
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j mappermirror                  ; a tail jump: it returns to ci_apply's caller
+    nop
+ci65_enable:                        ; $9003: acknowledge; bit 7 the enable
+    la t0, global_mapirq
+    sd zero, 0(t0)
+    la t0, global_extrairqmode
+    srl a1, a1, 7
+    andi a1, a1, 1
+    sd a1, 0(t0)                    ; ExtraIrqMode = the board's enable
+    b ci_arm                        ; the counter (ExtraIrqRun, kept when it stopped) runs again if enabled
+    nop
+ci65_reload:                        ; $9004: acknowledge; the counter = the latch (a running counter is replaced:
+    la t0, global_mapirq            ; MapIrqEnable cleared first, so ci_arm does not keep its remaining count)
+    sd zero, 0(t0)
+    la t0, global_mapirqenable
+    sd zero, 0(t0)
+    la t0, global_mapirqlatch
+    ld t1, 0(t0)
+    la t0, global_extrairqrun
+    b ci_arm
+    sd t1, 0(t0)                    ; ExtraIrqRun = the latch
+; ci_arm (65): the counter runs from now when the enable is set and the count is above 0 - the expiry = stamp +
+; count; else it is stopped, keeping its remaining count (expiry - stamp) if it was running.
+; THE PLAIN TWIN: If MapIrqEnable : ExtraIrqRun = ExtraIrqCount - stamp : EndIf
+;   If ExtraIrqMode And ExtraIrqRun > 0 : ExtraIrqCount = stamp + ExtraIrqRun : MapIrqEnable = 1 : Else : MapIrqEnable = 0
+ci_arm:
+    la t0, global_mapirqenable
+    ld t1, 0(t0)
+    beqz t1, ci_arm_stopped
+    ld t2, global_extrairqcount-global_mapirqenable(t0)
+    dsubu t2, t2, a2
+    bgtz t2, ci_arm_keep
+    nop
+    move t2, zero
+ci_arm_keep:
+    sd t2, global_extrairqrun-global_mapirqenable(t0)     ; what was left
+ci_arm_stopped:
+    ld t1, global_extrairqmode-global_mapirqenable(t0)
+    ld t2, global_extrairqrun-global_mapirqenable(t0)
+    beqz t1, ci_arm_off
+    nop
+    blez t2, ci_arm_off
+    daddu t2, t2, a2
+    sd t2, global_extrairqcount-global_mapirqenable(t0)   ; the expiry
+    addiu t1, zero, 1
+    b ci_apply_done
+    sd t1, 0(t0)                    ; MapIrqEnable = 1
+ci_arm_off:
+    b ci_apply_done
+    sd zero, 0(t0)
+    EndASM
+  CompilerElseIf #NES_SLOT_MODULE=67
+    ASM
+; 67: the register (addr >> 11) & 15 - odd values only (A11 set): 1 $8800, 3 $9800, 5 $A800, 7 $B800 (CHR), 9 $C800
+; (the counter's bytes), 11 $D800 (enable), 13 $E800 (mirroring), 15 $F800 (PRG).
+    srl t0, a0, 11
+    andi t0, t0, 15
+    andi t1, t0, 1
+    beqz t1, ci_apply_done          ; A11 clear: nothing
+    sltiu t1, t0, 8
+    la t2, global_extraregs
+    beqz t1, ci67_control
+    nop
+    move t1, t2
+    andi t0, t0, 14                 ; (register >> 1) x 8: the 2 KB slot's r(0..3) - 1, 3, 5, 7 -> 0, 8, 16, 24
+    sll t0, t0, 2
+    daddu t1, t1, t0
+    andi a1, a1, 63
+    b ci_apply_update
+    sd a1, 0(t1)
+ci67_control:
+    addiu t2, t0, -9
+    beqz t2, ci67_counter           ; $C800
+    addiu t2, t0, -11
+    beqz t2, ci67_enable            ; $D800
+    addiu t2, t0, -13
+    beqz t2, ci67_mirror            ; $E800
+    nop
+    la t1, global_extraregs         ; $F800: r(8)
+    b ci_apply_update
+    sd a1, 64(t1)
+ci67_mirror:                        ; $E800 bits 0-1: 0 V, 1 H, 2 A, 3 B -> MapperMirror 1, 0, 2, 3
+    andi a0, a1, 3
+    andi t0, a0, 2
+    bnez t0, ci67_mirror_one
+    nop
+    xori a0, a0, 1
+ci67_mirror_one:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j mappermirror                  ; a tail jump
+    nop
+; the counter's current value: ExtraIrqRun while stopped; the expiry - stamp - 1 while running (16 bits)
+ci67_counter:                       ; $C800: the high byte at the toggle's first write, the low at the second
+    la t0, global_mapirqenable
+    ld t1, 0(t0)
+    ld t2, global_extrairqrun-global_mapirqenable(t0)
+    beqz t1, ci67_counter_have
+    ld t3, global_extraflags-global_mapirqenable(t0)
+    ld t2, global_extrairqcount-global_mapirqenable(t0)
+    dsubu t2, t2, a2
+    daddiu t2, t2, -1
+    andi t2, t2, 0xFFFF
+ci67_counter_have:
+    andi t3, t3, 1
+    bnez t3, ci67_counter_low
+    xori t3, t3, 1
+    sd t3, global_extraflags-global_mapirqenable(t0)     ; the toggle: the low byte next
+    andi t2, t2, 0xFF
+    sll a1, a1, 8
+    b ci67_counter_set
+    or t2, t2, a1
+ci67_counter_low:
+    sd t3, global_extraflags-global_mapirqenable(t0)     ; the toggle back
+    andi t2, t2, 0xFF00
+    or t2, t2, a1
+ci67_counter_set:
+    sd t2, global_extrairqrun-global_mapirqenable(t0)
+    beqz t1, ci_apply_done          ; stopped: the value waits for the enable
+    daddu t2, t2, a2
+    daddiu t2, t2, 1
+    b ci_apply_done
+    sd t2, global_extrairqcount-global_mapirqenable(t0)   ; running: the expiry from the new value
+ci67_enable:                        ; $D800: acknowledge, the toggle reset, bit 4 the enable
+    la t0, global_mapirq
+    sd zero, 0(t0)
+    la t0, global_mapirqenable
+    sd zero, global_extraflags-global_mapirqenable(t0)
+    ld t1, 0(t0)
+    beqz t1, ci67_enable_stopped
+    ld t2, global_extrairqcount-global_mapirqenable(t0)
+    dsubu t2, t2, a2
+    daddiu t2, t2, -1
+    andi t2, t2, 0xFFFF
+    sd t2, global_extrairqrun-global_mapirqenable(t0)     ; the value now, while it ran
+ci67_enable_stopped:
+    srl a1, a1, 4
+    andi a1, a1, 1
+    sd a1, global_extrairqmode-global_mapirqenable(t0)
+    beqz a1, ci67_enable_off
+    ld t2, global_extrairqrun-global_mapirqenable(t0)
+    daddu t2, t2, a2
+    daddiu t2, t2, 1                ; the expiry: the wrap after count + 1 decrements
+    sd t2, global_extrairqcount-global_mapirqenable(t0)
+    addiu t1, zero, 1
+    b ci_apply_done
+    sd t1, 0(t0)
+ci67_enable_off:
+    b ci_apply_done
+    sd zero, 0(t0)
+    EndASM
+  CompilerElse
+    ASM
+; 73: the page (addr >> 12) & 7: 0-3 the latch's nibbles, 4 $C000 the control, 5 $D000 the acknowledge, 7 $F000 the
+; PRG bank; 6 nothing.
+    srl t0, a0, 12
+    andi t0, t0, 7
+    sltiu t1, t0, 4
+    bnez t1, ci73_latch
+    addiu t2, t0, -4
+    beqz t2, ci73_control
+    addiu t2, t0, -5
+    beqz t2, ci73_ack
+    addiu t2, t0, -7
+    la t1, global_extraregs
+    bnez t2, ci_apply_done          ; $E000: nothing
+    nop
+    andi a1, a1, 7
+    b ci_apply_update
+    sd a1, 64(t1)                   ; $F000: r(8)
+ci73_latch:
+    sll t0, t0, 2                   ; the nibble's shift: 4 x page
+    la t1, global_mapirqlatch
+    ld t2, 0(t1)
+    addiu t3, zero, 15
+    sllv t3, t3, t0
+    nor t3, t3, zero
+    and t2, t2, t3                  ; the nibble cleared ...
+    andi a1, a1, 15
+    sllv a1, a1, t0
+    or t2, t2, a1                   ; ... and set
+    b ci_apply_done
+    sd t2, 0(t1)
+ci73_control:                       ; $C000: acknowledges; bits 0-2 kept; bit 1: the counter from the latch, counting
+    la t0, global_mapirq
+    sd zero, 0(t0)
+    la t0, global_mapirqenable
+    andi a1, a1, 7
+    sd a1, global_extraflags-global_mapirqenable(t0)
+    andi t1, a1, 2
+    beqz t1, ci73_control_off
+    andi t1, a1, 4
+    ld t2, global_mapirqlatch-global_mapirqenable(t0)
+    beqz t1, ci73_period16
+    andi t2, t2, 0xFF
+    addiu t3, zero, 256
+    b ci73_period_set
+    subu t2, t3, t2                 ; 8-bit mode: 256 - the latch's low byte
+ci73_period16:
+    ld t2, global_mapirqlatch-global_mapirqenable(t0)
+    lui t3, 1
+    subu t2, t3, t2                 ; 65536 - the latch
+ci73_period_set:
+    sd t2, global_extrairqrun-global_mapirqenable(t0)     ; the period
+    daddu t2, t2, a2
+    sd t2, global_extrairqcount-global_mapirqenable(t0)   ; the first expiry
+    addiu t1, zero, 1
+    b ci_apply_done
+    sd t1, 0(t0)
+ci73_control_off:
+    b ci_apply_done
+    sd zero, 0(t0)
+ci73_ack:                           ; $D000: acknowledge; the counting = E (bit 0 of the control). A counter that
+    la t0, global_mapirq            ; was stopped and is started here counts a whole period from now (stated: the
+    sd zero, 0(t0)                  ; board's resume value is not documented)
+    la t0, global_mapirqenable
+    ld t1, global_extraflags-global_mapirqenable(t0)
+    andi t1, t1, 1
+    beqz t1, ci73_ack_off
+    ld t2, 0(t0)
+    bnez t2, ci_apply_done          ; running on
+    ld t2, global_extrairqrun-global_mapirqenable(t0)
+    blez t2, ci_apply_done          ; no period set yet: nothing to run
+    daddu t2, t2, a2
+    sd t2, global_extrairqcount-global_mapirqenable(t0)
+    b ci_apply_done
+    sd t1, 0(t0)
+ci73_ack_off:
+    b ci_apply_done
+    sd zero, 0(t0)
+    EndASM
+  CompilerEndIf
+  ASM
+ci_apply_update:
+    ld ra, 0(sp)
+    daddiu sp, sp, 16
+    j ci_update                     ; every mapping from the state (cold part): a tail jump
+    nop
+ci_apply_done:
+    ld ra, 0(sp)
+    jr ra
+    daddiu sp, sp, 16
+  EndASM

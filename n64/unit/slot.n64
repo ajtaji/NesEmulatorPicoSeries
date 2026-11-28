@@ -44,8 +44,10 @@ nes_mapper_slot:
     XIncludeFile "../modules/mmc1.n64"
   CompilerElseIf #NES_SLOT_MODULE=47 Or #NES_SLOT_MODULE=64
     XIncludeFile "../modules/mmc3x.n64"      ; the MMC3-family variants: the multicart 47, RAMBO-1 (step 4)
-  CompilerElseIf #NES_SLOT_MODULE=8 Or #NES_SLOT_MODULE=13 Or #NES_SLOT_MODULE=34 Or #NES_SLOT_MODULE=41 Or #NES_SLOT_MODULE=71 Or #NES_SLOT_MODULE=79 Or #NES_SLOT_MODULE=113 Or #NES_SLOT_MODULE=144 Or #NES_SLOT_MODULE=232
-    XIncludeFile "../modules/board.n64"      ; the simple-register boards (step 4)
+  CompilerElseIf #NES_SLOT_MODULE=8 Or #NES_SLOT_MODULE=13 Or #NES_SLOT_MODULE=34 Or #NES_SLOT_MODULE=41 Or #NES_SLOT_MODULE=71 Or #NES_SLOT_MODULE=79 Or #NES_SLOT_MODULE=113 Or #NES_SLOT_MODULE=144 Or #NES_SLOT_MODULE=232 Or #NES_SLOT_MODULE=228
+    XIncludeFile "../modules/board.n64"      ; the simple-register boards (step 4; 228 Action 52 among them)
+  CompilerElseIf #NES_SLOT_MODULE=65 Or #NES_SLOT_MODULE=67 Or #NES_SLOT_MODULE=73
+    XIncludeFile "../modules/cycirq.n64"     ; the CPU-cycle IRQ boards (step 4): Irem H3001, Sunsoft-3, VRC3
   CompilerElse
     XIncludeFile "../modules/discrete.n64"   ; NROM, UxROM, CNROM, AxROM, Color Dreams, GxROM (0, 2, 3, 7, 11, 66)
   CompilerEndIf
